@@ -22,7 +22,7 @@ import unittest
 import bittensor as bt
 import torch
 
-from neurons.validator import Validator
+from neurons.validators.validator import Validator
 from template.base.validator import BaseValidatorNeuron
 from template.protocol import Dummy
 from template.utils.uids import get_random_uids
