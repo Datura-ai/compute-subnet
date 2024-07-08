@@ -1,0 +1,19 @@
+[project]
+name = "datura"
+version = "0.1.1"
+description = "Compute subnet shared library"
+authors = [
+    {name = "waris", email = "waris0609@outlook.com"},
+]
+dependencies = []
+requires-python = "==3.11.*"
+readme = "README.md"
+license = {text = "MIT"}
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+
+[tool.pdm]
+distribution = true

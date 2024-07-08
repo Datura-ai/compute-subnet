@@ -9,8 +9,11 @@ dependencies = [
     "bittensor>=6.9.3",
     "torch>=2.3.1",
     "fastapi>=0.99.1",
+    "datura @ file:///${PROJECT_ROOT}/../../datura",
+    "pydantic>=1.10.17",
+    "pydantic-settings>=2.3.4",
 ]
-requires-python = ">=3.11"
+requires-python = "==3.11.*"
 readme = "README.md"
 license = {text = "MIT"}
 
