@@ -1,0 +1,23 @@
+[project]
+name = "miners"
+version = "0.1.0"
+description = "Compute subnet miner"
+authors = [
+    {name = "waris", email = "waris0609@outlook.com"},
+]
+dependencies = [
+    "bittensor>=6.9.3",
+    "torch>=2.3.1",
+    "fastapi>=0.99.1",
+]
+requires-python = ">=3.11"
+readme = "README.md"
+license = {text = "MIT"}
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+
+[tool.pdm]
+distribution = true
