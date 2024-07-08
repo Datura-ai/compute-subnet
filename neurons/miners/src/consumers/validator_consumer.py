@@ -1,5 +1,4 @@
 from datura.consumers.base import BaseConsumer
-
 from datura.requests.base import BaseRequest
 
 
