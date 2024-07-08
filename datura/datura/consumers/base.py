@@ -1,7 +1,7 @@
 import abc
 import json
 
-from fastapi import  WebSocket, WebSocketDisconnect
+from fastapi import WebSocket, WebSocketDisconnect
 
 from ..requests.base import BaseRequest
 

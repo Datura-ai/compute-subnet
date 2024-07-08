@@ -1,0 +1,52 @@
+[project]
+name = "compute-subnet"
+version = "0.1.0"
+description = "Datura compute subnet"
+authors = [
+    {name = "waris", email = "waris0609@outlook.com"},
+]
+dependencies = [
+]
+requires-python = "==3.11.*"
+readme = "README.md"
+license = {text = "MIT"}
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+
+[tool.pdm]
+distribution = true
+
+[tool.pdm.dev-dependencies]
+dev = [
+    "ruff>=0.5.1",
+    "pre-commit>=3.7.1",
+]
+
+format = [
+    "ruff",
+]
+lint = [
+    "ruff",
+]
+
+[tool.ruff]
+# TODO: validator project path
+src = ["neurons/miners/src"]
+line-length = 100
+
+[tool.ruff.lint]
+# TODO add D
+select = ["E", "F", "I", "UP"]
+# TODO: remove E501 once docstrings are formatted
+ignore = [
+    "D100", "D105", "D107", "D200", "D202", "D203", "D205", "D212", "D400", "D401", "D415",
+    "D101", "D102","D103", "D104", # TODO remove once we have docstring for all public methods
+    "E501", # TODO: remove E501 once docstrings are formatted
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"test/**" = ["D", "F403", "F405"]
