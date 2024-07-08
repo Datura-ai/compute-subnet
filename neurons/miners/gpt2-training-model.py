@@ -10,6 +10,8 @@ dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train[:1000]")
 tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
 model = GPT2LMHeadModel.from_pretrained('gpt2')
 
+tokenizer.pad_token = tokenizer.eos_token
+
 # Tokenize the dataset
 def tokenize_function(examples):
     return tokenizer(examples["text"], truncation=True, max_length=128, padding="max_length")
@@ -21,13 +23,19 @@ tokenized_dataset.set_format("torch")
 # Create DataLoader
 dataloader = DataLoader(tokenized_dataset, batch_size=4, shuffle=True)
 
+# Training loop
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print('device', device)
+model.to(device)
+
 # Evaluation function
 def evaluate(model, dataloader):
     model.eval()
     total_loss = 0
     with torch.no_grad():
         for batch in dataloader:
-            outputs = model(input_ids=batch['input_ids'], labels=batch['input_ids'])
+            inputs = batch["input_ids"].to(device)
+            outputs = model(input_ids=inputs, labels=inputs)
             total_loss += outputs.loss.item()
     return total_loss / len(dataloader)
 
@@ -35,10 +43,6 @@ def evaluate(model, dataloader):
 initial_loss = evaluate(model, dataloader)
 print(f"Initial Loss: {initial_loss:.4f}")
 print(f"Initial Perplexity: {torch.exp(torch.tensor(initial_loss)):.4f}")
-
-# Training loop
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
 optimizer = AdamW(model.parameters(), lr=5e-5)
 
 num_epochs = 3
