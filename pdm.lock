@@ -5,7 +5,7 @@
 groups = ["default", "dev"]
 strategy = ["cross_platform", "inherit_metadata"]
 lock_version = "4.4.1"
-content_hash = "sha256:bcf920283d233c3830cc3b0a1ebfe2c493932fc7d75222b9dac0e13bd213be7a"
+content_hash = "sha256:5df85945b6a3aba956730dac98a3efdcad9d1ca68b8c4a5ac275a5ed802ed19b"
 
 [[package]]
 name = "cfgv"
