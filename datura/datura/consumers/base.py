@@ -34,4 +34,7 @@ class BaseConsumer(abc.ABC):
                 data: BaseRequest = await self.receive_message()
                 await self.handle_message(data)
         except WebSocketDisconnect:
-            await self.disconnect()
+            try:
+                await self.disconnect()
+            except Exception:
+                pass
