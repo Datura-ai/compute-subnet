@@ -7,6 +7,7 @@ from datura.requests.base import BaseRequest
 
 class RequestType(enum.Enum):
     AuthenticateRequest = "AuthenticateRequest"
+    SSHPubKeySubmitRequest = "SSHPubKeySubmitRequest"
 
 
 class BaseValidatorRequest(BaseRequest):
@@ -30,3 +31,8 @@ class AuthenticateRequest(BaseValidatorRequest):
 
     def blob_for_signing(self):
         return self.payload.blob_for_signing()
+
+
+class SSHPubKeySubmitRequest(BaseValidatorRequest):
+    message_type: RequestType = RequestType.SSHPubKeySubmitRequest
+    public_key: bytes

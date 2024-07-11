@@ -7,6 +7,8 @@ class RequestType(enum.Enum):
     GenericError = "GenericError"
     AcceptJobRequest = "AcceptJobRequest"
     DeclineJobRequest = "DeclineJobRequest"
+    AcceptSSHKeyRequest = "AcceptSSHKeyRequest"
+    FailedRequest = "FailedRequest"
 
 
 class BaseMinerRequest(BaseRequest):
@@ -24,3 +26,13 @@ class AcceptJobRequest(BaseMinerRequest):
 
 class DeclineJobRequest(BaseMinerRequest):
     message_type: RequestType = RequestType.DeclineJobRequest
+
+
+class AcceptSSHKeyRequest(BaseMinerRequest):
+    message_type: RequestType = RequestType.AcceptSSHKeyRequest
+    ssh_username: str
+
+
+class FailedRequest(BaseMinerRequest):
+    message_type: RequestType = RequestType.FailedRequest
+    details: str | None = None

@@ -23,6 +23,8 @@ class JobState:
     def __init__(self):
         self.miner_ready_or_declining_future = asyncio.Future()
         self.miner_ready_or_declining_timestamp: int = 0
+        self.miner_accepted_ssh_key_or_failed_future = asyncio.Future()
+        self.miner_accepted_ssh_key_or_failed_timestamp: int = 0
 
 
 class MinerClient(abc.ABC):
