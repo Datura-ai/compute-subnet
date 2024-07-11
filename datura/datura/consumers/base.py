@@ -1,5 +1,4 @@
 import abc
-import json
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -10,15 +9,19 @@ class BaseConsumer(abc.ABC):
     def __init__(self, websocket: WebSocket):
         self.websocket = websocket
 
+    @abc.abstractmethod
+    def accepted_request_type(self) -> type[BaseRequest]:
+        pass
+
     async def connect(self):
         await self.websocket.accept()
 
     async def receive_message(self) -> BaseRequest:
         data = await self.websocket.receive_text()
-        return BaseRequest.parse(data)
+        return self.accepted_request_type().parse(data)
 
     async def send_message(self, msg: BaseRequest):
-        await self.websocket.send_text(json.dumps(msg.json()))
+        await self.websocket.send_text(msg.json())
 
     async def disconnect(self):
         await self.websocket.close()

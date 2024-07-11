@@ -8,9 +8,21 @@ import bittensor
 import websockets
 from datura.errors.protocol import UnsupportedMessageReceived
 from datura.requests.base import BaseRequest
+from datura.requests.miner_requests import (
+    AcceptJobRequest,
+    BaseMinerRequest,
+    DeclineJobRequest,
+    GenericError,
+)
 from datura.requests.validator_requests import AuthenticateRequest, AuthenticationPayload
 
 logger = logging.getLogger(__name__)
+
+
+class JobState:
+    def __init__(self):
+        self.miner_ready_or_declining_future = asyncio.Future()
+        self.miner_ready_or_declining_timestamp: int = 0
 
 
 class MinerClient(abc.ABC):
@@ -37,20 +49,21 @@ class MinerClient(abc.ABC):
         self.miner_port = miner_port
         self.keypair = keypair
 
+        self.job_state = JobState()
+
     def miner_url(self) -> str:
-        return (
-            f"ws://{self.miner_address}:{self.miner_port}/v0.1/validator_interface/{self.my_hotkey}"
-        )
+        return f"ws://{self.miner_address}:{self.miner_port}/validator/{self.my_hotkey}"
 
     def accepted_request_type(self) -> type[BaseRequest]:
-        return BaseRequest
+        return BaseMinerRequest
 
     async def handle_message(self, msg: BaseRequest):
         """
         Handle the message based on its type or raise UnsupportedMessageReceived
         """
-        # TODO: implement logic for each miner request
-        pass
+        if isinstance(msg, AcceptJobRequest | DeclineJobRequest):
+            self.job_state.miner_ready_or_declining_timestamp = time.time()
+            self.job_state.miner_ready_or_declining_future.set_result(msg)
 
     async def __aenter__(self):
         await self.await_connect()
@@ -155,15 +168,14 @@ class MinerClient(abc.ABC):
                 logger.info(error_msg)
                 continue
 
-            # TODO: needs to be rolled back
-            # if isinstance(msg, self.incoming_generic_error_class()):
-            #     try:
-            #         raise RuntimeError(
-            #             f"Received error message from miner {self.miner_name}: {msg.json()}"
-            #         )
-            #     except Exception:
-            #         logger.exception("")
-            #     continue
+            if isinstance(msg, GenericError):
+                try:
+                    raise RuntimeError(
+                        f"Received error message from miner {self.miner_name}: {msg.json()}"
+                    )
+                except Exception:
+                    logger.exception("")
+                continue
 
             try:
                 await self.handle_message(msg)

@@ -24,7 +24,7 @@ class AuthenticationPayload(pydantic.BaseModel):
 
 
 class AuthenticateRequest(BaseValidatorRequest):
-    message_type = RequestType.AuthenticateRequest
+    message_type: RequestType = RequestType.AuthenticateRequest
     payload: AuthenticationPayload
     signature: str
 
