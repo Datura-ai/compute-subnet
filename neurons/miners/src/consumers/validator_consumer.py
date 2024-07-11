@@ -5,7 +5,6 @@ from typing import Annotated
 import bittensor
 from datura.consumers.base import BaseConsumer
 from datura.requests.miner_requests import (
-    AcceptJobRequest,
     AcceptSSHKeyRequest,
     FailedRequest,
     GenericError,
@@ -74,12 +73,11 @@ class ValidatorConsumer(BaseConsumer):
     async def handle_message(self, msg: BaseValidatorRequest):
         if isinstance(msg, AuthenticateRequest):
             await self.handle_authentication(msg)
-
-            # TODO: update logic here, fow now, it sends AcceptJobRequest regardless
-            if self.validator_authenticated:
-                await self.send_message(AcceptJobRequest())
-
             return
+
+        # TODO: update logic here, fow now, it sends AcceptJobRequest regardless
+        # if self.validator_authenticated:
+        #     await self.send_message(AcceptJobRequest())
 
         if not self.validator_authenticated:
             if len(self.msg_queue) <= MAX_MESSAGE_COUNT:

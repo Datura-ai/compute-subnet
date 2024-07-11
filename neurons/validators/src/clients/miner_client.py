@@ -10,8 +10,10 @@ from datura.errors.protocol import UnsupportedMessageReceived
 from datura.requests.base import BaseRequest
 from datura.requests.miner_requests import (
     AcceptJobRequest,
+    AcceptSSHKeyRequest,
     BaseMinerRequest,
     DeclineJobRequest,
+    FailedRequest,
     GenericError,
 )
 from datura.requests.validator_requests import AuthenticateRequest, AuthenticationPayload
@@ -66,6 +68,9 @@ class MinerClient(abc.ABC):
         if isinstance(msg, AcceptJobRequest | DeclineJobRequest):
             self.job_state.miner_ready_or_declining_timestamp = time.time()
             self.job_state.miner_ready_or_declining_future.set_result(msg)
+        elif isinstance(msg, AcceptSSHKeyRequest | FailedRequest):
+            self.job_state.miner_accepted_ssh_key_or_failed_timestamp = time.time()
+            self.job_state.miner_accepted_ssh_key_or_failed_future.set_result(msg)
 
     async def __aenter__(self):
         await self.await_connect()

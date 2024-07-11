@@ -5,17 +5,15 @@ from typing import Annotated
 import bittensor
 from clients.miner_client import MinerClient
 from datura.requests.miner_requests import (
-    AcceptJobRequest,
     AcceptSSHKeyRequest,
-    DeclineJobRequest,
     FailedRequest,
 )
 from datura.requests.validator_requests import SSHPubKeySubmitRequest
 from fastapi import Depends
 from requests.api_requests import MinerRequestPayload
-from services.ssh_service import SSHService
 
 from core.config import settings
+from services.ssh_service import SSHService
 
 logger = logging.getLogger(__name__)
 
@@ -44,24 +42,26 @@ class MinerService:
         )
 
         async with miner_client:
-            try:
-                msg = await asyncio.wait_for(
-                    miner_client.job_state.miner_ready_or_declining_future, JOB_LENGTH
-                )
-            except TimeoutError:
-                msg = None
-
-            if isinstance(msg, DeclineJobRequest) or msg is None:
-                logger.info(f"Miner {miner_client.miner_name} won't do job: {msg}")
-                return
-            elif isinstance(msg, AcceptJobRequest):
-                logger.info(f"Miner {miner_client.miner_name} will do job: {msg}")
-            else:
-                raise ValueError(f"Unexpected msg: {msg}")
+            # try:
+            #     msg = await asyncio.wait_for(
+            #         miner_client.job_state.miner_ready_or_declining_future, JOB_LENGTH
+            #     )
+            # except TimeoutError:
+            #     msg = None
+            #
+            # if isinstance(msg, DeclineJobRequest) or msg is None:
+            #     logger.info(f"Miner {miner_client.miner_name} won't do job: {msg}")
+            #     return
+            # elif isinstance(msg, AcceptJobRequest):
+            #     logger.info(f"Miner {miner_client.miner_name} will do job: {msg}")
+            # else:
+            #     raise ValueError(f"Unexpected msg: {msg}")
 
             # generate ssh key and send it to miner
             private_key, public_key = self.ssh_service.generate_ssh_key(my_key.ss58_address)
             await miner_client.send_model(SSHPubKeySubmitRequest(public_key=public_key))
+
+            logger.info("Sent SSH key to miner %s", miner_client.miner_name)
 
             try:
                 msg = await asyncio.wait_for(

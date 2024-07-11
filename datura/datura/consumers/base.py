@@ -1,8 +1,11 @@
 import abc
+import logging
 
 from fastapi import WebSocket, WebSocketDisconnect
 
 from ..requests.base import BaseRequest
+
+logger = logging.getLogger(__name__)
 
 
 class BaseConsumer(abc.ABC):
@@ -36,8 +39,9 @@ class BaseConsumer(abc.ABC):
             while True:
                 data: BaseRequest = await self.receive_message()
                 await self.handle_message(data)
-        except WebSocketDisconnect:
+        except WebSocketDisconnect as ex:
             try:
+                logger.info("Websocket connection closed, e: %s", str(ex))
                 await self.disconnect()
             except Exception:
                 pass
