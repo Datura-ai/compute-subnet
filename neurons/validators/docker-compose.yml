@@ -1,0 +1,19 @@
+version: '3.7'
+
+services:
+  db:
+    image: postgres:14.0-alpine
+    healthcheck:
+      test: pg_isready -U postgres || exit 1
+    environment:
+      - POSTGRES_DB=compute-subnet-db
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - 6432:5432
+
+volumes:
+  redis_data:
+  db_data:
