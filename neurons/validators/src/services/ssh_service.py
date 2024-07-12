@@ -27,4 +27,7 @@ class SSHService:
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
 
-        return private_key_bytes, public_key_bytes
+        # extract pub key content, excluding first line and end line
+        pub_key_str = "".join(public_key_bytes.decode().split("\n")[1:-2])
+
+        return private_key_bytes, pub_key_str.encode()
