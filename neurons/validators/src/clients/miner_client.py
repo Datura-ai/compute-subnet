@@ -177,6 +177,7 @@ class MinerClient(abc.ABC):
 
             if isinstance(msg, GenericError):
                 try:
+                    await self.ws.close()
                     raise RuntimeError(
                         f"Received error message from miner {self.miner_name}: {msg.json()}"
                     )

@@ -1,9 +1,20 @@
+import hashlib
+from base64 import b64encode
+
+from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives.serialization import BestAvailableEncryption
 
 
 class SSHService:
+    def _hash(self, s: bytes) -> bytes:
+        return b64encode(hashlib.sha256(s).digest(), altchars=b"-_")
+
+    def _encrypt(self, key: str, payload: str) -> str:
+        key_bytes = self._hash(key.encode("utf-8"))
+        return Fernet(key_bytes).encrypt(payload.encode("utf-8")).decode("utf-8")
+
     def generate_ssh_key(self, encryption_key: str) -> (bytes, bytes):
         """Generate SSH key pair.
 
@@ -30,4 +41,6 @@ class SSHService:
         # extract pub key content, excluding first line and end line
         pub_key_str = "".join(public_key_bytes.decode().split("\n")[1:-2])
 
-        return private_key_bytes, pub_key_str.encode()
+        return self._encrypt(encryption_key, private_key_bytes.decode("utf-8")).encode(
+            "utf-8"
+        ), pub_key_str.encode()

@@ -4,12 +4,14 @@ from typing import Annotated
 
 import bittensor
 from clients.miner_client import MinerClient
+from daos.task import TaskDao
 from datura.requests.miner_requests import (
     AcceptSSHKeyRequest,
     FailedRequest,
 )
 from datura.requests.validator_requests import SSHPubKeySubmitRequest
 from fastapi import Depends
+from models.task import Task, TaskStatus
 from requests.api_requests import MinerRequestPayload
 
 from core.config import settings
@@ -25,8 +27,10 @@ class MinerService:
     def __init__(
         self,
         ssh_service: Annotated[SSHService, Depends(SSHService)],
+        task_dao: Annotated[TaskDao, Depends(TaskDao)],
     ):
         self.ssh_service = ssh_service
+        self.task_dao = task_dao
 
     async def request_resource_to_miner(self, payload: MinerRequestPayload):
         loop = asyncio.get_event_loop()
@@ -78,7 +82,13 @@ class MinerService:
             else:
                 raise ValueError(f"Unexpected msg: {msg}")
 
-            # TODO: store private key to database
+            self.task_dao.save(
+                Task(
+                    task_status=TaskStatus.SSHConnected,
+                    miner_hotkey=payload.miner_hotkey,
+                    ssh_private_key=private_key.decode(),
+                )
+            )
 
 
 MinerServiceDep = Annotated[MinerService, Depends(MinerService)]

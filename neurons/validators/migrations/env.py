@@ -34,7 +34,7 @@ load_dotenv(str(current_dir / ".." / "src" / ".env"))
 
 
 def get_url():
-    url = os.getenv("SQLALCHEMY_DB_URL")
+    url = os.getenv("SQLALCHEMY_DATABASE_URI")
     return url
 
 

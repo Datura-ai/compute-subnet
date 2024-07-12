@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     BITTENSOR_WALLET_NAME: str = Field(env="BITTENSOR_WALLET_NAME")
     BITTENSOR_WALLET_HOTKEY_NAME: str = Field(env="BITTENSOR_WALLET_HOTKEY_NAME")
 
-    SQLALCHEMY_DATABASE_URI: str = Field(env="SQLALCHEMY_DB_URL")
+    SQLALCHEMY_DATABASE_URI: str = Field(env="SQLALCHEMY_DATABASE_URI")
 
     class Config:
         env_file = ".env"
