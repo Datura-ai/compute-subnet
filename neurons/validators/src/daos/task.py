@@ -9,3 +9,6 @@ class TaskDao(BaseDao):
         self.session.commit()
         self.session.refresh(task)
         return task
+
+    def get_task_by_uuid(self, uuid: str) -> Task:
+        return self.session.query(Task).filter_by(uuid=uuid).first()
