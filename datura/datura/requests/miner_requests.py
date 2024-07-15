@@ -9,6 +9,7 @@ class RequestType(enum.Enum):
     DeclineJobRequest = "DeclineJobRequest"
     AcceptSSHKeyRequest = "AcceptSSHKeyRequest"
     FailedRequest = "FailedRequest"
+    UnAuthorizedRequest = "UnAuthorizedRequest"
 
 
 class BaseMinerRequest(BaseRequest):
@@ -36,3 +37,7 @@ class AcceptSSHKeyRequest(BaseMinerRequest):
 class FailedRequest(BaseMinerRequest):
     message_type: RequestType = RequestType.FailedRequest
     details: str | None = None
+
+
+class UnAuthorizedRequest(FailedRequest):
+    message_type: RequestType = RequestType.UnAuthorizedRequest

@@ -7,7 +7,7 @@ from datura.consumers.base import BaseConsumer
 from datura.requests.miner_requests import (
     AcceptSSHKeyRequest,
     FailedRequest,
-    GenericError,
+    UnAuthorizedRequest,
 )
 from datura.requests.validator_requests import (
     AuthenticateRequest,
@@ -18,6 +18,7 @@ from fastapi import Depends, WebSocket
 
 from core.config import settings
 from services.ssh_service import MinerSSHService
+from services.validator_service import ValidatorService
 
 AUTH_MESSAGE_MAX_AGE = 10
 MAX_MESSAGE_COUNT = 10
@@ -31,9 +32,11 @@ class ValidatorConsumer(BaseConsumer):
         websocket: WebSocket,
         validator_key: str,
         ssh_service: Annotated[MinerSSHService, Depends(MinerSSHService)],
+        validator_service: Annotated[ValidatorService, Depends(ValidatorService)],
     ):
         super().__init__(websocket)
         self.ssh_service = ssh_service
+        self.validator_service = validator_service
         self.validator_key = validator_key
         self.my_hotkey = settings.get_bittensor_wallet().get_hotkey().ss58_address
         self.validator_authenticated = False
@@ -58,11 +61,17 @@ class ValidatorConsumer(BaseConsumer):
             return True, ""
 
     async def handle_authentication(self, msg: AuthenticateRequest):
+        # check if validator is registered
+        if not self.validator_service.is_valid_validator(self.validator_key):
+            await self.send_message(UnAuthorizedRequest(details="Validator is not registered"))
+            await self.disconnect()
+            return
+
         authenticated, error_msg = self.verify_auth_msg(msg)
         if not authenticated:
             response_msg = f"Validator {self.validator_key} not authenticated due to: {error_msg}"
             logger.info(response_msg)
-            await self.send_message(GenericError(details=response_msg))
+            await self.send_message(UnAuthorizedRequest(details=response_msg))
             await self.disconnect()
             return
 

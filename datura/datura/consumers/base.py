@@ -27,7 +27,10 @@ class BaseConsumer(abc.ABC):
         await self.websocket.send_text(msg.json())
 
     async def disconnect(self):
-        await self.websocket.close()
+        try:
+            await self.websocket.close()
+        except Exception:
+            pass
 
     @abc.abstractmethod
     async def handle_message(self, data: BaseRequest):
@@ -40,8 +43,8 @@ class BaseConsumer(abc.ABC):
                 data: BaseRequest = await self.receive_message()
                 await self.handle_message(data)
         except WebSocketDisconnect as ex:
-            try:
-                logger.info("Websocket connection closed, e: %s", str(ex))
-                await self.disconnect()
-            except Exception:
-                pass
+            logger.info("Websocket connection closed, e: %s", str(ex))
+            await self.disconnect()
+        except Exception as ex:
+            logger.info("Handling message error: %s", str(ex))
+            await self.disconnect()
