@@ -1,4 +1,4 @@
-from daos.base import BaseDao
+from dtos.base import BaseDao
 
 from models.validator import Validator
 
