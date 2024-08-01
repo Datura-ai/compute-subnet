@@ -1,4 +1,6 @@
 import asyncio
+import io
+from pathlib import Path
 import logging
 from typing import Annotated
 
@@ -16,6 +18,8 @@ from requests.api_requests import MinerRequestPayload
 
 from core.config import settings
 from services.ssh_service import SSHService
+
+from paramiko import SSHClient, AutoAddPolicy, Ed25519Key 
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +80,8 @@ class MinerService:
 
             if isinstance(msg, AcceptSSHKeyRequest):
                 logger.info(f"Miner {miner_client.miner_name} accepted SSH key: {msg}")
+
+                await self.connect_ssh(msg.ssh_username, private_key.decode('utf-8'), miner_client)
             elif isinstance(msg, FailedRequest):
                 logger.info(f"Miner {miner_client.miner_name} failed job: {msg}")
                 return
@@ -90,5 +96,33 @@ class MinerService:
                 )
             )
 
+    async def connect_ssh(self, ssh_username: str, private_key: str, miner_client: MinerClient):
+        try:
+            private_key = self.ssh_service.decrypt_payload(miner_client.keypair.ss58_address, private_key)
+            pkey = Ed25519Key.from_private_key(io.StringIO(private_key))
+
+            ssh_client = SSHClient()
+            ssh_client.set_missing_host_key_policy(AutoAddPolicy())
+            ssh_client.connect(hostname=miner_client.miner_address, username=ssh_username, look_for_keys=False, pkey=pkey)
+
+            localFilePath = str(Path(__file__).parent / ".." / "test.py")
+            remoteFilePath = f"/home/{ssh_username}/test.py"
+
+            ftp_client=ssh_client.open_sftp()
+            ftp_client.put(localFilePath, remoteFilePath)
+            ftp_client.close()
+
+            _, stdout, stderr = ssh_client.exec_command(f"python3 {remoteFilePath}")
+            results = stdout.readlines()
+            errors = stderr.readlines()
+            if (len(errors) > 0):
+                raise Exception("Failed to execute command!") 
+
+            logger.info('ssh results ==>', results)
+
+            ssh_client.close()
+        except Exception as e:
+            logger.error('ssh connection error', e)
+            raise e
 
 MinerServiceDep = Annotated[MinerService, Depends(MinerService)]
