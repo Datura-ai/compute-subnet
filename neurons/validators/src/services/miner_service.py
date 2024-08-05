@@ -10,7 +10,7 @@ from datura.requests.miner_requests import (
     AcceptSSHKeyRequest,
     FailedRequest,
 )
-from datura.requests.validator_requests import SSHPubKeySubmitRequest
+from datura.requests.validator_requests import SSHPubKeySubmitRequest, SSHPubKeyRemoveRequest
 from fastapi import Depends
 from models.task import Task, TaskStatus
 from requests.api_requests import MinerRequestPayload
@@ -80,6 +80,8 @@ class MinerService:
                 logger.info(f"Miner {miner_client.miner_name} accepted SSH key: {msg}")
 
                 await self.task_service.create_task(miner_client.miner_address, msg.ssh_username, my_key, private_key.decode('utf-8'), public_key.decode())
+                
+                await miner_client.send_model(SSHPubKeyRemoveRequest(public_key=public_key))
             elif isinstance(msg, FailedRequest):
                 logger.info(f"Miner {miner_client.miner_name} failed job: {msg}")
                 return

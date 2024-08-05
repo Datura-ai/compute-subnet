@@ -8,11 +8,13 @@ from datura.requests.miner_requests import (
     AcceptSSHKeyRequest,
     FailedRequest,
     UnAuthorizedRequest,
+    SSHKeyRemoved,
 )
 from datura.requests.validator_requests import (
     AuthenticateRequest,
     BaseValidatorRequest,
     SSHPubKeySubmitRequest,
+    SSHPubKeyRemoveRequest,
 )
 from fastapi import Depends, WebSocket
 
@@ -102,6 +104,17 @@ class ValidatorConsumer(BaseConsumer):
                     AcceptSSHKeyRequest(ssh_username=self.ssh_service.get_current_os_user())
                 )
                 logger.info("Sent AcceptSSHKeyRequest to validator %s", self.validator_key)
+            except Exception as e:
+                logger.error("Storing SSH key or Sending AcceptSSHKeyRequest failed: %s", str(e))
+                await self.send_message(FailedRequest(details=str(e)))
+            return
+        
+        if isinstance(msg, SSHPubKeyRemoveRequest):
+            logger.info("Validator %s sent remove SSH Pubkey.", self.validator_key)
+            try:
+                self.ssh_service.remove_pubkey_from_host(msg.public_key)
+                await self.send_message(SSHKeyRemoved())
+                logger.info("Sent SSHPubKeyRemoveRequest to validator %s", self.validator_key)
             except Exception as e:
                 logger.error("Storing SSH key or Sending AcceptSSHKeyRequest failed: %s", str(e))
                 await self.send_message(FailedRequest(details=str(e)))
