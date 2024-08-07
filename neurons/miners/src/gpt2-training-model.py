@@ -1,3 +1,4 @@
+import time
 import torch
 from datasets import load_dataset
 from torch.utils.data import DataLoader
@@ -18,6 +19,7 @@ def tokenize_function(examples):
     return tokenizer(examples["text"], truncation=True, max_length=128, padding="max_length")
 
 
+start_time = time.time()
 tokenized_dataset = dataset.map(tokenize_function, batched=True)
 tokenized_dataset = tokenized_dataset.remove_columns(["text"])
 tokenized_dataset.set_format("torch")
@@ -47,9 +49,9 @@ def evaluate(model, dataloader):
 initial_loss = evaluate(model, dataloader)
 print(f"Initial Loss: {initial_loss:.4f}")
 print(f"Initial Perplexity: {torch.exp(torch.tensor(initial_loss)):.4f}")
-optimizer = AdamW(model.parameters(), lr=5e-5)
+optimizer = AdamW(model.parameters(), lr=5e-5, no_deprecation_warning=True)
 
-num_epochs = 3
+num_epochs = 1
 for epoch in range(num_epochs):
     model.train()
     for batch in dataloader:
@@ -70,3 +72,6 @@ print(f"Loss decreased by: {initial_loss - final_loss:.4f}")
 print(
     f"Perplexity decreased by: {torch.exp(torch.tensor(initial_loss)) - torch.exp(torch.tensor(final_loss)):.4f}"
 )
+
+print("Job finished")
+print(time.time() - start_time)

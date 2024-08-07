@@ -1,7 +1,6 @@
 import asyncio
 import logging
 from typing import Annotated
-import time
 
 import bittensor
 from clients.miner_client import MinerClient
@@ -79,7 +78,7 @@ class MinerService:
             if isinstance(msg, AcceptSSHKeyRequest):
                 logger.info(f"Miner {miner_client.miner_name} accepted SSH key: {msg}")
 
-                await self.task_service.create_task(miner_client.miner_address, msg.ssh_username, my_key, private_key.decode('utf-8'), public_key.decode())
+                await self.task_service.create_task(miner_client.miner_address, msg, my_key, private_key.decode('utf-8'))
                 
                 await miner_client.send_model(SSHPubKeyRemoveRequest(public_key=public_key))
             elif isinstance(msg, FailedRequest):
