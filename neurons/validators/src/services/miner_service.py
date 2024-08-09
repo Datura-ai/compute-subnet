@@ -8,6 +8,7 @@ from daos.task import TaskDao
 from datura.requests.miner_requests import (
     AcceptSSHKeyRequest,
     FailedRequest,
+    DeclineJobRequest,
 )
 from datura.requests.validator_requests import SSHPubKeySubmitRequest, SSHPubKeyRemoveRequest
 from fastapi import Depends
@@ -83,6 +84,9 @@ class MinerService:
                 await miner_client.send_model(SSHPubKeyRemoveRequest(public_key=public_key))
             elif isinstance(msg, FailedRequest):
                 logger.info(f"Miner {miner_client.miner_name} failed job: {msg}")
+                return
+            elif isinstance(msg, DeclineJobRequest):
+                logger.info(f"Miner {miner_client.miner_name} job declined: {msg}")
                 return
             else:
                 raise ValueError(f"Unexpected msg: {msg}")

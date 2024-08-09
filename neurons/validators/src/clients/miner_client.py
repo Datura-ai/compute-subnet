@@ -68,10 +68,10 @@ class MinerClient(abc.ABC):
         """
         Handle the message based on its type or raise UnsupportedMessageReceived
         """
-        if isinstance(msg, AcceptJobRequest | DeclineJobRequest):
+        if isinstance(msg, AcceptJobRequest):
             self.job_state.miner_ready_or_declining_timestamp = time.time()
             self.job_state.miner_ready_or_declining_future.set_result(msg)
-        elif isinstance(msg, AcceptSSHKeyRequest | FailedRequest | UnAuthorizedRequest):
+        elif isinstance(msg, AcceptSSHKeyRequest | FailedRequest | UnAuthorizedRequest | DeclineJobRequest):
             self.job_state.miner_accepted_ssh_key_or_failed_timestamp = time.time()
             self.job_state.miner_accepted_ssh_key_or_failed_future.set_result(msg)
         elif isinstance(msg, SSHKeyRemoved):

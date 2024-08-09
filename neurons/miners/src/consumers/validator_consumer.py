@@ -1,6 +1,7 @@
 import logging
 import time
 import sys
+import asyncio
 from typing import Annotated
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from datura.requests.miner_requests import (
     FailedRequest,
     UnAuthorizedRequest,
     SSHKeyRemoved,
+    DeclineJobRequest,
 )
 from datura.requests.validator_requests import (
     AuthenticateRequest,
@@ -126,3 +128,38 @@ class ValidatorConsumer(BaseConsumer):
                 logger.error("Storing SSH key or Sending AcceptSSHKeyRequest failed: %s", str(e))
                 await self.send_message(FailedRequest(details=str(e)))
             return
+
+class ValidatorConsumerManger:
+    def __init__(
+        self,
+    ):
+        self.active_consumer: ValidatorConsumer | None = None
+        self.lock = asyncio.Lock()
+        
+    async def addConsumer(
+        self,
+        websocket: WebSocket,
+        validator_key: str,
+        ssh_service: Annotated[MinerSSHService, Depends(MinerSSHService)],
+        validator_service: Annotated[ValidatorService, Depends(ValidatorService)],
+    ):
+        consumer = ValidatorConsumer(
+            websocket=websocket,
+            validator_key=validator_key,
+            ssh_service=ssh_service,
+            validator_service=validator_service
+        )
+        await consumer.connect()
+        if self.active_consumer is not None:
+            await consumer.send_message(DeclineJobRequest())
+            await consumer.disconnect()
+            return
+
+        async with self.lock:
+            self.active_consumer = consumer
+            
+            await self.active_consumer.handle()
+            self.active_consumer = None
+        
+        
+validatorConsumerManager = ValidatorConsumerManger()

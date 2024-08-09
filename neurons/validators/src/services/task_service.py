@@ -51,8 +51,8 @@ class TaskService:
         ssh_client.exec_command(f"mkdir -p {msg.root_dir}/temp")
 
         timestamp = int(time.time())
-        local_file_path = str(Path(__file__).parent / ".." / "test.py")
-        remote_file_path = f"{msg.root_dir}/temp/test_{timestamp}.py"
+        local_file_path = str(Path(__file__).parent / ".." / "job.py")
+        remote_file_path = f"{msg.root_dir}/temp/job_{timestamp}.py"
 
         ftp_client=ssh_client.open_sftp()
         ftp_client.put(local_file_path, remote_file_path)
@@ -66,15 +66,12 @@ class TaskService:
             # mark task is failed
             
             return
-        
-        print('restuls ===>', restuls)
+
         job_taken_time = restuls[-1]
         try:
             job_taken_time = int(job_taken_time)
         except:
             job_taken_time = end_time - start_time
-            
-        print('job_taken_time ===>', job_taken_time)
         
         
         ssh_client.close()
