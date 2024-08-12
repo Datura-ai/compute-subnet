@@ -150,6 +150,7 @@ class ValidatorConsumerManger:
             validator_service=validator_service
         )
         await consumer.connect()
+
         if self.active_consumer is not None:
             await consumer.send_message(DeclineJobRequest())
             await consumer.disconnect()
@@ -159,6 +160,7 @@ class ValidatorConsumerManger:
             self.active_consumer = consumer
             
             await self.active_consumer.handle()
+
             self.active_consumer = None
         
         
