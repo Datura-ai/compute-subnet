@@ -14,9 +14,10 @@ from payload_models.payloads import (
     ContainerStartRequest,
     ContainerStopRequest,
 )
+from protocol.vc_protocol.compute_requests import RentedMachine
 
 from core.utils import _m, get_extra_info
-from daos.executor import ExecutorDao
+from services.redis_service import RedisService
 from services.ssh_service import SSHService
 
 logger = logging.getLogger(__name__)
@@ -26,10 +27,10 @@ class DockerService:
     def __init__(
         self,
         ssh_service: Annotated[SSHService, Depends(SSHService)],
-        executor_dao: Annotated[ExecutorDao, Depends(ExecutorDao)],
+        redis_service: Annotated[RedisService, Depends(RedisService)],
     ):
         self.ssh_service = ssh_service
-        self.executor_dao = executor_dao
+        self.redis_service = redis_service
 
     def generate_portMappings(self, start_external_port=40000) -> list[tuple[int, int]]:
         internal_ports = [22, 22140, 22141, 22142, 22143]
@@ -67,7 +68,7 @@ class DockerService:
         logger.info(
             _m(
                 "Create Docker Container",
-                extra=get_extra_info({**default_extra, "payload": payload}),
+                extra=get_extra_info({**default_extra, "payload": str(payload)}),
             ),
         )
 
@@ -163,7 +164,14 @@ class DockerService:
                 ),
             )
 
-            await self.executor_dao.rent(payload.executor_id, payload.miner_hotkey)
+            await self.redis_service.add_rented_machine(
+                RentedMachine(
+                    miner_hotkey=payload.miner_hotkey,
+                    executor_id=payload.executor_id,
+                    executor_ip_address=executor_info.address,
+                    executor_ip_port=str(executor_info.port),
+                )
+            )
 
             return ContainerCreatedResult(
                 container_name=container_name,
@@ -276,7 +284,7 @@ class DockerService:
         logger.info(
             _m(
                 "Delete Docker Container",
-                extra=get_extra_info({**default_extra, "payload": payload}),
+                extra=get_extra_info({**default_extra, "payload": str(payload)}),
             ),
         )
 
@@ -307,4 +315,11 @@ class DockerService:
                 ),
             )
 
-            await self.executor_dao.unrent(payload.executor_id, payload.miner_hotkey)
+            await self.redis_service.remove_rented_machine(
+                RentedMachine(
+                    miner_hotkey=payload.miner_hotkey,
+                    executor_id=payload.executor_id,
+                    executor_ip_address=executor_info.address,
+                    executor_ip_port=str(executor_info.port),
+                )
+            )

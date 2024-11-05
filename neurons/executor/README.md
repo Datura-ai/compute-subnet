@@ -90,6 +90,7 @@ sed -i 's/sudo //g' scripts/install_executor_on_ubuntu.sh
 ```
 to remove sudo from the setup script commands
 
+
 ### Step 6: Install Bittensor
 ```
 python3 -m venv bt_venv

@@ -1,5 +1,3 @@
-version: '3.7'
-
 services:
   db:
     image: postgres:14.0-alpine
@@ -12,8 +10,6 @@ services:
     env_file: ./.env
     volumes:
       - db_data:/var/lib/postgresql/data
-    ports:
-      - ${POSTGRES_PORT}:5432
 
   redis:
     image: redis:6-alpine
@@ -22,8 +18,6 @@ services:
       test: redis-cli ping
     volumes:
       - redis_data:/data
-    ports:
-      - ${REDIS_PORT}:6379
 
   validator:
     image: daturaai/compute-subnet-validator:latest
@@ -51,6 +45,7 @@ services:
       - ASYNC_SQLALCHEMY_DATABASE_URI=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - COMPUTE_APP_URI=wss://celiumcompute.ai
     command: python src/connector.py
     volumes:
       - ${HOST_WALLET_DIR}:/root/.bittensor/wallets

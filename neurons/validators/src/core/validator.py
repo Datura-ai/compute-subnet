@@ -1,6 +1,8 @@
 import asyncio
+import json
 import logging
 import traceback
+from datetime import datetime
 
 import bittensor
 import numpy as np
@@ -11,11 +13,9 @@ from bittensor.utils.weight_utils import (
 from payload_models.payloads import MinerJobRequestPayload
 
 from core.config import settings
-from core.db import get_db
-from daos.executor import ExecutorDao
-from daos.task import TaskDao
 from services.docker_service import DockerService
 from services.miner_service import MinerService
+from services.redis_service import RedisService
 from services.ssh_service import SSHService
 from services.task_service import TaskService
 
@@ -23,13 +23,14 @@ logger = logging.getLogger(__name__)
 
 SYNC_CYCLE = 12
 WEIGHT_MAX_COUNTER = 6
+MINER_SCORES_KEY = "miner_scores"
 
 
 class Validator:
     wallet: bittensor.wallet
     netuid: int
 
-    def __init__(self):
+    def __init__(self, debug_miner=None):
         self.config = settings.get_bittensor_config()
 
         self.wallet = settings.get_bittensor_wallet()
@@ -39,31 +40,52 @@ class Validator:
         self.is_running = False
         self.last_job_run_blocks = 0
 
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(self.initiate_services())
-
         subtensor = self.get_subtensor()
 
         # check registered
         self.check_registered(subtensor)
 
-    async def initiate_services(self):
-        gen = get_db()
-        session = await gen.__anext__()
-        self.task_dao = TaskDao(session=session)
-        self.executor_dao = ExecutorDao(session=session)
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(self.initiate_services(subtensor))
 
+        self.debug_miner = debug_miner
+
+    async def initiate_services(self, subtensor: bittensor.subtensor):
         ssh_service = SSHService()
+        self.redis_service = RedisService()
         task_service = TaskService(
-            task_dao=self.task_dao, ssh_service=ssh_service, executor_dao=self.executor_dao
+            ssh_service=ssh_service,
+            redis_service=self.redis_service,
         )
-        docker_service = DockerService(ssh_service=ssh_service, executor_dao=self.executor_dao)
+        docker_service = DockerService(
+            ssh_service=ssh_service,
+            redis_service=self.redis_service,
+        )
         self.miner_service = MinerService(
             ssh_service=ssh_service,
             task_service=task_service,
             docker_service=docker_service,
-            executor_dao=self.executor_dao,
+            redis_service=self.redis_service,
         )
+
+        # init miner_scores
+        try:
+            if await self.should_set_weights(subtensor):
+                self.miner_scores = {}
+            else:
+                miner_scores_json = await self.redis_service.get(MINER_SCORES_KEY)
+                if miner_scores_json is None:
+                    bittensor.logging.info(
+                        "No data found in Redis for MINER_SCORES_KEY, initializing empty miner_scores."
+                    )
+                    self.miner_scores = {}
+                else:
+                    self.miner_scores = json.loads(miner_scores_json)
+        except Exception as e:
+            bittensor.logging.error(f"Failed to initialize miner_scores: {str(e)}")
+            self.miner_scores = {}
+
+        bittensor.logging.info(f"miner scores: {self.miner_scores}", "init", "init")
 
     def get_subtensor(self):
         bittensor.logging.debug("Getting subtensor", "get_subtensor", "get_subtensor")
@@ -108,38 +130,45 @@ class Validator:
 
     def fetch_miners(self, subtensor: bittensor.subtensor):
         bittensor.logging.debug("Fetching miners started", "fetch_miners", "fetch_miners")
-        metagraph = self.get_metagraph(subtensor)
-        miners = [
-            neuron
-            for neuron in metagraph.neurons
-            if neuron.axon_info.is_serving
-            and (
-                not settings.DEBUG
-                or not settings.DEBUG_MINER_HOTKEY
-                or settings.DEBUG_MINER_HOTKEY == neuron.axon_info.hotkey
-            )
-        ]
+
+        if self.debug_miner:
+            miners = [self.debug_miner]
+        else:
+            metagraph = self.get_metagraph(subtensor)
+            miners = [
+                neuron
+                for neuron in metagraph.neurons
+                if neuron.axon_info.is_serving
+                and (
+                    not settings.DEBUG
+                    or not settings.DEBUG_MINER_HOTKEY
+                    or settings.DEBUG_MINER_HOTKEY == neuron.axon_info.hotkey
+                )
+            ]
         bittensor.logging.info("Found %d miners", "fetch_miners", "fetch_miners", len(miners))
         return miners
 
     async def set_weights(self, miners, subtensor: bittensor.subtensor):
-        scores = await self.task_dao.get_scores_for_last_epoch(tempo=self.get_tempo(subtensor))
+        bittensor.logging.info(f"[set_weights] scores: {self.miner_scores}")
 
-        hotkey_to_score = {score.miner_hotkey: score.total_score for score in scores}
-        for miner_hotkey in hotkey_to_score.keys():
+        if not self.miner_scores:
+            bittensor.logging.info("No miner scores available, skipping set_weights.")
+            return
+
+        for miner_hotkey in self.miner_scores.keys():
             bittensor.logging.info(
                 "Total score for miner(%s) is %f",
                 "set_weights",
                 "set_weights",
                 miner_hotkey,
-                hotkey_to_score.get(miner_hotkey, 0.0),
+                self.miner_scores.get(miner_hotkey, 0.0),
             )
 
         uids = np.zeros(len(miners), dtype=np.int64)
         weights = np.zeros(len(miners), dtype=np.float32)
         for ind, miner in enumerate(miners):
             uids[ind] = miner.uid
-            weights[ind] = hotkey_to_score.get(miner.hotkey, 0.0)
+            weights[ind] = self.miner_scores.get(miner.hotkey, 0.0)
 
         bittensor.logging.info(f"uids: {uids}")
         bittensor.logging.info(f"weights: {weights}")
@@ -175,6 +204,9 @@ class Validator:
             bittensor.logging.info("set_weights on chain successfully!")
         else:
             bittensor.logging.error("set_weights failed", msg)
+
+        bittensor.logging.info("Reset miner scores")
+        self.miner_scores = {}
 
     def get_last_update(self, subtensor: bittensor.subtensor, block):
         try:
@@ -224,6 +256,25 @@ class Validator:
             )
             return False
 
+    async def get_time_from_block(self, subtensor: bittensor.subtensor, block: int):
+        max_retries = 3
+        retries = 0
+        while retries < max_retries:
+            try:
+                node = self.get_node(subtensor)
+                block_hash = node.get_block_hash(block)
+                return datetime.fromtimestamp(
+                    node.query("Timestamp", "Now", block_hash=block_hash).value / 1000
+                ).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception as e:
+                retries += 1
+                bittensor.logging.error(
+                    f"Error getting time from block: {e}",
+                    "get_time_from_block",
+                    "get_time_from_block",
+                )
+        return "Unknown"
+
     async def sync(self):
         try:
             subtensor = self.get_subtensor()
@@ -242,12 +293,16 @@ class Validator:
                 current_block % settings.BLOCKS_FOR_JOB == 0
                 or current_block - self.last_job_run_blocks > int(settings.BLOCKS_FOR_JOB * 1.5)
             ):
+                job_block = (current_block // settings.BLOCKS_FOR_JOB) * settings.BLOCKS_FOR_JOB
+                job_batch_id = await self.get_time_from_block(subtensor, job_block)
+
                 bittensor.logging.info(
-                    "Send jobs to %d miners at block(%d)",
+                    "Send jobs to %d miners at block(%d) at %s",
                     "sync",
                     "sync",
                     len(miners),
                     current_block,
+                    job_batch_id,
                 )
 
                 self.last_job_run_blocks = current_block
@@ -257,6 +312,7 @@ class Validator:
                     asyncio.create_task(
                         self.miner_service.request_job_to_miner(
                             payload=MinerJobRequestPayload(
+                                job_batch_id=job_batch_id,
                                 miner_hotkey=miner.hotkey,
                                 miner_address=miner.axon_info.ip,
                                 miner_port=miner.axon_info.port,
@@ -268,6 +324,18 @@ class Validator:
 
                 try:
                     results = await asyncio.wait_for(asyncio.gather(*jobs), timeout=60 * 10)
+                    for result in results:
+                        if result:
+                            bittensor.logging.info(f"Job score: {result}", "sync", "sync")
+                            miner_hotkey = result.get("miner_hotkey")
+                            job_score = result.get("score")
+                            if miner_hotkey in self.miner_scores:
+                                self.miner_scores[miner_hotkey] += job_score
+                            else:
+                                self.miner_scores[miner_hotkey] = job_score
+
+                    bittensor.logging.info(f"miner scores: {self.miner_scores}", "sync", "sync")
+
                     for index, result in enumerate(results):
                         miner = miners[index]
                         if isinstance(result, Exception):
@@ -278,12 +346,13 @@ class Validator:
                             )
                         else:
                             bittensor.logging.info(
-                                f"Job for miner({miner.hotkey}-{miner.axon_info.ip}:{miner.axon_info.port}) completed successfully",
+                                f"Job for miner({miner.hotkey}-{miner.axon_info.ip}:{miner.axon_info.port}) completed successfully: {result}",
                                 "sync",
                                 "sync",
                             )
 
                     bittensor.logging.info("All Jobs finished", "sync", "sync")
+                    bittensor.logging.info(f"miner_scores: {self.miner_scores}", "sync", "sync")
                 except TimeoutError:
                     bittensor.logging.error("Tasks timed out!", "sync", "sync")
                     # Cancel all tasks
@@ -331,4 +400,10 @@ class Validator:
 
     async def stop(self):
         bittensor.logging.info("Stop Validator process")
+
+        try:
+            await self.redis_service.set(MINER_SCORES_KEY, json.dumps(self.miner_scores))
+        except Exception as e:
+            bittensor.logging.error(f"Failed to save miner_scores: {str(e)}")
+
         self.should_exit = True
