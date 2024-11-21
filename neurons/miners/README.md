@@ -6,7 +6,7 @@ This miner allows you to contribute your GPU resources to the Compute Subnet and
 
 ### Central Miner Server Requirements
 
-To run the central miner, you only need a CPU server with the following specifications:
+To run the central miner, you only need a CPU server (hardware or Virtual Machine) with the following specifications:
 
 - **CPU**: 4 cores
 - **RAM**: 8GB
@@ -23,16 +23,82 @@ To see the compatible GPUs to mine with and their relative rewards, see this dic
 
 ### Using Docker
 
-#### Step 1: Clone the Git Repository
+#### Step 1: Install Docker
+
+Add Docker's official GPG key
+```
+sudo apt-get update
+sudo apt-get install ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+```
+Add the repository to Apt sources
+```
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update
+
+sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+
+test Docker install
+```
+sudo docker run hello-world
+```
+
+add user to docker group
+```
+sudo groupadd docker
+sudo usermod -aG docker $USER
+```
+
+Logout and login 
+
+#### Step 2: Clone the Git Repository
 
 ```
 git clone https://github.com/Datura-ai/compute-subnet.git
 ```
 
-#### Step 2: Install Required Tools
+#### Step 3: Install Required Tools
 
 ```
 cd compute-subnet && chmod +x scripts/install_miner_on_ubuntu.sh && ./scripts/install_miner_on_ubuntu.sh
+```
+
+#### Step 4: Install Bittensor
+```
+python3 -m venv bt_venv
+source bt_venv/bin/activate
+pip install bittensor
+```
+
+#### Step 5: Setup Env
+```
+cp neurons/miners/.env.template neurons/miners/.env
+```
+.env file:
+```
+BITTENSOR_WALLET_NAME=your_coldkey_name
+BITTENSOR_WALLET_HOTKEY_NAME=your_hotkey_name
+
+POSTGRES_DB=compute-subnet-db
+POSTGRES_PORT=7432
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=password
+SQLALCHEMY_DATABASE_URI=postgresql://postgres:password@localhost:7432/compute-subnet-db
+
+BITTENSOR_NETUID=51
+BITTENSOR_NETWORK=finney
+
+EXTERNAL_IP_ADDRESS=your_public_ip_address  # pro tip: use `curl ifconfig.me` to find this out
+INTERNAL_PORT=any_port_not_already_in_use
+EXTERNAL_PORT=any_port_not _already_in_use  # make sure this port is open to external connections
+
+HOST_WALLET_DIR=path_to_where_your_/.bittensor/wallets_is_installed
 ```
 
 Verify if bittensor and docker installed: 
@@ -44,30 +110,8 @@ btcli --version
 docker --version
 ```
 
-If one of them isn't installed properly, install using following link:     
-For bittensor, use [This Link](https://github.com/opentensor/bittensor/blob/master/README.md#install-bittensor-sdk)
-For docker, use [This Link](https://docs.docker.com/engine/install/)
-
-#### Step 3: Setup ENV
-```
-cp neurons/miners/.env.template neurons/miners/.env
-```
-
-Fill in your information for:
-
-`BITTENSOR_WALLET_NAME`: Your wallet name for Bittensor. You can check this with `btcli wallet list`
-
-`BITTENSOR_WALLET_HOTKEY_NAME`: The hotkey name of your wallet's registered hotkey. If it is not registered, run `btcli subnet register --netuid 51`. 
-
-`EXTERNAL_IP_ADDRESS`: The external IP address of your central miner server. Make sure it is open to external connections on the `EXTERNAL PORT`
-
-`HOST_WALLET_DIR`: The directory path of your wallet on the machine.
-
-`INTERNAL_PORT` and `EXTERNAL_PORT`: Optionally customize these ports. Make sure the `EXTERNAL PORT` is open for external connections to connect to the validators.
-
-
-#### Step 4: Start the Miner
-
+#### Step 6: Start the Miner
+!Make sure your VENV is activated! (`source ~/bt_venv/bin/activate`)
 ```
 cd neurons/miners && docker compose up -d
 ```
@@ -79,10 +123,11 @@ cd neurons/miners && docker compose up -d
 Executors are machines running on GPUs that you can add to your central miner. The more executors (GPUs) you have, the greater your compensation will be. Here's how to add them:
 
 1. Ensure the executor machine is set up and running Docker. For more information, follow the [executor README.md here](../executor/README.md)
-2. Use the following command to add an executor to the central miner:
+2. Register to the subnet before adding the executor to the miner.
+3. Use the following command to add an executor to the central miner:
 
     ```bash
-    docker exec <container-id or name> python /root/app/src/cli.py add-executor --address <executor-ip-address> --port <executor-port> --validator <validator-hotkey>
+    docker exec <container-id or name> python /root/app/src/cli.py add-executor --address <your-executor-ip-address> --port <your-executor-port> --validator <validator-hotkey-selected-from-list>
     ```
 
     - `<executor-ip-address>`: The IP address of the executor machine.
