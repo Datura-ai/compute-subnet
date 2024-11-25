@@ -43,7 +43,7 @@ class FileEncryptService:
 
         return file_name
 
-    def ecrypt_miner_job_files(self):
+    def encrypt_machine_scrape_files(self):
         tmp_directory = Path(__file__).parent / "temp"
         if tmp_directory.exists() and tmp_directory.is_dir():
             shutil.rmtree(tmp_directory)
@@ -63,11 +63,26 @@ class FileEncryptService:
             os.fsync(machine_scrape_file.fileno())
             machine_scrape_file_name = self.make_binary_file(str(tmp_directory), machine_scrape_file.name)
 
+        return MinerJobEnryptedFiles(
+            encrypt_key=encrypt_key,
+            tmp_directory=str(tmp_directory),
+            machine_scrape_file_name=machine_scrape_file_name,
+            score_file_name="",
+        )
+        
+    def encrypt_score_files(self, device_index=0):
+        tmp_directory = Path(__file__).parent / "temp"
+        if tmp_directory.exists() and tmp_directory.is_dir():
+            shutil.rmtree(tmp_directory)
+
+        encrypt_key = self.ssh_service.generate_random_string()
+
         # generate score_script file
         score_script_file_path = str(Path(__file__).parent / ".." / "miner_jobs/score.py")
         with open(score_script_file_path, 'r') as file:
             content = file.read()
         modified_content = content.replace('encrypt_key', encrypt_key)
+        modified_content = content.replace('device = torch.device("cuda" if torch.cuda.is_available() else "cpu")', f'device = torch.device("cuda:{device_index}" if torch.cuda.is_available() else "cpu")')
 
         with tempfile.NamedTemporaryFile(delete=True, suffix='.py') as score_file:
             score_file.write(modified_content.encode('utf-8'))
@@ -78,6 +93,6 @@ class FileEncryptService:
         return MinerJobEnryptedFiles(
             encrypt_key=encrypt_key,
             tmp_directory=str(tmp_directory),
-            machine_scrape_file_name=machine_scrape_file_name,
+            machine_scrape_file_name="",
             score_file_name=score_file_name,
         )

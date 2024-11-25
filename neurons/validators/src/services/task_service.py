@@ -24,6 +24,7 @@ from services.const import (
 )
 from services.redis_service import RENTED_MACHINE_SET, RedisService
 from services.ssh_service import SSHService
+from services.file_encrypt_service import FileEncryptService
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +36,14 @@ class TaskService:
         self,
         ssh_service: Annotated[SSHService, Depends(SSHService)],
         redis_service: Annotated[RedisService, Depends(RedisService)],
+        
     ):
         self.ssh_service = ssh_service
         self.redis_service = redis_service
         self.is_valid = True
+        self.file_encrypt_service = FileEncryptService(
+            ssh_service=ssh_service
+        )
 
     async def upload_directory(
         self,
@@ -223,7 +228,7 @@ class TaskService:
         keypair: bittensor.Keypair,
         private_key: str,
         public_key: str,
-        encypted_files: MinerJobEnryptedFiles,
+        # encypted_files: MinerJobEnryptedFiles,
         docker_hub_digests: dict[str, str]
     ):
         default_extra = {
@@ -253,6 +258,8 @@ class TaskService:
                 await ssh_client.run(f"mkdir -p {remote_dir}")
 
                 # upload temp directory
+
+                encypted_files = self.file_encrypt_service.encrypt_machine_scrape_files()
                 await self.upload_directory(ssh_client, encypted_files.tmp_directory, remote_dir)
 
                 remote_machine_scrape_file_path = f"{remote_dir}/{encypted_files.machine_scrape_file_name}"
@@ -411,6 +418,10 @@ class TaskService:
                         await self.clear_remote_directory(ssh_client, remote_dir)
 
                         return None, executor_info, 0, miner_info.job_batch_id, log_status, log_text
+
+                await self.clear_remote_directory(ssh_client, remote_dir)
+                encypted_files = self.file_encrypt_service.encrypt_score_files(gpu_count-1)
+                await self.upload_directory(ssh_client, encypted_files.tmp_directory, remote_dir)
 
                 # scoring
                 start_time = time.time()
