@@ -16,7 +16,7 @@ from core.config import settings
 from core.utils import _m, get_extra_info
 from services.docker_service import DockerService, REPOSITORYS
 from services.miner_service import MinerService
-from services.redis_service import RedisService, EXECUTOR_COUNT_PREFIX
+from services.redis_service import RedisService, LOG_ERROR_VALIDATOR_CHANNEL_NAME, EXECUTOR_COUNT_PREFIX
 from services.ssh_service import SSHService
 from services.task_service import TaskService
 from services.file_encrypt_service import FileEncryptService
@@ -166,7 +166,21 @@ class Validator:
         bittensor.logging.info(f"[set_weights] scores: {self.miner_scores}")
 
         if not self.miner_scores:
-            bittensor.logging.info("No miner scores available, skipping set_weights.")
+            log_text = "No miner scores available, skipping set_weights."
+            bittensor.logging.info(log_text)
+            log_status = "warning"
+            await self.redis_service.publish(
+                LOG_ERROR_VALIDATOR_CHANNEL_NAME,
+                {
+                    "current_block": self.get_current_block(subtensor),
+                    "weights": [],
+                    "scores": {},
+                    "validator_hotkey": self.wallet.hotkey.ss58_address,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "log_status": log_status,
+                    "log_text": str(log_text),
+                },
+            )
             return
 
         for miner_hotkey in self.miner_scores.keys():
@@ -214,10 +228,41 @@ class Validator:
             wait_for_finalization=False,
             wait_for_inclusion=False,
         )
+
+        current_block = self.get_current_block(subtensor)
         if result is True:
-            bittensor.logging.info("set_weights on chain successfully!")
+            log_text = "set_weights on chain successfully!"
+            bittensor.logging.info(log_text)
+            log_status = "info"
+            await self.redis_service.publish(
+                LOG_ERROR_VALIDATOR_CHANNEL_NAME,
+                {
+                    "current_block": current_block,
+                    "weights": uint_weights,
+                    "scores": self.miner_scores,
+                    "validator_hotkey": self.wallet.hotkey.ss58_address,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "log_status": log_status,
+                    "log_text": str(log_text),
+                },
+            )
         else:
-            bittensor.logging.error("set_weights failed", msg)
+            log_text = f"set_weights failed: {msg}"
+            bittensor.logging.error(log_text)
+
+            log_status = "error"
+            await self.redis_service.publish(
+                LOG_ERROR_VALIDATOR_CHANNEL_NAME,
+                {
+                    "current_block": current_block,
+                    "weights": uint_weights,
+                    "scores": self.miner_scores,
+                    "validator_hotkey": self.wallet.hotkey.ss58_address,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "log_status": log_status,
+                    "log_text": str(log_text),
+                },
+            )
 
         bittensor.logging.info("Reset miner scores")
         self.miner_scores = {}
