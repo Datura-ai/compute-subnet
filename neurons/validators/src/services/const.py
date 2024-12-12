@@ -304,4 +304,5 @@ LIB_NVIDIA_ML_DIGESTS = {
     "560.35.03": "93a3f8ef77af86b79314c00b0788aeed",
     "560.35.05": "1eec299b50e33a6cfa5155ded53495ab",
     "565.57.01": "c801dd3fc4660f3a8ddf977cfdffe113",
+    "570.127.08": "ac925f2cd192ad971c5466d55945a243",
 }
