@@ -67,9 +67,21 @@ wait_for_user() {
 #install pre
 install_pre() {
     sudo apt update
-    sudo apt install --no-install-recommends --no-install-suggests -y sudo apt-utils curl git cmake build-essential
+    sudo apt install --no-install-recommends --no-install-suggests -y sudo apt-utils curl git cmake build-essential 
     exit_on_error $?
 }
+
+# Remove conflicting bintray
+sudo rm /etc/apt/sources.list.d/speedtest.list
+sudo apt-get update
+sudo apt-get remove -y speedtest
+
+# Remove speedtest-cli
+sudo apt-get remove -y speedtest-cli
+
+# Add the Speedtest CLI repository and install Speedtest
+curl -s https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | sudo bash
+sudo apt-get install -y speedtest
 
 # check if python is installed, if not install it
 install_python() {
