@@ -79,10 +79,7 @@ sudo apt-get remove -y speedtest
 # Remove speedtest-cli
 sudo apt-get remove -y speedtest-cli
 
-# Install curl if not already installed
-sudo apt-get install -y curl
-
-# Add the Speedtest CLI repository and install Speedtest
+# Add the Speedtest repository and install Speedtest
 curl -s https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | sudo bash
 sudo apt-get install -y speedtest
 
