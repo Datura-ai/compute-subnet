@@ -71,6 +71,22 @@ install_pre() {
     exit_on_error $?
 }
 
+# Remove conflicting bintray
+sudo rm /etc/apt/sources.list.d/speedtest.list
+sudo apt-get update
+sudo apt-get remove -y speedtest
+
+# Remove speedtest-cli
+sudo apt-get remove -y speedtest-cli
+
+# Install curl if not already installed
+sudo apt-get install -y curl
+
+# Add the Speedtest CLI repository and install Speedtest
+curl -s https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | sudo bash
+sudo apt-get install -y speedtest
+
+
 # check if python is installed, if not install it
 install_python() {
     # Check if python3.11 is installed
