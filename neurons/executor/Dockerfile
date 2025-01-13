@@ -29,7 +29,7 @@ LABEL builder=false
 
 RUN apt-get update -y \
   && apt-get upgrade -y \
-  && apt-get install -y speedtest-cli hashcat hashcat-data nvidia-cuda-toolkit \
+  && apt-get install -y speedtest hashcat hashcat-data nvidia-cuda-toolkit \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /root/app/
