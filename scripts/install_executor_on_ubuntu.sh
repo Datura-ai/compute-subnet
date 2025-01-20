@@ -71,13 +71,6 @@ install_pre() {
     exit_on_error $?
 }
 
-# Remove speedtest-cli
-sudo apt-get remove -y speedtest-cli
-
-# Add the Speedtest repository and install Speedtest
-curl -s https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | sudo bash
-sudo apt-get install -y speedtest
-
 # check if python is installed, if not install it
 install_python() {
     # Check if python3.11 is installed
