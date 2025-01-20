@@ -538,8 +538,9 @@ def get_network_speed():
     # Extract upload and download speeds
         download_speed = speedtest_data["download"]["bandwidth"]
         upload_speed = speedtest_data["upload"]["bandwidth"]
-        data["upload_speed"] = speedtest_data["upload"] / 1_000_000  # Convert to Mbps
-        data["download_speed"] = speedtest_data["download"] / 1_000_000  # Convert to Mbps
+    # Convert speeds from bits per second to megabits per second
+        data["download_speed"] = download_speed / 125000  # Convert to Mbps
+        data["upload_speed"] = upload_speed / 125000  # Convert to Mbps
     except Exception as exc:
         data["network_speed_error"] = repr(exc)
     return data
