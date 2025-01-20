@@ -546,8 +546,8 @@ def get_network_speed():
         data["upload_speed"] = upload_speed / 125000  # Convert to Mbps
 
     #Convert elapsed time
-        data["download_time"] = download_time / 100  # Convert to seconds
-        data["upload_time"] = upload_time / 100  # Convert to seconds
+        data["download_time"] = download_time / 1000  # Convert ms to seconds
+        data["upload_time"] = upload_time / 1000  # Convert ms to seconds
         
     except Exception as exc:
         data["network_speed_error"] = repr(exc)
