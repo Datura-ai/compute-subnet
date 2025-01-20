@@ -792,7 +792,7 @@ class TaskService:
                     )
 
                 end_time = time.time()
-                job_taken_time = end_time - start_time
+                hashcat_taken_time = end_time - start_time
 
                 result = json.loads(results[0])
                 answer = result["answer"]
@@ -835,19 +835,23 @@ class TaskService:
                 else:
                     logger.info(
                         _m(
-                            "Job taken time for executor",
+                            "Hashcat taken time for executor",
                             extra=get_extra_info(
-                                {**default_extra, "job_taken_time": job_taken_time}
+                                {**default_extra, "hashcat_taken_time": hashcat_taken_time}
                             ),
                         ),
                     )
 
                     upload_speed = machine_spec.get("network", {}).get("upload_speed", 0)
                     download_speed = machine_spec.get("network", {}).get("download_speed", 0)
+                    download_time = machine_spec.get("network", {}).get("download_time", 0)
+                    upload_time = machine_spec.get("network", {}).get("upload_time", 0)
 
                     # Ensure upload_speed and download_speed are not None
                     upload_speed = upload_speed if upload_speed is not None else 0
                     download_speed = download_speed if download_speed is not None else 0
+
+                    job_taken_time = hashcat_taken_time - download_time - upload_time
 
                     job_taken_score = (
                         min(avg_job_time * 0.7 / job_taken_time, 1) if job_taken_time > 0 else 0
