@@ -533,12 +533,12 @@ def get_network_speed():
     """Get upload and download speed of the machine."""
     data = {"upload_speed": None, "download_speed": None}
     try:
-        speedtest_cmd = run_cmd("speedtest --format=json-pretty")
+        speedtest_cmd = run_cmd("speedtest --accept-license --accept-gdpr --format=json-pretty")
         speedtest_data = json.loads(speedtest_cmd)
     # Extract upload and download speeds
         download_speed = speedtest_data["download"]["bandwidth"]
         upload_speed = speedtest_data["upload"]["bandwidth"]
-    # Convert speeds from bits per second to megabits per second
+    # Convert speeds from bytes per second to megabits per second
         data["download_speed"] = download_speed / 125000  # Convert to Mbps
         data["upload_speed"] = upload_speed / 125000  # Convert to Mbps
     except Exception as exc:
