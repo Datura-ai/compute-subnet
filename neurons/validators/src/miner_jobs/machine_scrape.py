@@ -537,7 +537,10 @@ def get_network_speed():
         speedtest_data = json.loads(speedtest_cmd)
     # Extract upload and download speeds
         download_speed = speedtest_data["download"]["bandwidth"]
+        download_time = speedtest_data["download"]["elapsed"]
         upload_speed = speedtest_data["upload"]["bandwidth"]
+        upload_time = speedtest_data["upload"]["elapsed"]
+        
     # Convert speeds from bytes per second to megabits per second
         data["download_speed"] = download_speed / 125000  # Convert to Mbps
         data["upload_speed"] = upload_speed / 125000  # Convert to Mbps
