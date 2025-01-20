@@ -29,7 +29,6 @@ LABEL builder=false
 
 RUN apt-get update -y \
   && apt-get upgrade -y \
-  && sudo apt-get remove speedtest-cli \
   && apt-get install -y curl gnupg2 \
   && curl -s https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | bash \
   && apt-get install -y speedtest hashcat hashcat-data nvidia-cuda-toolkit \
