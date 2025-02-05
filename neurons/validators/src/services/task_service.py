@@ -744,7 +744,7 @@ class TaskService:
                             log_text,
                         )
 
-                    if ram < vram:
+                    if ram < vram * gpu_count:
                      log_status = "warning"
                      log_text = _m(
                          "Executor below min vram specifications allowed",
