@@ -182,9 +182,8 @@ install_btcli() {
     else
         ohai "Installing BtCLI..."
 
-        sudo apt install -y pipx 
-        pipx install bittensor
-        source ~/.bashrc
+        sudo apt install -y python3-pip
+        python3 -m pip install bittensor==7.3.1
     fi
 }
 
