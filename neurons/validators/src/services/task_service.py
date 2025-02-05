@@ -747,7 +747,7 @@ class TaskService:
                     if ram < vram:
                      log_status = "warning"
                      log_text = _m(
-                         "Executor below min specifications allowed",
+                         "Executor below min vram specifications allowed",
                          extra=get_extra_info(
                              {
                                  **default_extra,
@@ -766,11 +766,12 @@ class TaskService:
                 if cpu_count < GPU_MIN_CORE_COUNT[gpu_model] * gpu_count:
                     log_status = "warning"
                     log_text = _m(
-                        "Executor is below min specifications allowed",
+                        "Executor is below min cpu core specifications allowed",
                         extra=get_extra_info(
                             {
                                 **default_extra,
                                 "gpu_model": gpu_model,
+                                "gpu_count": gpu_count,
                                 "cpu_count": cpu_count,
                                 "memory": ram,
                                 "vram": vram,
