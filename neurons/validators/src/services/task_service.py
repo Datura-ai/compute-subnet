@@ -30,6 +30,7 @@ from services.const import (
     GPU_UTILIZATION_LIMIT,
     GPU_MEMORY_UTILIZATION_LIMIT,
     VERIFY_JOB_REQUIRED_COUNT,
+    GPU_MIN_CORE_COUNT,
 )
 from services.redis_service import (
     RedisService,
@@ -524,6 +525,7 @@ class TaskService:
 
                 ram = machine_spec.get("ram", {}).get("total", 0)
                 storage = machine_spec.get("hard_disk", {}).get("free", 0)
+                cpu_count = machine_spec.get("cpu", {}).get("count", 0)
 
                 gpu_processes = machine_spec.get("gpu_processes", [])
 
@@ -757,24 +759,41 @@ class TaskService:
                             log_text,
                         )
 
-                # if ram < vram * 0.9 or storage < vram * 1.5:
-                #     log_status = "warning"
-                #     log_text = _m(
-                #         "Incorrect vram",
-                #         extra=get_extra_info(
-                #             {
-                #                 **default_extra,
-                #                 "gpu_model": gpu_model,
-                #                 "gpu_count": gpu_count,
-                #                 "memory": ram,
-                #                 "vram": vram,
-                #                 "storage": storage,
-                #                 "nvidia_driver": nvidia_driver,
-                #                 "libnvidia_ml": libnvidia_ml,
-                #             }
-                #         ),
-                #     )
-                #     logger.warning(log_text)
+                    if ram < vram * gpu_count:
+                     log_status = "warning"
+                     log_text = _m(
+                         "Executor below min vram specifications allowed",
+                         extra=get_extra_info(
+                             {
+                                 **default_extra,
+                                 "gpu_model": gpu_model,
+                                 "gpu_count": gpu_count,
+                                 "memory": ram,
+                                 "vram": vram,
+                                 "storage": storage,
+                                 "nvidia_driver": nvidia_driver,
+                                 "libnvidia_ml": libnvidia_ml,
+                             }
+                         ),
+                     )
+                     logger.warning(log_text)
+
+                if cpu_count < GPU_MIN_CORE_COUNT[gpu_model] * gpu_count:
+                    log_status = "warning"
+                    log_text = _m(
+                        "Executor is below min cpu core specifications allowed",
+                        extra=get_extra_info(
+                            {
+                                **default_extra,
+                                "gpu_model": gpu_model,
+                                "gpu_count": gpu_count,
+                                "cpu_count": cpu_count,
+                                "memory": ram,
+                                "vram": vram,
+                            }
+                        ),
+                    )
+                    logger.warning(log_text)
 
                 #     await self.clear_remote_directory(ssh_client, remote_dir)
                 #     await self.redis_service.set_verified_job_info(

@@ -347,3 +347,31 @@ DOCKER_DIGESTS = {
     "26.1.3": "52d8fcc2c4370bf324cdf17cbc586784",
     "27.3.1": "40f1f7724fa0432ea6878692a05b998c",
 }
+
+
+GPU_MIN_CORE_COUNT = {
+    # Latest Gen NVIDIA GPUs 
+    "NVIDIA H200": 16,
+    "NVIDIA H100 80GB HBM3": 16,
+    "NVIDIA H100 NVL": 16,
+    "NVIDIA H100 PCIe": 16,
+    "NVIDIA GeForce RTX 4090": 12,
+    "NVIDIA GeForce RTX 4090 D": 12,
+    "NVIDIA RTX 4000 Ada Generation": 12,
+    "NVIDIA RTX 6000 Ada Generation": 10,
+    "NVIDIA L4": 12,
+    "NVIDIA L40S": 10,
+    "NVIDIA L40": 12,
+    "NVIDIA RTX 2000 Ada Generation": 10,
+    # Previous Gen NVIDIA GPUs 
+    "NVIDIA A100 80GB PCIe": 16,
+    "NVIDIA A100-SXM4-80GB": 16,
+    "NVIDIA RTX A6000": 6,
+    "NVIDIA RTX A5000": 8,
+    "NVIDIA RTX A4500": 6,
+    "NVIDIA RTX A4000": 4,
+    "NVIDIA A40": 6,
+    "NVIDIA A30": 6,
+    "NVIDIA GeForce RTX 3090": 12,
+    "NVIDIA V100": 6,
+}
