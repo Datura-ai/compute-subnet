@@ -148,7 +148,7 @@ async def _request_job_to_miner(miner_hotkey: str, miner_address: str, miner_por
     file_encrypt_service: FileEncryptService = ioc["FileEncryptService"]
 
     docker_hub_digests = await docker_service.get_docker_hub_digests(REPOSITORIES)
-    encypted_files = file_encrypt_service.ecrypt_miner_job_files()
+    encypted_files = file_encrypt_service.encrypt_miner_job_files()
 
     await miner_service.request_job_to_miner(
         MinerJobRequestPayload(
