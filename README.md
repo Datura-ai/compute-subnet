@@ -12,12 +12,23 @@ Welcome to the **Compute Subnet on Bittensor**! This project enables a decentral
   - [For Renters](#for-renters)
   - [For Miners](#for-miners)
   - [For Validators](#for-validators)
+- [System Requirements](#system-requirements)
+- [Installation](#installation)
+- [Contributing](#contributing)
 - [Contact and Support](#contact-and-support)
 
 ## Introduction
 
 The Compute Subnet on Bittensor is a decentralized network that allows miners to contribute their GPU resources to a global pool. Users can rent these resources for computational tasks, such as machine learning, data analysis, and more. The system ensures fair compensation for miners based on the quality and performance of their GPUs.
 
+### Key Features
+
+- Decentralized GPU marketplace
+- Secure peer-to-peer connections
+- Automated performance validation
+- Fair compensation system
+- Real-time resource monitoring
+- Flexible pricing models
 
 ## High-Level Architecture
 
@@ -46,20 +57,75 @@ Miners can contribute their GPU-equipped machines to the network. The machines a
 
 If you are a miner and want to contribute GPU resources to the subnet, please refer to the [Miner Setup Guide](neurons/miners/README.md) for instructions on how to:
 
-- Set up your environment.
-- Install the miner software.
-- Register your miner and connect to the network.
+- Set up your environment
+- Install the miner software
+- Register your miner and connect to the network
 - Get compensated for providing GPUs!
 
 ### For Validators
 
-Validators play a crucial role in maintaining the integrity of the Compute Subnet by verifying the hardware specifications and performance of miners’ machines. Validators ensure that miners are fairly compensated based on their GPU contributions and prevent fraudulent activities.
+Validators play a crucial role in maintaining the integrity of the Compute Subnet by verifying the hardware specifications and performance of miners' machines. Validators ensure that miners are fairly compensated based on their GPU contributions and prevent fraudulent activities.
 
 For more details, visit the [Validator Setup Guide](neurons/validators/README.md).
 
+## System Requirements
+
+### Minimum Requirements for Miners
+- CUDA-compatible GPU with at least 8GB VRAM
+- 16GB RAM
+- 100GB free disk space
+- Stable internet connection with minimum 100Mbps
+- Linux-based OS (Ubuntu 20.04 or later recommended)
+
+### Recommended Requirements for Validators
+- 32GB RAM
+- 8-core CPU
+- 200GB free disk space
+- Stable internet connection with minimum 200Mbps
+
+## Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/your-username/compute-subnet.git
+cd compute-subnet
+```
+
+2. Install dependencies:
+```bash
+python -m pip install -r requirements.txt
+```
+
+3. Configure your environment:
+```bash
+cp .env.example .env
+# Edit .env with your configuration
+```
+
+## Contributing
+
+We welcome contributions from the community! Here's how you can contribute:
+
+1. Fork the repository
+2. Create a new branch for your feature
+3. Commit your changes
+4. Submit a pull request
+
+Please make sure to:
+- Follow our coding standards
+- Write clear commit messages
+- Update documentation as needed
+- Add tests for new features
 
 ## Contact and Support
 
 If you need assistance or have any questions, feel free to reach out:
 
 - **Discord Support**: [Dedicated Channel within the Bittensor Discord](https://discord.com/channels/799672011265015819/1291754566957928469)
+- **GitHub Issues**: For bug reports and feature requests
+- **Documentation**: Check our [Wiki](https://github.com/opentensor/docs) for detailed guides
+- **Community Forum**: Join discussions on our [Forum](https://github.com/opentensor/discussions)
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
