@@ -881,7 +881,7 @@ class TaskService:
                     machine_spec=machine_spec
                 )
 
-                if not is_valid:
+                if settings.HAS_GPU_VERIFICATION and not is_valid:
                     log_text = _m(
                         "GPU Verification failed",
                         extra=get_extra_info(default_extra),
