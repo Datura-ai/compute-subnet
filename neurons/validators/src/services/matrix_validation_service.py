@@ -203,6 +203,7 @@ class ValidationService:
             "seed": verifier_params.seed,
             "uuid": verifier_params.uuid,
             "cipher_text": verifier_params.cipher_text,
+            "machine_info": machine_info,
         }
 
         logger.info(_m("Matrix Multiplication Python Script Command", extra=get_extra_info(log_extra)))
