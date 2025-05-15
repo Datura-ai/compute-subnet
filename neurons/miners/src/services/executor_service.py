@@ -47,7 +47,10 @@ class ExecutorService:
             try:
                 async with session.post(url, json=payload) as response:
                     if response.status != 200:
-                        logger.error("API request failed to register SSH key. url=%s", url)
+                        logger.error(
+                          "Failed to register SSH key on executor. url=%s, status_code=%d, reason=%s", 
+                          url, response.status, response.reason
+                        )
                         return None
                     response_obj: dict = await response.json()
                     logger.info(
@@ -59,7 +62,7 @@ class ExecutorService:
                     response_obj["uuid"] = str(executor.uuid)
                     response_obj["address"] = executor.address
                     response_obj["port"] = executor.port
-                    return ExecutorSSHInfo.parse_obj(response_obj)
+                    return ExecutorSSHInfo.model_validate(response_obj)
             except Exception as e:
                 logger.error(
                     "API request failed to register SSH key. url=%s, error=%s", url, str(e)
@@ -83,11 +86,15 @@ class ExecutorService:
             try:
                 async with session.post(url, json=payload) as response:
                     if response.status != 200:
-                        logger.error("API request failed to register SSH key. url=%s", url)
+                        logger.error(
+                          "Failed to remove SSH key on executor. url=%s, status_code=%d, reason=%s", 
+                          url, response.status, response.reason
+                        )
                         return None
+                    return True
             except Exception as e:
                 logger.error(
-                    "API request failed to register SSH key. url=%s, error=%s", url, str(e)
+                    "API request failed to remove SSH key. url=%s, error=%s", url, str(e)
                 )
 
     async def register_pubkey(self, validator_hotkey: str, pubkey: bytes, executor_id: Optional[str] = None):
@@ -133,7 +140,16 @@ class ExecutorService:
             )
             for executor in self.get_executors_for_validator(validator_hotkey, executor_id)
         ]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        
+        total_executors = len(tasks)
+        results = [
+            result for result in await asyncio.gather(*tasks, return_exceptions=True) if result
+        ]
+        logger.info(
+            "Send pubkey remove API requests to %d executors and received results from %d executors",
+            total_executors,
+            len(results),
+        )
 
     async def get_pod_logs(
         self, validator_hotkey: str, executor_id: str, container_name: str

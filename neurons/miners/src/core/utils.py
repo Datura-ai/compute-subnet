@@ -49,10 +49,13 @@ def get_extra_info(extra: dict) -> dict:
 def configure_logs_of_other_modules():
     miner_hotkey = settings.get_bittensor_wallet().get_hotkey().ss58_address
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format=f"Miner: {miner_hotkey} | Name: %(name)s | Time: %(asctime)s | Level: %(levelname)s | File: %(filename)s | Function: %(funcName)s | Line: %(lineno)s | Process: %(process)d | Message: %(message)s",
-    )
+    log_format = f"%(asctime)s [%(levelname)s] %(message)s"
+    log_level = logging.INFO if not settings.DEBUG else logging.DEBUG
+    
+    if settings.ENV == 'dev': 
+      log_format = f"%(asctime)s [%(levelname)s] [%(process)d] [%(name)s | %(funcName)s:%(lineno)s] %(message)s"
+
+    logging.basicConfig(force=True, level=log_level, format=log_format)
 
     sqlalchemy_logger = logging.getLogger("sqlalchemy")
     sqlalchemy_logger.setLevel(logging.WARNING)
