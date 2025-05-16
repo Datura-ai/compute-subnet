@@ -51,6 +51,20 @@ class Settings(BaseSettings):
     VERSION: str = (pathlib.Path(__file__).parent / ".." / ".." / "version.txt").read_text().strip()
 
     BURNERS: list[int] = [4, 206, 207, 208]
+    
+    DEBUG_COLLATERAL_CONTRACT: bool = True
+
+    REQUIRED_TAO_COLLATERAL: float = 0.001
+
+    COLLATERAL_CONTRACT_ADDRESS: str = "0x922f956Ee1B398d5b7BC35282a9cF7145c15b295"
+
+    DEBUG_CONTRACT_MINERS: [str] = [
+        "5Df8qGLMd19BXByefGCZFN57fWv6jDm5hUbnQeUTu2iqNBhT",
+        "5Dtbwfafi4cyiDwH5HBFEAWJA913EB6G1rX7wBnfcXwiPssR",
+        "5ECBM9caBAyJPBjVtfw4WGwdytacrZWvvt6i3T8GnqtByRFM"
+    ]
+    
+    ETHEREUM_VALIDATOR_KEY: str =  Field(env="ETHEREUM_VALIDATOR_KEY", default=None)
 
     def get_bittensor_wallet(self) -> "bittensor_wallet":
         if not self.BITTENSOR_WALLET_NAME or not self.BITTENSOR_WALLET_HOTKEY_NAME:
