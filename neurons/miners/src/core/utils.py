@@ -4,6 +4,7 @@ import json
 import logging
 
 from core.config import settings
+from celium_collateral_contracts import CollateralContract
 
 logger = logging.getLogger(__name__)
 
@@ -87,3 +88,27 @@ class StructuredMessage:
 
 
 _m = StructuredMessage
+
+def get_collateral_contract(
+    contract_address: str = None,
+    miner_key: str = None,
+    validator_key: str = "",
+    
+) -> CollateralContract:
+    """
+    Initializes and returns a CollateralContract instance.
+
+    Args:
+        contract_address (str): Address of the collateral contract.
+        validator_key (str): Ethereum validator key.
+        miner_key (str): Optional miner key required for contract operations.
+
+    Returns:
+        CollateralContract: The initialized contract instance.
+    """
+    if contract_address is None:
+        contract_address = settings.COLLATERAL_CONTRACT_ADDRESS
+    if miner_key is None:
+        miner_key = settings.ETHEREUM_MINER_KEY
+
+    return CollateralContract(settings.COLLATERAL_CONTRACT_NETWORK, contract_address, validator_key, miner_key)

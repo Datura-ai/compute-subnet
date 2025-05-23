@@ -116,7 +116,7 @@ class Validator:
                 ),
             ),
         )
-
+        
     def set_subtensor(self):
         try:
             if (
@@ -483,9 +483,22 @@ class Validator:
             # fetch miners
             miners = self.fetch_miners()
 
-            if await self.should_set_weights():
-                await self.set_weights(miners=miners)
-
+            try:
+                if await self.should_set_weights():
+                    await self.set_weights(miners=miners)
+            except Exception as e:
+                logger.error(
+                    _m(
+                        "[sync] Error setting weights",
+                        extra=get_extra_info(
+                            {
+                                **self.default_extra,
+                                "error": str(e),
+                            }
+                        ),
+                    ),
+                )
+            
             current_block = self.get_current_block()
             logger.info(
                 _m(
