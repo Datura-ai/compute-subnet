@@ -23,6 +23,7 @@ from services.redis_service import PENDING_PODS_PREFIX, NORMALIZED_SCORE_CHANNEL
 from services.ssh_service import SSHService
 from services.task_service import TaskService, JobResult
 from services.matrix_validation_service import ValidationService
+from services.collateral_contract_service import CollateralContractService
 from services.const import GPU_MODEL_RATES, TOTAL_BURN_EMISSION, BURNER_EMISSION, JOB_TIME_OUT
 
 if TYPE_CHECKING:
@@ -62,10 +63,12 @@ class Validator:
         self.redis_service = RedisService()
         self.file_encrypt_service = FileEncryptService(ssh_service=ssh_service)
         self.validation_service = ValidationService()
+        self.collateral_contract_service = CollateralContractService()
         task_service = TaskService(
             ssh_service=ssh_service,
             redis_service=self.redis_service,
-            validation_service=self.validation_service
+            validation_service=self.validation_service,
+            collateral_contract_service=self.collateral_contract_service
         )
         self.docker_service = DockerService(
             ssh_service=ssh_service,
@@ -116,7 +119,7 @@ class Validator:
                 ),
             ),
         )
-
+        
     def set_subtensor(self):
         try:
             if (
@@ -522,9 +525,22 @@ class Validator:
             # fetch miners
             miners = self.fetch_miners()
 
-            if await self.should_set_weights():
-                await self.set_weights(miners=miners)
-
+            try:
+                if await self.should_set_weights():
+                    await self.set_weights(miners=miners)
+            except Exception as e:
+                logger.error(
+                    _m(
+                        "[sync] Error setting weights",
+                        extra=get_extra_info(
+                            {
+                                **self.default_extra,
+                                "error": str(e),
+                            }
+                        ),
+                    ),
+                )
+            
             current_block = self.get_current_block()
             logger.info(
                 _m(
