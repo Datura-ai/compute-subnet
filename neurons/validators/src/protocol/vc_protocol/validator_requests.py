@@ -6,7 +6,6 @@ import bittensor
 import pydantic
 from datura.requests.base import BaseRequest
 
-
 class RequestType(enum.Enum):
     AuthenticateRequest = "AuthenticateRequest"
     MachineSpecRequest = "MachineSpecRequest"

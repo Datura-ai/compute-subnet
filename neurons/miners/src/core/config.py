@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     BITTENSOR_WALLET_HOTKEY_NAME: str = Field(env="BITTENSOR_WALLET_HOTKEY_NAME")
     BITTENSOR_NETUID: int = Field(env="BITTENSOR_NETUID")
     BITTENSOR_CHAIN_ENDPOINT: str | None = Field(env="BITTENSOR_CHAIN_ENDPOINT", default=None)
-    BITTENSOR_NETWORK: str = Field(env="BITTENSOR_NETWORK")
+    BITTENSOR_NETWORK: str = Field(env="BITTENSOR_NETWORK", default="finney")
 
     SQLALCHEMY_DATABASE_URI: str = Field(env="SQLALCHEMY_DATABASE_URI")
 
@@ -34,6 +34,23 @@ class Settings(BaseSettings):
 
     MIN_ALPHA_STAKE: int = Field(env="MIN_ALPHA_STAKE", default=10)
     MIN_TOTAL_STAKE: int = Field(env="MIN_TOTAL_STAKE", default=20000)
+
+    REQUIRED_TAO_COLLATERAL: float = 0.001
+
+    COLLATERAL_CONTRACT_ADDRESS: str = Field(
+        env='COLLATERAL_CONTRACT_ADDRESS', default='0x6d4168e6D1660EA268DC1814BEd7dF7C038d4D01'
+    )
+
+    COMPUTE_APP_URI: str = "wss://celiumcompute.ai"
+    COMPUTE_REST_API_URL: str | None = Field(
+        env="COMPUTE_REST_API_URL", default="https://celiumcompute.ai/api"
+    )
+
+    DEBUG_COLLATERAL_CONTRACT: bool = True
+
+    ETHEREUM_MINER_KEY: str | None = Field(env="ETHEREUM_MINER_KEY", default=None)
+
+    DEBUG_VALIDATOR_ETH_ADDRESS: str | None = Field(env="DEBUG_VALIDATOR_ETH_ADDRESS", default=None)
 
     def get_bittensor_wallet(self) -> "bittensor_wallet":
         if not self.BITTENSOR_WALLET_NAME or not self.BITTENSOR_WALLET_HOTKEY_NAME:
