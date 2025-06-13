@@ -11,7 +11,7 @@ from core.utils import configure_logs_of_other_modules, _m, get_extra_info, get_
 from core.validator import Validator
 from services.ioc import ioc
 from services.miner_service import MinerService
-from services.docker_service import DockerService, REPOSITORIES
+from services.docker_service import DockerService
 from services.file_encrypt_service import FileEncryptService
 from payload_models.payloads import (
     MinerJobRequestPayload,
@@ -191,7 +191,6 @@ async def _debug_validator(count: int):
     docker_service: DockerService = ioc["DockerService"]
     file_encrypt_service: FileEncryptService = ioc["FileEncryptService"]
 
-    docker_hub_digests = await docker_service.get_docker_hub_digests(REPOSITORIES)
     encrypted_files = file_encrypt_service.ecrypt_miner_job_files()
 
     job_batch_id = "123456789"
@@ -208,7 +207,6 @@ async def _debug_validator(count: int):
                         miner_port=miner.axon_info.port,
                     ),
                     encrypted_files=encrypted_files,
-                    docker_hub_digests=docker_hub_digests,
                 )
             )
             for miner in miners
