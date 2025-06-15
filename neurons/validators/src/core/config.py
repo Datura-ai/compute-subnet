@@ -55,6 +55,12 @@ class Settings(BaseSettings):
 
     BURNERS: list[int] = [4, 206, 207, 208]
 
+    DEBUG_COLLATERAL_CONTRACT: bool = True
+
+    COLLATERAL_CONTRACT_ADDRESS: str = Field(
+        env='COLLATERAL_CONTRACT_ADDRESS', default='0x0Bd3e88CE0F2303718Ac335868a3BAd8B5c19891'
+    )
+
     def get_bittensor_wallet(self) -> "bittensor_wallet":
         if not self.BITTENSOR_WALLET_NAME or not self.BITTENSOR_WALLET_HOTKEY_NAME:
             raise RuntimeError("Wallet not configured")
