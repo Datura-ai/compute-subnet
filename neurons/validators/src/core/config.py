@@ -20,9 +20,9 @@ class Settings(BaseSettings):
     )
     BITTENSOR_WALLET_NAME: str = Field(env="BITTENSOR_WALLET_NAME")
     BITTENSOR_WALLET_HOTKEY_NAME: str = Field(env="BITTENSOR_WALLET_HOTKEY_NAME")
-    BITTENSOR_NETUID: int = Field(env="BITTENSOR_NETUID")
+    BITTENSOR_NETUID: int = Field(env="BITTENSOR_NETUID", default=51)
     BITTENSOR_CHAIN_ENDPOINT: str | None = Field(env="BITTENSOR_CHAIN_ENDPOINT", default=None)
-    BITTENSOR_NETWORK: str = Field(env="BITTENSOR_NETWORK")
+    BITTENSOR_NETWORK: str = Field(env="BITTENSOR_NETWORK", default="finney")
 
     SQLALCHEMY_DATABASE_URI: str = Field(env="SQLALCHEMY_DATABASE_URI")
     ASYNC_SQLALCHEMY_DATABASE_URI: str = Field(env="ASYNC_SQLALCHEMY_DATABASE_URI")
@@ -41,7 +41,8 @@ class Settings(BaseSettings):
     COMPUTE_REST_API_URL: str | None = Field(
         env="COMPUTE_REST_API_URL", default="https://celiumcompute.ai/api"
     )
-
+    TAO_PRICE_API_URL: str = Field(env="TAO_PRICE_API_URL", default="https://api.coingecko.com/api/v3/coins/bittensor")
+    COLLATERAL_DAYS: int = Field(env="COLLATERAL_DAYS", default=1)
     ENV: str = Field(env="ENV", default="dev")
 
     PORTION_FOR_UPTIME: float = 0.05
@@ -54,6 +55,12 @@ class Settings(BaseSettings):
     VERSION: str = (pathlib.Path(__file__).parent / ".." / ".." / "version.txt").read_text().strip()
 
     BURNERS: list[int] = [4, 206, 207, 208]
+
+    DEBUG_COLLATERAL_CONTRACT: bool = True
+
+    COLLATERAL_CONTRACT_ADDRESS: str = Field(
+        env='COLLATERAL_CONTRACT_ADDRESS', default='0x7DCCb5659c70Ce2104A9bb79E9E257473ECbe628'
+    )
 
     def get_bittensor_wallet(self) -> "bittensor_wallet":
         if not self.BITTENSOR_WALLET_NAME or not self.BITTENSOR_WALLET_HOTKEY_NAME:
