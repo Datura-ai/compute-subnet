@@ -50,6 +50,7 @@ class JobResult(BaseModel):
     executor_info: ExecutorSSHInfo
     score: float
     job_score: float
+    collateral_deposited: bool
     job_batch_id: str
     log_status: str
     log_text: str
@@ -482,6 +483,7 @@ class TaskService:
         spec: dict | None,
         score: float,
         job_score: float,
+        collateral_deposited: bool,
         log_text: object,
         verified_job_info: dict,
         success: bool = True,
@@ -542,6 +544,7 @@ class TaskService:
             executor_info=executor_info,
             score=score,
             job_score=job_score,
+            collateral_deposited=collateral_deposited,
             job_batch_id=miner_info.job_batch_id,
             log_status=log_status,
             log_text=str(log_text),
@@ -769,6 +772,7 @@ class TaskService:
                         spec=machine_spec,
                         score=0,
                         job_score=0,
+                        collateral_deposited=collateral_deposited,
                         log_text=log_text,
                         verified_job_info=verified_job_info,
                         success=False,
@@ -814,6 +818,7 @@ class TaskService:
                         spec=machine_spec,
                         score=0,
                         job_score=0,
+                        collateral_deposited=collateral_deposited,
                         log_text=log_text,
                         verified_job_info=verified_job_info,
                         success=False,
@@ -840,6 +845,7 @@ class TaskService:
                         spec=machine_spec,
                         score=0,
                         job_score=0,
+                        collateral_deposited=collateral_deposited,
                         log_text=log_text,
                         verified_job_info=verified_job_info,
                         success=False,
@@ -864,6 +870,7 @@ class TaskService:
                         spec=machine_spec,
                         score=0,
                         job_score=0,
+                        collateral_deposited=collateral_deposited,
                         log_text=log_text,
                         verified_job_info=verified_job_info,
                         success=False,
@@ -888,6 +895,7 @@ class TaskService:
                         spec=machine_spec,
                         score=0,
                         job_score=0,
+                        collateral_deposited=collateral_deposited,
                         log_text=log_text,
                         verified_job_info=verified_job_info,
                         success=False,
@@ -917,6 +925,7 @@ class TaskService:
                         spec=machine_spec,
                         score=0,
                         job_score=0,
+                        collateral_deposited=collateral_deposited,
                         log_text=log_text,
                         verified_job_info=verified_job_info,
                         success=False,
@@ -949,6 +958,7 @@ class TaskService:
                             spec=machine_spec,
                             score=0,
                             job_score=0,
+                            collateral_deposited=collateral_deposited,
                             log_text=log_text,
                             verified_job_info=verified_job_info,
                             success=False,
@@ -980,6 +990,7 @@ class TaskService:
                                 spec=machine_spec,
                                 score=0,
                                 job_score=0,
+                                collateral_deposited=collateral_deposited,
                                 log_text=log_text,
                                 verified_job_info=verified_job_info,
                                 success=False,
@@ -996,16 +1007,10 @@ class TaskService:
                     actual_score = 1
                     log_msg = "Executor is already rented."
 
-                    if not collateral_deposited and not settings.DEBUG_COLLATERAL_CONTRACT:
-                        job_score = 1
-                        actual_score = 0
-                        log_msg = "Executor is rented. But not eligible from collateral contract."
-                    elif not is_rental_succeed:
+                    if not is_rental_succeed:
                         job_score = 1
                         actual_score = 0
                         log_msg = "Executor is rented. Set score 0 until it's verified by rental check"
-                    elif not collateral_deposited and settings.DEBUG_COLLATERAL_CONTRACT:
-                        log_msg = "Executor is rented. But not eligible from collateral contract. Will not have score very soon."
 
                     log_text = _m(
                         log_msg,
@@ -1018,6 +1023,7 @@ class TaskService:
                         spec=machine_spec,
                         score=actual_score,
                         job_score=job_score,
+                        collateral_deposited=collateral_deposited,
                         log_text=log_text,
                         verified_job_info=verified_job_info,
                         success=True,
@@ -1040,6 +1046,7 @@ class TaskService:
                         spec=machine_spec,
                         score=0,
                         job_score=0,
+                        collateral_deposited=collateral_deposited,
                         log_text=log_text,
                         verified_job_info=verified_job_info,
                         success=False,
@@ -1071,6 +1078,7 @@ class TaskService:
                             spec=machine_spec,
                             score=0,
                             job_score=0,
+                            collateral_deposited=collateral_deposited,
                             log_text=docker_connection_check_result.log_text,
                             verified_job_info=verified_job_info,
                             success=False,
@@ -1104,6 +1112,7 @@ class TaskService:
                         spec=machine_spec,
                         score=0,
                         job_score=0,
+                        collateral_deposited=collateral_deposited,
                         log_text=log_text,
                         verified_job_info=verified_job_info,
                         success=False,
@@ -1122,17 +1131,12 @@ class TaskService:
                 actual_score = 1
                 log_msg = "Train task is finished."
 
-                if not collateral_deposited and not settings.DEBUG_COLLATERAL_CONTRACT:
-                    actual_score = 0
-                    log_msg = "Train task is finished. But not eligible from collateral contract."
-                elif len(port_maps) < MIN_PORT_COUNT:
+                if len(port_maps) < MIN_PORT_COUNT:
                     actual_score = 0
                     log_msg = f"Current port maps: {len(port_maps)}. Minimum required: {MIN_PORT_COUNT}."
                 elif not is_rental_succeed:
                     actual_score = 0
                     log_msg = "Train task is finished. Set score 0 until it's verified by rental check"
-                elif not collateral_deposited and settings.DEBUG_COLLATERAL_CONTRACT:
-                    log_msg = "Train task is finished. But not eligible from collateral contract. Will not have score very soon."
 
                 success = True if actual_score > 0 else False
 
@@ -1165,6 +1169,7 @@ class TaskService:
                     spec=machine_spec,
                     score=actual_score,
                     job_score=job_score,
+                    collateral_deposited=collateral_deposited,
                     log_text=log_text,
                     verified_job_info=verified_job_info,
                     success=success,
