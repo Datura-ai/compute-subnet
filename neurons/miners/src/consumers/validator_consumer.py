@@ -71,6 +71,8 @@ class ValidatorConsumer(BaseConsumer):
         keypair = bittensor.Keypair(ss58_address=self.validator_key)
         if keypair.verify(msg.blob_for_signing(), msg.signature):
             return True, ""
+        return False, "signature verification failed"
+
 
     async def handle_authentication(self, msg: AuthenticateRequest):
         # check if validator is registered
@@ -100,8 +102,13 @@ class ValidatorConsumer(BaseConsumer):
         If no executors, decline job request
         """
         executors = self.executor_service.get_executors_for_validator(self.validator_key)
-        if len(executors):
-            logger.info("Found %d executors for validator(%s)", len(executors), self.validator_key)
+
+        logger.info("Validator %s was authenticated and has %d assigned executors", self.validator_key, len(executors))
+        
+        if len(executors) <= 0:
+            await self.send_message(DeclineJobRequest())
+            await self.disconnect()
+        else:
             await self.send_message(
                 AcceptJobRequest(
                     executors=[
@@ -110,10 +117,6 @@ class ValidatorConsumer(BaseConsumer):
                     ]
                 )
             )
-        else:
-            logger.info("Not found any executors for validator(%s)", self.validator_key)
-            await self.send_message(DeclineJobRequest())
-            await self.disconnect()
 
     async def invoke_rental_request_hook(self, payload: dict):
        if settings.RENTAL_REQUEST_HOOK:
@@ -168,7 +171,8 @@ class ValidatorConsumer(BaseConsumer):
                 logger.info("Sent AcceptSSHKeyRequest to validator %s", self.validator_key)
             except Exception as e:
                 logger.error("Storing SSH key or Sending AcceptSSHKeyRequest failed: %s", str(e))
-                self.ssh_service.remove_pubkey_from_host(msg.public_key)
+                # Maybe we should remove key from all executors?
+                # self.ssh_service.remove_pubkey_from_host(msg.public_key)
                 await self.send_message(FailedRequest(details=str(e)))
             return
 
