@@ -26,6 +26,9 @@ _REGISTRY_DIGEST_TIMEOUT_SECONDS = 10
 _DOCKER_EXEC_READY_TIMEOUT_SECONDS = 15
 _DOCKER_EXEC_READY_POLL_INTERVAL_SECONDS = 0.5
 _DOCKER_EXEC_TRANSIENT_RETRY_DELAYS_SECONDS = (1, 2, 4, 8)
+# Guards only the swap of docker-py's module-global SSHHTTPAdapter while an APIClient is built. The
+# SSH connect and the daemon's version request run after it is released: under it, one host that
+# never answers a channel open (paramiko waits up to 1 h) held every other rental's client build.
 _DOCKER_SDK_SSH_ADAPTER_LOCK = threading.Lock()
 # A dropped SSH transport under a Docker SDK call costs one re-open (bounded by these paramiko
 # timeouts) plus one more attempt of the same call with its own timeout; there is no third try.
@@ -42,6 +45,7 @@ _TRANSPORT_ERROR_TEXTS = (
     # http.client/urllib3 when the link drops mid-call. "Broken pipe" and "Connection reset by
     # peer" are not here: a container's own stderr says them; they count by type, below
     "Remote end closed connection without response",
+    "Timeout opening channel",  # paramiko: open_session got no answer within its timeout
     "('Connection aborted.',",
 )
 _TRANSPORT_ERROR_TYPES = (
@@ -1248,21 +1252,20 @@ class RentalDockerSdkClientFactory:
         key_path: Path,
         known_hosts_path: Path,
     ):
-        with _DOCKER_SDK_SSH_ADAPTER_LOCK:
-            if self.api_client_factory is not None:
-                return self.api_client_factory(
-                    base_url=base_url,
-                    timeout=self.timeout,
-                    use_ssh_client=False,
-                )
-
-            return _default_docker_api_client_factory(
+        if self.api_client_factory is not None:
+            return self.api_client_factory(
                 base_url=base_url,
                 timeout=self.timeout,
                 use_ssh_client=False,
-                key_path=key_path,
-                known_hosts_path=known_hosts_path,
             )
+
+        return _default_docker_api_client_factory(
+            base_url=base_url,
+            timeout=self.timeout,
+            use_ssh_client=False,
+            key_path=key_path,
+            known_hosts_path=known_hosts_path,
+        )
 
 
 def build_container_command_argv(startup_commands: str | None) -> tuple[str, ...]:
@@ -1402,15 +1405,37 @@ def _create_docker_api_client_with_rental_ssh_adapter(
     # docker-py normally discovers SSH identity/known_hosts via ~/.ssh. Patch
     # its adapter only during construction so this rental client uses our
     # operation-scoped files without mutating process-global HOME.
-    original_adapter = docker_api_client.SSHHTTPAdapter
-    docker_api_client.SSHHTTPAdapter = _build_rental_ssh_http_adapter_class(
+    adapter_class = _build_rental_ssh_http_adapter_class(
         key_path=key_path,
         known_hosts_path=known_hosts_path,
     )
+    version = kwargs.pop("version", None)
+    resolve_version = version is None or (isinstance(version, str) and version.lower() == "auto")
+    # any valid version skips docker-py's request; the daemon's own is read after the lock
+    construct_version = (
+        docker_module.constants.MINIMUM_DOCKER_API_VERSION if resolve_version else version
+    )
+    with _DOCKER_SDK_SSH_ADAPTER_LOCK:
+        original_adapter = docker_api_client.SSHHTTPAdapter
+        docker_api_client.SSHHTTPAdapter = adapter_class
+        try:
+            # no network here: the adapter defers its connect
+            api_client = docker_module.APIClient(version=construct_version, **kwargs)
+        finally:
+            docker_api_client.SSHHTTPAdapter = original_adapter
+
     try:
-        return docker_module.APIClient(**kwargs)
-    finally:
-        docker_api_client.SSHHTTPAdapter = original_adapter
+        adapter = getattr(api_client, "_custom_adapter", None)
+        if isinstance(adapter, adapter_class):
+            # same errors as before (paramiko's own auth/connect failure), just outside the lock
+            adapter.connect_deferred()
+        if resolve_version:
+            api_client._version = api_client._retrieve_server_version()
+    except BaseException:
+        with suppress(Exception):
+            api_client.close()
+        raise
+    return api_client
 
 
 # The Docker SDK SSH session idles through a long build, so it needs a keepalive.
@@ -1448,7 +1473,8 @@ def _build_rental_ssh_http_adapter_class(
                     "the SSH session to the executor is closed; no channel for the Docker API"
                 )
             try:
-                channel = transport.open_session()
+                # paramiko's default is its 1 h channel_timeout
+                channel = transport.open_session(timeout=_DOCKER_SSH_REOPEN_TIMEOUT_SECONDS)
             except EOFError as exc:
                 raise RentalDockerTransportDropped(
                     "the SSH session ended while a Docker API channel was being opened"
@@ -1496,7 +1522,22 @@ def _build_rental_ssh_http_adapter_class(
             return self._new_conn()
 
     class RentalSSHHTTPAdapter(SSHHTTPAdapter):
+        # upstream connects inside __init__, which runs under _DOCKER_SDK_SSH_ADAPTER_LOCK; the
+        # builder calls connect_deferred() once the lock is released
+        _connect_deferred = False
+
+        def __init__(self, *args, **kwargs):
+            self._connect_deferred = True
+            super().__init__(*args, **kwargs)
+
+        def connect_deferred(self) -> None:
+            if self._connect_deferred:
+                self._connect_deferred = False
+                self._connect()
+
         def _connect(self) -> None:
+            if self._connect_deferred:
+                return
             super()._connect()
             transport = self.ssh_client.get_transport() if self.ssh_client else None
             if transport is not None:

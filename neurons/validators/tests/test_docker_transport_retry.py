@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
+import paramiko
 import pytest
 from datura.requests.miner_requests import ExecutorSSHInfo
 from docker.errors import APIError, NotFound
@@ -529,6 +530,7 @@ def test_connection_live_channel_gets_timeout_and_dial_stdio(tmp_path):
 
     connection.connect()
 
+    transport.open_session.assert_called_once_with(timeout=15)
     channel.settimeout.assert_called_once_with(60)
     channel.exec_command.assert_called_once_with("docker system dial-stdio")
     assert connection.sock is channel
@@ -824,3 +826,8 @@ async def test_two_drops_on_connect_fail_the_connect_without_a_third(tmp_path, m
         async with factory.connect(executor_info=_connect_info(), private_key="PRIVATE KEY"):
             pass
     assert api_client_factory.call_count == 2
+
+
+def test_a_channel_open_that_times_out_is_a_transport_error():
+    # paramiko's text when open_session gets no answer within its timeout
+    assert is_rental_docker_transport_error(paramiko.SSHException("Timeout opening channel."))
