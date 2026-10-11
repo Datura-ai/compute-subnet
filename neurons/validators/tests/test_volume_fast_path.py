@@ -352,7 +352,8 @@ async def test_fresh_volume_is_capped_below_the_ext4_file_limit(docker_service):
     result = await docker_service.resolve_volume_sizing(ssh_client, payload, "tag", {})
 
     assert result.path == "fresh"
-    assert result.volume_limit_gb <= 16000
+    assert result.volume_limit_gb == 16000
+    assert result.storage_limit_gb == 8000
 
 
 @pytest.mark.asyncio
@@ -441,7 +442,7 @@ async def test_resolve_volume_sizing_probe_without_df_falls_back_to_per_command_
 # ---------------------------------------------------------------------------
 
 
-async def _create_volume(docker_service, ssh_client, probe):
+async def _create_volume(docker_service, ssh_client, probe, *, limit=40, sparse=False):
     docker_service.stream_log = AsyncMock()
     docker_client = docker_service.rental_docker_client_factory.client
     await docker_service.create_local_volume(
@@ -451,15 +452,20 @@ async def _create_volume(docker_service, ssh_client, probe):
         log_tag="tag",
         log_text="Creating docker volume volume_test",
         log_extra={},
-        limit=40,
+        limit=limit,
         timeout=10,
+        sparse=sparse,
         host_probe=probe,
     )
     return docker_client.created_volumes
 
 
 @pytest.mark.asyncio
-async def test_create_local_volume_with_enabled_plugin_runs_no_ssh_command(docker_service):
+@pytest.mark.parametrize("limit", [40, 15999, 16000, None])
+@pytest.mark.parametrize("sparse", [False, True])
+async def test_create_local_volume_with_enabled_plugin_runs_no_ssh_command(
+    docker_service, limit, sparse
+):
     ssh_client = Mock()
     ssh_client.run = AsyncMock()
     probe = VolumeHostProbe(
@@ -469,17 +475,45 @@ async def test_create_local_volume_with_enabled_plugin_runs_no_ssh_command(docke
         loopback_plugin_enabled=True,
     )
 
-    created = await _create_volume(docker_service, ssh_client, probe)
+    # Act
+    created = await _create_volume(docker_service, ssh_client, probe, limit=limit, sparse=sparse)
 
+    # Assert: preserve the exact plugin size/options, or the unlimited local driver.
     ssh_client.run.assert_not_called()
+    options = {"size": f"{limit}g", **({"sparse": "true"} if sparse else {})} if limit else None
     assert created == [
         {
             "volume_name": "volume_test",
-            "driver": "vloopback",
-            "driver_opts": {"size": "40g"},
-            "timeout": 10,
+            "driver": "vloopback" if limit else None,
+            "driver_opts": options,
+            "timeout": 180 if limit and limit >= 15999 else 10,
         }
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disk_share,storage_limit,path", [(None, 8001, "legacy"), (1.0, None, "storage_opt_unsupported"), (1.0, 8001, "fresh_fallback")])
+@pytest.mark.parametrize("sparse", [False, True])
+async def test_oversized_passthrough_size_is_rejected_before_volume_side_effects(
+    docker_service, disk_share, storage_limit, path, sparse
+):
+    # Arrange: legacy includes filler-style finite limits with no disk_share.
+    payload = _make_sizing_payload(
+        volume_limit_gb=16001, storage_limit_gb=storage_limit, disk_share=disk_share
+    )
+    ssh_client = Mock(run=AsyncMock(side_effect=OSError("measurement unavailable")))
+    sizing = await docker_service.resolve_volume_sizing(ssh_client, payload, "tag", {})
+    assert sizing.path == path and sizing.volume_limit_gb == 16001
+    ssh_client.run.reset_mock()
+    ssh_client.run.side_effect = None
+    ssh_client.run.return_value = Mock(stdout="/var/lib/docker\n", exit_status=0)
+    # Act
+    with pytest.raises(ValueError, match="16001 GB exceeds the 16000 GB limit"):
+        await _create_volume(docker_service, ssh_client, None, limit=sizing.volume_limit_gb, sparse=sparse)
+    # Assert: no root probe, plugin install/enable, volume call or success log.
+    ssh_client.run.assert_not_called()
+    docker_service.stream_log.assert_not_called()
+    assert docker_service.rental_docker_client_factory.client.created_volumes == []
 
 
 @pytest.mark.asyncio
@@ -633,6 +667,45 @@ def svc():
 
 def _create_payload() -> ContainerCreateRequest:
     return _deploy_payload(disk_share=0.5, storage_limit_gb=1, volume_limit_gb=2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disk_share", [None, 1.0])
+async def test_oversized_new_volume_returns_failure_not_allocated_size(svc, monkeypatch, disk_share):
+    # Arrange: restore the real resolver and final boundary inside the stubbed deploy flow.
+    ssh_client = _deploy_ssh_client()
+    _patch_happy(svc, monkeypatch, ssh_client)
+    monkeypatch.setattr(settings, "RENTAL_VOLUME_FAST_PATH_ENABLED", False)
+    monkeypatch.setattr(svc, "resolve_volume_sizing", DockerService.resolve_volume_sizing.__get__(svc))
+    monkeypatch.setattr(svc, "create_local_volume", DockerService.create_local_volume.__get__(svc))
+    monkeypatch.setattr(svc, "get_docker_root_dir", AsyncMock(side_effect=OSError("measurement unavailable")))
+    docker_client = svc.rental_docker_client_factory.client
+    docker_client.create_volume = AsyncMock()
+    # Act
+    result = await _run_create_container(svc, _deploy_payload(
+        volume_limit_gb=16001, storage_limit_gb=8001, disk_share=disk_share
+    ))
+    # Assert: the shared exception flow never reports an allocation or launches a container.
+    assert result.__class__.__name__ == "FailedContainerRequest"
+    assert "16001 GB exceeds the 16000 GB limit" in result.detail
+    assert not hasattr(result, "volume_limit_gb")
+    docker_client.create_volume.assert_not_called()
+    svc._run_rental_docker_create_with_port_retry.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_existing_oversized_volume_is_reused_without_sizing_or_creation(svc, monkeypatch):
+    # Arrange
+    ssh_client = _deploy_ssh_client()
+    _patch_happy(svc, monkeypatch, ssh_client)
+    payload = _deploy_payload(local_volume="volume_existing", volume_limit_gb=16001)
+    # Act
+    result = await _run_create_container(svc, payload)
+    # Assert: existing data is not resized; retain the original reported allocation.
+    assert result.__class__.__name__ == "ContainerCreated"
+    assert result.volume_name == "volume_existing" and result.volume_limit_gb == 16001
+    svc.resolve_volume_sizing.assert_not_called()
+    svc.create_local_volume.assert_not_called()
 
 
 @pytest.mark.asyncio
