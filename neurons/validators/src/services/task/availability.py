@@ -114,8 +114,19 @@ def availability_errors(events: list[ValidationEvent] | None) -> list[Availabili
     return list(errors.values())
 
 
+# The executor reports its own sshd's host key and the validator pins it to this address and port,
+# so an untrusted key means a different sshd answered there: in practice the host's own sshd
+# (muam_89937, 11 Oct 2026: the node SSH port was the host's SSH port). Firewall advice misleads.
+SSH_HOST_KEY_MISMATCH_REMEDIATION = (
+    "The SSH port answered with a different SSH server than this node's: usually the host's own "
+    "sshd, or a port forward to another machine. Set the node SSH port (and the public SSH port "
+    "forward, if any) to a port that reaches the executor container, not the host's SSH port, "
+    "then re-run `lium mine`."
+)
+
+
 def build_ssh_unreachable_event(
-    *, executor_uuid: str, host: str, port: int | None, error: str
+    *, executor_uuid: str, host: str, port: int | None, error: str, host_key_mismatch: bool = False
 ) -> ValidationEvent:
     return build_availability_event(
         code=AvailabilityErrorCode.EXECUTOR_SSH_UNREACHABLE,
@@ -123,7 +134,9 @@ def build_ssh_unreachable_event(
         reach_target=ReachTarget.EXECUTOR_SSH,
         event_text="Validator cannot open SSH to this node",
         impact="The node is hidden from the market and cannot take new rentals until a check succeeds.",
-        remediation=(
+        remediation=SSH_HOST_KEY_MISMATCH_REMEDIATION
+        if host_key_mismatch
+        else (
             "Check that sshd on the node accepts the validator on its management port, "
             "and that no firewall or rate limit rejects the connection."
         ),

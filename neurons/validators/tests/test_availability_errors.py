@@ -11,6 +11,7 @@ from services.task import service as task_service_module
 from services.task.availability import (
     AVAILABILITY_CATEGORY,
     MAX_PEER_TEXT_LENGTH,
+    SSH_HOST_KEY_MISMATCH_REMEDIATION,
     AvailabilityErrorCode,
     ReachSource,
     ReachTarget,
@@ -170,6 +171,35 @@ async def test_a_cycle_that_cannot_open_ssh_scores_zero_and_reports_the_code(mon
     assert result.score == 0
     assert [e["reason_code"] for e in result.availability_errors] == ["EXECUTOR_SSH_UNREACHABLE"]
     assert "EXECUTOR_SSH_UNREACHABLE" in result.log_text
+
+
+class _ShellAnsweredByAnotherSshd(_ShellThatRefusesToConnect):
+    async def __aenter__(self) -> "_ShellAnsweredByAnotherSshd":
+        raise asyncssh.HostKeyNotVerifiable("Host key is not trusted for host 1.2.3.4")
+
+
+@pytest.mark.asyncio
+async def test_an_untrusted_host_key_points_at_the_ssh_port_not_the_firewall(monkeypatch) -> None:
+    """muam_89937, 11 Oct 2026: the node SSH port reached the host's own sshd, not the executor."""
+    monkeypatch.setattr(task_service_module, "InteractiveShellService", _ShellAnsweredByAnotherSshd)
+    miner, executor = _a_job_for("node-9")
+
+    result = await _run_cycle(_task_service_that_reaches_the_ssh_connect(), miner, executor)
+
+    [error] = result.availability_errors
+    assert error["reason_code"] == "EXECUTOR_SSH_UNREACHABLE"
+    assert error["remediation"] == SSH_HOST_KEY_MISMATCH_REMEDIATION
+    assert "firewall" not in error["remediation"]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_connect_keeps_the_firewall_advice(monkeypatch) -> None:
+    monkeypatch.setattr(task_service_module, "InteractiveShellService", _ShellThatRefusesToConnect)
+    miner, executor = _a_job_for("node-9")
+
+    result = await _run_cycle(_task_service_that_reaches_the_ssh_connect(), miner, executor)
+
+    assert "firewall" in result.availability_errors[0]["remediation"]
 
 
 @pytest.mark.asyncio

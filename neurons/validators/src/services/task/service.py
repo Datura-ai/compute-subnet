@@ -262,6 +262,7 @@ class TaskService:
                     host=executor_info.address,
                     port=executor_info.ssh_port,
                     error=str(e),
+                    host_key_mismatch=isinstance(e, asyncssh.HostKeyNotVerifiable),
                 )
                 log_text = _m(event.event, extra=event.model_dump())
                 availability_problems = [error.model_dump(mode="json") for error in availability_errors([event])]
