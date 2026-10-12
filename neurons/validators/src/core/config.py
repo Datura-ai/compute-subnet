@@ -175,6 +175,9 @@ class Settings(BaseSettings):
     DIND_PROBE_FIRST_MISS_GRACE_TTL_SECONDS: int = Field(
         env="DIND_PROBE_FIRST_MISS_GRACE_TTL_SECONDS", default=3600, gt=0
     )
+    # ticket-0494: how long a DinD probe's sysbox pass is remembered for a rented executor whose later
+    # probes cannot reach the host (PortConnectivityCheck). Refreshed by every passing probe.
+    SYSBOX_VERIFIED_TTL_SECONDS: int = Field(env="SYSBOX_VERIFIED_TTL_SECONDS", default=24 * 3600, gt=0)
     DISCORD_INCENTIVE_CUTOFF: datetime = datetime(2026, 6, 15, 12, 0, 0)
 
     # DAH-2265: cached-template requirement. Before the cutoff the CachedTemplateVerificationCheck

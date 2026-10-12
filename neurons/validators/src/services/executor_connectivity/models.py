@@ -127,6 +127,10 @@ class PortVerificationResult:
     probe_tier: str | None = None
     # len(get_all_ports(...)) for the executor's declared range or mappings; None when they could not be parsed
     declared_port_count: int | None = None
+    # ticket-0494: the DinD probe's own sysbox reading, before any fallback. True/False only when the
+    # probe reached its container with sysbox-runc requested; None when it never reached the container
+    # or did not test sysbox. PortConnectivityCheck remembers a True and forgets on a False.
+    sysbox_measured: bool | None = None
 
 
 @dataclass(frozen=True)

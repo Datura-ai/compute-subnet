@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 
 from core.config import settings
+from core.utils import _m, get_extra_info
 from services.executor_connectivity.models import PortVerificationResult, SecondPass
 
 from ..messages import PortConnectivityMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
+
+logger = logging.getLogger(__name__)
+
 
 class PortConnectivityCheck:
     """Verify Docker port mappings by running the batch verifier exactly like before.
@@ -103,6 +108,16 @@ class PortConnectivityCheck:
                     "sysbox_runtime": ctx.state.sysbox_runtime,
                 },
                 sysbox_runtime=ctx.state.sysbox_runtime,
+            )
+
+        if await self._should_use_last_verified_sysbox(
+            ctx, result, rented=rented_executor is not None, sysbox_now=updated_state.sysbox_runtime
+        ):
+            extra_info["sysbox_from_last_verified"] = True
+            updated_state = replace(
+                updated_state,
+                specs={**updated_state.specs, "sysbox_runtime": True},
+                sysbox_runtime=True,
             )
 
         total = len(result.successful_ports) + len(result.failed_ports)
@@ -233,3 +248,38 @@ class PortConnectivityCheck:
         elif result.dind_ok:
             await ctx.services.redis.clear_dind_probe_miss(ctx.miner_hotkey, ctx.executor.uuid)
         return False
+
+    @staticmethod
+    async def _should_use_last_verified_sysbox(
+        ctx: Context, result: PortVerificationResult, *, rented: bool, sysbox_now: bool
+    ) -> bool:
+        """ticket-0494: keep a rented executor's verified sysbox when this cycle measured nothing.
+
+        On a busy rented host the scrape's own sysbox test can time out (sysbox_runtime False), so
+        the DinD probe runs without sysbox-runc and then is refused by the host or never reaches its
+        container. The fallbacks above key off ctx.state.sysbox_runtime, which is that same scrape,
+        so neither applies and a rented node scored 0 for the cycle. Every probe that reached its
+        container with sysbox-runc is remembered here (pass refreshes, fail forgets); a rented
+        executor whose probe never reached its container reads that memory. A probe that reached
+        its container and found no sysbox stays a verdict. Fails open to the current behaviour on a
+        Redis error.
+        """
+        redis = ctx.services.redis
+        try:
+            if result.sysbox_measured is True:
+                await redis.record_sysbox_verified(
+                    ctx.miner_hotkey, ctx.executor.uuid, settings.SYSBOX_VERIFIED_TTL_SECONDS
+                )
+            elif result.sysbox_measured is False:
+                await redis.clear_sysbox_verified(ctx.miner_hotkey, ctx.executor.uuid)
+            if not rented or sysbox_now or result.dind_ok:
+                return False
+            return await redis.is_sysbox_verified(ctx.miner_hotkey, ctx.executor.uuid)
+        except Exception as e:  # noqa: BLE001 — a safety net; never fail the port check over it
+            logger.warning(
+                _m(
+                    "last verified sysbox unavailable",
+                    extra=get_extra_info({**ctx.default_extra, "error": str(e)}),
+                )
+            )
+            return False
