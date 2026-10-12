@@ -63,14 +63,25 @@ def _result(exit_code: int, *, stdout: str = "", stderr: str = "", error_type: s
     )
 
 
-def _context(context_factory, runner: FakeRunner, *, pod_status: str | None = "REBOOT_FAILED", owner: str = MINER):
+def _context(
+    context_factory,
+    runner: FakeRunner,
+    *,
+    pod_status: str | None = "REBOOT_FAILED",
+    owner: str = MINER,
+    neighbours: int = 0,
+):
     rented_data = RentedExecutorsResponse(
         executors={
             EXECUTOR_UUID: RentedExecutor(
                 miner_hotkey=owner,
                 executor_ip_address="127.0.0.1",
                 executor_ip_port="22",
-                pods=[RentedPod(pod_id="pod-1", container_name="pod_pod-1", status=pod_status)],
+                pods=[RentedPod(pod_id="pod-1", container_name="pod_pod-1", status=pod_status)]
+                + [
+                    RentedPod(pod_id=f"pod-n{i}", container_name=f"pod_pod-n{i}", status="RUNNING")
+                    for i in range(neighbours)
+                ],
             )
         },
         banned_guids=[],
@@ -192,3 +203,26 @@ async def test_a_rental_another_miner_owns_runs_no_host_check(context_factory):
 
 def test_the_flag_ships_off():
     assert type(rented_machine.settings).model_fields["REBOOT_FAILED_HOST_CHECK_ENABLED"].default is False
+
+
+@pytest.mark.asyncio
+async def test_a_split_box_with_a_healthy_neighbour_is_not_reset(context_factory):
+    """taiberium on #1526: the verdict resets the whole node, so on a box another pod shares it
+    would stop billing the healthy neighbour too; the host check runs only for the node's only
+    pod."""
+    runner = FakeRunner(gpu_run=_result(125, stderr=NVIDIA_HOOK_ERROR))
+
+    result = await _run(_context(context_factory, runner, neighbours=1))
+
+    assert result.event.reason_code == Msg.POD_NOT_RUNNING.reason
+    assert not any("docker run" in command for command in runner.commands)
+
+
+@pytest.mark.asyncio
+async def test_a_signal_killed_docker_client_is_not_a_host_fault(context_factory):
+    """asyncssh reports -1 when a signal kills the `docker` client: unknown, not a host refusal."""
+    runner = FakeRunner(gpu_run=_result(-1))
+
+    result = await _run(_context(context_factory, runner))
+
+    assert result.event.reason_code == Msg.POD_NOT_RUNNING.reason

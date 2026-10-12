@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Any, NamedTuple
 
 import asyncssh
+from pydantic import BaseModel
 
 from core.docker_utils import DockerCommand, collect_container_death_diagnostics
 from core.utils import _m, get_extra_info
@@ -458,7 +459,7 @@ class TenantEnforcementCheck:
         ctx: Context,
         container_name: str,
         pod_id: str,
-        host_fault: dict[str, Any],
+        host_fault: "HostGpuContainerFailure",
         extra: dict[str, Any],
     ) -> CheckResult:
         event = render_message(
@@ -469,7 +470,7 @@ class TenantEnforcementCheck:
                 "pod_id": pod_id,
                 "container_name": container_name,
                 "executor_uuid": ctx.executor.uuid,
-                "host_gpu_container": host_fault,
+                "host_gpu_container": host_fault.model_dump(),
             },
             extra=extra,
         )
@@ -486,7 +487,7 @@ class TenantEnforcementCheck:
                     "check_id": self.check_id,
                     "pod_id": pod_id,
                     "container_name": container_name,
-                    "host_gpu_container": host_fault,
+                    "host_gpu_container": host_fault.model_dump(),
                 },
             },
         )
@@ -498,13 +499,26 @@ _HOST_OUTPUT_TAIL_CHARS = 256
 _IMAGE_ID_RX = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
-async def _host_gpu_container_failure(ctx: Context, pod_status: str | None) -> dict[str, Any] | None:
+class HostGpuContainerFailure(BaseModel):
+    """The host's answer to the GPU container it could not start: its exit code and output tails."""
+
+    exit_code: int
+    stderr_tail: str
+    stdout_tail: str
+
+
+async def _host_gpu_container_failure(
+    ctx: Context, pod_status: str | None
+) -> HostGpuContainerFailure | None:
     """What the host answered when it could not start a GPU container for a pod whose reboot failed.
 
     The container runs the executor's own image, already on the host, with `nvidia-smi -L`: nothing the
     renter wrote is in it, so a refusal is the Docker daemon's or the NVIDIA runtime's. None when the
     check is off, the pod is not REBOOT_FAILED, the rental is another miner's, the image is unknown,
-    the host started the container, or the transport gave no exit status.
+    the host started the container, or the transport gave no exit status. Only on a node with this
+    one pod: the verdict resets the whole node, and on a split box it would stop billing a healthy
+    neighbour pod too. A negative exit code (asyncssh's -1 when a signal killed the `docker` client)
+    says nothing about the host.
     """
     if not settings.REBOOT_FAILED_HOST_CHECK_ENABLED or pod_status != REBOOT_FAILED_POD_STATUS:
         return None
@@ -513,31 +527,37 @@ async def _host_gpu_container_failure(ctx: Context, pod_status: str | None) -> d
     # The backend resets by executor UUID alone, which is the miner's word.
     if rented_executor is None or rented_executor.miner_hotkey != ctx.miner_hotkey:
         return None
+    if len(rented_executor.pods) != 1:
+        return None
     docker = (ctx.state.specs or {}).get("docker")
     executor_container_id = docker.get("container_id") if isinstance(docker, dict) else None
     if not isinstance(executor_container_id, str) or not executor_container_id:
         return None
-    image = await ctx.runner.run(
+    executor_inspect = await ctx.runner.run(
         f"/usr/bin/docker inspect --format '{{{{.Image}}}}' {shlex.quote(executor_container_id)}",
         timeout=_HOST_GPU_CONTAINER_TIMEOUT_SECONDS,
         retryable=False,
     )
-    image_id = image.stdout.strip()
-    if image.error_type or image.exit_code != 0 or not _IMAGE_ID_RX.match(image_id):
+    image_id = executor_inspect.stdout.strip()
+    if (
+        executor_inspect.error_type
+        or executor_inspect.exit_code != 0
+        or not _IMAGE_ID_RX.match(image_id)
+    ):
         return None
-    run = await ctx.runner.run(
+    gpu_container_run = await ctx.runner.run(
         "/usr/bin/docker run --rm --network none --gpus all -e NVIDIA_DRIVER_CAPABILITIES=utility "
         f"--entrypoint nvidia-smi {image_id} -L",
         timeout=_HOST_GPU_CONTAINER_TIMEOUT_SECONDS,
         retryable=False,
     )
-    if run.error_type or run.exit_code == 0:
+    if gpu_container_run.error_type or gpu_container_run.exit_code <= 0:
         return None
-    return {
-        "exit_code": run.exit_code,
-        "stderr_tail": run.stderr[-_HOST_OUTPUT_TAIL_CHARS:],
-        "stdout_tail": run.stdout[-_HOST_OUTPUT_TAIL_CHARS:],
-    }
+    return HostGpuContainerFailure(
+        exit_code=gpu_container_run.exit_code,
+        stderr_tail=gpu_container_run.stderr[-_HOST_OUTPUT_TAIL_CHARS:],
+        stdout_tail=gpu_container_run.stdout[-_HOST_OUTPUT_TAIL_CHARS:],
+    )
 
 
 def _container_state_from_diagnostics(diagnostics: dict[str, object]) -> ContainerState:
