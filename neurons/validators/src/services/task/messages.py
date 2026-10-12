@@ -331,10 +331,11 @@ class GpuModelMessages:
         reason="GPU_MODEL_MIXED",
         severity="error",
         category="policy",
-        impact="Score set to 0; the node is hidden from the market and takes no new rentals until every GPU is one model",
+        impact="Score set to 0; the node is hidden from the market and takes no new rentals",
         remediation=(
             "Every GPU on a node must be the same model: the node is listed and priced as its first card. "
-            "Move the other cards to a different machine."
+            "Move the other cards to a different machine. A node that has passed a check has its GPU set recorded, "
+            "so after removing a card delete the node in the portal and register it again."
         ),
     )
     MODEL_OK = MessageTemplate(

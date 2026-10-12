@@ -27,7 +27,7 @@ class GpuModelValidCheck:
 
     A detail list naming more than one model (GPU_MODEL_MIXED) is always reported, and refused only
     under MIXED_GPU_MODEL_ENFORCEMENT_ENABLED: the node is listed and priced as its first card. The
-    refusal is an availability entry, so the node also leaves the market until every card matches.
+    refusal is an availability entry, so the node also leaves the market.
     """
 
     check_id = "gpu.validate.model"
