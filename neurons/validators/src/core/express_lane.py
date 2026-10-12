@@ -406,7 +406,7 @@ class ExpressLane:
         executor_id = pending.executor.id
         result = results[0]
         passed = result.score > 0 or result.job_score > 0
-        retry = (
+        should_run_first_pass_again = (
             not passed
             and settings.EXPRESS_LANE_FAILED_FIRST_PASS_RETRY_ENABLED
             and pending.failed_runs + 1 < FIRST_PASS_MAX_RUNS
@@ -415,7 +415,7 @@ class ExpressLane:
         await self.miner_service.publish_machine_specs(
             results, miner.hotkey, miner.coldkey, is_whole_miner_batch=False
         )
-        if retry:
+        if should_run_first_pass_again:
             # Not recorded as validated, so the lane runs it again; a wave that starts meanwhile
             # claims it through in_flight and its publish records it.
             pending.failed_runs += 1
