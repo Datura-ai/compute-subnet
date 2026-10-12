@@ -15,13 +15,14 @@ import pytest
 import services.verifyx_validation_service as vvs
 from datura.requests.miner_requests import ExecutorSSHInfo
 from payload_models.payloads import MinerJobRequestPayload
-from protocol.vc_protocol.compute_requests import RentedExecutorsResponse
+from protocol.vc_protocol.compute_requests import NetworkEMA, RentedExecutorsResponse
 from protocol.vc_protocol.validator_requests import ValidationEvent
 from services.attestation_service import HostPolicyResult
 from services.liumd_exec_client import LiumdRefusal
 from services.local_verify_client import SCHEMA, LocalVerifyUnavailable, parse_answer
 from services.task import liumd_shadow
 from services.task import service as task_service_module
+from services.task.checks.verifyx import VerifyXCheck
 from services.task.liumd_shadow import (
     LIUMD_SHADOW_EVENT,
     TodayStep,
@@ -65,28 +66,46 @@ def _event(check_id: str, reason: str, ms: int = 1500) -> ValidationEvent:
 PASSED = [_event(VERIFYX, "VERIFYX_OK", 80_000), _event(CAPABILITY, "GPU_VERIFY_OK", 26_000)]
 
 
+@pytest.fixture(autouse=True)
+def reserved_executor(monkeypatch):
+    """The test executor is a reserved dev executor, the only kind the shadow runs on."""
+    monkeypatch.setattr(settings, "LIUMD_SHADOW_EXECUTOR_UUIDS", f"other-dev, {UUID}")
+
+
 @pytest.fixture
 def keypair():
     return bittensor.Keypair.create_from_uri("//LiumdShadowTest")
 
 
+JUDGED_VERIFYX = {"success": True, "ram": {}, "network": {"download_speed": 900.0}}
+
+
 @pytest.fixture
 def verifyx_service(monkeypatch):
+    """The real service around a fake validator; `.judged` is what the checks return and
+    `.record_tally` what each judgement was asked to do with the network-gate tally."""
     monkeypatch.setattr(vvs, "VerifyXValidator", _FakeVerifyXValidator)
     monkeypatch.setattr(vvs, "sha256_from_path", lambda _p: "lib-sha")
-    monkeypatch.setattr(
-        vvs,
-        "_perform_verification_checks",
-        lambda payload: {"success": True, "ram": {}, "network": {"download_speed": 900.0}},
-    )
-    return vvs.VerifyXValidationService()
+    service = vvs.VerifyXValidationService()
+    service.judged = JUDGED_VERIFYX
+    service.record_tally = []
+
+    def checks(payload, *, record_tally=True):
+        service.record_tally.append(record_tally)
+        return service.judged
+
+    monkeypatch.setattr(vvs, "_perform_verification_checks", checks)
+    return service
 
 
 class FakeLiumd:
     """`LiumdExecClient` answering as the binary does, per step as told."""
 
-    def __init__(self, *, verifyx_ok=True, lib_sha="lib-sha", result=None, matmul=None):
+    def __init__(
+        self, *, verifyx_ok=True, lib_sha="lib-sha", result=None, matmul=None, deadline_hit=False
+    ):
         self.matmul = matmul  # a dict replacing the matmul step's reply
+        self.deadline_hit = deadline_hit  # the document-wide flag: any step reached the deadline
         self.verifyx_ok = verifyx_ok
         self.lib_sha = lib_sha
         self.result = result
@@ -133,7 +152,7 @@ class FakeLiumd:
             "executor_uuid": intent["executor_uuid"],
             "executor_version": "liumd/0.1.0",
             "elapsed_ms": 91_000,
-            "deadline_hit": False,
+            "deadline_hit": self.deadline_hit,
             "steps": steps,
         }
         return parse_answer(raw, intent=intent, round_trip_ms=92_000)
@@ -217,6 +236,8 @@ async def test_agreeing_verdicts_are_logged_as_one_structured_line(
         "agree": True,
     }
     assert record["steps"]["verifyx"]["agree"] is True
+    # The shadow's judgement never counts in the live network-gate tally.
+    assert verifyx_service.record_tally == [False]
     assert record["steps"]["docker"] == {"liumd_status": "ok", "liumd_ms": 3}
     assert (record["round_trip_ms"], record["executor_elapsed_ms"]) == (92_000, 91_000)
     [line] = [r for r in caplog.records if r.getMessage() == LIUMD_SHADOW_EVENT]
@@ -273,8 +294,42 @@ async def test_the_intent_mirrors_todays_steps_and_sizing(keypair, monkeypatch, 
             True,
             False,
         ),
+        # Matmul timed out at its own 120 s cap while another step reached the suite deadline:
+        # the agent keeps the step's time, so it is a failure, not a deadline cut.
+        (
+            "challenge",
+            dict(
+                matmul={"status": "timeout", "ms": 120_005, "error": "timed out after 120s"},
+                deadline_hit=True,
+            ),
+            True,
+            PASSED,
+            False,
+            True,
+            False,
+        ),
+        # Cut at the suite deadline: the agent resets the step's time to 0; it never ran to a verdict.
+        (
+            "challenge",
+            dict(
+                matmul={"status": "timeout", "ms": 0, "error": "suite deadline reached"},
+                deadline_hit=True,
+            ),
+            True,
+            PASSED,
+            None,
+            True,
+            None,
+        ),
     ],
-    ids=["liumd-fails", "today-fails", "step-skipped", "step-failed"],
+    ids=[
+        "liumd-fails",
+        "today-fails",
+        "step-skipped",
+        "step-failed",
+        "own-cap-timeout",
+        "deadline-cut",
+    ],
 )
 async def test_agreement_per_step_and_overall(
     keypair,
@@ -295,6 +350,103 @@ async def test_agreement_per_step_and_overall(
     assert record["steps"]["matmul"].get("agree") is matmul_agree
     assert record["steps"]["verifyx"]["agree"] is verifyx_agree
     assert record["agree"] is agree
+
+
+def test_only_a_step_cut_at_the_suite_deadline_is_not_run():
+    own_cap = SimpleNamespace(status="timeout", ms=120005, error="timed out after 120s")
+    cut = SimpleNamespace(status="timeout", ms=0, error="suite deadline reached")
+    hit, not_hit = SimpleNamespace(deadline_hit=True), SimpleNamespace(deadline_hit=False)
+    assert liumd_shadow._not_run_or_fail(own_cap, hit) == "fail"
+    assert liumd_shadow._not_run_or_fail(own_cap, not_hit) == "fail"
+    assert liumd_shadow._not_run_or_fail(cut, hit) == "not_run"
+    assert liumd_shadow._not_run_or_fail(cut, not_hit) == "fail"
+
+
+class _TodaysVerifyX:
+    """Today's SSH transport, answering with the judged result the shadow gets too."""
+
+    def __init__(self, judged):
+        self.judged = judged
+
+    async def validate_verifyx_and_process_job(self, **_):
+        return SimpleNamespace(data=self.judged, error=None, diagnostics=None)
+
+
+def _network_ema(download):
+    return RentedExecutorsResponse(
+        executors={}, network_ema={UUID: NetworkEMA(ema_verifyx_download_speed=download)}
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "prev_ema,network,first_pass,today",
+    [
+        # The reviewer's probe: raw success, but the EMA (100 → 75) falls under the floor.
+        (100.0, {"download_speed": 50.0}, False, "fail"),
+        (100.0, {"download_speed": 50.0}, True, "fail"),
+        (None, {"download_speed": 50.0}, False, "fail"),
+        # A first pass on a never-measured host defers the floor to the first scored cycle.
+        (None, {"download_speed": 50.0}, True, "pass"),
+        (300.0, {"download_speed": 900.0}, False, "pass"),
+        # A Cloudflare fallback with no reading keeps the stored EMA, under and over the floor.
+        (80.0, {"download_speed": None, "cloudflare_fallback": True}, False, "fail"),
+        (150.0, {"download_speed": None, "cloudflare_fallback": True}, False, "pass"),
+        # Nothing stored and nothing read: the EMA stays unseeded and the check passes.
+        (None, {"download_speed": None, "cloudflare_fallback": True}, False, "pass"),
+    ],
+    ids=[
+        "ema-drops-under-floor",
+        "first-pass-known-host",
+        "never-measured-scored",
+        "first-pass-deferred",
+        "fast",
+        "fallback-keeps-slow-ema",
+        "fallback-keeps-fast-ema",
+        "unseeded",
+    ],
+)
+async def test_verifyx_verdict_is_the_checks_own_including_the_ema_gate(
+    keypair, monkeypatch, verifyx_service, prev_ema, network, first_pass, today
+):
+    monkeypatch.setattr(settings, "VERIFYX_COLD_SAMPLE_RETRY_ENABLED", False)
+    judged = {"success": True, "ram": {}, "network": network}
+    verifyx_service.judged = judged
+    rented = _network_ema(prev_ema)
+    ctx = _ctx(
+        keypair,
+        monkeypatch,
+        verifyx_service,
+        first_pass=first_pass,
+        state=build_state(specs=SPECS, rented_data=rented),
+    )
+    # Today's verdict is the real check's, on the same judged result and the same stored EMA.
+    todays_ctx = _ctx(
+        keypair,
+        monkeypatch,
+        _TodaysVerifyX(judged),
+        first_pass=first_pass,
+        state=build_state(specs=SPECS, rented_data=rented),
+    )
+    stored_before = rented.network_ema[UUID].model_dump()
+    checked = await VerifyXCheck().run(todays_ctx)
+    assert ("pass" if checked.passed else "fail") == today
+    events = (
+        [checked.event, _event(CAPABILITY, "GPU_VERIFY_OK")] if checked.passed else [checked.event]
+    )
+    tally_before = vvs.NETWORK_GATE_TALLY.probe_fallback
+
+    record = await _shadow(ctx, FakeLiumd(), ok=checked.passed, events=events)
+
+    entry = record["steps"]["verifyx"]
+    assert entry["today"] == today
+    assert entry["liumd_verdict"] == today
+    assert entry["agree"] is True
+    if today == "fail":
+        assert entry["liumd_reason"] == "network_too_slow"
+    # The stored EMA and the live tally are read, never written.
+    assert rented.network_ema[UUID].model_dump() == stored_before
+    assert vvs.NETWORK_GATE_TALLY.probe_fallback == tally_before
 
 
 @pytest.mark.asyncio
@@ -358,6 +510,21 @@ async def test_all_cards_mode_does_not_compare_the_matmul(keypair, monkeypatch, 
         ([_event("gpu.count", "GPU_COUNT_MISMATCH")], False, "no_gpu_step_ran", {}),
         (PASSED, True, "workload", {"rented": True}),
         (PASSED, True, "no_budget", {"deadline_s": 59.0}),
+        # Only reserved dev executors run the shadow: a rentable executor never does, idle or not.
+        (PASSED, True, "not_reserved", {"reserved": ""}),
+        (PASSED, True, "not_reserved", {"reserved": "other-dev"}),
+        (PASSED, True, "not_reserved", {"reserved": "other-dev", "rented": True}),
+    ],
+    ids=[
+        "filler",
+        "rented-by-event",
+        "no-events",
+        "stopped-before-gpu",
+        "rented-by-snapshot",
+        "no-budget",
+        "allowlist-empty",
+        "rentable-idle",
+        "rentable-rented",
     ],
 )
 async def test_no_gpu_work_where_today_ran_none(
@@ -365,6 +532,8 @@ async def test_no_gpu_work_where_today_ran_none(
 ):
     fake = FakeLiumd()
     extra = dict(extra)
+    if "reserved" in extra:
+        monkeypatch.setattr(settings, "LIUMD_SHADOW_EXECUTOR_UUIDS", extra.pop("reserved"))
     state = None
     if extra.pop("rented", False):
         pod = {"pod_id": "p1", "container_name": "c1"}
@@ -454,7 +623,7 @@ def _result() -> JobResult:
     )
 
 
-async def _cycle(pipeline_ctx, *, ok=True, events=PASSED) -> JobResult:
+async def _cycle(pipeline_ctx, *, ok=True, events=PASSED, first_pass=False) -> JobResult:
     service = TaskService.__new__(TaskService)
     service.ssh_service = MagicMock(decrypt_payload=MagicMock(return_value="key"))
     service.attestation_service = MagicMock(
@@ -488,6 +657,7 @@ async def _cycle(pipeline_ctx, *, ok=True, events=PASSED) -> JobResult:
             encrypted_files=MagicMock(),
             rented_data=MagicMock(),
             default_docker_image_digests={},
+            first_pass=first_pass,
         )
 
 
@@ -533,6 +703,10 @@ async def test_flag_off_or_dry_run_never_calls_the_shadow(keypair, monkeypatch, 
     assert shadow.await_count == 0
 
     monkeypatch.setattr(settings, "DRY_RUN", False)
+    # An express-lane first pass publishes only after create_task returns: no shadow there.
+    await _cycle(ctx, first_pass=True)
+    assert shadow.await_count == 0
+
     await _cycle(ctx, ok=False, events=PASSED[:1])
     [call] = shadow.await_args_list
     assert call.args == (ctx,)

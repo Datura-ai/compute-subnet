@@ -344,6 +344,10 @@ class Settings(BaseSettings):
     # intent's `deadline_s` is this − 30. Sized for a scored cycle, where VerifyX (p90 about 150 s)
     # and the matmul (at most 120 s) run one after the other.
     LIUMD_SHADOW_TIMEOUT_SECONDS: int = Field(env="LIUMD_SHADOW_TIMEOUT_SECONDS", default=330)
+    # The only executors (comma-separated UUIDs) the shadow runs on: reserved, non-rentable dev
+    # executors. A pod or filler started after the cycle's snapshot is not seen, so on a rentable
+    # node the shadow could run its GPU/RAM/disk/network probe next to a workload. Empty = none.
+    LIUMD_SHADOW_EXECUTOR_UUIDS: str = Field(env="LIUMD_SHADOW_EXECUTOR_UUIDS", default="")
     # DAH-2667: measure a RoCE fabric with ib_write_bw between the free hosts of one segment, rather
     # than inferring it from the addresses alone. The backend reads a flag of the SAME name to decide
     # whether a fabric must be measured before it is sold, so the feature has one switch across both
@@ -731,6 +735,9 @@ class Settings(BaseSettings):
 
     def get_allowed_advisory_ids(self) -> set[str]:
         return {s.strip() for s in self.TDX_ALLOWED_ADVISORY_IDS.split(",") if s.strip()}
+
+    def get_liumd_shadow_executor_uuids(self) -> set[str]:
+        return {s.strip() for s in self.LIUMD_SHADOW_EXECUTOR_UUIDS.split(",") if s.strip()}
 
     def get_allowed_gpu_hwmodels(self) -> set[str]:
         return {s.strip() for s in self.GPU_ATTESTATION_ALLOWED_HWMODELS.split(",") if s.strip()}

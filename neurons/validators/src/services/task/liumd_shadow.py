@@ -6,8 +6,13 @@ the node's `JobResult` is built, on the SSH session the pipeline used. With
 (the capability matmul, VerifyX) are prepared again the way their checks prepare them, sent in one
 signed intent through `liumd run` (`LiumdExecClient`), judged with the same functions
 (`evaluate_matmul_output`, `evaluate_verifyx_capture`), and compared with today's verdicts read from
-the run's events. The outcome is one `[liumd_shadow] comparison` log line. Nothing is returned to
-the caller, stored, or scored.
+the run's events. VerifyX's verdict is `verifyx_verdict`, the check's own pass/fail including the
+download-EMA floor, read against the stored EMA; the capture is judged with `record_tally=False`, so
+the shadow writes no EMA, state or network-gate tally. The outcome is one `[liumd_shadow] comparison`
+log line. Nothing is returned to the caller, stored, or scored.
+
+It runs only on the executors listed in `LIUMD_SHADOW_EXECUTOR_UUIDS` (reserved, non-rentable dev
+executors; empty by default), never on an express-lane first pass.
 
 Today's verdict per step comes from the pipeline's events: both checks are fatal, so a check that
 failed is the run's last event on a run that did not pass; one that reported a skip reason did not
@@ -42,7 +47,7 @@ from core.utils import _m, get_extra_info
 
 from .checks.capability import CapabilityCheck
 from .checks.local_verify import _step_reason
-from .checks.verifyx import VerifyXCheck, _first_pass_challenge_config
+from .checks.verifyx import VerifyXCheck, _first_pass_challenge_config, verifyx_verdict
 from .pipeline import Context
 
 logger = logging.getLogger(__name__)
@@ -178,6 +183,10 @@ async def _compare(
     steps = {name: _today_fields(step) for name, step in today.items()}
     if settings.MATMUL_ALLCARDS_CHECK_ENABLED:
         steps["matmul"]["liumd_reason"] = "allcards_ssh"
+    # A pod or filler started after the cycle's snapshot is not seen below, so the shadow runs only
+    # on reserved, non-rentable dev executors.
+    if ctx.executor.uuid not in settings.get_liumd_shadow_executor_uuids():
+        return _skipped("not_reserved", steps=steps)
     if _workload_on_node(ctx, today):
         return _skipped("workload", steps=steps)
     # All-cards enforcement can reject a card before today's matmul; the shadow's one ordinary
@@ -269,9 +278,16 @@ async def _compare(
 
 
 def _not_run_or_fail(step, answer: LocalVerifyAnswer) -> str:
-    # A step the agent skipped, or cut at its own deadline, never ran to a verdict.
-    cut = step.status == "timeout" and answer.deadline_hit
+    # A step the agent skipped, or cut at the suite deadline, never ran to a verdict. `deadline_hit`
+    # is document-wide (any step reached the deadline); a cut step's time is reset to 0, while a
+    # step that timed out at its own cap keeps its time and is a failure.
+    cut = step.status == "timeout" and answer.deadline_hit and step.ms == 0
     return "not_run" if step.status == "skipped" or cut else "fail"
+
+
+def _stored_ema(ctx: Context):
+    rented = ctx.state.rented_data
+    return rented.network_ema.get(ctx.executor.uuid) if rented is not None else None
 
 
 def _liumd_fields(step, verdict: str, reason: str) -> dict[str, Any]:
@@ -321,9 +337,14 @@ def _judged(
                     stdout=step.stdout, stderr=step.stderr_tail, exit_status=step.exit_status
                 ),
                 extra,
+                record_tally=False,
             )
-            passed = bool(response.data and response.data.get("success"))
-            verdict, reason = ("pass", "ok") if passed else ("fail", "local_failed")
+            if not (response.data and response.data.get("success")):
+                verdict, reason = "fail", "local_failed"
+            elif verifyx_verdict(response.data, _stored_ema(ctx), first_pass=ctx.config.first_pass):
+                verdict, reason = "pass", "ok"
+            else:
+                verdict, reason = "fail", "network_too_slow"
         steps["verifyx"].update(_liumd_fields(step, verdict, reason))
     for name in STEP_NAMES:
         if name not in steps and name in answer.steps:

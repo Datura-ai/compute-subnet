@@ -589,3 +589,18 @@ async def test_scrape_network_block_is_empty_and_only_verifyx_keys_leave_the_che
     }
     for stale_key in ("download_speed", "upload_speed", "ema_download_speed", "ema_upload_speed"):
         assert stale_key not in specs["network"]
+
+
+def test_an_evaluation_only_judgement_does_not_count_the_fallback():
+    """The liumd shadow judges with `record_tally=False`: same stats, nothing counted in the live
+    network-gate tally. The default (live SSH / local verify) still counts it."""
+    from neurons.validators.src.services import verifyx_validation_service as service
+
+    payload = {"network_execution": _cloudflare_unreachable_payload()}
+    before = service.NETWORK_GATE_TALLY.probe_fallback
+
+    quiet, _ = _verify_network_test(_challenge_data(), copy.deepcopy(payload), record_tally=False)
+    assert service.NETWORK_GATE_TALLY.probe_fallback == before
+    counted, _ = _verify_network_test(_challenge_data(), copy.deepcopy(payload))
+    assert service.NETWORK_GATE_TALLY.probe_fallback == before + 1
+    assert quiet == counted and quiet["cloudflare_fallback"] is True
