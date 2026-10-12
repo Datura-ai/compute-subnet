@@ -35,8 +35,10 @@ import asyncio
 import json
 import os
 import random
+import socket
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 
 import docker
@@ -191,7 +193,7 @@ def _pull_pinned(
     # The deadline and the idle checks run on their own thread, not per stream event: Docker
     # can go quiet for long stretches (a big layer extracting, a slow registry), and a check
     # that waits for the next event could let a pull share the link with the bandwidth sample
-    # for up to the read timeout. Closing the response from the watcher is what ends the read.
+    # for up to the read timeout. Shutting the stream's socket from the watcher ends the read.
     # The read timeout still bounds a silent stream when nothing else ends it.
     response = api._post(
         api._url("/images/create"),
@@ -222,7 +224,7 @@ def _pull_pinned(
                 continue
             if reason and not stop.is_set():
                 verdict.append(reason)
-                response.close()
+                _abort_stream(api, response)
                 return
 
     watcher = threading.Thread(target=watch, name="pre-pull-watch", daemon=True)
@@ -242,18 +244,28 @@ def _pull_pinned(
     except Exception:
         if not verdict:
             raise
-        # reading a response the watcher closed raises whatever the transport raises
+        # reading a stream the watcher shut down raises whatever the transport raises
     finally:
         stop.set()
         if watcher.is_alive():
             watcher.join()
-        if not verdict:
-            response.close()
+        # closing the stream is what makes the daemon abandon an unfinished pull
+        response.close()
     if verdict:
         return verdict[0]
     # A digest pull leaves the tag untouched; rentals look the image up by repo:tag.
     client.images.get(f"{repo}@{digest}").tag(repo, tag)
     return "pull_ok", None
+
+
+def _abort_stream(api, response) -> None:
+    """Wake the thread blocked reading the pull stream. On Linux a close() from another thread
+    does not wake a blocked recv(), and closing the buffered reader waits for that read to end;
+    a shutdown() of the socket ends the read at once."""
+    with suppress(Exception):
+        sock = api._get_raw_response_socket(response)
+        # docker's unix-socket stream hands back the makefile's SocketIO, which wraps the socket
+        getattr(sock, "_sock", sock).shutdown(socket.SHUT_RDWR)
 
 
 class PrePuller:

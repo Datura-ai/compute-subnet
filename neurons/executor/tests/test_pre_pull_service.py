@@ -9,6 +9,7 @@ the loop's refresh deadline; the loop starts it as a task and never waits for it
 import asyncio
 import json
 import logging
+import socket
 import threading
 import time
 from pathlib import Path
@@ -772,12 +773,14 @@ def test_pull_ok_pulls_by_digest_and_retags(monkeypatch):
 
 
 def _stalling_client(events: list[dict], stall_seconds: float = 3.0) -> tuple[MagicMock, MagicMock]:
-    """A pull whose stream sends `events`, then goes silent until the response is closed (or
-    `stall_seconds` pass, when it raises what the socket read timeout raises)."""
+    """A pull whose stream sends `events`, then goes silent until its socket is shut down (or
+    `stall_seconds` pass, when it raises what the socket read timeout raises). A close() of the
+    response does not end it: on a real socket it does not wake a blocked read."""
     client = MagicMock()
     response = MagicMock()
     closed = threading.Event()
-    response.close.side_effect = lambda: closed.set()
+    sock = client.api._get_raw_response_socket.return_value = MagicMock(spec=["shutdown"])
+    sock.shutdown.side_effect = lambda how: closed.set()
     client.api._post.return_value = response
 
     def stream(*_args, **_kwargs):
@@ -1210,3 +1213,26 @@ def test_corrupt_state_file_starts_empty(tmp_path):
     path.write_text("{not json")
 
     assert PrePullState(str(path)).images == {}
+
+
+def test_the_watcher_wakes_a_read_blocked_on_a_real_socket(monkeypatch, fast_checks):
+    # close() from the watcher would leave this read (and the watcher) blocked until the read
+    # timeout; the socket shutdown ends it at once
+    monkeypatch.setattr(pre_pull_service, "rental_activity", lambda _: None)
+    monkeypatch.setattr(pre_pull_service, "host_activity", lambda: "validator bandwidth test")
+    near_end, daemon_end = socket.socketpair()
+    near_end.settimeout(3)  # only so a regression fails instead of hanging
+    reader = near_end.makefile("rb")
+    client, response = _pull_client([])
+    client.api._get_raw_response_socket.return_value = reader.raw  # the SocketIO, as docker-py
+    client.api._stream_helper.side_effect = lambda *a, **k: iter(lambda: reader.read1(1024), b"")
+
+    started = time.monotonic()
+    outcome, detail = _pull_pinned(client, REPO, CU128_TAG, DIGEST_CU128, timeout_seconds=60)
+
+    assert (outcome, detail) == ("preempted", "validator bandwidth test")
+    assert time.monotonic() - started < 1.0
+    response.close.assert_called_once()
+    reader.close()
+    near_end.close()
+    daemon_end.close()
