@@ -1,3 +1,4 @@
+import logging
 import pathlib
 from datetime import datetime
 from enum import Enum
@@ -18,6 +19,8 @@ if TYPE_CHECKING:
 
 from incentive.config import IncentiveConfig
 from lium_core.shared_config import DEFAULT_SHARED_CONFIG, SharedConfigClient
+
+logger = logging.getLogger(__name__)
 
 
 class FeatureFlag(str, Enum):
@@ -288,6 +291,12 @@ class Settings(BaseSettings):
     # encryption label) in ONE ssh command instead of ~8; every removal and write still runs its
     # own command, and a probe that fails leaves every step on its own commands. Off: as before.
     RENTAL_PRERUN_HOST_PROBE_ENABLED: bool = Field(env="RENTAL_PRERUN_HOST_PROBE_ENABLED", default=False)
+    # On a rent, a Docker SDK call whose SSH channel dropped under it (paramiko EOFError, a 60 s
+    # read timeout, the adapter's typed dropped-transport error) is retried ONCE after the SSH
+    # session is re-opened; `containers/create` and `volumes/create` first check by name and adopt
+    # what the lost first attempt made. Off: the call fails the rent as before. Either way the
+    # failure event carries `error_class: transport`.
+    DOCKER_TRANSPORT_RETRY_ENABLED: bool = Field(env="DOCKER_TRANSPORT_RETRY_ENABLED", default=False)
     # On a rent, when dockerd refuses to bind a host port the backend handed the pod (a stale
     # container or a provider process holds it), the pod moves to the next free pair of the
     # executor's advertised range (≤ 3 candidates, the host's listening sockets read once over the
@@ -412,6 +421,12 @@ class Settings(BaseSettings):
     # future resets only: an executor already reset stays inactive until its next clean scrape, and
     # cycles already skipped are not billed or paid afterwards.
     RENTED_HOST_GPU_FAULT_RESET_ENABLED: bool = Field(env="RENTED_HOST_GPU_FAULT_RESET_ENABLED", default=False)
+    # A rented pod whose reboot failed (backend status REBOOT_FAILED) and whose container is not running:
+    # the validator asks the host to start a throwaway GPU container (the executor's own image,
+    # `nvidia-smi -L`). If the Docker daemon or the NVIDIA runtime refuses, the host is at fault and the
+    # verified job is cleared, so the backend marks the executor inactive and billing stops. A transport
+    # error or timeout decides nothing. Off by default: the pod keeps the plain POD_NOT_RUNNING verdict.
+    REBOOT_FAILED_HOST_CHECK_ENABLED: bool = Field(env="REBOOT_FAILED_HOST_CHECK_ENABLED", default=False)
     # Report a rented node that lost a GPU to the backend from the first cycle that sees it (a possible
     # glitch waits one more); observation only, no score change. Off by default.
     RENTED_GPU_DROP_CHECK_ENABLED: bool = Field(env="RENTED_GPU_DROP_CHECK_ENABLED", default=False)
@@ -468,6 +483,10 @@ class Settings(BaseSettings):
     # it passes. Off by default:
     # it rents a container on every idle node every 6 h, so the team turns it on after staging.
     RENTAL_PROBE_ENABLED: bool = Field(env="RENTAL_PROBE_ENABLED", default=False)
+    # Off: shadow mode. The probe runs on the same interval and logs RENTAL_PROBE_FAILED_OBSERVED, but a
+    # failure changes no score, job score or verified job and is not kept as a standing failure. On by
+    # default so a validator that already runs the probe keeps enforcing it.
+    RENTAL_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="RENTAL_PROBE_ENFORCEMENT_ENABLED", default=True)
     RENTAL_PROBE_INTERVAL_HOURS: float = Field(env="RENTAL_PROBE_INTERVAL_HOURS", default=6.0, gt=0)
     RENTAL_PROBE_SSH_DEADLINE_SECONDS: int = Field(env="RENTAL_PROBE_SSH_DEADLINE_SECONDS", default=90, gt=0)
     # A node whose containers cannot reach the internet passed every check. CHECK runs the rental probe's
@@ -507,6 +526,12 @@ class Settings(BaseSettings):
     )
     SKIP_COLLATERAL_PENALTY: bool = Field(env="SKIP_COLLATERAL_PENALTY", default=True)
     DRY_RUN: bool = Field(env="DRY_RUN", default=False, description="Run validation without publishing scores/weights")
+    # DAH-4001 — delayed idle settlement. off: today's behaviour, nothing reported. shadow: post every cycle's
+    # vector and per-node rows to the backend and read its settled vector every tempo for comparison only; live
+    # weights unchanged. enforce: submit the backend's settled vector (the cycles scored a day earlier, inactive
+    # nodes' idle shares moved to the verified burner); with none to serve, submit this tempo's vector with its
+    # idle moved to the burner, never an older vector.
+    SETTLEMENT_MODE: Literal["off", "shadow", "enforce"] = Field(env="SETTLEMENT_MODE", default="off")
     CONTAINER_CLEANUP_DRY_RUN: bool = Field(env="CONTAINER_CLEANUP_DRY_RUN", default=False, description="Dry run mode for stale container cleanup")
     DUPLICATE_EXECUTOR_DRY_RUN: bool = Field(env="DUPLICATE_EXECUTOR_DRY_RUN", default=True, description="Observe mode: detect duplicate executors but don't penalize")
     EXECUTOR_IMAGE_REF: str = Field(
@@ -740,6 +765,12 @@ class Settings(BaseSettings):
         env="EXPRESS_LANE_MINER_SNAPSHOT_MAX_ATTEMPTS", default=8, gt=0
     )
 
+    # A new node whose first pass failed is run again by the lane (up to 3 runs, 60 s
+    # apart) instead of waiting for the next cycle; off = the failed result waits for the cycle.
+    EXPRESS_LANE_FAILED_FIRST_PASS_RETRY_ENABLED: bool = Field(
+        env="EXPRESS_LANE_FAILED_FIRST_PASS_RETRY_ENABLED", default=True
+    )
+
     def express_lane_tick_seconds(self) -> int:
         """How often the express lane reads the portal snapshot: the fast tick with the fast path on."""
         if self.VALIDATION_FAST_PATH_ENABLED:
@@ -774,6 +805,44 @@ class Settings(BaseSettings):
     CUSTOM_DOCKERFILE_DIND_MEMORY: str = Field(
         env="CUSTOM_DOCKERFILE_DIND_MEMORY", default="8g",
         description="--memory limit for the throwaway DinD build container.",
+    )
+    RENTAL_PIDS_LIMIT_PER_CPU: int = Field(
+        env="RENTAL_PIDS_LIMIT_PER_CPU", default=4096, ge=0,
+        description=(
+            "cgroup pids.max granted to a rental container per allocated CPU. 0 disables the limit "
+            "(rollback switch). The product is clamped to RENTAL_PIDS_LIMIT_CAP; a rental with no "
+            "per-pod CPU cap (whole host) gets RENTAL_PIDS_LIMIT_CAP. Stops a tenant fork bomb from "
+            "exhausting the host PID space and taking the executor offline mid-rental."
+        ),
+    )
+    RENTAL_PIDS_LIMIT_CAP: int = Field(
+        env="RENTAL_PIDS_LIMIT_CAP", default=1_048_576, gt=0,
+        description=(
+            "Absolute ceiling for a rental container's pids.max, and the value used when the rental "
+            "has no per-pod CPU cap. Kept well below a host's kernel.pid_max so a fork bomb still hits "
+            "the cgroup wall first."
+        ),
+    )
+    RENTAL_PIDS_LIMIT_HOST_MARGIN: int = Field(
+        env="RENTAL_PIDS_LIMIT_HOST_MARGIN", default=4096, ge=0,
+        description=(
+            "PIDs reserved for the host's own tasks (sshd, dockerd, the executor) when a rental "
+            "container's pids.max is clamped to the executor's actual kernel.pid_max. The container "
+            "gets min(scaled cap, kernel.pid_max - this), so on a host with a low kernel.pid_max it "
+            "still cannot exhaust the global PID space before hitting its own cgroup wall."
+        ),
+    )
+    RENTAL_HOST_RAM_RESERVE_GB: int = Field(
+        env="RENTAL_HOST_RAM_RESERVE_GB", default=4, ge=0,
+        description=(
+            "RAM kept back for the host (sshd, dockerd, the executor) when a rental arrives with no "
+            "memory limit: the container gets host MemTotal minus max(this, "
+            "RENTAL_HOST_RAM_RESERVE_PERCENT), so a renter cannot exhaust the host's memory."
+        ),
+    )
+    RENTAL_HOST_RAM_RESERVE_PERCENT: float = Field(
+        env="RENTAL_HOST_RAM_RESERVE_PERCENT", default=1.0, ge=0, lt=100,
+        description="Percent of host RAM kept back, see RENTAL_HOST_RAM_RESERVE_GB.",
     )
     CUSTOM_DOCKERFILE_DIND_READY_TIMEOUT_SECONDS: int = Field(
         env="CUSTOM_DOCKERFILE_DIND_READY_TIMEOUT_SECONDS", default=60, gt=0,
@@ -827,6 +896,14 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "ENABLE_VOLUME_ENCRYPTION requires VOLUME_MASTER_SECRET "
                     "of at least 32 characters"
+                )
+            # one unit of up to 8 bytes repeated holds at most 64 bits however long it is; a random secret
+            # of 32+ characters is never one (odds about 2^-96 for hex). A warning, not a refusal: the
+            # remedy, a new secret, leaves every volume encrypted under the old one unreadable
+            encoded = secret.encode()
+            if any(encoded[period:] == encoded[:-period] for period in range(1, 9)):
+                logger.warning(
+                    "VOLUME_MASTER_SECRET repeats a unit of at most 8 bytes, so it holds at most 64 bits"
                 )
         return self
 
