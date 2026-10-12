@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 import pytest
+from neurons.validators.src.services.task.availability import availability_errors
 from neurons.validators.src.services.task.checks.gpu_model_valid import GpuModelValidCheck
 from neurons.validators.src.services.task.messages import GpuModelMessages as Msg
 from protocol.vc_protocol.compute_requests import RentedExecutor, RentedExecutorsResponse, RentedPod
@@ -126,15 +127,31 @@ async def test_a_node_with_two_gpu_models_is_reported_and_refused_only_under_enf
         s.MIXED_GPU_MODEL_ENFORCEMENT_ENABLED = enforce
         result = await GpuModelValidCheck().run(_mixed_ctx(context_factory))
 
-    assert result.passed is (not enforce)
-    assert result.event.reason_code == Msg.MODEL_MIXED.reason
-    assert result.event.what_we_saw == {
+    seen = {
         "listed_as": "NVIDIA GeForce RTX 4090",
         "gpu_count": 2,
         "models": {"NVIDIA GeForce RTX 4090": 1, "NVIDIA GeForce RTX 5060 Ti": 1},
     }
-    # a mixed node is refused like an unsupported model; its verification is left alone
+    assert result.passed is (not enforce)
+    assert result.event.reason_code == Msg.MODEL_MIXED.reason
+    # its verification is left alone either way: a reset would stop a live renter's billing
     assert result.updates.get("clear_verified_job_info", False) is False
+    hidden = availability_errors([result.event])
+    if not enforce:
+        assert result.event.what_we_saw == seen
+        assert hidden == []  # shadow: still listed
+        return
+    # enforced: one availability entry, which the backend reads as "hide from the market, refuse new rentals"
+    assert [error.model_dump() for error in hidden] == [
+        {
+            "reason_code": Msg.MODEL_MIXED.reason,
+            "reach_source": "validator",
+            "reach_target": "gpu_inventory",
+            "message": Msg.MODEL_MIXED.event,
+            "remediation": Msg.MODEL_MIXED.remediation,
+            "what_we_saw": seen,
+        }
+    ]
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,9 @@ from __future__ import annotations
 from collections import Counter
 
 from core.config import settings
+from protocol.vc_protocol.validator_requests import AVAILABILITY_CATEGORY
+
+from ..availability import ReachSource, ReachTarget
 
 from ..messages import GpuModelMessages as Msg, render_message
 from ..pipeline import CheckResult, Context
@@ -23,7 +26,8 @@ class GpuModelValidCheck:
     rented or idle, and is verified again on the first cycle whose scrape lists every card.
 
     A detail list naming more than one model (GPU_MODEL_MIXED) is always reported, and refused only
-    under MIXED_GPU_MODEL_ENFORCEMENT_ENABLED: the node is listed and priced as its first card.
+    under MIXED_GPU_MODEL_ENFORCEMENT_ENABLED: the node is listed and priced as its first card. The
+    refusal is an availability entry, so the node also leaves the market until every card matches.
     """
 
     check_id = "gpu.validate.model"
@@ -93,13 +97,19 @@ class GpuModelValidCheck:
         models = Counter(detail.get("name") for detail in gpu_details)
         if len(models) > 1:
             enforce = settings.MIXED_GPU_MODEL_ENFORCEMENT_ENABLED
+            what = {"listed_as": gpu_model, "gpu_count": gpu_count, "models": dict(models)}
+            if enforce:
+                # An availability entry hides the node from the market and refuses new rentals; a
+                # renter already on it keeps running and is still billed (no verification reset).
+                what = {"reach_source": str(ReachSource.VALIDATOR), "reach_target": str(ReachTarget.GPU_INVENTORY), **what}
             event = render_message(
                 Msg.MODEL_MIXED,
                 ctx=ctx,
                 check_id=self.check_id,
                 severity=None if enforce else "warning",
-                impact=None if enforce else "Shadow observation only: score was NOT changed",
-                what={"listed_as": gpu_model, "gpu_count": gpu_count, "models": dict(models)},
+                category=AVAILABILITY_CATEGORY if enforce else None,
+                impact=None if enforce else "Shadow observation only: score and listing were NOT changed",
+                what=what,
             )
             return CheckResult(passed=not enforce, event=event)
 

@@ -331,10 +331,10 @@ class GpuModelMessages:
         reason="GPU_MODEL_MIXED",
         severity="error",
         category="policy",
-        impact="Job skipped; score set to 0",
+        impact="Score set to 0; the node is hidden from the market and takes no new rentals until every GPU is one model",
         remediation=(
             "Every GPU on a node must be the same model: the node is listed and priced as its first card. "
-            "Run each GPU model as its own executor."
+            "Move the other cards to a different machine."
         ),
     )
     MODEL_OK = MessageTemplate(

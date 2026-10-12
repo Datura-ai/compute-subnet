@@ -31,6 +31,11 @@ class ReachTarget(StrEnum):
     EXECUTOR_SSH = "executor_ssh"
     # The executor's HTTP API, the miner's side of the node.
     EXECUTOR_API = "executor_api"
+    # Not a reachability failure: the node's GPUs are not all the model it is listed as (OD-D850).
+    # It rides this class because an availability entry is the one hide that closes the listing and
+    # new rentals while leaving `active` (a live renter's billing) alone, and the next cycle that
+    # does not raise it lists the node again.
+    GPU_INVENTORY = "gpu_inventory"
 
 
 # The longest peer-supplied text a reading may keep: the node writes it, the portal shows it.
