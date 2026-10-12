@@ -321,7 +321,9 @@ nvidia_driver_package() {
     # Blackwell (RTX 50xx, RTX PRO 6000 Blackwell, B200, B300) runs only the open kernel module, and a host already on
     # the open module would otherwise be switched to the closed one by the FIX command
     if grep -q "Open Kernel Module" "$(host_path /proc/driver/nvidia/version)" 2>/dev/null \
-        || nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | grep -Eq 'RTX 50[0-9]{2}|Blackwell|B200|B300'; then
+        || nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | grep -Eq 'RTX 50[0-9]{2}|Blackwell|B200|B300' \
+        || lspci 2>/dev/null | grep -i nvidia | grep -Eq 'GB[12][0-9]{2}|RTX 50[0-9]{2}|Blackwell|B200|B300'; then
+        # lspci names the chip (GB100, GB202, ...) even before any driver is installed
         echo nvidia-driver-580-server-open
     else
         echo nvidia-driver-580-server
@@ -432,7 +434,8 @@ check_free_disk_for_node() {
     free_gb=$(awk -v k="$free_kb" 'BEGIN {printf "%.1f", k / 1024 / 1024}')
     needed_gb=$MIN_FREE_STORAGE_GB
     docker image inspect "$VERIFY_IMAGE" &>/dev/null || needed_gb=$((MIN_FREE_STORAGE_GB + NODE_IMAGES_GB))
-    if awk -v f="$free_gb" -v n="$needed_gb" 'BEGIN {exit !(f >= n)}'; then
+    # compare raw KiB: 99.96 GiB rounds to 100.0 for display but is still below 100 GiB
+    if [ "$free_kb" -ge $((needed_gb * 1024 * 1024)) ]; then
         pf_pass "Free disk ${free_gb} GB on $data_root >= ${needed_gb} GB for the node's images and the validators' ${MIN_FREE_STORAGE_GB} GB storage test."
         return 0
     fi

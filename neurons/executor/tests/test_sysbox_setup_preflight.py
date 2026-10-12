@@ -69,6 +69,7 @@ STUBS = {
     # the real `sysbox-runc --version`: the name alone on line 1, the version on line 2
     "sysbox-runc": '#!/bin/bash\nprintf "sysbox-runc\\n\\tversion:\\t${STUB_SYSBOX_VERSION:-0.7.1}\\n\\tcommit:\\tabc123\\n"\n',
     "fusermount3": "#!/bin/bash\nexit 0\n",
+    "lspci": '#!/bin/bash\necho "${STUB_LSPCI:-17:00.0 3D controller: NVIDIA Corporation GH100 [H100 SXM5 80GB] (rev a1)}"\n',
     # loads the legacy iptables modules into the fixture /proc/modules, or fails with STUB_MODPROBE_FAILS
     "modprobe": textwrap.dedent(
         """\
@@ -430,6 +431,15 @@ def test_driver_fix_keeps_the_open_module_where_it_is_needed(tmp_path, env, file
     assert f"sudo apt-get install -y {package}" in out
 
 
+def test_blackwell_without_a_driver_gets_the_open_module_from_pci(tmp_path):
+    env = {"STUB_LSPCI": "17:00.0 3D controller: NVIDIA Corporation GB100 [B200] (rev a1)"}
+    rc, out, _ = run_check(tmp_path, "check_nvidia_driver", env=env, without=("nvidia-smi",))
+    assert rc == 1
+    assert "sudo apt-get install -y nvidia-driver-580-server-open" in out
+
+
+
+
 # ── disk >= 1.5x VRAM (validators' MIN_DISK_TO_VRAM_RATE) ────────────────────
 
 
@@ -482,6 +492,13 @@ def test_free_disk_needs_only_the_storage_test_once_the_images_are_pulled(tmp_pa
     rc, out, _ = run_check(tmp_path, "check_free_disk_for_node", env={"STUB_DF_AVAIL_KB": str(120 * 1024 * 1024)})
     assert rc == 0, out
     assert "PASS Free disk 120.0 GB on " in out and ">= 100 GB" in out
+
+
+def test_free_disk_just_below_100_gib_is_not_rounded_up(tmp_path):
+    env = {"STUB_DF_AVAIL_KB": str(100 * 1024 * 1024 - 40000)}
+    rc, out, _ = run_check(tmp_path, "check_free_disk_for_node", env=env)
+    assert rc == 1, out
+    assert "FIX  Free disk 100.0 GB on " in out
 
 
 # ── ports ────────────────────────────────────────────────────────────────────
