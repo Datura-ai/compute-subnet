@@ -31,7 +31,8 @@ TAR_CHECKPOINT_RECORDS = 1024
 MEBIBYTE = 1024 * 1024
 RESTIC_TMPFS_BYTES = 512 * MEBIBYTE
 # Without `|| exit`, a failed cd leaves sh in the helper's own directory and restic backs that up instead.
-ENCRYPTED_BACKUP_SCRIPT = 'cd "$1" || exit 66; shift; exec "$@"'
+# sh's own cd error is dropped: StorageEventReporter keeps the first diagnostic, which must be ours.
+ENCRYPTED_BACKUP_SCRIPT = 'cd "$1" 2>/dev/null || exit 66; shift; exec "$@"'
 BACKUP_SOURCE_MISSING_EXIT = 66
 
 class ResticOperationError(RuntimeError):

@@ -1181,6 +1181,8 @@ def test_encrypted_backup_script_stops_when_the_backup_path_is_missing(tmp_path:
 
     assert completed.returncode == 66
     assert not marker.exists()
+    # the reporter keeps the first diagnostic, so sh's own cd error must not reach it ahead of ours
+    assert completed.stderr == b""
 
 
 class _MissingSourcePopen(_FakePopen):
