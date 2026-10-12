@@ -585,3 +585,70 @@ async def test_A16d_a_credential_in_the_build_tail_never_reaches_a_log_record(sv
 # ------------------------------------------------------------------
 
 
+def test_A16e_a_buildx_stack_trace_does_not_push_the_error_out_of_the_tail():
+    # Arrange: the error line followed by more stack frames than the tail holds
+    frames = [
+        "sync.(*Once).Do",
+        "/usr/local/go/src/sync/once.go:67",
+        "runtime.goexit",
+        "runtime/asm_amd64.s:1700",
+        "711 v0.21.0 /usr/local/lib/docker/cli-plugins/docker-buildx buildx build --progress=plain --pull -t x /build",
+        "github.com/moby/buildkit/client.(*Client).solve.func2",
+        "github.com/moby/buildkit@v0.20.0/client/solve.go:285",
+        "143 /usr/local/bin/dockerd",
+    ]
+    output = "\n".join(
+        [
+            "#5 [2/3] RUN pip install nope",
+            'ERROR: failed to solve: process "/bin/sh -c pip install nope" did not complete',
+        ]
+        + frames * 10
+    )
+
+    # Act
+    from services.docker_service import custom_build_log_tail
+
+    tail = custom_build_log_tail(output)
+
+    # Assert
+    assert tail.splitlines() == [
+        "#5 [2/3] RUN pip install nope",
+        'ERROR: failed to solve: process "/bin/sh -c pip install nope" did not complete',
+    ]
+
+
+def test_A17e_a_stack_trace_longer_than_the_tail_still_reaches_the_renter_with_its_error(tmp_path, monkeypatch):
+    # Arrange: buildx prints the ERROR line, then 40 Go stack lines, and fails
+    import subprocess
+
+    from services import docker_service
+    from services.docker_service import custom_build_inner_command, custom_build_log_tail
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    stub = bindir / "docker"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'echo "#5 [2/3] RUN pip install nope"\n'
+        'echo "ERROR: failed to solve: pip install nope did not complete"\n'
+        'i=1; while [ $i -le 20 ]; do echo "runtime.goexit"; echo "runtime/asm_amd64.s:1700"; i=$((i + 1)); done\n'
+        "exit 1\n"
+    )
+    stub.chmod(0o755)
+    monkeypatch.setattr(docker_service, "CUSTOM_BUILD_LOG_FILE", str(tmp_path / "lium-build.log"))
+    monkeypatch.setattr(docker_service, "CUSTOM_BUILD_RC_FILE", str(tmp_path / "lium-build.rc"))
+
+    # Act
+    run = subprocess.run(
+        ["sh", "-c", custom_build_inner_command("lium-custom-test:latest", "/build")],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{bindir}:/usr/bin:/bin"},
+    )
+    tail = custom_build_log_tail(run.stderr)
+
+    # Assert
+    assert tail.splitlines() == [
+        "#5 [2/3] RUN pip install nope",
+        "ERROR: failed to solve: pip install nope did not complete",
+    ]
