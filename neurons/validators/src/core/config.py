@@ -377,7 +377,8 @@ class Settings(BaseSettings):
     CPU_TRUTH_ENFORCEMENT_ENABLED: bool = Field(env="CPU_TRUTH_ENFORCEMENT_ENABLED", default=False)
     # GpuModelValidCheck names the node after gpu.details[0], so a 4090 + 5060 Ti host was listed
     # and priced as "2x RTX 4090". A mixed-model scrape is always reported (GPU_MODEL_MIXED);
-    # this flag makes it fatal, so the node earns 0 and is not offered until every card matches.
+    # this flag makes it fatal, so the node earns 0 until every card matches. It does not take the
+    # node off the market: the backend lists on active/verified/availability_errors, not on score.
     MIXED_GPU_MODEL_ENFORCEMENT_ENABLED: bool = Field(env="MIXED_GPU_MODEL_ENFORCEMENT_ENABLED", default=False)
     # Item 3 — run the GPU work-proof on every claimed card concurrently (own challenge per card,
     # sized from the registry SKU) and time the aggregate on the validator, so a count lie either
