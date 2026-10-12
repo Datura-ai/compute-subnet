@@ -34,8 +34,12 @@ def _session(status: int, text: str = "") -> MagicMock:
 @pytest.fixture
 def session(monkeypatch):
     wallet = MagicMock()
-    wallet.get_hotkey.return_value = MagicMock(ss58_address="validator-hotkey", sign=lambda blob: b"\x01")
-    settings = SimpleNamespace(get_bittensor_wallet=lambda: wallet, COMPUTE_REST_API_URL="http://lium.test")
+    wallet.get_hotkey.return_value = MagicMock(
+        ss58_address="validator-hotkey", sign=lambda blob: b"\x01"
+    )
+    settings = SimpleNamespace(
+        get_bittensor_wallet=lambda: wallet, COMPUTE_REST_API_URL="http://lium.test"
+    )
     monkeypatch.setattr(subtensor_client, "settings", settings)
     sessions = []
 
@@ -59,7 +63,9 @@ async def test_a_report_without_a_current_block_is_not_posted(session):
 @pytest.mark.asyncio
 async def test_a_refused_report_is_logged_with_its_status(session, monkeypatch):
     errors = []
-    monkeypatch.setattr(subtensor_client.logger, "error", lambda message, *args, **kwargs: errors.append(message))
+    monkeypatch.setattr(
+        subtensor_client.logger, "error", lambda message, *args, **kwargs: errors.append(message)
+    )
     client = SubtensorClient.__new__(SubtensorClient)
 
     await client.send_weights_to_lium(PAYLOAD)
