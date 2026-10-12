@@ -222,6 +222,12 @@ class Settings(BaseSettings):
     }
     ENABLE_NEW_BURN_LOGIC: bool = True
 
+    # Comma-separated miner hotkeys that earn no subnet incentive from this validator. Their
+    # executors are still validated, listed and rentable exactly as before; only the incentive
+    # is zeroed (every pool, spot pay and referral), and the share they would have taken is
+    # left to burn. Empty (the default) changes nothing. Burner hotkeys are never affected.
+    SCORING_EXCLUDED_HOTKEYS: str = Field(env="SCORING_EXCLUDED_HOTKEYS", default="")
+
     # DAH-2251 — referral incentive paid via emission, to referrer hotkeys weighted by
     # the backend's epoch-stable EMA feed. There is no funding wallet, so unlike the
     # earlier carve-out design this has no UID/coldkey knobs.
@@ -725,6 +731,9 @@ class Settings(BaseSettings):
 
     def get_allowed_gpu_hwmodels(self) -> set[str]:
         return {s.strip() for s in self.GPU_ATTESTATION_ALLOWED_HWMODELS.split(",") if s.strip()}
+
+    def get_scoring_excluded_hotkeys(self) -> set[str]:
+        return {s.strip() for s in self.SCORING_EXCLUDED_HOTKEYS.split(",") if s.strip()}
 
     # Use REST API instead of WebSocket for miner communication
     USE_REST_API: bool = Field(env="USE_REST_API", default=False)
