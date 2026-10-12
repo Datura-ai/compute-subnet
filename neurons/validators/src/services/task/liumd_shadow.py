@@ -11,8 +11,11 @@ download-EMA floor, read against the stored EMA; the capture is judged with `rec
 the shadow writes no EMA, state or network-gate tally. The outcome is one `[liumd_shadow] comparison`
 log line. Nothing is returned to the caller, stored, or scored.
 
-It runs only on the executors listed in `LIUMD_SHADOW_EXECUTOR_UUIDS` (reserved, non-rentable dev
-executors; empty by default), never on an express-lane first pass.
+It runs only on the executors listed in `LIUMD_SHADOW_RESERVED_EXECUTORS` (reserved, non-rentable
+dev executors, each matched on miner hotkey, executor UUID, address and SSH port; empty by default),
+never on an express-lane first pass. With `VERIFYX_COLD_SAMPLE_RETRY_ENABLED`, VerifyX is not
+compared on an executor with no stored download EMA: today's check may take a second sample there,
+the shadow takes one (`liumd_reason="cold_sample_retry"`).
 
 Today's verdict per step comes from the pipeline's events: both checks are fatal, so a check that
 failed is the run's last event on a run that did not pass; one that reported a skip reason did not
@@ -185,7 +188,10 @@ async def _compare(
         steps["matmul"]["liumd_reason"] = "allcards_ssh"
     # A pod or filler started after the cycle's snapshot is not seen below, so the shadow runs only
     # on reserved, non-rentable dev executors.
-    if ctx.executor.uuid not in settings.get_liumd_shadow_executor_uuids():
+    # Executor UUIDs are miner-chosen: an entry matches only its miner's executor at its endpoint.
+    executor = ctx.executor
+    key = (ctx.miner_hotkey, executor.uuid, executor.address, executor.ssh_port)
+    if key not in settings.get_liumd_shadow_reserved_executors():
         return _skipped("not_reserved", steps=steps)
     if _workload_on_node(ctx, today):
         return _skipped("workload", steps=steps)
@@ -193,7 +199,12 @@ async def _compare(
     # matmul is not comparable (checks/local_verify.py `allcards_ssh`).
     allcards = settings.MATMUL_ALLCARDS_CHECK_ENABLED
     ask_matmul = today["matmul"].verdict in RAN and not allcards
-    ask_verifyx = today["verifyx"].verdict in RAN and ctx.config.verifyx_enabled
+    # On a never-measured executor today's check may re-measure a cold sample below the gate
+    # (DAH-2959) and pass on the second; the shadow's one sample is not comparable.
+    cold_retry = _cold_retry_possible(ctx)
+    if cold_retry:
+        steps["verifyx"]["liumd_reason"] = "cold_sample_retry"
+    ask_verifyx = today["verifyx"].verdict in RAN and ctx.config.verifyx_enabled and not cold_retry
     if not (ask_matmul or ask_verifyx):
         return _skipped("no_gpu_step_ran", steps=steps)
     specs = ctx.state.specs
@@ -288,6 +299,15 @@ def _not_run_or_fail(step, answer: LocalVerifyAnswer) -> str:
 def _stored_ema(ctx: Context):
     rented = ctx.state.rented_data
     return rented.network_ema.get(ctx.executor.uuid) if rented is not None else None
+
+
+def _cold_retry_possible(ctx: Context) -> bool:
+    """Whether today's VerifyX could have taken a cold-sample retry on this executor: retries on,
+    the backend's answer present, and no stored download EMA (`_is_cold_sample_below_gate`)."""
+    if not settings.VERIFYX_COLD_SAMPLE_RETRY_ENABLED or ctx.state.rented_data is None:
+        return False
+    prev_ema = _stored_ema(ctx)
+    return prev_ema is None or prev_ema.ema_verifyx_download_speed is None
 
 
 def _liumd_fields(step, verdict: str, reason: str) -> dict[str, Any]:

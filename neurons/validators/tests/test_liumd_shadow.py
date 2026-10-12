@@ -47,6 +47,7 @@ EXECUTOR_INFO = ExecutorSSHInfo(
     python_path="/usr/bin/python",
     root_dir="/root/app",
 )
+RESERVED = f"5Miner/{UUID}/10.0.0.5/2200"
 CAPABILITY = "gpu.validate.capability"
 VERIFYX = "gpu.validate.verifyx"
 
@@ -69,7 +70,9 @@ PASSED = [_event(VERIFYX, "VERIFYX_OK", 80_000), _event(CAPABILITY, "GPU_VERIFY_
 @pytest.fixture(autouse=True)
 def reserved_executor(monkeypatch):
     """The test executor is a reserved dev executor, the only kind the shadow runs on."""
-    monkeypatch.setattr(settings, "LIUMD_SHADOW_EXECUTOR_UUIDS", f"other-dev, {UUID}")
+    monkeypatch.setattr(
+        settings, "LIUMD_SHADOW_RESERVED_EXECUTORS", f"5Miner/other-dev/10.0.0.6/22, {RESERVED}"
+    )
 
 
 @pytest.fixture
@@ -363,13 +366,15 @@ def test_only_a_step_cut_at_the_suite_deadline_is_not_run():
 
 
 class _TodaysVerifyX:
-    """Today's SSH transport, answering with the judged result the shadow gets too."""
+    """Today's SSH transport, answering with the judged result the shadow gets too, then with
+    each of `then` in turn (a cold-sample retry's samples)."""
 
-    def __init__(self, judged):
-        self.judged = judged
+    def __init__(self, judged, then=()):
+        self.answers = [judged, *then]
 
     async def validate_verifyx_and_process_job(self, **_):
-        return SimpleNamespace(data=self.judged, error=None, diagnostics=None)
+        data = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        return SimpleNamespace(data=data, error=None, diagnostics=None)
 
 
 def _network_ema(download):
@@ -380,20 +385,25 @@ def _network_ema(download):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "prev_ema,network,first_pass,today",
+    "prev_ema,network,first_pass,today,retry",
     [
         # The reviewer's probe: raw success, but the EMA (100 → 75) falls under the floor.
-        (100.0, {"download_speed": 50.0}, False, "fail"),
-        (100.0, {"download_speed": 50.0}, True, "fail"),
-        (None, {"download_speed": 50.0}, False, "fail"),
+        (100.0, {"download_speed": 50.0}, False, "fail", None),
+        (100.0, {"download_speed": 50.0}, True, "fail", None),
+        (None, {"download_speed": 50.0}, False, "fail", None),
         # A first pass on a never-measured host defers the floor to the first scored cycle.
-        (None, {"download_speed": 50.0}, True, "pass"),
-        (300.0, {"download_speed": 900.0}, False, "pass"),
+        (None, {"download_speed": 50.0}, True, "pass", None),
+        (300.0, {"download_speed": 900.0}, False, "pass", None),
         # A Cloudflare fallback with no reading keeps the stored EMA, under and over the floor.
-        (80.0, {"download_speed": None, "cloudflare_fallback": True}, False, "fail"),
-        (150.0, {"download_speed": None, "cloudflare_fallback": True}, False, "pass"),
+        (80.0, {"download_speed": None, "cloudflare_fallback": True}, False, "fail", None),
+        (150.0, {"download_speed": None, "cloudflare_fallback": True}, False, "pass", None),
         # Nothing stored and nothing read: the EMA stays unseeded and the check passes.
-        (None, {"download_speed": None, "cloudflare_fallback": True}, False, "pass"),
+        (None, {"download_speed": None, "cloudflare_fallback": True}, False, "pass", None),
+        # Cold retries on, never measured: today re-measures 50 then 150 Mbps and passes, where
+        # the shadow's one 50 Mbps sample would fail. Not compared.
+        (None, {"download_speed": 50.0}, False, "pass", {"download_speed": 150.0}),
+        # Cold retries on, but a stored EMA: no retry today, so compared as ever.
+        (100.0, {"download_speed": 50.0}, False, "fail", {"download_speed": 150.0}),
     ],
     ids=[
         "ema-drops-under-floor",
@@ -404,13 +414,16 @@ def _network_ema(download):
         "fallback-keeps-slow-ema",
         "fallback-keeps-fast-ema",
         "unseeded",
+        "cold-retry-not-compared",
+        "cold-retry-on-known-host",
     ],
 )
 async def test_verifyx_verdict_is_the_checks_own_including_the_ema_gate(
-    keypair, monkeypatch, verifyx_service, prev_ema, network, first_pass, today
+    keypair, monkeypatch, verifyx_service, prev_ema, network, first_pass, today, retry
 ):
-    monkeypatch.setattr(settings, "VERIFYX_COLD_SAMPLE_RETRY_ENABLED", False)
+    monkeypatch.setattr(settings, "VERIFYX_COLD_SAMPLE_RETRY_ENABLED", retry is not None)
     judged = {"success": True, "ram": {}, "network": network}
+    retried = [{"success": True, "ram": {}, "network": retry}] if retry else []
     verifyx_service.judged = judged
     rented = _network_ema(prev_ema)
     ctx = _ctx(
@@ -424,7 +437,7 @@ async def test_verifyx_verdict_is_the_checks_own_including_the_ema_gate(
     todays_ctx = _ctx(
         keypair,
         monkeypatch,
-        _TodaysVerifyX(judged),
+        _TodaysVerifyX(judged, retried),
         first_pass=first_pass,
         state=build_state(specs=SPECS, rented_data=rented),
     )
@@ -436,14 +449,22 @@ async def test_verifyx_verdict_is_the_checks_own_including_the_ema_gate(
     )
     tally_before = vvs.NETWORK_GATE_TALLY.probe_fallback
 
-    record = await _shadow(ctx, FakeLiumd(), ok=checked.passed, events=events)
+    fake = FakeLiumd()
+    record = await _shadow(ctx, fake, ok=checked.passed, events=events)
 
     entry = record["steps"]["verifyx"]
     assert entry["today"] == today
-    assert entry["liumd_verdict"] == today
-    assert entry["agree"] is True
-    if today == "fail":
-        assert entry["liumd_reason"] == "network_too_slow"
+    if retry and prev_ema is None:
+        assert checked.passed is True
+        assert entry.get("agree") is None
+        assert entry["liumd_reason"] == "cold_sample_retry"
+        assert "liumd_verdict" not in entry
+        assert fake.intents[0]["steps"]["verifyx"] is None
+    else:
+        assert entry["liumd_verdict"] == today
+        assert entry["agree"] is True
+        if today == "fail":
+            assert entry["liumd_reason"] == "network_too_slow"
     # The stored EMA and the live tally are read, never written.
     assert rented.network_ema[UUID].model_dump() == stored_before
     assert vvs.NETWORK_GATE_TALLY.probe_fallback == tally_before
@@ -512,8 +533,17 @@ async def test_all_cards_mode_does_not_compare_the_matmul(keypair, monkeypatch, 
         (PASSED, True, "no_budget", {"deadline_s": 59.0}),
         # Only reserved dev executors run the shadow: a rentable executor never does, idle or not.
         (PASSED, True, "not_reserved", {"reserved": ""}),
-        (PASSED, True, "not_reserved", {"reserved": "other-dev"}),
-        (PASSED, True, "not_reserved", {"reserved": "other-dev", "rented": True}),
+        (PASSED, True, "not_reserved", {"reserved": "5Miner/other-dev/10.0.0.5/2200"}),
+        (
+            PASSED,
+            True,
+            "not_reserved",
+            {"reserved": "5Miner/other-dev/10.0.0.5/2200", "rented": True},
+        ),
+        # UUIDs are miner-chosen: the reserved UUID under another miner or endpoint is not it.
+        (PASSED, True, "not_reserved", {"reserved": f"5OtherMiner/{UUID}/10.0.0.5/2200"}),
+        (PASSED, True, "not_reserved", {"reserved": f"5Miner/{UUID}/10.0.0.9/2200"}),
+        (PASSED, True, "not_reserved", {"reserved": f"5Miner/{UUID}/10.0.0.5/2201"}),
     ],
     ids=[
         "filler",
@@ -525,6 +555,9 @@ async def test_all_cards_mode_does_not_compare_the_matmul(keypair, monkeypatch, 
         "allowlist-empty",
         "rentable-idle",
         "rentable-rented",
+        "same-uuid-other-miner",
+        "same-uuid-other-address",
+        "same-uuid-other-ssh-port",
     ],
 )
 async def test_no_gpu_work_where_today_ran_none(
@@ -533,7 +566,7 @@ async def test_no_gpu_work_where_today_ran_none(
     fake = FakeLiumd()
     extra = dict(extra)
     if "reserved" in extra:
-        monkeypatch.setattr(settings, "LIUMD_SHADOW_EXECUTOR_UUIDS", extra.pop("reserved"))
+        monkeypatch.setattr(settings, "LIUMD_SHADOW_RESERVED_EXECUTORS", extra.pop("reserved"))
     state = None
     if extra.pop("rented", False):
         pod = {"pod_id": "p1", "container_name": "c1"}
@@ -550,6 +583,21 @@ async def test_no_gpu_work_where_today_ran_none(
     record = await _shadow(ctx, fake, ok=ok, events=events, **extra)
 
     assert (record["outcome"], record["reason"]) == ("skipped", reason)
+    assert fake.intents == []
+
+
+@pytest.mark.parametrize("entry", [UUID, f"5Miner/{UUID}/10.0.0.5", f"5Miner/{UUID}/10.0.0.5/ssh"])
+@pytest.mark.asyncio
+async def test_a_malformed_reserved_entry_runs_nothing(
+    keypair, monkeypatch, verifyx_service, entry
+):
+    monkeypatch.setattr(settings, "LIUMD_SHADOW_RESERVED_EXECUTORS", f"{RESERVED},{entry}")
+    fake = FakeLiumd()
+
+    record = await _shadow(_ctx(keypair, monkeypatch, verifyx_service), fake)
+
+    assert (record["outcome"], record["reason"]) == ("error", "internal_error")
+    assert "LIUMD_SHADOW_RESERVED_EXECUTORS" in record["detail"]
     assert fake.intents == []
 
 
