@@ -205,6 +205,15 @@ def _is_the_validators_own_reading(job_result: JobResult) -> bool:
     return not errors or any(error.get("reach_source") != ReachSource.MINER for error in errors)
 
 
+# Entries that are a reading of a node the validator did reach, not a failed connect: they say
+# nothing about our egress, DNS or keys, so they do not count toward the outage share.
+NOT_A_CONNECT_TARGETS = frozenset({ReachTarget.GPU_INVENTORY})
+
+
+def _failed_to_connect(job_result: JobResult) -> bool:
+    return any(error.get("reach_target") not in NOT_A_CONNECT_TARGETS for error in job_result.availability_errors or [])
+
+
 def silence_availability_errors_on_our_own_outage(job_results: list[JobResult]) -> int:
     """Report nothing about reachability when the cycle looks like our own outage.
 
@@ -213,7 +222,7 @@ def silence_availability_errors_on_our_own_outage(job_results: list[JobResult]) 
     are silenced (``_is_the_validators_own_reading``).
     """
     checked_results = [result for result in job_results if _is_the_validators_own_reading(result)]
-    unreachable_results = [result for result in checked_results if result.availability_errors]
+    unreachable_results = [result for result in checked_results if _failed_to_connect(result)]
     if not is_our_own_outage(len(unreachable_results), len(checked_results)):
         return 0
     for result in checked_results:

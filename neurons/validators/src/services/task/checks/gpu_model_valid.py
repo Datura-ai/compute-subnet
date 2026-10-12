@@ -25,9 +25,9 @@ class GpuModelValidCheck:
     through the same path banned_gpu, gpu_fingerprint, duplicate_executor and spec_change use,
     rented or idle, and is verified again on the first cycle whose scrape lists every card.
 
-    A detail list naming more than one model (GPU_MODEL_MIXED) is always reported, and refused only
-    under MIXED_GPU_MODEL_ENFORCEMENT_ENABLED: the node is listed and priced as its first card. The
-    refusal is an availability entry, so the node also leaves the market.
+    A detail list naming more than one model (GPU_MODEL_MIXED) is allowed and reported. The interim
+    MIXED_GPU_MODEL_ENFORCEMENT_ENABLED refuses it while the backend lists a node as its first card;
+    the refusal is an availability entry, so the node also leaves the market.
     """
 
     check_id = "gpu.validate.model"
@@ -92,8 +92,9 @@ class GpuModelValidCheck:
             )
             return CheckResult(passed=False, event=event, updates={"clear_verified_job_info": True})
 
-        # The node is listed and priced as gpu_details[0] x gpu_count, so every card has to be that
-        # model: a renter of a "2x RTX 4090" got a 4090 and an RTX 5060 Ti (OD-D850).
+        # Mixed models are allowed: the backend lists a mixed node by its real cards and rents it whole.
+        # The interim flag refuses one while the backend still lists it as gpu_details[0] x gpu_count:
+        # a renter of a "2x RTX 4090" got a 4090 and an RTX 5060 Ti (OD-D850).
         models = Counter(detail.get("name") for detail in gpu_details)
         if len(models) > 1:
             enforce = settings.MIXED_GPU_MODEL_ENFORCEMENT_ENABLED
@@ -103,12 +104,10 @@ class GpuModelValidCheck:
                 # renter already on it keeps running and is still billed (no verification reset).
                 what = {"reach_source": str(ReachSource.VALIDATOR), "reach_target": str(ReachTarget.GPU_INVENTORY), **what}
             event = render_message(
-                Msg.MODEL_MIXED,
+                Msg.MODEL_MIXED_REFUSED if enforce else Msg.MODEL_MIXED,
                 ctx=ctx,
                 check_id=self.check_id,
-                severity=None if enforce else "warning",
                 category=AVAILABILITY_CATEGORY if enforce else None,
-                impact=None if enforce else "Shadow observation only: score and listing were NOT changed",
                 what=what,
             )
             return CheckResult(passed=not enforce, event=event)

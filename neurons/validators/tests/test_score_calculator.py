@@ -2,6 +2,8 @@
 speed threshold. Other score_calculator paths (rental, price) are exercised
 via integration in test_score_check.py and test_pipeline_default_scenarios.py.
 """
+from types import SimpleNamespace
+
 import pytest
 
 from neurons.validators.src.services.task.score_calculator import calculate_scores
@@ -115,3 +117,39 @@ def test_executor_without_deposit_scores_in_full(gpu_model):
     assert actual_score == 1.0
     assert job_score == 1.0
     assert warning == ""
+
+
+@pytest.mark.parametrize(
+    "price_per_gpu, zeroed",
+    [
+        # OD-D850: 1x RTX 4090 + 1x RTX 5060 Ti; the 4090's limit alone would let 0.5 through
+        (0.5, True),
+        (0.3, False),
+    ],
+)
+def test_a_mixed_node_price_is_capped_by_its_real_cards(price_per_gpu, zeroed, monkeypatch):
+    from neurons.validators.src.services.task import score_calculator
+
+    config = SimpleNamespace(
+        machine_prices={"NVIDIA GeForce RTX 4090": 0.4, "NVIDIA GeForce RTX 5060 Ti": 0.1},
+        machine_max_price_rate=1.5,
+    )
+    monkeypatch.setattr(score_calculator, "shared_client", SimpleNamespace(config=config))
+    executor = default_executor().model_copy(update={"price_per_gpu": price_per_gpu})
+    details = [{"name": "NVIDIA GeForce RTX 4090"}, {"name": "NVIDIA GeForce RTX 5060 Ti"}]
+    state = build_state(
+        specs={"network": {"ema_verifyx_download_speed": 500.0}},
+        gpu_model="NVIDIA GeForce RTX 4090",
+        gpu_count=2,
+        gpu_details=details,
+    )
+    ctx = make_context(
+        executor=executor, state=state, services=build_services(), config=build_context_config(),
+        collateral_deposited=True, is_rental_succeed=True,
+    )
+
+    actual_score, _, warning = calculate_scores(ctx, rented=False)
+
+    # limit = mean(0.4, 0.1) * 1.5 = 0.375
+    assert (actual_score == 0.0) is zeroed
+    assert ("GPU price exceeds the limit" in warning) is zeroed

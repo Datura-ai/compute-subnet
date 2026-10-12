@@ -346,3 +346,19 @@ def test_the_peer_text_of_an_ssh_failure_is_capped() -> None:
 
     # Assert
     assert len(event.what_we_saw["error"]) == MAX_PEER_TEXT_LENGTH
+
+
+def test_a_gpu_inventory_refusal_is_not_counted_as_a_failed_connect() -> None:
+    """A node the validator reached and refused for its GPUs says nothing about our own outage."""
+    # Arrange
+    gpu_refusal = [{"reason_code": "GPU_MODEL_MIXED", "reach_source": "validator", "reach_target": "gpu_inventory"}]
+    unreachable = [{"reason_code": "EXECUTOR_SSH_UNREACHABLE", "reach_target": "executor_ssh"}]
+    results = [_result_with(gpu_refusal) for _ in range(8)] + [_result_with(unreachable)] + [_result_with([])]
+
+    # Act
+    silenced = silence_availability_errors_on_our_own_outage(results)
+
+    # Assert
+    assert silenced == 0
+    assert results[0].availability_errors == gpu_refusal
+    assert results[8].availability_errors == unreachable

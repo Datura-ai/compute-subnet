@@ -329,13 +329,21 @@ class GpuModelMessages:
     MODEL_MIXED = MessageTemplate(
         event="GPU models differ across cards",
         reason="GPU_MODEL_MIXED",
+        severity="info",
+        category="policy",
+        impact="Reported only; score and listing are not changed",
+        remediation="None required: a node may mix GPU models.",
+    )
+    MODEL_MIXED_REFUSED = MessageTemplate(
+        event="GPU models differ across cards",
+        reason="GPU_MODEL_MIXED",
         severity="error",
         category="policy",
         impact="Score set to 0; the node is hidden from the market and takes no new rentals",
         remediation=(
-            "Every GPU on a node must be the same model: the node is listed and priced as its first card. "
-            "Move the other cards to a different machine. A node that has passed a check has its GPU set recorded, "
-            "so after removing a card delete the node in the portal and register it again."
+            "Mixed GPU models are refused for now because the node would be listed and priced as its first card. "
+            "To list it today, move the other cards to a different machine. A node that has passed a check has its "
+            "GPU set recorded, so after removing a card delete the node in the portal and register it again."
         ),
     )
     MODEL_OK = MessageTemplate(

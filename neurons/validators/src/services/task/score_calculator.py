@@ -46,8 +46,10 @@ def calculate_scores(
         job_score = 0.0
         warning_messages.append("Required executor image is outdated")
 
-    # Machine price check
-    base_price = shared_client.config.machine_prices.get(gpu_model, 0)
+    # Machine price check. A mixed node is capped by its real cards, not by its first card (OD-D850).
+    machine_prices = shared_client.config.machine_prices
+    card_models = [detail.get("name") for detail in (getattr(ctx.state, "gpu_details", None) or [])] or [gpu_model]
+    base_price = sum(machine_prices.get(model, 0) for model in card_models) / len(card_models)
     max_price_rate = shared_client.config.machine_max_price_rate
     if price_per_gpu and price_per_gpu > base_price * max_price_rate:
         actual_score = 0.0

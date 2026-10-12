@@ -375,11 +375,11 @@ class Settings(BaseSettings):
     # author (/proc/cpuinfo, /sys present population, docker NCPU).
     CPU_TRUTH_CHECK_ENABLED: bool = Field(env="CPU_TRUTH_CHECK_ENABLED", default=True)
     CPU_TRUTH_ENFORCEMENT_ENABLED: bool = Field(env="CPU_TRUTH_ENFORCEMENT_ENABLED", default=False)
-    # GpuModelValidCheck names the node after gpu.details[0], so a 4090 + 5060 Ti host was listed
-    # and priced as "2x RTX 4090". A mixed-model scrape is always reported (GPU_MODEL_MIXED);
-    # this flag makes it fatal and an availability entry, so the node earns 0 and leaves the market
-    # (no listing, no new rentals; a live rental runs on and is billed). Pulling a card off a verified
-    # node then fails GPU_UUID_CHANGED, so the node comes back only by being registered again.
+    # Mixed GPU models on one node are allowed: the backend lists a mixed node by its real cards and
+    # rents it whole. Until that backend change is live, a mixed node is listed and priced as its first
+    # card (a 4090 + 5060 Ti host was sold as "2x RTX 4090", OD-D850), and this interim flag refuses it:
+    # score 0 and an availability entry (no listing, no new rentals; a live rental runs on and is
+    # billed). Turn it off again once the backend lists the real composition.
     MIXED_GPU_MODEL_ENFORCEMENT_ENABLED: bool = Field(env="MIXED_GPU_MODEL_ENFORCEMENT_ENABLED", default=False)
     # Item 3 — run the GPU work-proof on every claimed card concurrently (own challenge per card,
     # sized from the registry SKU) and time the aggregate on the validator, so a count lie either

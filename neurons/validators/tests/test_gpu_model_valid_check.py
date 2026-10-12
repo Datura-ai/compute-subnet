@@ -122,7 +122,7 @@ def _mixed_ctx(context_factory, details=MIXED_DETAILS):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enforce", [False, True])
-async def test_a_node_with_two_gpu_models_is_reported_and_refused_only_under_enforcement(enforce, context_factory):
+async def test_a_node_with_two_gpu_models_is_allowed_and_refused_only_under_the_interim_flag(enforce, context_factory):
     with patch("neurons.validators.src.services.task.checks.gpu_model_valid.settings") as s:
         s.MIXED_GPU_MODEL_ENFORCEMENT_ENABLED = enforce
         result = await GpuModelValidCheck().run(_mixed_ctx(context_factory))
@@ -139,7 +139,8 @@ async def test_a_node_with_two_gpu_models_is_reported_and_refused_only_under_enf
     hidden = availability_errors([result.event])
     if not enforce:
         assert result.event.what_we_saw == seen
-        assert hidden == []  # shadow: still listed
+        assert result.event.severity == "info"
+        assert hidden == []  # allowed: still listed
         return
     # enforced: one availability entry, which the backend reads as "hide from the market, refuse new rentals"
     assert [error.model_dump() for error in hidden] == [
@@ -147,8 +148,8 @@ async def test_a_node_with_two_gpu_models_is_reported_and_refused_only_under_enf
             "reason_code": Msg.MODEL_MIXED.reason,
             "reach_source": "validator",
             "reach_target": "gpu_inventory",
-            "message": Msg.MODEL_MIXED.event,
-            "remediation": Msg.MODEL_MIXED.remediation,
+            "message": Msg.MODEL_MIXED_REFUSED.event,
+            "remediation": Msg.MODEL_MIXED_REFUSED.remediation,
             "what_we_saw": seen,
         }
     ]
