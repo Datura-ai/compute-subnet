@@ -9,6 +9,7 @@ the loop's refresh deadline; the loop starts it as a task and never waits for it
 import asyncio
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -770,11 +771,35 @@ def test_pull_ok_pulls_by_digest_and_retags(monkeypatch):
     response.close.assert_called_once()
 
 
-def test_pull_is_cancelled_when_a_rental_starts_mid_pull(monkeypatch):
+def _stalling_client(events: list[dict], stall_seconds: float = 3.0) -> tuple[MagicMock, MagicMock]:
+    """A pull whose stream sends `events`, then goes silent until the response is closed (or
+    `stall_seconds` pass, when it raises what the socket read timeout raises)."""
+    client = MagicMock()
+    response = MagicMock()
+    closed = threading.Event()
+    response.close.side_effect = lambda: closed.set()
+    client.api._post.return_value = response
+
+    def stream(*_args, **_kwargs):
+        yield from events
+        if not closed.wait(stall_seconds):
+            raise urllib3.exceptions.ReadTimeoutError(None, None, "Read timed out.")
+        raise urllib3.exceptions.ProtocolError("connection closed")
+
+    client.api._stream_helper.side_effect = stream
+    return client, response
+
+
+@pytest.fixture
+def fast_checks(monkeypatch):
+    monkeypatch.setattr(pre_pull_service, "BANDWIDTH_TEST_CHECK_SECONDS", 0.01)
+
+
+def test_pull_is_cancelled_when_a_rental_starts_mid_pull(monkeypatch, fast_checks):
     activity = iter([None, "rental container pod_9"])
     monkeypatch.setattr(pre_pull_service, "rental_activity", lambda _: next(activity))
     monkeypatch.setattr(pre_pull_service, "ACTIVITY_CHECK_SECONDS", 0)
-    client, response = _pull_client([{"status": "Downloading"}] * 5)
+    client, response = _stalling_client([{"status": "Downloading"}] * 5)
 
     outcome, detail = _pull_pinned(client, REPO, CU128_TAG, DIGEST_CU128, timeout_seconds=60)
 
@@ -783,15 +808,13 @@ def test_pull_is_cancelled_when_a_rental_starts_mid_pull(monkeypatch):
     client.images.get.assert_not_called()
 
 
-def test_a_bandwidth_test_starting_mid_pull_stops_it_within_seconds(monkeypatch):
+def test_a_bandwidth_test_starting_mid_pull_stops_it_within_seconds(monkeypatch, fast_checks):
     # the full idle check (a docker call) runs every 10 s; the probe check alone every 2 s
     too_early = lambda _: pytest.fail("full check before 10 s")  # noqa: E731
     monkeypatch.setattr(pre_pull_service, "rental_activity", too_early)
     probe = iter([None, "validator bandwidth test"])
     monkeypatch.setattr(pre_pull_service, "host_activity", lambda: next(probe))
-    clock = iter([0.0, 1.0, 2.0, 4.5])  # start, then each event
-    monkeypatch.setattr(pre_pull_service.time, "monotonic", lambda: next(clock))
-    client, response = _pull_client([{"status": "Downloading"}] * 3)
+    client, response = _stalling_client([{"status": "Downloading"}] * 3)
 
     outcome, detail = _pull_pinned(client, REPO, CU128_TAG, DIGEST_CU128, timeout_seconds=60)
 
@@ -800,15 +823,31 @@ def test_a_bandwidth_test_starting_mid_pull_stops_it_within_seconds(monkeypatch)
     client.images.get.assert_not_called()
 
 
-def test_pull_stops_at_the_per_image_timeout(monkeypatch):
+def test_a_bandwidth_test_stops_a_pull_whose_stream_has_gone_quiet(monkeypatch, fast_checks):
+    # review (12 Oct): the probe check ran only when a stream event arrived, so a quiet stream
+    # (a big layer extracting) kept pulling beside the bandwidth sample until the 60 s read
+    # timeout. The check now runs on its own timer and closes the stream itself.
     monkeypatch.setattr(pre_pull_service, "rental_activity", lambda _: None)
-    clock = iter([0.0, 10.0, 100.0])  # start, then each event's check
-    monkeypatch.setattr(pre_pull_service.time, "monotonic", lambda: next(clock))
-    client, response = _pull_client([{"status": "Downloading"}] * 3)
+    monkeypatch.setattr(pre_pull_service, "host_activity", lambda: "validator bandwidth test")
+    client, response = _stalling_client([], stall_seconds=3.0)
 
-    outcome, detail = _pull_pinned(client, REPO, CU128_TAG, DIGEST_CU128, timeout_seconds=30)
+    started = time.monotonic()
+    outcome, detail = _pull_pinned(client, REPO, CU128_TAG, DIGEST_CU128, timeout_seconds=60)
 
-    assert (outcome, detail) == ("timeout", "exceeded 30s")
+    assert (outcome, detail) == ("preempted", "validator bandwidth test")
+    assert time.monotonic() - started < 1.0  # not the stall's (read timeout's) length
+    response.close.assert_called_once()
+    client.images.get.assert_not_called()
+
+
+def test_pull_stops_at_the_per_image_timeout(monkeypatch, fast_checks):
+    monkeypatch.setattr(pre_pull_service, "rental_activity", lambda _: None)
+    monkeypatch.setattr(pre_pull_service, "host_activity", lambda: None)
+    client, response = _stalling_client([{"status": "Downloading"}] * 3)
+
+    outcome, detail = _pull_pinned(client, REPO, CU128_TAG, DIGEST_CU128, timeout_seconds=0.05)
+
+    assert (outcome, detail) == ("timeout", "exceeded 0s")
     response.close.assert_called_once()
     client.images.get.assert_not_called()
 

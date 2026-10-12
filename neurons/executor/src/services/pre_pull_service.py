@@ -35,6 +35,7 @@ import asyncio
 import json
 import os
 import random
+import threading
 import time
 from pathlib import Path
 
@@ -187,11 +188,11 @@ def _pull_pinned(
     headers = {"X-Registry-Auth": auth_header} if auth_header else {}
     started = time.monotonic()
     deadline = started + timeout_seconds
-    next_check = started + ACTIVITY_CHECK_SECONDS
-    next_probe_check = started + BANDWIDTH_TEST_CHECK_SECONDS
-    # The deadline and the idle check run per stream event, so the read timeout is what
-    # bounds a stream that goes silent: without it a stalled registry would hold this thread
-    # (and the pull lock) for the whole budget past the caller's refresh deadline.
+    # The deadline and the idle checks run on their own thread, not per stream event: Docker
+    # can go quiet for long stretches (a big layer extracting, a slow registry), and a check
+    # that waits for the next event could let a pull share the link with the bandwidth sample
+    # for up to the read timeout. Closing the response from the watcher is what ends the read.
+    # The read timeout still bounds a silent stream when nothing else ends it.
     response = api._post(
         api._url("/images/create"),
         params={"fromImage": repo, "tag": digest},
@@ -199,30 +200,57 @@ def _pull_pinned(
         stream=True,
         timeout=(CONNECT_TIMEOUT_SECONDS, STREAM_READ_TIMEOUT_SECONDS),
     )
+    stop = threading.Event()
+    verdict: list[tuple[str, str]] = []
+
+    def watch() -> None:
+        next_check = started + ACTIVITY_CHECK_SECONDS
+        while not stop.wait(BANDWIDTH_TEST_CHECK_SECONDS):
+            now = time.monotonic()
+            try:
+                if now > deadline:
+                    reason = ("timeout", f"exceeded {timeout_seconds:.0f}s")
+                elif now >= next_check:
+                    next_check = now + ACTIVITY_CHECK_SECONDS
+                    busy = rental_activity(client)
+                    reason = ("preempted", busy) if busy else None
+                else:
+                    busy = host_activity()
+                    reason = ("preempted", busy) if busy else None
+            except Exception as e:
+                logger.info(f"pre-pull idle check failed, retrying: {e}")
+                continue
+            if reason and not stop.is_set():
+                verdict.append(reason)
+                response.close()
+                return
+
+    watcher = threading.Thread(target=watch, name="pre-pull-watch", daemon=True)
     try:
         api._raise_for_status(response)
+        watcher.start()
         for event in api._stream_helper(response, decode=True) or ():
+            if verdict:
+                break
             if isinstance(event, dict) and event.get("error"):
                 return "pull_failed", str(event["error"])
-            now = time.monotonic()
-            if now > deadline:
-                return "timeout", f"exceeded {timeout_seconds:.0f}s"
-            busy = None
-            if now >= next_check:
-                next_check = now + ACTIVITY_CHECK_SECONDS
-                next_probe_check = now + BANDWIDTH_TEST_CHECK_SECONDS
-                busy = rental_activity(client)
-            elif now >= next_probe_check:
-                next_probe_check = now + BANDWIDTH_TEST_CHECK_SECONDS
-                busy = host_activity()
-            if busy:
-                return "preempted", busy
     except (requests.exceptions.Timeout, urllib3.exceptions.TimeoutError):
-        # docker-py reads the chunked stream off `response.raw`, so a silent stream surfaces as
-        # urllib3's ReadTimeoutError, not requests' (requests only remaps inside iter_content).
-        return "timeout", f"no stream event for {STREAM_READ_TIMEOUT_SECONDS}s"
+        if not verdict:
+            # docker-py reads the chunked stream off `response.raw`, so a silent stream surfaces
+            # as urllib3's ReadTimeoutError, not requests' (requests only remaps inside iter_content).
+            return "timeout", f"no stream event for {STREAM_READ_TIMEOUT_SECONDS}s"
+    except Exception:
+        if not verdict:
+            raise
+        # reading a response the watcher closed raises whatever the transport raises
     finally:
-        response.close()
+        stop.set()
+        if watcher.is_alive():
+            watcher.join()
+        if not verdict:
+            response.close()
+    if verdict:
+        return verdict[0]
     # A digest pull leaves the tag untouched; rentals look the image up by repo:tag.
     client.images.get(f"{repo}@{digest}").tag(repo, tag)
     return "pull_ok", None
