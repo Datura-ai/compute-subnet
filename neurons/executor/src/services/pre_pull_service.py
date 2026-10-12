@@ -220,7 +220,7 @@ def _pull_pinned(
                     busy = host_activity()
                     reason = ("preempted", busy) if busy else None
             except Exception as e:
-                logger.info(f"pre-pull idle check failed, retrying: {e}")
+                logger.info(f"pre-pull idle check failed, retrying: {type(e).__name__}")
                 continue
             if reason and not stop.is_set():
                 verdict.append(reason)
