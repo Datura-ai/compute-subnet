@@ -471,3 +471,18 @@ def test_get_filler_containers_prefers_list_field_and_falls_back_to_legacy():
     assert old_backend.get_filler_containers("exec-single") == ["filler_only"]
     assert old_backend.get_filler_container("exec-single") == "filler_only"
     assert old_backend.get_filler_containers("exec-unknown") == []
+
+
+@pytest.mark.asyncio
+async def test_get_all_rented_executors_returns_none_after_three_empty_answers(client):
+    """12 Oct 05:03Z: the backend did not answer /internal/executors/rented and tenacity raised
+    RetryError out of PortConnectivityCheck, so 107 nodes failed as PIPELINE_VALIDATION_ERROR.
+    Every caller checks for None; the retried read has to give them None."""
+    from tenacity import wait_none
+
+    now = AsyncMock(return_value=None)
+    with patch.object(BackendClient, "get_rented_executors_now", now):
+        result = await BackendClient.get_all_rented_executors.retry_with(wait=wait_none())(client)
+
+    assert result is None
+    assert now.await_count == 3
