@@ -677,6 +677,7 @@ async def test_live_weights_are_reported_with_their_cycles_and_dropped_from_redi
     validator.redis_service.lpush.assert_awaited_once_with(UNACKED_LIVE_WEIGHTS_KEY, kept)
     validator.backend_client.report_live_weights.assert_awaited_once_with(900, ["c1", "c2"])
     validator.redis_service.lrem.assert_awaited_once_with(UNACKED_LIVE_WEIGHTS_KEY, kept)
+    validator.redis_service.ltrim.assert_awaited_once_with(UNACKED_LIVE_WEIGHTS_KEY, UNACKED_CYCLE_REPORTS_MAX)
 
 
 @pytest.mark.asyncio
@@ -691,6 +692,23 @@ async def test_an_unacknowledged_live_weights_report_is_kept_and_sent_first_next
 
     validator.backend_client.report_live_weights.assert_awaited_once_with(800, ["c0"])  # oldest first, then stop
     validator.redis_service.lrem.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_hung_backend_holds_a_live_weights_report_no_longer_than_the_reporting_budget(monkeypatch):
+    monkeypatch.setattr("core.validator.SETTLEMENT_REPORTING_BUDGET_SECONDS", 0.01)
+    validator = _validator(window=None, accepted=True)
+    kept = json.dumps({"inclusion_block": 900, "cycle_ids": ["c1"]}).encode()
+    validator.redis_service.lrange = AsyncMock(return_value=[kept])
+
+    async def hang(*_):
+        await asyncio.sleep(60)
+
+    validator.backend_client.report_live_weights = AsyncMock(side_effect=hang)
+
+    await asyncio.wait_for(validator.report_live_weights(900, ["c1"]), timeout=5)
+
+    validator.redis_service.lrem.assert_not_awaited()  # kept for the next tempo
 
 
 @pytest.mark.asyncio

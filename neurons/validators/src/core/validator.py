@@ -360,6 +360,13 @@ class Validator:
                             block = block if block is not None else block_before
                             if block is not None:
                                 await self.report_live_weights(block, live_cycle_ids)
+                            else:
+                                logger.warning(
+                                    _m(
+                                        "[settlement] live weights landed but no block could be read; not reported",
+                                        extra=get_extra_info(self.default_extra),
+                                    )
+                                )
                         # after the live submission: a slow or failing backend must not delay or skip it
                         if settings.SETTLEMENT_MODE == SETTLEMENT_SHADOW:
                             await self.shadow_settled_window(live_scores)
@@ -1067,6 +1074,11 @@ class Validator:
             await self._send_live_weights(report)
             return
         await self.drain_live_weights()
+        try:
+            # one report per tempo: past the cap during a long outage the oldest go, as for the cycle reports
+            await self.redis_service.ltrim(UNACKED_LIVE_WEIGHTS_KEY, UNACKED_CYCLE_REPORTS_MAX)
+        except Exception:
+            pass
 
     async def drain_live_weights(self) -> None:
         """Send the kept live weights reports, oldest first, until one is not taken: after every tempo's submission in
@@ -1089,7 +1101,12 @@ class Validator:
     async def _send_live_weights(self, report: dict) -> bool:
         """Whether the report is done with: taken, or rejected as wrong (keeping it would block every later one)."""
         try:
-            return await self.backend_client.report_live_weights(report["inclusion_block"], report["cycle_ids"]) is not None
+            # bounded like the cycle reports: a hung backend costs one budget per tempo and the report stays kept
+            receipt = await asyncio.wait_for(
+                self.backend_client.report_live_weights(report["inclusion_block"], report["cycle_ids"]),
+                timeout=SETTLEMENT_REPORTING_BUDGET_SECONDS,
+            )
+            return receipt is not None
         except BackendRejected as exc:
             logger.error(
                 _m(
