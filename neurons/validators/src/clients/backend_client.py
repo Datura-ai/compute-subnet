@@ -324,10 +324,7 @@ class BackendClient:
         stop=stop_after_attempt(3),
         wait=wait_fixed(30),
         retry=retry_if_result(lambda x: x is None),
-        # Three empty answers return None, which every caller handles. Without this tenacity raises
-        # RetryError: on 12 Oct 05:03Z a backend that stopped answering /internal/executors/rented
-        # turned it into an exception in PortConnectivityCheck, and 107 nodes of 37 miners failed
-        # that cycle as PIPELINE_VALIDATION_ERROR instead of keeping the port check's own verdict.
+        # without this, tenacity raises RetryError after the last None
         retry_error_callback=lambda retry_state: None,
     )
     async def get_all_rented_executors(self) -> RentedExecutorsResponse | None:

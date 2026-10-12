@@ -480,9 +480,9 @@ async def test_get_all_rented_executors_returns_none_after_three_empty_answers(c
     Every caller checks for None; the retried read has to give them None."""
     from tenacity import wait_none
 
-    now = AsyncMock(return_value=None)
-    with patch.object(BackendClient, "get_rented_executors_now", now):
+    rented_read_mock = AsyncMock(return_value=None)
+    with patch.object(BackendClient, "get_rented_executors_now", rented_read_mock):
         result = await BackendClient.get_all_rented_executors.retry_with(wait=wait_none())(client)
 
     assert result is None
-    assert now.await_count == 3
+    assert rented_read_mock.await_count == 3
