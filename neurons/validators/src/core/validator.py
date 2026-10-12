@@ -342,6 +342,8 @@ class Validator:
                         await self.submit_settled_window()
                         self.miner_scores = {}
                         self.live_cycle_ids = []
+                        # a live report left unacknowledged when settlement switched to enforce still goes out
+                        await self.drain_live_weights()
                     else:
                         live_scores, live_cycle_ids = self.miner_scores, self.live_cycle_ids
                         block_before = self._current_block_or_none()
@@ -1050,13 +1052,11 @@ class Validator:
 
     async def report_live_weights(self, inclusion_block: int, cycle_ids: list[str]) -> None:
         """DAH-4001: tell the backend where live weights landed and which cycles they summed, so it credits the epochs
-        they pay to those cycles instead of the last settled window. Kept in Redis before it is sent and replayed,
-        oldest first, at every later live submission until the backend takes it: a lost one misattributes epochs.
-        Never fails the tempo."""
-        payload = json.dumps({"inclusion_block": inclusion_block, "cycle_ids": cycle_ids}).encode()
+        they pay to those cycles instead of the last settled window. Kept in Redis before it is sent: a lost report
+        misattributes epochs. Never fails the tempo."""
+        report = {"inclusion_block": inclusion_block, "cycle_ids": cycle_ids}
         try:
-            await self.redis_service.lpush(UNACKED_LIVE_WEIGHTS_KEY, payload)
-            kept = list(reversed(await self.redis_service.lrange(UNACKED_LIVE_WEIGHTS_KEY)))
+            await self.redis_service.lpush(UNACKED_LIVE_WEIGHTS_KEY, json.dumps(report).encode())
         except Exception as exc:
             logger.error(
                 _m(
@@ -1064,33 +1064,48 @@ class Validator:
                     extra=get_extra_info({**self.default_extra, "inclusion_block": inclusion_block, "error": str(exc)}),
                 )
             )
-            kept = [payload]
+            await self._send_live_weights(report)
+            return
+        await self.drain_live_weights()
+
+    async def drain_live_weights(self) -> None:
+        """Send the kept live weights reports, oldest first, until one is not taken: after every tempo's submission in
+        every mode, so the first failure costs one request per tempo and never delays a submission."""
+        try:
+            kept = list(reversed(await self.redis_service.lrange(UNACKED_LIVE_WEIGHTS_KEY)))
+        except Exception as exc:
+            logger.warning(
+                _m("[settlement] could not read kept live weights reports", extra=get_extra_info({**self.default_extra, "error": str(exc)}))
+            )
+            return
         for raw in kept:
-            report = json.loads(raw)
-            try:
-                receipt = await self.backend_client.report_live_weights(report["inclusion_block"], report["cycle_ids"])
-            except BackendRejected as exc:
-                receipt = True  # the report itself is wrong: keeping it would block every later one behind it
-                logger.error(
-                    _m(
-                        "[settlement] live weights report rejected by the backend; dropped",
-                        extra=get_extra_info({**self.default_extra, "error": str(exc), **report}),
-                    )
-                )
-            except Exception as exc:
-                receipt = None
-                logger.warning(
-                    _m(
-                        "[settlement] live weights report failed; kept for the next live submission",
-                        extra=get_extra_info({**self.default_extra, "error": str(exc), "inclusion_block": report["inclusion_block"]}),
-                    )
-                )
-            if receipt is None:
+            if not await self._send_live_weights(json.loads(raw)):
                 return
             try:
                 await self.redis_service.lrem(UNACKED_LIVE_WEIGHTS_KEY, raw)
             except Exception:
                 pass
+
+    async def _send_live_weights(self, report: dict) -> bool:
+        """Whether the report is done with: taken, or rejected as wrong (keeping it would block every later one)."""
+        try:
+            return await self.backend_client.report_live_weights(report["inclusion_block"], report["cycle_ids"]) is not None
+        except BackendRejected as exc:
+            logger.error(
+                _m(
+                    "[settlement] live weights report rejected by the backend; dropped",
+                    extra=get_extra_info({**self.default_extra, "error": str(exc), **report}),
+                )
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                _m(
+                    "[settlement] live weights report failed; kept for the next tempo",
+                    extra=get_extra_info({**self.default_extra, "error": str(exc), "inclusion_block": report["inclusion_block"]}),
+                )
+            )
+            return False
 
     def _settlement_burner(self, miners) -> str | None:
         """The verified burner. A test network has none, so our own hotkey stands in; on mainnet a burner that fails

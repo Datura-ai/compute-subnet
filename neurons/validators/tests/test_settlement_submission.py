@@ -692,3 +692,23 @@ async def test_an_unacknowledged_live_weights_report_is_kept_and_sent_first_next
     validator.backend_client.report_live_weights.assert_awaited_once_with(800, ["c0"])  # oldest first, then stop
     validator.redis_service.lrem.assert_not_awaited()
 
+
+@pytest.mark.asyncio
+async def test_an_enforce_tempo_drains_live_weights_reports_left_from_before_the_switch(monkeypatch):
+    monkeypatch.setattr("core.config.settings.SETTLEMENT_MODE", "enforce")
+    monkeypatch.setattr("core.config.settings.DRY_RUN", False)
+    validator = _validator(window=WINDOW, accepted=True)
+    validator.completed_cycles_since_start = 1
+    validator.subtensor_client.get_miners = AsyncMock(return_value=[])
+    validator.subtensor_client.should_set_weights = AsyncMock(return_value=True)
+    validator.subtensor_client.get_current_block = MagicMock(side_effect=RuntimeError("stop the tick"))
+    validator.submit_settled_window = AsyncMock(return_value=True)
+    left = json.dumps({"inclusion_block": 800, "cycle_ids": ["c0"]}).encode()
+    validator.redis_service.lrange = AsyncMock(return_value=[left])
+    validator.backend_client.report_live_weights = AsyncMock(return_value=MagicMock(created=True))
+
+    await validator.sync()
+
+    validator.backend_client.report_live_weights.assert_awaited_once_with(800, ["c0"])
+    validator.redis_service.lrem.assert_awaited_once_with(UNACKED_LIVE_WEIGHTS_KEY, left)
+
