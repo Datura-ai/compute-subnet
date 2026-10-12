@@ -1,5 +1,6 @@
-import pytest
+from unittest.mock import patch
 
+import pytest
 from neurons.validators.src.services.task.checks.gpu_model_valid import GpuModelValidCheck
 from neurons.validators.src.services.task.messages import GpuModelMessages as Msg
 from protocol.vc_protocol.compute_requests import RentedExecutor, RentedExecutorsResponse, RentedPod
@@ -103,3 +104,56 @@ async def test_a_rented_node_that_lists_fewer_gpus_than_it_reports_loses_its_ver
     assert result.event.reason_code == Msg.DETAILS_MISMATCH.reason
     assert result.event.what_we_saw == {"gpu_count": 8, "details_len": 1}
     assert result.updates == {"clear_verified_job_info": True}
+
+
+MIXED_RATES = {"NVIDIA GeForce RTX 4090": 1.0, "NVIDIA GeForce RTX 5060 Ti": 0.2}
+# OD-D850: listed as "2X RTX 4090"; the renter's nvidia-smi showed a 4090 (24564MiB) and a 5060 Ti (16311MiB)
+MIXED_DETAILS = [
+    {"name": "NVIDIA GeForce RTX 4090", "uuid": "GPU-0", "capacity": 24564},
+    {"name": "NVIDIA GeForce RTX 5060 Ti", "uuid": "GPU-1", "capacity": 16311},
+]
+
+
+def _mixed_ctx(context_factory, details=MIXED_DETAILS):
+    state = build_state(specs={"gpu": {"count": len(details), "details": details}}, gpu_count=len(details), gpu_details=details)
+    return context_factory(services=build_services(), config=build_context_config(gpu_model_rates=MIXED_RATES), state=state)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enforce", [False, True])
+async def test_a_node_with_two_gpu_models_is_reported_and_refused_only_under_enforcement(enforce, context_factory):
+    with patch("neurons.validators.src.services.task.checks.gpu_model_valid.settings") as s:
+        s.MIXED_GPU_MODEL_ENFORCEMENT_ENABLED = enforce
+        result = await GpuModelValidCheck().run(_mixed_ctx(context_factory))
+
+    assert result.passed is (not enforce)
+    assert result.event.reason_code == Msg.MODEL_MIXED.reason
+    assert result.event.what_we_saw == {
+        "listed_as": "NVIDIA GeForce RTX 4090",
+        "gpu_count": 2,
+        "models": {"NVIDIA GeForce RTX 4090": 1, "NVIDIA GeForce RTX 5060 Ti": 1},
+    }
+    # a mixed node is refused like an unsupported model; its verification is left alone
+    assert result.updates.get("clear_verified_job_info", False) is False
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_node_is_refused_whichever_card_comes_first(context_factory):
+    with patch("neurons.validators.src.services.task.checks.gpu_model_valid.settings") as s:
+        s.MIXED_GPU_MODEL_ENFORCEMENT_ENABLED = True
+        result = await GpuModelValidCheck().run(_mixed_ctx(context_factory, list(reversed(MIXED_DETAILS))))
+
+    assert result.passed is False
+    assert result.event.reason_code == Msg.MODEL_MIXED.reason
+    assert result.event.what_we_saw["listed_as"] == "NVIDIA GeForce RTX 5060 Ti"
+
+
+@pytest.mark.asyncio
+async def test_same_model_cards_pass_under_enforcement(context_factory):
+    details = [dict(MIXED_DETAILS[0], uuid=f"GPU-{i}") for i in range(4)]
+    with patch("neurons.validators.src.services.task.checks.gpu_model_valid.settings") as s:
+        s.MIXED_GPU_MODEL_ENFORCEMENT_ENABLED = True
+        result = await GpuModelValidCheck().run(_mixed_ctx(context_factory, details))
+
+    assert result.passed is True
+    assert result.event.reason_code == Msg.MODEL_OK.reason

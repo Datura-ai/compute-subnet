@@ -326,6 +326,17 @@ class GpuModelMessages:
             "the node is verified again when every card is listed."
         ),
     )
+    MODEL_MIXED = MessageTemplate(
+        event="GPU models differ across cards",
+        reason="GPU_MODEL_MIXED",
+        severity="error",
+        category="policy",
+        impact="Job skipped; score set to 0",
+        remediation=(
+            "Every GPU on a node must be the same model: the node is listed and priced as its first card. "
+            "Run each GPU model as its own executor."
+        ),
+    )
     MODEL_OK = MessageTemplate(
         event="GPU model validated",
         reason="GPU_MODEL_OK",

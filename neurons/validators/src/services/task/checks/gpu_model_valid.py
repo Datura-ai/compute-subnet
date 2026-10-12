@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from collections import Counter
+
+from core.config import settings
+
 from ..messages import GpuModelMessages as Msg, render_message
 from ..pipeline import CheckResult, Context
 
@@ -17,6 +21,9 @@ class GpuModelValidCheck:
     runs before SpecChangeCheck, so the reset has to happen here; the node then leaves the market
     through the same path banned_gpu, gpu_fingerprint, duplicate_executor and spec_change use,
     rented or idle, and is verified again on the first cycle whose scrape lists every card.
+
+    A detail list naming more than one model (GPU_MODEL_MIXED) is always reported, and refused only
+    under MIXED_GPU_MODEL_ENFORCEMENT_ENABLED: the node is listed and priced as its first card.
     """
 
     check_id = "gpu.validate.model"
@@ -80,6 +87,21 @@ class GpuModelValidCheck:
                 what={"gpu_count": gpu_count, "details_len": len(gpu_details)},
             )
             return CheckResult(passed=False, event=event, updates={"clear_verified_job_info": True})
+
+        # The node is listed and priced as gpu_details[0] x gpu_count, so every card has to be that
+        # model: a renter of a "2x RTX 4090" got a 4090 and an RTX 5060 Ti (OD-D850).
+        models = Counter(detail.get("name") for detail in gpu_details)
+        if len(models) > 1:
+            enforce = settings.MIXED_GPU_MODEL_ENFORCEMENT_ENABLED
+            event = render_message(
+                Msg.MODEL_MIXED,
+                ctx=ctx,
+                check_id=self.check_id,
+                severity=None if enforce else "warning",
+                impact=None if enforce else "Shadow observation only: score was NOT changed",
+                what={"listed_as": gpu_model, "gpu_count": gpu_count, "models": dict(models)},
+            )
+            return CheckResult(passed=not enforce, event=event)
 
         event = render_message(
             Msg.MODEL_OK,
