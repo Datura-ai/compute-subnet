@@ -381,6 +381,12 @@ class Settings(BaseSettings):
     # score 0 and an availability entry (no listing, no new rentals; a live rental runs on and is
     # billed). Turn it off again once the backend lists the real composition.
     MIXED_GPU_MODEL_ENFORCEMENT_ENABLED: bool = Field(env="MIXED_GPU_MODEL_ENFORCEMENT_ENABLED", default=False)
+    # A failed GPU health check (wedged, no CUDA device, a card off the bus, a rented card that dropped
+    # or faults: availability.GPU_HEALTH_FAILURE_CODES) only zeroes the score, and the market does not
+    # filter on score, so a broken node stayed listed and rentable. On, the cycle also reports a
+    # GPU_UNHEALTHY availability entry: hidden, no new rentals, a live rental keeps running; the first
+    # healthy cycle lists it again. Off, the entry is only logged.
+    GPU_HEALTH_UNLISTABLE_ENABLED: bool = Field(env="GPU_HEALTH_UNLISTABLE_ENABLED", default=False)
     # Item 3 — run the GPU work-proof on every claimed card concurrently (own challenge per card,
     # sized from the registry SKU) and time the aggregate on the validator, so a count lie either
     # fails device selection or serialises past a wide wall-clock threshold.
