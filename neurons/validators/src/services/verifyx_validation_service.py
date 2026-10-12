@@ -766,14 +766,15 @@ def _package_fallback_stats(
     record_tally: bool = True,
 ) -> Tuple[dict, List[str]]:
     """Use the package download as the gated number when Cloudflare failed. Never feed 0.
-    `record_tally=False` (an evaluation-only judgement) leaves NETWORK_GATE_TALLY untouched."""
+    `record_tally=False` (an evaluation-only judgement) leaves NETWORK_GATE_TALLY untouched and
+    logs nothing: this warning carries no transport marker, so it would read as a live fallback."""
     if record_tally:
         NETWORK_GATE_TALLY.probe_fallback += 1
-    logger.warning(
-        "VerifyX Cloudflare probe failed; using the package download reading "
-        f"package_mbps={_format_mbps(package_speed)} "
-        f"error={network_execution.get('error', 'Unknown error')}"
-    )
+        logger.warning(
+            "VerifyX Cloudflare probe failed; using the package download reading "
+            f"package_mbps={_format_mbps(package_speed)} "
+            f"error={network_execution.get('error', 'Unknown error')}"
+        )
     success = True
     if package_speed < settings.verifyx.NETWORK_MIN_PACKAGE_DOWNLOAD_SPEED_MBPS:
         errors.append(
@@ -1058,21 +1059,23 @@ def _perform_verification_checks(payload: dict, *, record_tally: bool = True) ->
 
     if "xet_execution" in response_data:
         xet_stats, xet_errors = _verify_xet_test(challenge_data, response_data)
-        log_extra = {
-            "xet_status": xet_stats.get("status"),
-            "xet_success": xet_stats.get("success"),
-            "xet_bytes_downloaded": xet_stats.get("bytes_downloaded"),
-            "xet_speed_mbps": xet_stats.get("speed_mbps"),
-            "xet_elapsed_ms": xet_stats.get("elapsed_ms"),
-            "xet_token_fetch_ms": xet_stats.get("token_fetch_ms"),
-            "xet_hash": xet_stats.get("hash"),
-            "xet_error": xet_stats.get("error"),
-            "xet_errors": xet_errors,
-        }
-        if xet_stats.get("success"):
-            logger.info(_m("VerifyX Xet execution passed", extra=get_extra_info(log_extra)))
-        else:
-            logger.warning(_m("VerifyX Xet execution failed", extra=get_extra_info(log_extra)))
+        # Evaluation-only (record_tally=False, the liumd shadow): no unmarked Xet log either.
+        if record_tally:
+            log_extra = {
+                "xet_status": xet_stats.get("status"),
+                "xet_success": xet_stats.get("success"),
+                "xet_bytes_downloaded": xet_stats.get("bytes_downloaded"),
+                "xet_speed_mbps": xet_stats.get("speed_mbps"),
+                "xet_elapsed_ms": xet_stats.get("elapsed_ms"),
+                "xet_token_fetch_ms": xet_stats.get("token_fetch_ms"),
+                "xet_hash": xet_stats.get("hash"),
+                "xet_error": xet_stats.get("error"),
+                "xet_errors": xet_errors,
+            }
+            if xet_stats.get("success"):
+                logger.info(_m("VerifyX Xet execution passed", extra=get_extra_info(log_extra)))
+            else:
+                logger.warning(_m("VerifyX Xet execution failed", extra=get_extra_info(log_extra)))
         result["xet"] = xet_stats
 
     return result
