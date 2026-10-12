@@ -115,6 +115,7 @@ from services.rental_docker_observability import (
 )
 from services.rental_docker_sdk import (
     DEFAULT_DOCKER_PULL_TIMEOUT_SECONDS,
+    FILLER_VOLUME_LABELS,
     HOST_KILL_EXIT_CODES,
     ContainerCreateRefused,
     ContainerExecSpec,
@@ -401,6 +402,11 @@ _LOCAL_VOLUME_TIMEOUT_MAX_SEC = 180
 _FILLER_EXTERNAL_PORT_OFFSET = 20
 _LIUM_CIPHER_MOUNT = "/lium-cipher"
 _ENCRYPTED_VOLUME_IMAGE_LABEL = "lium.volume_encryption.enable"
+DOCKER_FILLER_VOLUME_LS_NAME_DRIVER_CMD = DOCKER_VOLUME_LS_NAME_DRIVER_CMD.replace(
+    "volume ls",
+    "volume ls " + " ".join(f"--filter label={key}={value}" for key, value in FILLER_VOLUME_LABELS.items()),
+    1,
+)
 # Where the gocryptfs passphrase and the script that carries it live for the second they exist
 # inside the rental container. /dev/shm is the tmpfs Docker (and sysbox) mount into every
 # container; /tmp is part of the container's writable layer, i.e. a directory on the provider's
@@ -538,6 +544,8 @@ def _best_effort_delete_step(log: _BoundLog, step: str, **fields: Any) -> Iterat
 _FRESH_SIZING_OVERHEAD_GB = 20   # reserved for system/docker overhead when reconstructing the pool
 _FRESH_SIZING_HEADROOM_GB = 10   # min free space left on the fs after volume allocation
 _FRESH_SIZING_GB_BYTES = 1024 ** 3
+# The loopback plugin backs a volume with one sparse file and ext4 caps a file at 16 TiB.
+_FRESH_SIZING_MAX_VOLUME_GB = 16 * 1024 - 1
 _VOLUME_SIZE_OPTION_RE = re.compile(r"(\d+(?:\.\d+)?)\s*([kmgt]?)b?", re.IGNORECASE)
 _VOLUME_SIZE_SUFFIX_MULTIPLIERS = {
     "": 1,
@@ -795,6 +803,9 @@ def _exception_texts(exc: Exception) -> list[str]:
 # wrote the Dockerfile, so its build output is theirs to see; the cap keeps the wire message small.
 CUSTOM_BUILD_LOG_TAIL_LINES = 25
 CUSTOM_BUILD_LOG_TAIL_MAX_CHARS = 2000
+# How many non-blank lines the node sends back. More than the renter's tail, because buildx can print a
+# Go stack trace after the ERROR line; custom_build_log_tail drops it before cutting to 25.
+CUSTOM_BUILD_LOG_SHIPPED_LINES = 200
 # The build command's own exit-code marker on stderr (`echo BUILD_FAILED_RC=$rc >&2`): the streamer's
 # failure signal, not a build line, so it never counts toward the renter's tail.
 CUSTOM_BUILD_FAILED_MARKER = "BUILD_FAILED_RC="
@@ -829,15 +840,36 @@ class CustomBuildOutcome(NamedTuple):
     log_tail: str | None
 
 
+# A Go stack trace buildx prints after its `ERROR: failed to solve: ...` line on some failures: a frame
+# (`sync.(*Once).Do`), its file (`/usr/local/go/src/sync/once.go:67`) and the `<pid> <version> <binary>` header of
+# each goroutine dump. Kept, they push the one line that names the renter's mistake out of the tail.
+_GO_STACK_FRAME_RE = re.compile(r"^[\w.\-/@*()]+:?\d*$")
+_GO_STACK_HEADER_RE = re.compile(r"^\d+ (?:v\S+ )?/\S+")
+
+
+def _is_go_stack_line(line: str) -> bool:
+    text = line.strip()
+    return bool(
+        _GO_STACK_HEADER_RE.match(text)
+        or (
+            "." in text
+            and ("/" in text or "(" in text or text.startswith("runtime."))
+            and _GO_STACK_FRAME_RE.match(text)
+        )
+    )
+
+
 def custom_build_log_tail(output: str | None) -> str | None:
     """The last CUSTOM_BUILD_LOG_TAIL_LINES non-empty lines of a build's output, cut to
     CUSTOM_BUILD_LOG_TAIL_MAX_CHARS from the end (the error is at the bottom). The BUILD_FAILED_RC=
-    marker line is dropped before the cap, so a failed build yields 25 build lines, not 24 and the
-    marker. None when there is nothing."""
+    marker line and buildx's Go stack trace are dropped before the cap, so a failed build yields 25 build lines,
+    not 24 and the marker. None when there is nothing."""
     lines = [
         line.rstrip()
         for line in (output or "").splitlines()
-        if line.strip() and not line.lstrip().startswith(CUSTOM_BUILD_FAILED_MARKER)
+        if line.strip()
+        and not line.lstrip().startswith(CUSTOM_BUILD_FAILED_MARKER)
+        and not _is_go_stack_line(line)
     ]
     if not lines:
         return None
@@ -853,7 +885,7 @@ def stream_timed_out(err: str | None) -> bool:
 def custom_build_inner_command(image_tag: str, ctx: str) -> str:
     """The `sh -c` body that runs `docker build` inside the DinD container. Build output goes to
     stdout (the streamer's success lines) and to CUSTOM_BUILD_LOG_FILE; on a non-zero exit the last
-    CUSTOM_BUILD_LOG_TAIL_LINES non-blank lines of that file go to stderr, then the
+    CUSTOM_BUILD_LOG_SHIPPED_LINES non-blank lines of that file go to stderr, then the
     BUILD_FAILED_RC=<rc> marker; the exit code is the build's (no pipefail needed: it is read
     back from CUSTOM_BUILD_RC_FILE). An rc file that cannot be written or read makes the build a
     failure (rc 1) whose tail ends with CUSTOM_BUILD_RC_UNREADABLE_REASON — never a bare `exit`
@@ -864,7 +896,7 @@ def custom_build_inner_command(image_tag: str, ctx: str) -> str:
         f"| tee {CUSTOM_BUILD_LOG_FILE}; rc=$(cat {CUSTOM_BUILD_RC_FILE} 2>/dev/null); "
         'if [ -z "$rc" ]; then rc=1; rc_lost=1; fi; '
         f'if [ "$rc" -ne 0 ]; then grep -v "^[[:space:]]*$" {CUSTOM_BUILD_LOG_FILE} '
-        f"| tail -n {CUSTOM_BUILD_LOG_TAIL_LINES} >&2; "
+        f"| tail -n {CUSTOM_BUILD_LOG_SHIPPED_LINES} >&2; "
         f'if [ -n "$rc_lost" ]; then echo "{CUSTOM_BUILD_RC_UNREADABLE_REASON}" >&2; fi; '
         f"echo {CUSTOM_BUILD_FAILED_MARKER}$rc >&2; fi; exit $rc"
     )
@@ -956,6 +988,11 @@ class _FillerRefusedForCustomerCreate(ContainerCreateRefused):
 class _FillerBesideCustomerContainer(Exception):
     """Raised by a customer create's running check: a `filler_*` on the host survived its removal, the host
     could not be listed to confirm there is none, or the removed filler's GPU power restore did not finish."""
+
+
+class _FillerRefusedBesideUnlistedPod(_FillerRefusedForCustomerCreate):
+    """Raised by a filler create that finds a `pod_*` its active_container_names do not name; the
+    backend gets #1518's refusal, the log names the pods."""
 
 
 class ImageExitedDuringKeyInjection(Exception):
@@ -1574,6 +1611,28 @@ def _refuse_filler_during_customer_create(payload: ContainerCreateRequest) -> No
     if _is_filler_create_beside_customer_create(payload):
         raise _FillerRefusedForCustomerCreate(
             f"a customer create is running on executor {payload.executor_id}; filler {payload.pod_id} not started"
+        )
+
+
+def _refuse_filler_beside_unlisted_pod(payload: ContainerCreateRequest, container_names: Iterable[str]) -> None:
+    """Stop a filler create on a host with a `pod_*` its active_container_names do not name.
+
+    The backend builds that list when it sends the filler, so an unlisted pod is a customer's that came
+    after it (a late or retried send, a lapsed create lock, a second connector), or one of an ended
+    rental. Running or exited alike: the filler does not remove it and is not started beside it. A pod
+    created after the last listing, before `start`, is not seen here: that window is the customer
+    side's to close. The validator's stale-container reaper removes a pod the backend no longer
+    lists. Refused like #1518 (no strike).
+    """
+    if payload.workload_kind != WorkloadKind.FILLER:
+        return
+    listed = set(payload.active_container_names or [])
+    listed |= {f"{name}{EDIT_PARKED_SUFFIX}" for name in listed}
+    unlisted = sorted({name for name in container_names if name.startswith(POD_CONTAINER_PREFIX)} - listed)
+    if unlisted:
+        raise _FillerRefusedBesideUnlistedPod(
+            f"pod containers the filler was not told of are on executor {payload.executor_id}: "
+            f"{', '.join(unlisted)}; filler {payload.pod_id} not started"
         )
 
 
@@ -2219,7 +2278,7 @@ class DockerService:
         """`docker run` through the SDK with the same-command retry on known Docker races.
 
         Returns the container's ID, or None when the client gave none. A ContainerCreateRefused of
-        the spec's `before_create` (checked before every attempt) is raised as is.
+        the spec's `before_create` or `before_start` (checked on every attempt) is raised as is.
 
         Port collision (PORT_COLLISION_RETRY_ENABLED): when dockerd refuses the bind of a host port
         and `port_maps` / `spare_port_pairs` are given, the colliding mapping moves to the next
@@ -2588,6 +2647,12 @@ class DockerService:
             entrypoint=custom_options.entrypoint,
             network=RENTAL_NETWORK_NAME,
             before_create=lambda: _refuse_filler_during_customer_create(payload),
+            # a customer pod created since the cleanup's listing is seen here, before the filler starts
+            before_start=(
+                (lambda names: _refuse_filler_beside_unlisted_pod(payload, names))
+                if payload.workload_kind == WorkloadKind.FILLER
+                else None
+            ),
         )
 
     async def _ensure_pod_quote_socket(
@@ -3614,10 +3679,14 @@ class DockerService:
         remove_every_filler: bool = False,
         report: ContainerCleanupReport | None = None,
         removed_at_ssh_connect: dict[str, str] | None = None,
+        refuse_before_removal: Callable[[list[str]], None] | None = None,
     ) -> list[str]:
         """Force-remove stale pod_/filler_ containers (and their volumes); returns the names removed.
 
         DAH-3257: ``host_probe`` supplies the `docker ps -a` listing; the removals still run here.
+
+        ``refuse_before_removal`` gets the listing's names before anything is removed and may raise to
+        stop the create there (a filler create on a host with a pod it was not told of).
 
         DAH-3980: ``removed_at_ssh_connect`` holds the fillers `remove_fillers_at_ssh_connect` already
         removed (or tried to), each with the ID it was listed under: the listing may predate that
@@ -3642,6 +3711,8 @@ class DockerService:
             result = await ssh_client.run(DOCKER_PS_ALL_NAMES_IDS_CMD)
             names, listed_ids = parse_container_listing((result.stdout or "").splitlines())
             all_names = list(names)
+        if refuse_before_removal is not None:
+            refuse_before_removal(all_names)
         if all_names:
             # Optional pre-GC delay (default 0). DAH-1524 removed the 10s
             # deploy-path sleep; the port-race it hedged is now covered by
@@ -4020,8 +4091,11 @@ class DockerService:
         default_extra: dict,
         skip_volume_names: list[str] | set[str] | None = None,
         host_probe: PrerunHostProbe | None = None,
+        filler_volumes_only: bool = False,
     ) -> list[str]:
         """Remove vloopback `volume_*` volumes no container mounts (minus ``skip_volume_names``).
+
+        ``filler_volumes_only`` limits it to volumes a filler create labelled (FILLER_VOLUME_LABELS).
 
         Returns the volumes it asked docker to remove (empty when nothing was stale or the listing
         failed). DAH-3257: ``host_probe`` supplies the volume and mounted-volume listings; the
@@ -4030,6 +4104,10 @@ class DockerService:
         """
         skip_set = {name for name in (skip_volume_names or []) if name}
         list_volumes_cmd = DOCKER_VOLUME_LS_NAME_DRIVER_CMD
+        if filler_volumes_only:
+            # the host probe's volume listing carries no labels
+            host_probe = None if host_probe is None else dataclasses.replace(host_probe, volumes=None)
+            list_volumes_cmd = DOCKER_FILLER_VOLUME_LS_NAME_DRIVER_CMD
         mounted_volumes_cmd = DOCKER_MOUNTED_VOLUME_NAMES_CMD
 
         try:
@@ -5604,6 +5682,7 @@ class DockerService:
         timeout: int = 10,
         sparse: bool = False,
         host_probe: VolumeHostProbe | None = None,
+        labels: dict[str, str] | None = None,
     ):
         requested_timeout = timeout
         _quote_safe_docker_volume_name(
@@ -5687,6 +5766,7 @@ class DockerService:
                 driver=volume_driver,
                 driver_opts=volume_driver_opts,
                 timeout=timeout,
+                labels=labels,
             ),
             volume_name=local_volume,
             volume_driver=volume_driver,
@@ -5918,6 +5998,9 @@ class DockerService:
         # the min-size check so the check runs against the final value.
         volume_limit_gb = max(math.floor(slice_bytes * 2 / 3 / _FRESH_SIZING_GB_BYTES), 1)
         storage_limit_gb = max(math.floor(slice_bytes / 3 / _FRESH_SIZING_GB_BYTES), 1)
+        if volume_limit_gb > _FRESH_SIZING_MAX_VOLUME_GB:
+            volume_limit_gb = _FRESH_SIZING_MAX_VOLUME_GB
+            capped_by = "max_file_size"
 
         if payload.min_volume_gb is not None and volume_limit_gb < payload.min_volume_gb:
             logger.error(
@@ -7722,6 +7805,7 @@ class DockerService:
                     remove_every_filler=payload.workload_kind == WorkloadKind.CUSTOMER_RENTAL,
                     report=cleanup_report,
                     removed_at_ssh_connect=fillers_removed_at_ssh_connect.listed_id_by_filler_name,
+                    refuse_before_removal=lambda names: _refuse_filler_beside_unlisted_pod(payload, names),
                 )
                 # DAH-3980: removing only fillers (confirmed gone, their volumes left to the backend's
                 # filler delete) changes no listing but the containers and their mounts, so the listings
@@ -7746,11 +7830,14 @@ class DockerService:
                         [f"volume_{name.removeprefix(FILLER_CONTAINER_PREFIX)}" for name in removed_containers],
                     )
 
+                # A filler sweeps filler volumes only: a customer's fresh volume is unmounted until its
+                # `docker run`, and a lapsed create lock or a second connector would let a filler remove it.
                 removed_vloopback_volumes = await self.clean_stale_vloopback_volumes(
                     ssh_client=ssh_client,
                     default_extra=default_extra,
                     skip_volume_names=protected_volume_names,
                     host_probe=docker_listing_probe,
+                    filler_volumes_only=payload.workload_kind == WorkloadKind.FILLER,
                 )
                 if removed_vloopback_volumes:
                     docker_listing_probe = None
@@ -7946,6 +8033,7 @@ class DockerService:
                         limit=effective_volume_limit_gb,
                         sparse=full_node_rental,
                         host_probe=volume_probe,
+                        labels=FILLER_VOLUME_LABELS if payload.workload_kind == WorkloadKind.FILLER else None,
                     )
                     created_local_volume = True
 
@@ -8274,7 +8362,8 @@ class DockerService:
                         # lock lapsed), before its start or before the running-state check, is that
                         # refusal, not a filler fault: not ContainerVanished, counted against the host.
                         container_vanished = False
-                        _refuse_filler_during_customer_create(payload)
+                        if not isinstance(docker_run_error, _FillerRefusedBesideUnlistedPod):
+                            _refuse_filler_during_customer_create(payload)
                     raise
 
                 # Add profiler for the post-run container running-state poll
@@ -8686,6 +8775,13 @@ class DockerService:
                             "reason": "cancelled_by_delete",
                             "failure_step": current_step,
                         }),
+                    )
+                )
+            elif isinstance(e, _FillerRefusedBesideUnlistedPod):
+                logger.info(
+                    _m(
+                        "filler create refused: unlisted pod_* on the node",
+                        extra=get_extra_info({**default_extra, "reason": "unlisted_pod_on_node", "error": str(e)}),
                     )
                 )
             elif isinstance(e, _FillerRefusedForCustomerCreate):
