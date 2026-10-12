@@ -1,6 +1,6 @@
 # Installing `liumd` in the executor image
 
-Follows lium-io#1494, which adds the host files and the validator's shadow but ships no binary.
+Design for the step after this change: lium-io#1494 adds the host files and the validator's shadow but ships no binary.
 
 ## Why the binary is not committed
 
@@ -23,6 +23,6 @@ from a pinned source commit in a multi-stage build. The install therefore verifi
 ## To do before the install lands
 
 - Create the release key and the signing step in the companion's CI (none exists yet).
-- Restore `neurons/validators/tests/test_liumd_exec_e2e.py` from lium-io#1494 history
+- Restore `neurons/validators/tests/test_liumd_exec_e2e.py` from this branch's history
   (`4929da826:neurons/validators/tests/test_liumd_exec_e2e.py`); it runs the real binary and
   skips when it is absent.
