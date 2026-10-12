@@ -16,7 +16,7 @@ from clients.backend_client import (
 )
 from clients.subtensor_client import fold_unregistered_into_burner, scored_registered_neurons
 from core.settlement import cycle_node_shares, share_moved, tempo_index
-from core.validator import PENDING_INCLUSION_KEY, UNACKED_CYCLE_REPORTS_MAX, Validator
+from core.validator import PENDING_INCLUSION_KEY, UNACKED_CYCLE_REPORTS_MAX, UNACKED_LIVE_WEIGHTS_KEY, Validator
 from incentive.burn_service import verified_burner_hotkey
 
 WINDOW = SettledWeights(
@@ -36,6 +36,7 @@ def _validator(*, window: SettledWeights | None, accepted: bool) -> Validator:
     validator.default_extra = {}
     validator.active_hotkeys = set()
     validator.miner_scores = {"hk": 0.5, "burn": 0.5}
+    validator.live_cycle_ids = ["c1"]
     validator._unacknowledged_inclusions = {}
     validator.backend_client = MagicMock(
         get_settled_weights=AsyncMock(return_value=window),
@@ -161,10 +162,10 @@ async def test_a_failing_shadow_comparison_never_skips_the_live_weights(monkeypa
     await validator.sync()
 
     validator.subtensor_client.set_weights.assert_awaited_once_with(
-        miner_scores={"hk": 0.5, "burn": 0.5}, active_hotkeys=set()
+        miner_scores={"hk": 0.5, "burn": 0.5}, active_hotkeys=set(), wait_for_inclusion=True
     )
     validator.backend_client.get_settled_weights.assert_not_awaited()
-    assert validator.miner_scores == {}
+    assert (validator.miner_scores, validator.live_cycle_ids) == ({}, [])
 
 
 class RedisList:
@@ -662,3 +663,32 @@ async def test_an_inclusion_redis_never_kept_still_holds_the_next_window_back():
 def test_only_a_wrong_request_is_dropped_a_bad_moment_is_retried():
     assert DEFINITIVE_REJECTIONS == (400, 404, 422)
     assert 403 not in DEFINITIVE_REJECTIONS and 429 not in DEFINITIVE_REJECTIONS
+
+
+@pytest.mark.asyncio
+async def test_live_weights_are_reported_with_their_cycles_and_dropped_from_redis_once_acknowledged():
+    validator = _validator(window=None, accepted=True)
+    kept = json.dumps({"inclusion_block": 900, "cycle_ids": ["c1", "c2"]}).encode()
+    validator.redis_service.lrange = AsyncMock(return_value=[kept])
+    validator.backend_client.report_live_weights = AsyncMock(return_value=MagicMock(created=True))
+
+    await validator.report_live_weights(900, ["c1", "c2"])
+
+    validator.redis_service.lpush.assert_awaited_once_with(UNACKED_LIVE_WEIGHTS_KEY, kept)
+    validator.backend_client.report_live_weights.assert_awaited_once_with(900, ["c1", "c2"])
+    validator.redis_service.lrem.assert_awaited_once_with(UNACKED_LIVE_WEIGHTS_KEY, kept)
+
+
+@pytest.mark.asyncio
+async def test_an_unacknowledged_live_weights_report_is_kept_and_sent_first_next_time():
+    validator = _validator(window=None, accepted=True)
+    older = json.dumps({"inclusion_block": 800, "cycle_ids": ["c0"]}).encode()
+    newer = json.dumps({"inclusion_block": 900, "cycle_ids": ["c1"]}).encode()
+    validator.redis_service.lrange = AsyncMock(return_value=[newer, older])  # lpush order: newest first
+    validator.backend_client.report_live_weights = AsyncMock(return_value=None)  # backend down
+
+    await validator.report_live_weights(900, ["c1"])
+
+    validator.backend_client.report_live_weights.assert_awaited_once_with(800, ["c0"])  # oldest first, then stop
+    validator.redis_service.lrem.assert_not_awaited()
+
