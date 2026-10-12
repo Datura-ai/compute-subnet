@@ -89,7 +89,7 @@ install_system_packages() {
         "apk")
             echo "Installing packages with apk (Alpine)..."
             apk update
-            apk add --no-cache python3 python3-dev python3-pip py3-pip build-base linux-headers gcc g++ make bash
+            apk add --no-cache python3 python3-dev py3-pip build-base linux-headers gcc g++ make bash
             ;;
         "apt")
             echo "Installing packages with apt (Ubuntu/Debian)..."
