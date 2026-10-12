@@ -44,7 +44,10 @@ from services.redis_service import (
 )
 from protocol.vc_protocol.compute_requests import RentedExecutorsResponse
 from services.pod_ssh_probe import attach_pod_ssh, pod_ssh_only_results, probe_rented_pods
-from services.task.availability import silence_availability_errors_on_our_own_outage
+from services.task.availability import (
+    silence_availability_errors_on_our_own_outage,
+    silence_gpu_health_errors_on_our_own_fault,
+)
 from services.task.checks.duplicate_executor import keep_one_miner_per_executor
 from services.task.checks.verifyx import MIN_VERIFYX_EMA_DOWNLOAD_SPEED_MBPS
 from services.task_service import JobResult, TaskService
@@ -723,6 +726,14 @@ class Validator:
                             _m(
                                 "[sync] Most of the cycle could not be reached; reporting no availability errors",
                                 extra={"silenced_results": silenced_count},
+                            )
+                        )
+                    silenced_gpu_count = silence_gpu_health_errors_on_our_own_fault(cycle_results)
+                    if silenced_gpu_count:
+                        logger.error(
+                            _m(
+                                "[sync] Most of the cycle failed a GPU health check; reporting no GPU_UNHEALTHY",
+                                extra={"silenced_results": silenced_gpu_count},
                             )
                         )
 

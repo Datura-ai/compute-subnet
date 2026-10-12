@@ -36,6 +36,9 @@ class ReachTarget(StrEnum):
     # new rentals while leaving `active` (a live renter's billing) alone, and the next cycle that
     # does not raise it lists the node again.
     GPU_INVENTORY = "gpu_inventory"
+    # Not a reachability failure either: a GPU on a node the validator reached failed a health
+    # check (wedged, no CUDA device, a card off the bus, a rented card that dropped or faults).
+    GPU_HEALTH = "gpu_health"
 
 
 # The longest peer-supplied text a reading may keep: the node writes it, the portal shows it.
@@ -54,6 +57,27 @@ class AvailabilityErrorCode(StrEnum):
     EXECUTOR_SSH_UNREACHABLE = "EXECUTOR_SSH_UNREACHABLE"
     # DAH-3558: the backend lists the executor as rented, the miner answered the wave without it.
     RENTED_EXECUTOR_NOT_LISTED = "RENTED_EXECUTOR_NOT_LISTED"
+    # A GPU failed a health check this cycle; the node must not take a new rental on it.
+    GPU_UNHEALTHY = "GPU_UNHEALTHY"
+
+
+# The failures that mean a card on the node is broken, not that a check could not run. A timeout,
+# a skipped check or an UNKNOWN verdict is not here: it says nothing about the card.
+GPU_HEALTH_FAILURE_CODES = frozenset(
+    {
+        "GPU_COUNT_ZERO",
+        "GPU_DETAILS_MISMATCH",  # the scrape lists fewer cards than the node reports
+        "GPU_MISSING",  # an anchored card is gone
+        "GPU_WEDGED",  # 100% utilisation with no process, and the cure did not clear it
+        "GPU_VERIFY_FAILED",
+        "GPU_VERIFY_CUDA_NOT_READY",
+        "GPU_VERIFY_NO_CUDA_DEVICE",
+        "GPU_VERIFY_VRAM_UNAVAILABLE",
+        "GPU_FAULT_PROBE_FAILED",  # ECC, remapped rows, Xid (GPU_FAULT_PROBE_CHECK_ENABLED)
+        "RENTED_GPU_DROP",  # a rented card left the bus (RENTED_GPU_DROP_CHECK_ENABLED)
+        "RENTED_GPU_HEALTH_SHADOW_FAULT",  # the NVML/Xid read on a rented node (lium-io#1552)
+    }
+)
 
 
 def build_availability_event(
@@ -207,7 +231,7 @@ def _is_the_validators_own_reading(job_result: JobResult) -> bool:
 
 # Entries that are a reading of a node the validator did reach, not a failed connect: they say
 # nothing about our egress, DNS or keys, so they do not count toward the outage share.
-NOT_A_CONNECT_TARGETS = frozenset({ReachTarget.GPU_INVENTORY})
+NOT_A_CONNECT_TARGETS = frozenset({ReachTarget.GPU_INVENTORY, ReachTarget.GPU_HEALTH})
 
 
 def _failed_to_connect(job_result: JobResult) -> bool:
@@ -229,3 +253,60 @@ def silence_availability_errors_on_our_own_outage(job_results: list[JobResult]) 
         # None means "this cycle did not check": the backend leaves the stored errors alone.
         result.availability_errors = None
     return len(checked_results)
+
+
+def build_gpu_unhealthy_event(failure: ValidationEvent) -> ValidationEvent:
+    """The availability entry for a node whose GPU failed a health check this cycle.
+
+    A failed GPU check alone only zeroes the score, and the market does not filter on score, so a
+    wedged or faulting node stayed listed and was rented again. The entry hides it and refuses
+    new rentals; a rental already on it keeps running. The first cycle that finds every card
+    healthy reports no entry, and the node is listed again.
+    """
+    return build_availability_event(
+        code=AvailabilityErrorCode.GPU_UNHEALTHY,
+        reach_source=ReachSource.VALIDATOR,
+        reach_target=ReachTarget.GPU_HEALTH,
+        event_text="A GPU on this node failed a health check",
+        impact=(
+            "The node is hidden from the market and cannot take new rentals until a check finds every "
+            "GPU healthy. A rental already on it keeps running."
+        ),
+        remediation=failure.remediation
+        or "Check nvidia-smi and the kernel log (dmesg) for Xid errors, then reset or replace the card.",
+        what_we_saw={
+            "failed_check": failure.reason_code,
+            "failure": failure.event[:MAX_PEER_TEXT_LENGTH],
+        },
+    )
+
+
+def gpu_health_events(events: list[ValidationEvent] | None) -> list[ValidationEvent]:
+    """The GPU_UNHEALTHY entry for this cycle's first GPU health failure, or none."""
+    for event in events or []:
+        if event.reason_code in GPU_HEALTH_FAILURE_CODES:
+            return [build_gpu_unhealthy_event(event)]
+    return []
+
+
+def _is_gpu_health_entry(error: dict) -> bool:
+    return error.get("reach_target") == ReachTarget.GPU_HEALTH
+
+
+def silence_gpu_health_errors_on_our_own_fault(job_results: list[JobResult]) -> int:
+    """Drop the GPU_UNHEALTHY entries of a cycle where most nodes failed a GPU check.
+
+    Most of the fleet breaking its GPUs in one cycle is a validator fault (a bad probe, a broken
+    image), and hiding the whole market over it is worse than listing a bad node for one more
+    cycle. A result left with no entry reports None, so the backend keeps what it stored.
+    """
+    checked_results = [result for result in job_results if result.availability_errors is not None]
+    unhealthy_results = [
+        result for result in checked_results if any(_is_gpu_health_entry(error) for error in result.availability_errors)
+    ]
+    if not is_our_own_outage(len(unhealthy_results), len(checked_results)):
+        return 0
+    for result in unhealthy_results:
+        kept = [error for error in result.availability_errors if not _is_gpu_health_entry(error)]
+        result.availability_errors = kept or None
+    return len(unhealthy_results)

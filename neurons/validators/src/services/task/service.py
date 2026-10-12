@@ -22,7 +22,7 @@ from core.config import settings
 from core.utils import _m, get_extra_info
 from services.ssh_service import SSHService
 
-from .availability import MAX_PEER_TEXT_LENGTH, availability_errors, build_ssh_unreachable_event
+from .availability import MAX_PEER_TEXT_LENGTH, availability_errors, build_ssh_unreachable_event, gpu_health_events
 from .messages import REASON_CODE_DOCS_URL, TenantEnforcementMessages
 from .models import JobResult, ValidationEvent, build_msg
 from .pipeline import PodRecoverer
@@ -242,8 +242,23 @@ class TaskService:
                 result.ssh_host_key_verified = known_hosts_policy is not None
                 # DAH-2748: any check that could not reach something hides the node. The whole
                 # event list is read, so a new reachability check needs no change here.
+                # A broken GPU hides the node too (GPU_HEALTH_UNLISTABLE_ENABLED); off, it is only logged.
+                gpu_events = gpu_health_events(events)
+                if gpu_events and not settings.GPU_HEALTH_UNLISTABLE_ENABLED:
+                    logger.warning(
+                        _m(
+                            "GPU health failure would hide this node (GPU_HEALTH_UNLISTABLE_ENABLED is off)",
+                            extra=get_extra_info({
+                                "job_batch_id": miner_info.job_batch_id,
+                                "miner_hotkey": miner_info.miner_hotkey,
+                                "executor_uuid": executor_info.uuid,
+                                **gpu_events[0].what_we_saw,
+                            }),
+                        )
+                    )
+                    gpu_events = []
                 result.availability_errors = [
-                    error.model_dump(mode="json") for error in availability_errors(events)
+                    error.model_dump(mode="json") for error in availability_errors(events + gpu_events)
                 ]
                 # DAH-3405: the last event is the one that ended the run — the failed fatal check,
                 # the finalize event of a run that completed without a score, or the rented halt
