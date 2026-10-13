@@ -12,6 +12,13 @@ set -eu
 # running) has nothing to break and skips the probe.
 running_executor=$(docker compose ps --quiet executor 2>/dev/null || true)
 if [ -n "$running_executor" ]; then
+    # `timeout` stops only the docker client: a hung probe container outlives it, and every retry would add one.
+    leftovers=$(docker ps --all --quiet --filter label=io.lium.executor-runner.probe=nvidia-runtime 2>/dev/null || true)
+    if [ -n "$leftovers" ] && ! docker rm --force $leftovers >/dev/null 2>&1; then
+        echo "Update held, running executor kept: a GPU probe container from an earlier try cannot be removed ($(echo $leftovers)); reboot the host once no renter is on it. Retrying in ${RUNNER_PROBE_RETRY_SECONDS:-300}s."
+        sleep "${RUNNER_PROBE_RETRY_SECONDS:-300}"
+        exit 1
+    fi
     probe_image=$(docker inspect --format '{{.Image}}' "$running_executor" 2>/dev/null || true)
     if [ -n "$probe_image" ] && ! probe_error=$(timeout "${RUNNER_PROBE_TIMEOUT_SECONDS:-120}" docker run --rm --gpus all --label io.lium.executor-runner.probe=nvidia-runtime --entrypoint true "$probe_image" 2>&1); then
         case "$probe_error" in

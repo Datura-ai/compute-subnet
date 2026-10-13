@@ -25,6 +25,8 @@ DOCKER_STUB = textwrap.dedent(
         "compose logs") exit 0 ;;
         "compose up") exit 0 ;;
         "inspect --format") echo "sha256:executorimage" ;;
+        "ps --all") echo "${STUB_PROBE_LEFTOVERS:-}" ;;
+        "rm --force") exit "${STUB_RM_EXIT:-0}" ;;
         "run --rm")
             [ -n "${STUB_PROBE_HANG:-}" ] && exec "$STUB_PROBE_HANG" 30
             [ -z "${STUB_PROBE_ERROR:-}" ] && exit 0
@@ -114,3 +116,21 @@ def test_a_hanging_probe_holds_the_update(tmp_path):
 
     assert "Update held, running executor kept" in result.stdout
     assert not recreated(calls)
+
+
+def test_leftover_probe_containers_are_removed_before_probing(tmp_path):
+    result, calls = run_entrypoint(tmp_path, STUB_RUNNING_EXECUTOR="abc123", STUB_PROBE_LEFTOVERS="dead1\ndead2")
+
+    removal = calls.index("rm --force dead1 dead2")
+    probe = next(i for i, c in enumerate(calls) if c.startswith("run --rm"))
+    assert removal < probe
+    assert recreated(calls)
+
+
+def test_a_leftover_probe_that_cannot_be_removed_holds_the_update(tmp_path):
+    result, calls = run_entrypoint(tmp_path, STUB_RUNNING_EXECUTOR="abc123", STUB_PROBE_LEFTOVERS="dead1", STUB_RM_EXIT="1")
+
+    assert not any(c.startswith("run ") for c in calls)
+    assert not recreated(calls)
+    assert "cannot be removed (dead1)" in result.stdout
+    assert "sleep 300" in calls
