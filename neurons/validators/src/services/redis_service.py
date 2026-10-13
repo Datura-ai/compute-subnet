@@ -605,6 +605,8 @@ class RedisService:
         prev_uuids = prev_info.get(GPU_ANCHOR_KEY, '')
 
         if (success):
+            if prev_info.get(LEGACY_FALLBACK_KEY) and not has_gpu_anchor(uuids):
+                return  # a borrowed anchor moves only to a hotkey whose own scrape listed a UUID
             count += 1
         else:
             if prev_info.get(LEGACY_FALLBACK_KEY):

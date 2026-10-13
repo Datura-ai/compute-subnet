@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from core.config import settings
-from services.redis_service import GPU_ANCHOR_BROKEN_KEY, GPU_ANCHOR_KEY, split_uuids
+from services.redis_service import GPU_ANCHOR_BROKEN_KEY, GPU_ANCHOR_KEY, LEGACY_FALLBACK_KEY, split_uuids
 
 from ..messages import GpuFingerprintMessages as Msg, render_message
 from ..pipeline import CheckResult, Context
@@ -41,6 +41,10 @@ class GpuFingerprintCheck:
     Both sets are compared as distinct UUIDs. A scrape that lists one anchored card twice matches the anchor
     (`duplicate_uuid: true` on the event, one warning in the log). A scrape with zero cards passes this check
     and leaves the anchor unchanged. Neither is read as a set change.
+
+    An empty current set is compared as a mismatch (it never skips the comparison) when the scrape is
+    malformed (blank or comma-only UUIDs) or the anchor is not this hotkey's own record (uuid-only or another
+    hotkey's): otherwise a success would copy that anchor into this hotkey's record with no GPU matched.
     """
 
     check_id = "gpu.validate.fingerprint"
@@ -76,7 +80,9 @@ class GpuFingerprintCheck:
             )
         seen = {"duplicate_uuid": True} if duplicated else {}
 
-        if anchor and current and anchor != current:
+        malformed = bool(current_uuids) and not current  # the scrape listed cards, none with a UUID
+        unowned = bool(verified.get(LEGACY_FALLBACK_KEY))
+        if anchor and (current or malformed or unowned) and anchor != current:
             missing = sorted(set(anchor) - set(current))
             unexpected = sorted(set(current) - set(anchor))
             # Sets decide: only cards missing = GPU_MISSING; any card outside the anchor = broken.

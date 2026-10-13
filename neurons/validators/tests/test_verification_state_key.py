@@ -186,6 +186,43 @@ async def test_empty_uuid_only_record_does_not_hide_an_indexed_foreign_anchor(co
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("current", [" ", "", ","], ids=["space", "empty", "comma"])
+async def test_blank_current_uuids_fail_against_a_foreign_anchor_and_write_nothing(context_factory, current):
+    service = _redis_service()
+    assert await _cycle(service, context_factory, hotkey=HOTKEY_A, uuids="gpu-001")
+
+    ok = await _cycle(service, context_factory, hotkey=HOTKEY_B, uuids=current)
+
+    assert ok is False
+    assert await _field(service, verified_job_field(HOTKEY_B, EXECUTOR)) is None
+    assert await service.redis.hget(VERIFIED_JOB_ANCHOR_HOTKEY_KEY, EXECUTOR) == HOTKEY_A.encode()
+
+
+@pytest.mark.asyncio
+async def test_anchor_owner_with_a_real_uuid_still_passes(context_factory):
+    service = _redis_service()
+    assert await _cycle(service, context_factory, hotkey=HOTKEY_A, uuids="gpu-001")
+    assert await _cycle(service, context_factory, hotkey=HOTKEY_B, uuids=" ") is False
+
+    ok = await _cycle(service, context_factory, hotkey=HOTKEY_A, uuids="gpu-001")
+
+    assert ok is True
+    assert (await _field(service, verified_job_field(HOTKEY_A, EXECUTOR)))["count"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("current", [" ", "", ","], ids=["space", "empty", "comma"])
+async def test_success_writer_never_copies_a_borrowed_anchor_for_a_blank_scrape(current):
+    service = _redis_service()
+    await service.set_verified_job_info(HOTKEY_A, EXECUTOR, prev_info={}, uuids="gpu-001")
+    verified = await service.get_verified_job_info(EXECUTOR, HOTKEY_B)
+
+    await service.set_verified_job_info(HOTKEY_B, EXECUTOR, prev_info=verified, success=True, uuids=current)
+
+    assert await _field(service, verified_job_field(HOTKEY_B, EXECUTOR)) is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("own_uuids", "expected"),
     [("", "gpu-001"), (",", "gpu-001"), (" , ", "gpu-001"), ("a,,", "a,,")],

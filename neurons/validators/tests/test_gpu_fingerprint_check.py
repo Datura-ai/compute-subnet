@@ -170,6 +170,35 @@ async def test_a_scrape_with_zero_cards_leaves_the_anchor_alone(hard, context_fa
     assert result.updates == {}
 
 
+@pytest.mark.parametrize("current_uuids", [" ", ",", " , "])
+@pytest.mark.parametrize("hard", [False, True])
+@pytest.mark.asyncio
+async def test_a_blank_or_comma_only_scrape_is_a_mismatch_not_a_skip(current_uuids, hard, context_factory):
+    """Regression (#1483 review): blank UUIDs parse to no cards and skip the comparison, so the check passes."""
+    result = await _run(context_factory, hard=hard, prev_uuids="gpu-001", current_uuids=current_uuids)
+
+    assert result.passed is False
+    assert result.event.reason_code == (Msg.GPU_MISSING if hard else Msg.UUID_CHANGED).reason
+    assert result.event.what_we_saw["missing"] == ["gpu-001"]
+    assert result.updates == {"clear_verified_job_info": True}
+
+
+@pytest.mark.parametrize("current_uuids", ["", " "])
+@pytest.mark.parametrize("hard", [False, True])
+@pytest.mark.asyncio
+async def test_an_empty_scrape_fails_against_an_anchor_this_hotkey_does_not_own(current_uuids, hard, context_factory):
+    """Regression (#1483 review): an empty scrape passes against another hotkey's anchor and the success
+    write copies that anchor into this hotkey's record."""
+    ctx = _ctx(context_factory, prev_uuids="gpu-001", current_uuids=current_uuids)
+    ctx.verified.update({"legacy_fallback": True, "foreign_fallback": True})
+    with patch(SETTINGS) as s:
+        s.GPU_ANCHOR_HARD_ENABLED = hard
+        result = await GpuFingerprintCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.event.what_we_saw["missing"] == ["gpu-001"]
+
+
 @pytest.mark.parametrize("current_uuids", ["gpu-001,gpu-002", "gpu-003", ""])
 @pytest.mark.asyncio
 async def test_hard_mode_a_broken_record_fails_before_the_sets_are_compared(current_uuids, context_factory):
