@@ -1,9 +1,9 @@
 from unittest.mock import patch
 
 import pytest
+from neurons.validators.src.services.const import GPU_MODEL_RATES
 from neurons.validators.src.services.task.availability import availability_errors
 from neurons.validators.src.services.task.checks.gpu_model_valid import GpuModelValidCheck
-from neurons.validators.src.services.const import GPU_MODEL_RATES
 from neurons.validators.src.services.task.messages import GpuModelMessages as Msg
 from protocol.vc_protocol.compute_requests import RentedExecutor, RentedExecutorsResponse, RentedPod
 
