@@ -237,6 +237,8 @@ class Context(BaseModel):
     contract_version: str | None = None
     is_rental_succeed: bool = False
     rented: bool = False
+    # DAH-4219: UUIDs of the cards the rented pods hold, read only on a mixed-GPU node; None = unknown
+    rented_gpu_uuids: list[str] | None = None
     renting_in_progress: bool = False
     ssh_pub_keys: list[str] | None = None
     port_count: int = 0

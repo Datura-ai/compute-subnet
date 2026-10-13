@@ -3,14 +3,22 @@
 Before, incentive keyed on the first card: 1x H200 + 7 cheap cards earned as 8x H200.
 """
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from constants import TOTAL_BURN_EMISSION
 from core.validator import settle_cycle_results
 from incentive import base as incentive_base
+from incentive.base import BaseIncentive
 from incentive.default import DefaultIncentive
+from protocol.vc_protocol.compute_requests import RentedPod
+from services.task.checks.rented_machine import (
+    _gpu_uuids_of_device_requests,
+    _read_rented_gpu_uuids_of_mixed_node,
+)
 
+from core.config import settings
 from tests.test_incentive_flow import _run_sync_with_jobs
 from tests.test_rental_price_incentive_flow import (  # noqa: F401 - fixtures
     _make_rented_data,
@@ -169,3 +177,140 @@ async def test_rental_price_pays_an_idle_mixed_node_like_its_cards_on_separate_n
     assert paid_mixed["miner_b"] == pytest.approx(validator.miner_scores["miner_b"])
     assert mixed_node.incentive_idle > 0 and mixed_node.incentive_rented == 0
     assert (mixed_node.gpu_model, mixed_node.gpu_count) == ("H200", 2)
+
+
+def _split_node(create_job_result, cards: list[str], *, rented_count: int, rented_uuids: list[str] | None):
+    result = create_job_result(gpu_model=cards[0], gpu_count=len(cards))
+    result.spec = {
+        "gpu": {"count": len(cards), "details": [{"name": name, "uuid": f"GPU-{i}"} for i, name in enumerate(cards)]}
+    }
+    result.is_rented = True
+    result.supports_gpu_splitting = True
+    result.gpu_splitting_min_count = 1
+    result.rented_gpu_count = rented_count
+    result.rented_gpu_uuids = rented_uuids
+    return result
+
+
+def _cards(portions):
+    return [(p.gpu_model, p.gpu_count, p.is_rented) for p in portions]
+
+
+@pytest.fixture
+def split_scoring_on(monkeypatch):
+    monkeypatch.setattr(settings, "ENABLE_SPLIT_PARTIAL_RENTAL_SCORING", True)
+
+
+def test_a_partly_rented_mixed_node_pays_the_rented_pool_for_the_pods_cards_only(create_job_result, split_scoring_on):
+    """Owner decision on #1580: the rented pool pays the cards the pods hold; the free ones are idle."""
+    node = _split_node(create_job_result, [H200, H200, RTX4090, RTX4090], rented_count=2, rented_uuids=["GPU-1", "GPU-2"])
+
+    assert _cards(BaseIncentive._portion_cards(node, node.gpu_model_counts)) == [
+        (H200, 1, True),
+        (H200, 1, False),
+        (RTX4090, 1, True),
+        (RTX4090, 1, False),
+    ]
+
+
+def test_unknown_pod_cards_pay_the_cheapest_cards_rented_and_nothing_idle(create_job_result, split_scoring_on):
+    node = _split_node(create_job_result, [H200, H200, RTX4090], rented_count=2, rented_uuids=None)
+
+    assert _cards(BaseIncentive._portion_cards(node, node.gpu_model_counts)) == [(H200, 1, True), (RTX4090, 1, True)]
+
+
+def test_a_wholly_rented_mixed_node_is_rented_card_by_card(create_job_result, split_scoring_on):
+    node = _split_node(create_job_result, [H200, RTX4090], rented_count=2, rented_uuids=["GPU-0", "GPU-1"])
+
+    assert _cards(BaseIncentive._portion_cards(node, node.gpu_model_counts)) == [(H200, 1, True), (RTX4090, 1, True)]
+
+
+@pytest.mark.asyncio
+async def test_a_partly_rented_mixed_node_is_paid_from_both_pools_and_merged(
+    per_model_portions, mock_settings, create_job_result, split_scoring_on
+):
+    node = _split_node(create_job_result, [H200, H200, RTX4090], rented_count=1, rented_uuids=["GPU-2"])
+    rental_created_at = node.rental_created_at
+    jobs = {"mixed": [node]}
+    incentive = DefaultIncentive(mock_settings.incentive, per_model_portions, jobs, {H200: 2, RTX4090: 1})
+
+    await incentive.calculate_mining_scores()
+
+    assert jobs["mixed"] == [node]
+    assert (node.gpu_model, node.gpu_count, node.is_rented, node.rented_gpu_count) == (H200, 3, True, 1)
+    assert node.is_split_remainder is False and node.rental_created_at == rental_created_at
+    portions = node.incentive_formula_inputs["portions"]
+    assert [(p["gpu_model"], p["gpu_count"], p["is_rented"]) for p in portions] == [(H200, 2, False), (RTX4090, 1, True)]
+    assert node.incentive_rented == pytest.approx(portions[1]["incentive"])
+    assert node.incentive_idle == pytest.approx(portions[0]["incentive"])
+
+
+def test_each_card_takes_its_own_models_filler_floor(per_model_portions, mock_settings, create_job_result):
+    node = _node(create_job_result, [H200, RTX4090, RTX4090])
+    node.filler_revenue_per_gpu_hour = 9.0  # looked up as 3x H200: never used on a mixed node
+    node.filler_revenue_per_gpu_hour_by_model = {H200: 2.0, RTX4090: 0.3}
+    jobs = {"mixed": [node]}
+    incentive = DefaultIncentive(mock_settings.incentive, per_model_portions, jobs, {H200: 1, RTX4090: 2})
+
+    incentive._expand_mixed_gpu_model_results()
+
+    assert [(p.gpu_model, p.filler_revenue_per_gpu_hour) for p in jobs["mixed"]] == [(H200, 2.0), (RTX4090, 0.3)]
+
+
+@pytest.mark.parametrize(
+    "device_requests, expected",
+    [
+        ('[{"Count":0,"DeviceIDs":["GPU-b"],"Capabilities":[["gpu"]]}]', ["GPU-b"]),
+        ('[{"Count":0,"DeviceIDs":["0","2"],"Capabilities":[["gpu"]]}]', ["GPU-a", "GPU-c"]),
+        ('[{"Count":-1,"DeviceIDs":null,"Capabilities":[["gpu"]]}]', ["GPU-a", "GPU-b", "GPU-c"]),
+        ('[{"Count":2,"DeviceIDs":null,"Capabilities":[["gpu"]]}]', None),
+        ('[{"Count":0,"DeviceIDs":["GPU-x"],"Capabilities":[["gpu"]]}]', None),
+        ("null", None),
+        ("not json", None),
+    ],
+)
+def test_a_pods_cards_are_read_from_its_gpu_device_request(device_requests, expected):
+    assert _gpu_uuids_of_device_requests(device_requests, ["GPU-a", "GPU-b", "GPU-c"]) == expected
+
+
+class _FakeSsh:
+    def __init__(self, stdout: str, exit_status: int = 0):
+        self.stdout, self.exit_status, self.commands = stdout, exit_status, []
+
+    async def run(self, command):
+        self.commands.append(command)
+        return SimpleNamespace(stdout=self.stdout, exit_status=self.exit_status)
+
+
+def _rented_ctx(ssh, cards):
+    details = [{"name": name, "uuid": f"GPU-{i}"} for i, name in enumerate(cards)]
+    return SimpleNamespace(ssh=ssh, state=SimpleNamespace(gpu_details=details), default_extra={})
+
+
+def _pods(*names):
+    return [RentedPod(pod_id=name, container_name=name) for name in names]
+
+
+@pytest.mark.asyncio
+async def test_the_rented_check_reads_the_cards_every_pod_holds_on_a_mixed_node():
+    ssh = _FakeSsh(
+        '[{"Count":0,"DeviceIDs":["GPU-0"],"Capabilities":[["gpu"]]}]\n'
+        '[{"Count":0,"DeviceIDs":["GPU-2"],"Capabilities":[["gpu"]]}]\n'
+    )
+    ctx = _rented_ctx(ssh, [H200, H200, RTX4090])
+
+    assert await _read_rented_gpu_uuids_of_mixed_node(ctx, _pods("pod-a", "pod-b")) == ["GPU-0", "GPU-2"]
+    assert "pod-a pod-b" in ssh.commands[0]
+
+
+@pytest.mark.asyncio
+async def test_the_rented_check_reads_nothing_on_a_single_model_node():
+    ssh = _FakeSsh("")
+    assert await _read_rented_gpu_uuids_of_mixed_node(_rented_ctx(ssh, [H200, H200]), _pods("pod-a")) is None
+    assert ssh.commands == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_leaves_the_rented_cards_unknown():
+    ssh = _FakeSsh("Error: No such object: pod-b\n", exit_status=1)
+    assert await _read_rented_gpu_uuids_of_mixed_node(_rented_ctx(ssh, [H200, RTX4090]), _pods("pod-a", "pod-b")) is None

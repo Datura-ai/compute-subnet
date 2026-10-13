@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 import shlex
@@ -320,6 +321,10 @@ class TenantEnforcementCheck:
                     )
                 )
 
+        rented_gpu_uuids = await _read_rented_gpu_uuids_of_mixed_node(ctx, rented_pods)
+        if rented_gpu_uuids is not None:
+            extra["rented_gpu_uuids"] = rented_gpu_uuids
+
         score_calculator = ctx.services.score_calculator
         actual_score, job_score, warning_message = score_calculator(ctx, True)
 
@@ -346,6 +351,7 @@ class TenantEnforcementCheck:
                 updates={
                     "default_extra": extra,
                     "rented": True,
+                    "rented_gpu_uuids": rented_gpu_uuids,
                     "ssh_pub_keys": ssh_pub_keys,
                     "score": actual_score,
                     "job_score": job_score,
@@ -725,6 +731,66 @@ class PodRunningAndAuthorizedKeys(NamedTuple):
     running: bool
     # None: dockerd refused the exec (a restarting or paused container), so the keys are unknown.
     authorized_keys: list[str] | None
+
+
+async def _read_rented_gpu_uuids_of_mixed_node(ctx: Context, rented_pods: list[RentedPod]) -> list[str] | None:
+    """DAH-4219: UUIDs of the cards the rented pods hold, so a partly rented mixed-GPU node is paid
+    in the rented pool for those cards only. Read from each pod container's GPU device request.
+
+    Only on a node with more than one GPU model: elsewhere every card is the same and the count is
+    enough. None when any pod's cards cannot be told; a failed read never fails the check.
+    """
+    gpu_details = ctx.state.gpu_details or []
+    uuids = [str(detail.get("uuid") or "") for detail in gpu_details]
+    if len({detail.get("name") for detail in gpu_details}) < 2 or not all(uuids) or not rented_pods:
+        return None
+    names = " ".join(shlex.quote(pod.container_name) for pod in rented_pods)
+    command = f"/usr/bin/docker inspect --format '{{{{json .HostConfig.DeviceRequests}}}}' {names}"
+    try:
+        result = await ctx.ssh.run(command)
+    except Exception as exc:  # noqa: BLE001 - unknown cards fall back to the conservative payout
+        logger.info(_m("Could not read the rented pods' GPU devices", extra={**ctx.default_extra, "error": type(exc).__name__}))
+        return None
+    lines = [line for line in str(result.stdout or "").splitlines() if line.strip()]
+    if result.exit_status != 0 or len(lines) != len(rented_pods):
+        return None
+    held: list[str] = []
+    for line in lines:
+        pod_uuids = _gpu_uuids_of_device_requests(line, uuids)
+        if pod_uuids is None:
+            return None
+        held.extend(uuid for uuid in pod_uuids if uuid not in held)
+    return held
+
+
+def _gpu_uuids_of_device_requests(device_requests_json: str, node_uuids: list[str]) -> list[str] | None:
+    """The node cards one container's DeviceRequests name; None when they do not name them."""
+    try:
+        requests = json.loads(device_requests_json)
+    except ValueError:
+        return None
+    gpu_requests = [
+        request
+        for request in requests or []
+        if isinstance(request, dict) and any("gpu" in caps for caps in request.get("Capabilities") or [])
+    ]
+    if not gpu_requests:
+        return None
+    held: list[str] = []
+    for request in gpu_requests:
+        device_ids = request.get("DeviceIDs") or []
+        if not device_ids:
+            if request.get("Count") == -1:
+                return list(node_uuids)
+            return None
+        for device_id in device_ids:
+            if device_id in node_uuids:
+                held.append(device_id)
+            elif str(device_id).isdigit() and int(device_id) < len(node_uuids):
+                held.append(node_uuids[int(device_id)])
+            else:
+                return None
+    return held
 
 
 async def _check_pod_running_and_read_authorized_keys(

@@ -234,6 +234,7 @@ class ResultHandler:
             ssh_pub_keys=context.ssh_pub_keys,
             is_rented=context.rented,
             rented_gpu_count=self._get_rented_gpu_count(context),
+            rented_gpu_uuids=context.rented_gpu_uuids if context.rented else None,
             is_spot=is_spot,
             is_provider_chosen_spot=is_provider_chosen_spot,
             is_new_rentals_paused=is_new_rentals_paused,
@@ -243,6 +244,7 @@ class ResultHandler:
             default_job_owner=default_job_owner,
             has_lium_filler=has_lium_filler,
             filler_revenue_per_gpu_hour=filler_revenue_per_gpu_hour,
+            filler_revenue_per_gpu_hour_by_model=self._filler_revenue_per_gpu_hour_by_model(context, rented_data),
             tdx_attestation_passed=context.tdx_attestation_passed,
             gpu_attestation_passed=context.gpu_attestation_passed,
             executor_image_report=executor_image_report,
@@ -285,6 +287,26 @@ class ResultHandler:
                 )
             )
         return held_specs if hold_enabled else specs
+
+    @staticmethod
+    def _filler_revenue_per_gpu_hour_by_model(context: Context, rented_data) -> dict[str, float | None] | None:
+        """DAH-4219: on a mixed-GPU node, each model's own filler average, looked up for that
+        model's cards on the node; None on a single-model node."""
+        if not rented_data:
+            return None
+        model_counts: dict[str, int] = {}
+        for detail in context.state.gpu_details or []:
+            name = detail.get("name")
+            if name:
+                model_counts[name] = model_counts.get(name, 0) + 1
+        if len(model_counts) < 2:
+            return None
+        return {
+            gpu_model: rented_data.get_filler_revenue_per_gpu_hour(
+                BASE_GPU_MAP.get(gpu_model), gpu_count, settings.FILLER_REVENUE_MIN_GPU_HOURS
+            )
+            for gpu_model, gpu_count in model_counts.items()
+        }
 
     @staticmethod
     def _get_rented_gpu_count(context: Context) -> int | None:

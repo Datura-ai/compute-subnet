@@ -55,6 +55,8 @@ class JobResult(BaseModel):
     # executor is then scored whole-box; set and below gpu_count on a split node, the incentive
     # engine scores the free GPUs in the unrented pool.
     rented_gpu_count: int | None = None
+    # DAH-4219: the cards the rented pods hold, read only on a mixed-GPU node. None = unknown.
+    rented_gpu_uuids: list[str] | None = None
     # DAH-2467: the free remainder of a partially rented split node. It is always rated at the
     # minimum-split tier and rate, never as a bundle of its own size.
     is_split_remainder: bool = False
@@ -70,6 +72,8 @@ class JobResult(BaseModel):
     has_lium_filler: bool = False  # the backend lists at least one active Lium filler container on the node
     # the node's GPU configuration's average filler USD per GPU-hour; None = no usable sample
     filler_revenue_per_gpu_hour: float | None = None
+    # DAH-4219: on a mixed-GPU node, each model's own average for its cards on the node
+    filler_revenue_per_gpu_hour_by_model: dict[str, float | None] | None = None
 
     # tdx attestation relevant fields
     attestation_digest: str | None = None
@@ -195,6 +199,21 @@ class JobResult(BaseModel):
         """Take both portions' formula snapshots — call it while each portion still holds
         the GPU count its own formula ran on, before the merge restores the whole box."""
         self._mixed_formula_inputs = inputs
+
+    @property
+    def rented_gpu_model_counts(self) -> dict[str, int] | None:
+        """Rented cards per model (DAH-4219); None when the rented cards are not known."""
+        if self.rented_gpu_uuids is None:
+            return None
+        details = ((self.spec or {}).get("gpu") or {}).get("details") or []
+        model_by_uuid = {detail.get("uuid"): detail.get("name") for detail in details if isinstance(detail, dict)}
+        counts: dict[str, int] = {}
+        for gpu_uuid in self.rented_gpu_uuids:
+            gpu_model = model_by_uuid.get(gpu_uuid)
+            if not gpu_model:
+                return None
+            counts[gpu_model] = counts.get(gpu_model, 0) + 1
+        return counts
 
     def record_per_gpu_model_formula_inputs(self, portions: list[dict[str, Any]]) -> None:
         """Take each model's formula snapshot of a mixed-GPU node — call it while every
