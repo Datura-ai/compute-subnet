@@ -114,6 +114,7 @@ async def test_failing_cycle_leaves_legacy_and_other_records_unchanged(context_f
     other = json.dumps({"count": 4, "failed": 0, "spec": "A100:1", "uuids": "gpu-001"})
     await service.redis.hset(VERIFIED_JOB_COUNT_KEY, EXECUTOR, legacy)
     await service.redis.hset(VERIFIED_JOB_COUNT_KEY, verified_job_field(HOTKEY_A, EXECUTOR), other)
+    await service.redis.hset(VERIFIED_JOB_ANCHOR_HOTKEY_KEY, EXECUTOR, HOTKEY_A)
 
     verified = await service.get_verified_job_info(EXECUTOR, HOTKEY_B)
     await service.set_verified_job_info(HOTKEY_B, EXECUTOR, prev_info=verified, success=False)
@@ -122,8 +123,7 @@ async def test_failing_cycle_leaves_legacy_and_other_records_unchanged(context_f
     # an anchored legacy record only gains the broken mark (as on main); nothing is imported into B's record
     expected = json.loads(legacy) | ({"anchor_broken": True} if anchor else {})
     assert await _field(service, EXECUTOR) == expected
-    if anchor:
-        assert await _field(service, verified_job_field(HOTKEY_B, EXECUTOR)) is None
+    assert await _field(service, verified_job_field(HOTKEY_B, EXECUTOR)) is None
     assert await _field(service, verified_job_field(HOTKEY_A, EXECUTOR)) == json.loads(other)
 
 
@@ -156,6 +156,30 @@ async def test_failed_cycle_does_not_import_another_hotkeys_legacy_identity(cont
     # a different host never takes the id over, whichever hotkey migrated first, even from an empty own record
     assert await _cycle(service, context_factory, hotkey=HOTKEY_B, uuids="gpu-009") is False
     assert await _field(service, verified_job_field(HOTKEY_B, EXECUTOR)) == preseed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "own",
+    [
+        None,
+        {"count": 0, "failed": 1, "spec": "", "uuids": ""},
+        {"count": 0, "failed": 0, "spec": "", "uuids": ""},
+    ],
+    ids=["absent", "failed", "reset"],
+)
+async def test_empty_uuid_only_record_does_not_hide_an_indexed_foreign_anchor(context_factory, own):
+    service = _redis_service()
+    assert await _cycle(service, context_factory, hotkey=HOTKEY_A, uuids="gpu-001")
+    await service.redis.hset(VERIFIED_JOB_COUNT_KEY, EXECUTOR, json.dumps({"count": 3, "failed": 0, "spec": "", "uuids": ""}))
+    if own:
+        await service.redis.hset(VERIFIED_JOB_COUNT_KEY, verified_job_field(HOTKEY_B, EXECUTOR), json.dumps(own))
+
+    ok = await _cycle(service, context_factory, hotkey=HOTKEY_B, uuids="gpu-009")
+
+    assert ok is False
+    assert await _field(service, verified_job_field(HOTKEY_B, EXECUTOR)) == own
+    assert (await service.get_verified_job_info(EXECUTOR, HOTKEY_B))["uuids"] == "gpu-001"
 
 
 @pytest.mark.asyncio

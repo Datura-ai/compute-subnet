@@ -673,7 +673,8 @@ class RedisService:
         carried the hotkey. A failing cycle never copies it into this hotkey's record, but with
         GPU_ANCHOR_HARD_ENABLED a mismatch may mark an anchored uuid-only record broken. It is removed by the
         first successful write for the executor, so it moves to the hotkey whose GPU UUIDs match its anchor.
-        A uuid-only record without an anchor is not carried: that executor starts a fresh count."""
+        A uuid-only record without an anchor is not carried: that executor starts a fresh count unless another
+        hotkey already holds an anchor for it."""
         data = await self.hget(VERIFIED_JOB_COUNT_KEY, verified_job_field(miner_hotkey, executor_id))
         if data:
             own = json.loads(data)
@@ -694,7 +695,8 @@ class RedisService:
             return await self._foreign_anchor(executor_id, miner_hotkey)
         legacy = json.loads(data)
         if not legacy.get(GPU_ANCHOR_KEY):
-            return {}
+            # an empty uuid-only record must not hide an anchor another hotkey holds
+            return await self._foreign_anchor(executor_id, miner_hotkey)
         return {**legacy, LEGACY_FALLBACK_KEY: True}
 
     async def _foreign_anchor(self, executor_id: str, miner_hotkey: str):
