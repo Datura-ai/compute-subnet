@@ -9,8 +9,12 @@ import ipaddress
 import socket
 
 
-class NodeHostError(Exception):
-    """The node's hostname does not resolve to public addresses only."""
+class NodeHostError(OSError):
+    """The node's hostname does not resolve to public addresses only.
+
+    An OSError so the connect site classifies it like any other failed dial: the node is reported
+    EXECUTOR_SSH_UNREACHABLE (an availability error) and hidden, not scored as a generic failure.
+    """
 
 
 def is_ip_literal(host: str) -> bool:
