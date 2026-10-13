@@ -6,10 +6,15 @@ it does); this check only refuses a name that points anywhere but the public int
 
 import asyncio
 import ipaddress
+import logging
 import socket
 
 import aiohttp
 from aiohttp.abc import AbstractResolver, ResolveResult
+
+from core.utils import _m, get_extra_info
+
+logger = logging.getLogger(__name__)
 
 
 class NodeHostError(OSError):
@@ -28,6 +33,35 @@ def is_ip_literal(host: str) -> bool:
     return True
 
 
+class _CheckedAddresses(list):
+    """``resolve_public_host``'s results for a name; keeps the name so the dial can log both."""
+
+    host: str = ""
+
+
+def _refused(host: str, port: int, reason: str, addresses: list[str] | None = None) -> NodeHostError:
+    logger.warning(
+        _m(
+            f"Refused hostname node {host}:{port}: {reason}",
+            extra=get_extra_info({"host": host, "port": port, "addresses": addresses or [], "reason": reason}),
+        )
+    )
+    return NodeHostError(f"{host} {reason}")
+
+
+def _log_dialed(infos: list, sockaddr: tuple) -> None:
+    host = getattr(infos, "host", "")
+    if not host:
+        return
+    address, port = sockaddr[0], sockaddr[1]
+    logger.info(
+        _m(
+            f"Dialed hostname node {host}:{port} at {address}",
+            extra=get_extra_info({"host": host, "port": port, "address": address}),
+        )
+    )
+
+
 async def resolve_public_host(host: str, port: int = 22) -> list:
     """The getaddrinfo results to dial for ``host``: [] for an IP literal (dial it as is), else every
     address the name resolves to, all of them global; NodeHostError otherwise."""
@@ -36,14 +70,16 @@ async def resolve_public_host(host: str, port: int = 22) -> list:
     try:
         infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
-        raise NodeHostError(f"{host} does not resolve: {exc}") from exc
+        raise _refused(host, port, f"does not resolve: {exc}") from exc
     addresses = {ipaddress.ip_address(info[4][0]) for info in infos}
     if not addresses:
-        raise NodeHostError(f"{host} resolves to no address")
+        raise _refused(host, port, "resolves to no address")
     blocked = sorted(str(a) for a in addresses if not a.is_global)
     if blocked:
-        raise NodeHostError(f"{host} resolves to a non-public address: {', '.join(blocked)}")
-    return infos
+        raise _refused(host, port, f"resolves to a non-public address: {', '.join(blocked)}", blocked)
+    checked = _CheckedAddresses(infos)
+    checked.host = host
+    return checked
 
 
 async def public_host_sock(host: str, port: int = 22, connect_timeout: float | None = None) -> dict:
@@ -87,6 +123,7 @@ def dial_validated(infos: list, timeout: float | None) -> socket.socket:
         except BaseException:
             sock.close()
             raise
+        _log_dialed(infos, sockaddr)
         return sock
     raise last_error
 
@@ -105,6 +142,7 @@ async def _dial_first(loop: asyncio.AbstractEventLoop, infos: list) -> socket.so
         except BaseException:
             sock.close()
             raise
+        _log_dialed(infos, sockaddr)
         return sock
     raise last_error
 
@@ -123,6 +161,14 @@ class PublicHostResolver(AbstractResolver):
         infos = await resolve_public_host(host, port)
         if not infos:  # an IP literal
             infos = [(family or socket.AF_INET, socket.SOCK_STREAM, 0, "", (host.strip("[]"), port))]
+        else:
+            addresses = sorted({info[4][0] for info in infos if not family or info[0] == family})
+            logger.info(
+                _m(
+                    f"Resolved hostname node {host}:{port} to {', '.join(addresses)}",
+                    extra=get_extra_info({"host": host, "port": port, "addresses": addresses}),
+                )
+            )
         return [
             ResolveResult(
                 hostname=host,
