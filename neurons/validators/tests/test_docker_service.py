@@ -207,6 +207,7 @@ class _FakeRentalDockerClient:
         driver: str | None = None,
         driver_opts: dict[str, str] | None = None,
         timeout: int | None = None,
+        labels: dict[str, str] | None = None,
     ) -> None:
         self.created_volumes.append(
             {
@@ -3240,7 +3241,10 @@ def test_ssh_bootstrap_script_supports_multi_distro_install(docker_service):
     script = docker_service._ssh_bootstrap_script_path().read_text()
 
     assert "apt-get update" in script
-    assert "apt-get install -y openssh-server" in script
+    assert (
+        "apt-get install -y --no-install-recommends openssh-server ncurses-term xauth python3 wget ca-certificates"
+        in script
+    )
     assert "apk add --no-cache openssh" in script
     assert "dnf install -y openssh-server" in script
     assert "yum install -y openssh-server" in script
@@ -6071,6 +6075,24 @@ async def test_resolve_volume_sizing_fresh_pool_bound(docker_service):
     assert result.storage_limit_gb == 196
     assert result.df_avail_bytes == 900 * _SIZING_GB
     assert result.existing_volumes_bytes == 300 * _SIZING_GB
+
+
+@pytest.mark.asyncio
+async def test_resolve_volume_sizing_fresh_caps_volume_at_ext4_file_limit(docker_service):
+    # Arrange: ~28 TiB free, whole node -> 2/3 slice is ~18 TiB, above the 16 TiB ext4 file cap.
+    payload = _make_sizing_payload(disk_share=1.0, storage_limit_gb=1)
+    ssh_client = _make_sizing_ssh_client(
+        df_avail_bytes=28 * 1024 * _SIZING_GB,
+        volume_ls_stdout="other_volume local\n",
+    )
+
+    # Act
+    result = await docker_service.resolve_volume_sizing(ssh_client, payload, "tag", {})
+
+    # Assert
+    assert result.path == "fresh"
+    assert result.capped_by == "max_file_size"
+    assert result.volume_limit_gb == 16 * 1024 - 1
 
 
 @pytest.mark.asyncio

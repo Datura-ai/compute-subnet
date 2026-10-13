@@ -421,6 +421,12 @@ class Settings(BaseSettings):
     # future resets only: an executor already reset stays inactive until its next clean scrape, and
     # cycles already skipped are not billed or paid afterwards.
     RENTED_HOST_GPU_FAULT_RESET_ENABLED: bool = Field(env="RENTED_HOST_GPU_FAULT_RESET_ENABLED", default=False)
+    # A rented pod whose reboot failed (backend status REBOOT_FAILED) and whose container is not running:
+    # the validator asks the host to start a throwaway GPU container (the executor's own image,
+    # `nvidia-smi -L`). If the Docker daemon or the NVIDIA runtime refuses, the host is at fault and the
+    # verified job is cleared, so the backend marks the executor inactive and billing stops. A transport
+    # error or timeout decides nothing. Off by default: the pod keeps the plain POD_NOT_RUNNING verdict.
+    REBOOT_FAILED_HOST_CHECK_ENABLED: bool = Field(env="REBOOT_FAILED_HOST_CHECK_ENABLED", default=False)
     # Report a rented node that lost a GPU to the backend from the first cycle that sees it (a possible
     # glitch waits one more); observation only, no score change. Off by default.
     RENTED_GPU_DROP_CHECK_ENABLED: bool = Field(env="RENTED_GPU_DROP_CHECK_ENABLED", default=False)
@@ -477,6 +483,10 @@ class Settings(BaseSettings):
     # it passes. Off by default:
     # it rents a container on every idle node every 6 h, so the team turns it on after staging.
     RENTAL_PROBE_ENABLED: bool = Field(env="RENTAL_PROBE_ENABLED", default=False)
+    # Off: shadow mode. The probe runs on the same interval and logs RENTAL_PROBE_FAILED_OBSERVED, but a
+    # failure changes no score, job score or verified job and is not kept as a standing failure. On by
+    # default so a validator that already runs the probe keeps enforcing it.
+    RENTAL_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="RENTAL_PROBE_ENFORCEMENT_ENABLED", default=True)
     RENTAL_PROBE_INTERVAL_HOURS: float = Field(env="RENTAL_PROBE_INTERVAL_HOURS", default=6.0, gt=0)
     RENTAL_PROBE_SSH_DEADLINE_SECONDS: int = Field(env="RENTAL_PROBE_SSH_DEADLINE_SECONDS", default=90, gt=0)
     # A node whose containers cannot reach the internet passed every check. CHECK runs the rental probe's
@@ -753,6 +763,12 @@ class Settings(BaseSettings):
     # the window it covers (7 × 35 s ≈ 245 s) stays at least the serial one (2 × 120 s = 240 s).
     EXPRESS_LANE_MINER_SNAPSHOT_MAX_ATTEMPTS: int = Field(
         env="EXPRESS_LANE_MINER_SNAPSHOT_MAX_ATTEMPTS", default=8, gt=0
+    )
+
+    # A new node whose first pass failed is run again by the lane (up to 3 runs, 60 s
+    # apart) instead of waiting for the next cycle; off = the failed result waits for the cycle.
+    EXPRESS_LANE_FAILED_FIRST_PASS_RETRY_ENABLED: bool = Field(
+        env="EXPRESS_LANE_FAILED_FIRST_PASS_RETRY_ENABLED", default=True
     )
 
     def express_lane_tick_seconds(self) -> int:

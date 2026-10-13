@@ -971,6 +971,17 @@ class TenantEnforcementMessages:
         impact="Score set to 0; verification cleared",
         remediation="Start container and ensure it stays healthy.",
     )
+    REBOOT_FAILED_HOST_FAULT = MessageTemplate(
+        event="Host cannot start a GPU container after a failed pod reboot",
+        reason="REBOOT_FAILED_HOST_FAULT",
+        severity="error",
+        category="runtime",
+        impact="Score set to 0; verification cleared; executor inactive until the host passes again",
+        remediation=(
+            "Run `docker run --rm --gpus all <image> nvidia-smi -L` on the host and fix the Docker daemon or"
+            " the NVIDIA container runtime; check `dmesg` for Xid errors and reboot if a GPU is lost."
+        ),
+    )
     POD_RESTARTING = MessageTemplate(
         event="Pod restarting under its own restart policy",
         reason="POD_RESTARTING",
@@ -1719,6 +1730,14 @@ class RentalProbeMessages:
         severity="error",
         category="runtime",
         impact="Score set to 0 and the verified job cleared until a probe passes; the node is probed again next cycle while it stays idle",
+    )
+    # the same verdict while RENTAL_PROBE_ENFORCEMENT_ENABLED is off: logged, score unchanged
+    PROBE_FAILED_OBSERVED = MessageTemplate(
+        event="Rental probe failed: a renter could not use this node (not enforced)",
+        reason="RENTAL_PROBE_FAILED_OBSERVED",
+        severity="warning",
+        category="runtime",
+        impact="None: RENTAL_PROBE_ENFORCEMENT_ENABLED is off; the node is probed again after the interval",
     )
     INCONCLUSIVE = MessageTemplate(
         event="Rental probe could not reach a verdict",
