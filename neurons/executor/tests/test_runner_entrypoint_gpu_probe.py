@@ -26,6 +26,7 @@ DOCKER_STUB = textwrap.dedent(
         "compose up") exit 0 ;;
         "inspect --format") echo "sha256:executorimage" ;;
         "run --rm")
+            [ -n "${STUB_PROBE_HANG:-}" ] && exec "$STUB_PROBE_HANG" 30
             [ -z "${STUB_PROBE_ERROR:-}" ] && exit 0
             echo "$STUB_PROBE_ERROR" >&2; exit 125 ;;
     esac
@@ -47,7 +48,7 @@ def run_entrypoint(tmp_path, **env):
     # the log-follow loop never ends; a `sleep` that fails ends the script after one round
     (bin_dir / "sleep").write_text('#!/bin/sh\necho "sleep $*" >> "$STUB_CALLS"\nexit 7\n')
     (bin_dir / "sleep").chmod(0o755)
-    for tool in ("sh", "tail", "cat"):
+    for tool in ("sh", "tail", "cat", "timeout"):
         os.symlink(shutil.which(tool), bin_dir / tool)
     calls = tmp_path / "calls"
     calls.touch()
@@ -104,3 +105,12 @@ def test_first_install_recreates_without_probe(tmp_path, probe_error):
 
     assert not any(c.startswith("run ") for c in calls)
     assert recreated(calls)
+
+
+def test_a_hanging_probe_holds_the_update(tmp_path):
+    result, calls = run_entrypoint(
+        tmp_path, STUB_RUNNING_EXECUTOR="abc123", STUB_PROBE_HANG=shutil.which("sleep"), RUNNER_PROBE_TIMEOUT_SECONDS="1"
+    )
+
+    assert "Update held, running executor kept" in result.stdout
+    assert not recreated(calls)

@@ -8,11 +8,12 @@ set -eu
 # throwaway container from the image it already runs (local, nothing pulled) with every GPU requested
 # and the entrypoint `true`, the same probe daturaai/lium-watchtower runs before it updates the runner.
 # If that fails, keep the running executor and exit; the restart policy brings the runner back to try
-# again. A first install (no executor running) has nothing to break and skips the probe.
+# again; a probe that hangs past RUNNER_PROBE_TIMEOUT_SECONDS counts as failed. A first install (no executor
+# running) has nothing to break and skips the probe.
 running_executor=$(docker compose ps --quiet executor 2>/dev/null || true)
 if [ -n "$running_executor" ]; then
     probe_image=$(docker inspect --format '{{.Image}}' "$running_executor" 2>/dev/null || true)
-    if [ -n "$probe_image" ] && ! probe_error=$(docker run --rm --gpus all --label io.lium.executor-runner.probe=nvidia-runtime --entrypoint true "$probe_image" 2>&1); then
+    if [ -n "$probe_image" ] && ! probe_error=$(timeout "${RUNNER_PROBE_TIMEOUT_SECONDS:-120}" docker run --rm --gpus all --label io.lium.executor-runner.probe=nvidia-runtime --entrypoint true "$probe_image" 2>&1); then
         case "$probe_error" in
             *"driver/library version mismatch"*)
                 cause="the host's NVIDIA driver and its libraries do not match (driver updated without a reboot)"
