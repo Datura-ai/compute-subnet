@@ -754,13 +754,13 @@ async def _read_rented_gpu_uuids_of_mixed_node(ctx: Context, rented_pods: list[R
     lines = [line for line in str(result.stdout or "").splitlines() if line.strip()]
     if result.exit_status != 0 or len(lines) != len(rented_pods):
         return None
-    held: list[str] = []
+    held_gpu_uuids: list[str] = []
     for line in lines:
         pod_uuids = _gpu_uuids_of_device_requests(line, uuids)
         if pod_uuids is None:
             return None
-        held.extend(uuid for uuid in pod_uuids if uuid not in held)
-    return held
+        held_gpu_uuids.extend(uuid for uuid in pod_uuids if uuid not in held_gpu_uuids)
+    return held_gpu_uuids
 
 
 def _gpu_uuids_of_device_requests(device_requests_json: str, node_uuids: list[str]) -> list[str] | None:
@@ -776,7 +776,7 @@ def _gpu_uuids_of_device_requests(device_requests_json: str, node_uuids: list[st
     ]
     if not gpu_requests:
         return None
-    held: list[str] = []
+    held_gpu_uuids: list[str] = []
     for request in gpu_requests:
         device_ids = request.get("DeviceIDs") or []
         if not device_ids:
@@ -785,12 +785,12 @@ def _gpu_uuids_of_device_requests(device_requests_json: str, node_uuids: list[st
             return None
         for device_id in device_ids:
             if device_id in node_uuids:
-                held.append(device_id)
+                held_gpu_uuids.append(device_id)
             elif str(device_id).isdigit() and int(device_id) < len(node_uuids):
-                held.append(node_uuids[int(device_id)])
+                held_gpu_uuids.append(node_uuids[int(device_id)])
             else:
                 return None
-    return held
+    return held_gpu_uuids
 
 
 async def _check_pod_running_and_read_authorized_keys(

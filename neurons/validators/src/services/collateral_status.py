@@ -204,7 +204,9 @@ class CollateralStatusReader:
         self._rpc = rpc or _post_batch
         self._evm_address_for_hotkey = evm_address_for_hotkey or _evm_address_for_hotkey
         self._clock = clock
-        self._cache: dict[tuple, tuple[float, CollateralStatus]] = {}
+        self._cache: dict[
+            tuple[str, str, str, str | None, int, tuple[str | None, ...] | None], tuple[float, CollateralStatus]
+        ] = {}
 
     async def status(
         self,

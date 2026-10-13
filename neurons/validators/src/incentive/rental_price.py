@@ -655,8 +655,7 @@ class RentalPriceIncentive(DefaultIncentive):
         ):
             return None
         if len(result.gpu_model_counts) > 1:
-            # DAH-4219: rented_gpu_count does not say which cards are rented, so a mixed-GPU
-            # node is scored whole in the rented pool, each card at its own model's rate
+            # DAH-4219: left to the per-model split (BaseIncentive), which pays only the rented cards
             return None
         free_gpu_count: int = result.gpu_count - result.rented_gpu_count
         return free_gpu_count if free_gpu_count > 0 else None
@@ -1566,9 +1565,10 @@ class RentalPriceIncentive(DefaultIncentive):
                 # executors excluded from incentive pools should not inflate estimates.
                 if result.is_spot or is_missing_discord_after_cutoff(result):
                     continue
-                total_gpu_model_count_map[result.gpu_model] = (
-                    total_gpu_model_count_map.get(result.gpu_model, 0) + result.gpu_count
-                )
+                # DAH-4219: a mixed-GPU node adds each card to its own model, as settle_cycle_results does
+                model_counts: dict[str, int] = result.gpu_model_counts or {result.gpu_model: result.gpu_count}
+                for gpu_model, gpu_count in model_counts.items():
+                    total_gpu_model_count_map[gpu_model] = total_gpu_model_count_map.get(gpu_model, 0) + gpu_count
 
         total_gpu_count = sum(total_gpu_model_count_map.values())
 

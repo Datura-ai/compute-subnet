@@ -11,7 +11,9 @@ from constants import TOTAL_BURN_EMISSION
 from core.validator import settle_cycle_results
 from incentive import base as incentive_base
 from incentive.base import BaseIncentive
+from incentive.config import IncentiveConfig
 from incentive.default import DefaultIncentive
+from incentive.rental_price import RentalPriceIncentive
 from protocol.vc_protocol.compute_requests import RentedPod
 from services.task.checks.rented_machine import (
     _gpu_uuids_of_device_requests,
@@ -70,6 +72,14 @@ def test_the_cycle_total_counts_each_card_under_its_own_model(create_job_result)
         "plain": [_node(create_job_result, [RTX4090])],
     }
     assert settle_cycle_results(results, {}) == {H200: 1, RTX4090: 8}
+
+
+def test_the_estimate_snapshot_counts_each_card_under_its_own_model(create_job_result):
+    jobs = {"mixed": [_node(create_job_result, [H200] + [RTX4090] * 7)]}
+
+    snapshot = RentalPriceIncentive(IncentiveConfig(), AsyncMock(), jobs, {}).get_snapshot()
+
+    assert snapshot.mining.total_gpu_model_count_map == {H200: 1, RTX4090: 7}
 
 
 @pytest.mark.asyncio
@@ -192,41 +202,33 @@ def _split_node(create_job_result, cards: list[str], *, rented_count: int, rente
     return result
 
 
-def _cards(portions):
-    return [(p.gpu_model, p.gpu_count, p.is_rented) for p in portions]
-
-
 @pytest.fixture
 def split_scoring_on(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_SPLIT_PARTIAL_RENTAL_SCORING", True)
 
 
 def test_a_partly_rented_mixed_node_pays_the_rented_pool_for_the_pods_cards_only(create_job_result, split_scoring_on):
-    """Owner decision on #1580: the rented pool pays the cards the pods hold; the free ones are idle."""
+    """The rented pool pays the cards the pods hold. The free cards are not rentable (lium-platform#1256),
+    so they get no idle portion."""
     node = _split_node(create_job_result, [H200, H200, RTX4090, RTX4090], rented_count=2, rented_uuids=["GPU-1", "GPU-2"])
 
-    assert _cards(BaseIncentive._portion_cards(node, node.gpu_model_counts)) == [
-        (H200, 1, True),
-        (H200, 1, False),
-        (RTX4090, 1, True),
-        (RTX4090, 1, False),
-    ]
+    assert BaseIncentive._portion_cards(node, node.gpu_model_counts) == {H200: 1, RTX4090: 1}
 
 
 def test_unknown_pod_cards_pay_the_cheapest_cards_rented_and_nothing_idle(create_job_result, split_scoring_on):
     node = _split_node(create_job_result, [H200, H200, RTX4090], rented_count=2, rented_uuids=None)
 
-    assert _cards(BaseIncentive._portion_cards(node, node.gpu_model_counts)) == [(H200, 1, True), (RTX4090, 1, True)]
+    assert BaseIncentive._portion_cards(node, node.gpu_model_counts) == {H200: 1, RTX4090: 1}
 
 
 def test_a_wholly_rented_mixed_node_is_rented_card_by_card(create_job_result, split_scoring_on):
     node = _split_node(create_job_result, [H200, RTX4090], rented_count=2, rented_uuids=["GPU-0", "GPU-1"])
 
-    assert _cards(BaseIncentive._portion_cards(node, node.gpu_model_counts)) == [(H200, 1, True), (RTX4090, 1, True)]
+    assert BaseIncentive._portion_cards(node, node.gpu_model_counts) == {H200: 1, RTX4090: 1}
 
 
 @pytest.mark.asyncio
-async def test_a_partly_rented_mixed_node_is_paid_from_both_pools_and_merged(
+async def test_a_partly_rented_mixed_node_is_paid_for_its_rented_cards_only_and_merged(
     per_model_portions, mock_settings, create_job_result, split_scoring_on
 ):
     node = _split_node(create_job_result, [H200, H200, RTX4090], rented_count=1, rented_uuids=["GPU-2"])
@@ -240,9 +242,30 @@ async def test_a_partly_rented_mixed_node_is_paid_from_both_pools_and_merged(
     assert (node.gpu_model, node.gpu_count, node.is_rented, node.rented_gpu_count) == (H200, 3, True, 1)
     assert node.is_split_remainder is False and node.rental_created_at == rental_created_at
     portions = node.incentive_formula_inputs["portions"]
-    assert [(p["gpu_model"], p["gpu_count"], p["is_rented"]) for p in portions] == [(H200, 2, False), (RTX4090, 1, True)]
-    assert node.incentive_rented == pytest.approx(portions[1]["incentive"])
-    assert node.incentive_idle == pytest.approx(portions[0]["incentive"])
+    assert [(p["gpu_model"], p["gpu_count"], p["is_rented"]) for p in portions] == [(RTX4090, 1, True)]
+    assert node.incentive_rented == pytest.approx(portions[0]["incentive"])
+    assert node.incentive_idle == 0
+
+
+@pytest.mark.asyncio
+async def test_a_rented_portion_without_sysbox_earns_nothing_after_the_cutoff(
+    per_model_portions, mock_settings, create_job_result, split_scoring_on
+):
+    """Each portion keeps the node's rental fields: a portion copied after another one changed them
+    lost rental_created_at and earned the idle Sysbox multiplier instead of 0."""
+    node = _split_node(create_job_result, [H200, H200, RTX4090], rented_count=1, rented_uuids=["GPU-2"])
+    node.sysbox_runtime = False
+    node.rental_created_at = settings.SYSBOX_RENTED_CUTOFF.replace(year=settings.SYSBOX_RENTED_CUTOFF.year + 1)
+    jobs = {"mixed": [node]}
+    incentive = DefaultIncentive(mock_settings.incentive, per_model_portions, jobs, {H200: 2, RTX4090: 1})
+    incentive._expand_mixed_gpu_model_results()
+
+    rented_portion = next(p for p in jobs["mixed"] if p.gpu_model == RTX4090)
+    await incentive.calculate_executor_score(rented_portion)
+
+    assert (rented_portion.is_rented, rented_portion.is_split_remainder) == (True, False)
+    assert rented_portion.rental_created_at == node.rental_created_at
+    assert rented_portion.sysbox_multiplier == 0.0
 
 
 def test_each_card_takes_its_own_models_filler_floor(per_model_portions, mock_settings, create_job_result):

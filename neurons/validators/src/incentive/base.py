@@ -3,12 +3,12 @@
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
 
 import bittensor
 from pydantic import BaseModel
 from services.const import GPU_MODEL_RATES
 from services.redis_service import RedisService
+from services.task.models import PerGpuModelFormulaInputs
 from services.task_service import JobResult
 
 from core.config import settings
@@ -20,6 +20,10 @@ from incentive.utils import log_for_monitoring
 logger = get_logger(__name__)
 
 
+# the node's own fields each portion overrides, put back from the original at the merge
+_PORTION_FIELDS: tuple[str, ...] = ("gpu_model", "gpu_count", "rented_gpu_count", "filler_revenue_per_gpu_hour")
+
+
 @dataclass
 class _MixedGpuModelPortions:
     """One mixed-GPU node while it is scored as one virtual result per model (DAH-4219)."""
@@ -27,14 +31,7 @@ class _MixedGpuModelPortions:
     sibling_results: list[JobResult]
     first_model_portion: JobResult  # the node's own result, cut down to its first portion's cards
     other_model_portions: list[JobResult]
-    restore: dict[str, Any]  # the node's own fields the portions changed, put back at the merge
-
-
-@dataclass(frozen=True)
-class _PortionCards:
-    gpu_model: str
-    gpu_count: int
-    is_rented: bool
+    original: JobResult  # the node as scraped, before any portion changed it
 
 
 class BaseIncentive(ABC):
@@ -100,10 +97,8 @@ class BaseIncentive(ABC):
         """DAH-4219: score a mixed-GPU node as one virtual result per model.
 
         Each card is then paid at its own model's rate by the same rules as a node of that
-        model alone, instead of every card at the first card's rate. Cards of a model with no
-        rate get no portion and earn nothing. A partly rented split node gets a rented and a
-        free portion per model (see `_portion_cards`). The portions are merged back afterwards:
-        the downstream consumers expect one result per executor.
+        model alone, instead of every card at the first card's rate. The portions are merged
+        back afterwards: the downstream consumers expect one result per executor.
         """
         mixed_nodes: list[_MixedGpuModelPortions] = []
         for sibling_results in self.job_results.values():
@@ -111,66 +106,53 @@ class BaseIncentive(ABC):
                 model_counts: dict[str, int] = result.gpu_model_counts
                 if len(model_counts) < 2:
                     continue
-                portion_cards: list[_PortionCards] = self._portion_cards(result, model_counts)
+                portion_cards: dict[str, int] = self._portion_cards(result, model_counts)
                 if not portion_cards:
                     continue
-                restore: dict[str, Any] = {
-                    name: getattr(result, name)
-                    for name in (
-                        "gpu_model",
-                        "gpu_count",
-                        "is_rented",
-                        "is_split_remainder",
-                        "rental_created_at",
-                        "rented_gpu_count",
-                        "filler_revenue_per_gpu_hour",
-                    )
-                }
-                partly_rented: bool = any(not cards.is_rented for cards in portion_cards) and result.is_rented
-                node = _MixedGpuModelPortions(sibling_results, result, [], restore)
-                for index, cards in enumerate(portion_cards):
-                    portion: JobResult = result if index == 0 else result.model_copy(deep=True)
-                    if index:
-                        portion.incentive_logs = []
-                        portion.zero_incentive_reasons = []
-                        sibling_results.append(portion)
-                        node.other_model_portions.append(portion)
-                    portion.gpu_model = cards.gpu_model
-                    portion.gpu_count = cards.gpu_count
-                    portion.is_rented = cards.is_rented
-                    portion.rented_gpu_count = None
-                    # each card at its own model's floor; a split remainder gets none, as on a single-model node
-                    by_model = result.filler_revenue_per_gpu_hour_by_model
-                    portion.filler_revenue_per_gpu_hour = (
-                        (by_model or {}).get(cards.gpu_model) if not (partly_rented and not cards.is_rented) else None
-                    )
-                    if partly_rented and not cards.is_rented:
-                        portion.is_split_remainder = True
-                        portion.rental_created_at = None
-                mixed_nodes.append(node)
+                mixed_nodes.append(self._split_mixed_node_into_model_portions(sibling_results, result, portion_cards))
                 logger.info(
                     _m(
                         "Mixed-GPU node scored per model",
                         extra={
                             "executor_id": str(result.executor_info.uuid),
                             "gpu_models": model_counts,
-                            "portions": [
-                                {"gpu_model": c.gpu_model, "gpu_count": c.gpu_count, "is_rented": c.is_rented}
-                                for c in portion_cards
-                            ],
+                            "portions": portion_cards,
                         },
                     )
                 )
         return mixed_nodes
 
     @staticmethod
-    def _portion_cards(result: JobResult, model_counts: dict[str, int]) -> list[_PortionCards]:
-        """The cards each portion of a mixed-GPU node is paid for, first card's model first.
+    def _split_mixed_node_into_model_portions(
+        sibling_results: list[JobResult], result: JobResult, portion_cards: dict[str, int]
+    ) -> _MixedGpuModelPortions:
+        """The node's own result becomes the first portion; each other portion is a copy of the
+        node as scraped, never of a portion already changed."""
+        original: JobResult = result.model_copy(deep=True)
+        node = _MixedGpuModelPortions(sibling_results, result, [], original)
+        filler_by_model: dict[str, float | None] = original.filler_revenue_per_gpu_hour_by_model or {}
+        for index, (gpu_model, gpu_count) in enumerate(portion_cards.items()):
+            portion: JobResult = result
+            if index:
+                portion = original.model_copy(deep=True)
+                portion.incentive_logs = []
+                portion.zero_incentive_reasons = []
+                sibling_results.append(portion)
+                node.other_model_portions.append(portion)
+            portion.gpu_model = gpu_model
+            portion.gpu_count = gpu_count
+            portion.rented_gpu_count = None
+            portion.filler_revenue_per_gpu_hour = filler_by_model.get(gpu_model)
+        return node
 
-        A partly rented split node (owner decision on #1580): the rented pool pays only the cards
-        the pods hold, the free cards are a split remainder in the idle pool. When the pods' cards
-        are not known, the rented pool pays `rented_gpu_count` of the cheapest cards and the rest
-        earn nothing, so not knowing never pays more than knowing.
+    @staticmethod
+    def _portion_cards(result: JobResult, model_counts: dict[str, int]) -> dict[str, int]:
+        """The cards per model each portion of a mixed-GPU node is paid for, first card's model first.
+
+        A model with no rate gets no portion. A partly rented split node is paid only for the
+        cards the pods hold: its free cards cannot be rented, so they get no idle portion. When
+        the pods' cards are not known, it is paid for `rented_gpu_count` of the cheapest cards,
+        so not knowing never pays more than knowing.
         """
         rated: dict[str, int] = {m: n for m, n in model_counts.items() if m in GPU_MODEL_RATES}
         rented_gpu_count: int | None = result.rented_gpu_count
@@ -183,11 +165,11 @@ class BaseIncentive(ABC):
             and rented_gpu_count < result.gpu_count
         )
         if not partly_rented:
-            return [_PortionCards(m, n, result.is_rented) for m, n in rated.items()]
+            return rated
 
         rented_counts: dict[str, int] | None = result.rented_gpu_model_counts
-        free_paid: bool = rented_counts is not None and sum(rented_counts.values()) == rented_gpu_count
-        if not free_paid:
+        are_rented_cards_known: bool = rented_counts is not None and sum(rented_counts.values()) == rented_gpu_count
+        if not are_rented_cards_known:
             rented_counts = {}
             left: int = rented_gpu_count
             for gpu_model in sorted(model_counts, key=lambda m: GPU_MODEL_RATES.get(m, 0.0)):
@@ -195,13 +177,11 @@ class BaseIncentive(ABC):
                 if take:
                     rented_counts[gpu_model] = take
                 left -= take
-        portions: list[_PortionCards] = []
+        portions: dict[str, int] = {}
         for gpu_model, gpu_count in rated.items():
             rented: int = min(rented_counts.get(gpu_model, 0), gpu_count)
             if rented:
-                portions.append(_PortionCards(gpu_model, rented, True))
-            if free_paid and gpu_count - rented:
-                portions.append(_PortionCards(gpu_model, gpu_count - rented, False))
+                portions[gpu_model] = rented
         return portions
 
     @staticmethod
@@ -214,14 +194,14 @@ class BaseIncentive(ABC):
             # taken while each portion still carries the model and count its formula ran on
             merged.record_per_gpu_model_formula_inputs(
                 [
-                    {
-                        "gpu_model": portion.gpu_model,
-                        "gpu_count": portion.gpu_count,
-                        "is_rented": portion.is_rented,
-                        "incentive": portion.incentive,
-                        "incentive_formula_version": portion.incentive_formula_version,
-                        "incentive_formula_inputs": portion.incentive_formula_inputs,
-                    }
+                    PerGpuModelFormulaInputs(
+                        gpu_model=portion.gpu_model,
+                        gpu_count=portion.gpu_count,
+                        is_rented=portion.is_rented,
+                        incentive=portion.incentive,
+                        incentive_formula_version=portion.incentive_formula_version,
+                        incentive_formula_inputs=portion.incentive_formula_inputs,
+                    )
                     for portion in portions
                 ]
             )
@@ -240,8 +220,8 @@ class BaseIncentive(ABC):
                 merged.zero_incentive_reasons.extend(
                     reason for reason in portion.zero_incentive_reasons if reason not in merged.zero_incentive_reasons
                 )
-            for name, value in node.restore.items():
-                setattr(merged, name, value)
+            for name in _PORTION_FIELDS:
+                setattr(merged, name, getattr(node.original, name))
             # Drop by identity: two portions of one executor can compare equal as pydantic models.
             node.sibling_results[:] = [
                 result

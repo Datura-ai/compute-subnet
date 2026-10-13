@@ -30,6 +30,17 @@ class MixedFormulaInputs(BaseModel):
     unrented: dict[str, Any]
 
 
+class PerGpuModelFormulaInputs(BaseModel):
+    """DAH-4219: one model's portion of a mixed-GPU node and the formula its incentive came from."""
+
+    gpu_model: str
+    gpu_count: int
+    is_rented: bool
+    incentive: float | None
+    incentive_formula_version: str
+    incentive_formula_inputs: dict[str, Any]
+
+
 class JobResult(BaseModel):
     spec: dict | None = None
     executor_info: ExecutorSSHInfo
@@ -167,7 +178,7 @@ class JobResult(BaseModel):
     zero_incentive_reasons: list[IncentiveReason] = Field(default_factory=list, exclude=True)
 
     _mixed_formula_inputs: "MixedFormulaInputs | None" = PrivateAttr(default=None)
-    _per_gpu_model_formula_inputs: list[dict[str, Any]] | None = PrivateAttr(default=None)
+    _per_gpu_model_formula_inputs: list[PerGpuModelFormulaInputs] | None = PrivateAttr(default=None)
 
     @property
     def gpu_model_counts(self) -> dict[str, int]:
@@ -215,7 +226,7 @@ class JobResult(BaseModel):
             counts[gpu_model] = counts.get(gpu_model, 0) + 1
         return counts
 
-    def record_per_gpu_model_formula_inputs(self, portions: list[dict[str, Any]]) -> None:
+    def record_per_gpu_model_formula_inputs(self, portions: list[PerGpuModelFormulaInputs]) -> None:
         """Take each model's formula snapshot of a mixed-GPU node — call it while every
         portion still holds the cards its own formula ran on, before the merge."""
         self._per_gpu_model_formula_inputs = portions
@@ -269,7 +280,7 @@ class JobResult(BaseModel):
         """Snapshot the exact scalar inputs needed to explain this cycle's incentive."""
         if self._per_gpu_model_formula_inputs is not None:
             # DAH-4219: one block per model; their incentives sum to this node's.
-            return {"portions": self._per_gpu_model_formula_inputs}
+            return {"portions": [portion.model_dump() for portion in self._per_gpu_model_formula_inputs]}
         if self._mixed_formula_inputs is not None:
             # The property's contract is a plain JSON-ready dict, and the payload is
             # published straight into a JSON message.

@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 from datura.requests.miner_requests import ExecutorSSHInfo
 from payload_models.payloads import MinerJobRequestPayload
+from protocol.vc_protocol.compute_requests import RentedExecutorsResponse
 from protocol.vc_protocol.validator_requests import ResetVerifiedJobReason, ValidationEvent
 from services.gpu_spec_table import normalize_gpu_model
 from services.redis_service import INSPECTOR_EVENT_CHANNEL, RedisService
@@ -289,7 +290,9 @@ class ResultHandler:
         return held_specs if hold_enabled else specs
 
     @staticmethod
-    def _filler_revenue_per_gpu_hour_by_model(context: Context, rented_data) -> dict[str, float | None] | None:
+    def _filler_revenue_per_gpu_hour_by_model(
+        context: Context, rented_data: RentedExecutorsResponse | None
+    ) -> dict[str, float | None] | None:
         """DAH-4219: on a mixed-GPU node, each model's own filler average, looked up for that
         model's cards on the node; None on a single-model node."""
         if not rented_data:
