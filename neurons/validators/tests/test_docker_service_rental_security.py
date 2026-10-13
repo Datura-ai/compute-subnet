@@ -510,6 +510,7 @@ async def test_fresh_create_fails_when_sysbox_cannot_align_the_volume_owner(
 
     assert isinstance(result, FailedContainerRequest)
     assert result.failure_step == "external_volume_sysbox_owner"
+    assert "rent another node" in result.msg
     assert docker_service.rental_docker_client_factory.client.run_specs == []
     plugin_spy.assert_awaited_once_with(ssh_client, "celium-volume-safe")
 
@@ -558,6 +559,8 @@ async def test_fresh_create_fails_when_the_volume_does_not_mount(
     ssh_client = RecordingSSHClient(stdout="sysbox:231072:65536")
     _patch_create_harness(monkeypatch, docker_service, ssh_client)
     monkeypatch.setattr(docker_service, "create_s3fs_volume", AsyncMock(return_value=(False, "mount error")))
+    plugin_spy = AsyncMock()
+    monkeypatch.setattr(docker_service, "remove_s3fs_volume_plugin", plugin_spy)
     payload = _base_create_payload(is_sysbox=True, external_volume_info=_s3fs_volume_info())
 
     result = await docker_service.create_container(
@@ -570,6 +573,9 @@ async def test_fresh_create_fails_when_the_volume_does_not_mount(
     assert isinstance(result, FailedContainerRequest)
     assert result.failure_step == "external_volume_creation"
     assert "mount error" not in result.msg
+    assert "Volume could not be mounted" in result.msg
+    # the plugin holding the Volume's keys does not outlive the refused create
+    plugin_spy.assert_awaited_once_with(ssh_client, "celium-volume-safe")
     assert docker_service.rental_docker_client_factory.client.run_specs == []
 
 

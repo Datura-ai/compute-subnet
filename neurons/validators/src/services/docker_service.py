@@ -1078,6 +1078,16 @@ async def _raise_unless_running_before_created(
         )
 
 
+class RequestedCapabilityUnavailable(RuntimeError):
+    """A fresh create refused itself because this node cannot give what the rental asked for (a Volume that
+    did not mount, sysbox that cannot own the Volume). ``renter_sentence`` is the wire `msg`, like
+    ContainerKilledDuringBootstrap's: it names the cause and carries no host detail."""
+
+    def __init__(self, renter_sentence: str):
+        self.renter_sentence = renter_sentence
+        super().__init__(renter_sentence)
+
+
 class ContainerKilledDuringBootstrap(Exception):
     """The container `docker run` started was killed before the bootstrap finished, and no delete of
     ours was in flight (that case is _CreateCancelledByDelete). ``cause`` is `oom`, `killed`,
@@ -7994,9 +8004,9 @@ class DockerService:
                                     local_volume=local_volume if created_local_volume else None,
                                     external_volume_name=external_volume_name,
                                 )
-                                raise RuntimeError(
-                                    "this node cannot run sysbox with the attached Volume (its sysbox "
-                                    "uid range cannot be aligned with the Volume's owner); rent another node"
+                                raise RequestedCapabilityUnavailable(
+                                    "This node cannot run the pod with its Volume attached (its sysbox uid range "
+                                    "cannot own the Volume); rent another node"
                                 )
                             # Decided only once the volume is really attached: runc
                             # keeps /mnt writable, sysbox without the base does not.
@@ -8013,9 +8023,11 @@ class DockerService:
                             ssh_client,
                             default_extra,
                             local_volume=local_volume if created_local_volume else None,
-                            external_volume_name=None,
+                            external_volume_name=external_volume_info.name,
                         )
-                        raise RuntimeError("the attached Volume could not be mounted on this node")
+                        raise RequestedCapabilityUnavailable(
+                            "The attached Volume could not be mounted on this node; rent again or another node"
+                        )
                     else:
                         warnings.append(ContainerWarningCode.ExternalVolumeFailed)
                         profilers.append(ProfilerStep.since(ProfilerStepName.DOCKER_VOLUME_CREATION_FAILED, prev_timestamp))
@@ -8752,7 +8764,7 @@ class DockerService:
                 workload_kind=payload.workload_kind,
                 msg=(
                     last_exc.renter_sentence
-                    if isinstance(last_exc, ContainerKilledDuringBootstrap)
+                    if isinstance(last_exc, (ContainerKilledDuringBootstrap, RequestedCapabilityUnavailable))
                     else str(log_text)
                 ),
                 detail=failure_detail,
