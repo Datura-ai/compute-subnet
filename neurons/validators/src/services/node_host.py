@@ -8,6 +8,9 @@ import asyncio
 import ipaddress
 import socket
 
+import aiohttp
+from aiohttp.abc import AbstractResolver, ResolveResult
+
 
 class NodeHostError(OSError):
     """The node's hostname does not resolve to public addresses only.
@@ -104,3 +107,39 @@ async def _dial_first(loop: asyncio.AbstractEventLoop, infos: list) -> socket.so
             raise
         return sock
     raise last_error
+
+
+class PublicHostResolver(AbstractResolver):
+    """aiohttp resolver for requests to a node: a name resolves through ``resolve_public_host``.
+
+    aiohttp connects to exactly the addresses returned here (no second lookup), so a name that is
+    refused or that rebinds to a private address after the check is never dialled; the request's
+    Host header and TLS SNI keep the name. IP literals never reach a resolver.
+    """
+
+    async def resolve(
+        self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
+    ) -> list[ResolveResult]:
+        infos = await resolve_public_host(host, port)
+        if not infos:  # an IP literal
+            infos = [(family or socket.AF_INET, socket.SOCK_STREAM, 0, "", (host.strip("[]"), port))]
+        return [
+            ResolveResult(
+                hostname=host,
+                host=sockaddr[0],
+                port=sockaddr[1],
+                family=info_family,
+                proto=proto,
+                flags=socket.AI_NUMERICHOST | socket.AI_NUMERICSERV,
+            )
+            for info_family, _, proto, _, sockaddr in infos
+            if not family or info_family == family
+        ]
+
+    async def close(self) -> None:
+        pass
+
+
+def public_host_connector(**kwargs) -> aiohttp.TCPConnector:
+    """A TCPConnector for HTTP requests to a node's address (a hostname is pinned, see above)."""
+    return aiohttp.TCPConnector(resolver=PublicHostResolver(), **kwargs)
