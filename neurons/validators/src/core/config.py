@@ -616,6 +616,12 @@ class Settings(BaseSettings):
     # earns 0 as before. Pays nobody until the backend sends provider_spot_executor_ids.
     # False: every spot node earns 0, as before.
     ENABLE_SPOT_NODE_PAY: bool = Field(env="ENABLE_SPOT_NODE_PAY", default=False)
+    # Spot rental incentive, independent of the flag above. True: a rented spot node the backend
+    # lists in provider_spot_executor_ids earns rental incentive at 0.5 x what the same node would
+    # earn rented as secure (0.5 = SPOT_RENTAL_INCENTIVE_FACTOR); a node that is spot as a
+    # restriction, and the free remainder of a partially rented spot node, earn 0 as before.
+    # False: every rented spot node earns 0, as before.
+    ENABLE_SPOT_RENTAL_INCENTIVE: bool = Field(env="ENABLE_SPOT_RENTAL_INCENTIVE", default=False)
     # Secure-node floor, independent of the flag above. True: an idle secure node's rate after
     # bucket-cap dilution is raised to 0.95 x its configuration's average filler revenue, even above
     # its listed rate (0.95 = SECURE_FILLER_REVENUE_FLOOR_FACTOR, set apart from the spot factor).
