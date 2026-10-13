@@ -5,7 +5,7 @@ Through the real RedisService, Pipeline and ResultHandler on a fakeredis server.
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fakeredis import FakeServer
@@ -164,3 +164,18 @@ async def test_executor_id_with_colon_cannot_address_another_hotkeys_record(cont
     service = _redis_service()
     await service.set_verified_job_info(HOTKEY_B, f"prefix:{EXECUTOR}", prev_info={}, uuids="gpu-009")
     assert await service.get_verified_job_info(EXECUTOR, "hotkey-c") == {}
+
+
+@pytest.mark.asyncio
+async def test_foreign_anchor_lookup_does_not_scan_the_verified_job_hash(context_factory):
+    service = _redis_service()
+    assert await _cycle(service, context_factory, hotkey=HOTKEY_A, uuids="gpu-001")
+    service.redis.hscan_iter = MagicMock()
+
+    for _ in range(3):
+        assert await _cycle(service, context_factory, hotkey=HOTKEY_B, uuids="gpu-009") is False
+
+    assert await service.get_verified_job_info(EXECUTOR, HOTKEY_B) == {
+        "uuids": "gpu-001", "legacy_fallback": True, "foreign_fallback": True
+    }
+    service.redis.hscan_iter.assert_not_called()

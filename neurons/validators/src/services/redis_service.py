@@ -27,6 +27,8 @@ DUPLICATED_MACHINE_SET = "duplicated_machines"
 RENTAL_SUCCEED_MACHINE_SET = "rental_succeed_machines"
 AVAILABLE_PORT_MAPS_PREFIX = "available_port_maps"
 VERIFIED_JOB_COUNT_KEY = "verified_job_counts"
+# executor id -> the first hotkey whose record for it holds an anchor; replaces a per-cycle HSCAN of VERIFIED_JOB_COUNT_KEY
+VERIFIED_JOB_ANCHOR_HOTKEY_KEY = "verified_job_anchor_hotkey"
 # The anchor: the GPU UUID set of the executor's first successful verification, kept by every later write.
 GPU_ANCHOR_KEY = "uuids"
 # DAH-3457: field of a verified-job record, set once by GpuFingerprintCheck under GPU_ANCHOR_HARD_ENABLED and kept by
@@ -431,6 +433,10 @@ class RedisService:
         async with self.lock:
             return await self.redis.hget(key, field)
 
+    async def hsetnx(self, key: str, field: str, value: str):
+        async with self.lock:
+            await self.redis.hsetnx(key, field, value)
+
     async def hgetall(self, key: str):
         async with self.lock:
             return await self.redis.hgetall(key)
@@ -604,6 +610,8 @@ class RedisService:
             data[GPU_ANCHOR_BROKEN_KEY] = True
 
         await self.hset(VERIFIED_JOB_COUNT_KEY, verified_job_field(miner_hotkey, executor_id), json.dumps(data))
+        if data[GPU_ANCHOR_KEY] and ":" not in executor_id:
+            await self.hsetnx(VERIFIED_JOB_ANCHOR_HOTKEY_KEY, executor_id, miner_hotkey)
         if success and ":" not in executor_id:
             # an id with ":" is never a uuid-only field; it could name another hotkey's record
             await self.hdel(VERIFIED_JOB_COUNT_KEY, executor_id)
@@ -656,8 +664,9 @@ class RedisService:
 
     async def get_verified_job_info(self, executor_id: str, miner_hotkey: str):
         """The record under (miner_hotkey, executor_id), else the uuid-only record written before the key
-        carried the hotkey. The uuid-only record is never written again; it is removed by the first
-        successful write for the executor, so it moves to the hotkey whose GPU UUIDs match its anchor.
+        carried the hotkey. A failing cycle never copies it into this hotkey's record, but with
+        GPU_ANCHOR_HARD_ENABLED a mismatch may mark an anchored uuid-only record broken. It is removed by the
+        first successful write for the executor, so it moves to the hotkey whose GPU UUIDs match its anchor.
         A uuid-only record without an anchor is not carried: that executor starts a fresh count."""
         data = await self.hget(VERIFIED_JOB_COUNT_KEY, verified_job_field(miner_hotkey, executor_id))
         if data:
@@ -676,23 +685,23 @@ class RedisService:
             return {}  # uuid-only fields never contain ":"; such an id would read another hotkey's record
         data = await self.hget(VERIFIED_JOB_COUNT_KEY, executor_id)
         if not data:
-            return await self._foreign_anchor(executor_id, verified_job_field(miner_hotkey, executor_id))
+            return await self._foreign_anchor(executor_id, miner_hotkey)
         legacy = json.loads(data)
         if not legacy.get(GPU_ANCHOR_KEY):
             return {}
         return {**legacy, LEGACY_FALLBACK_KEY: True}
 
-    async def _foreign_anchor(self, executor_id: str, own_field: str):
+    async def _foreign_anchor(self, executor_id: str, miner_hotkey: str):
         """Another hotkey already holds a record for this executor id: carry only its anchor, so the fingerprint
         check fails a host whose GPUs differ. Nothing else is imported and no failure is written for it."""
-        async with self.lock:
-            async for field, value in self.redis.hscan_iter(VERIFIED_JOB_COUNT_KEY, match=f"*:{executor_id}"):
-                field = field.decode() if isinstance(field, bytes) else field
-                if field == own_field or field.partition(":")[2] != executor_id:
-                    continue
-                anchor = json.loads(value).get(GPU_ANCHOR_KEY)
-                if anchor:
-                    return {GPU_ANCHOR_KEY: anchor, LEGACY_FALLBACK_KEY: True, FOREIGN_FALLBACK_KEY: True}
+        owner = await self.hget(VERIFIED_JOB_ANCHOR_HOTKEY_KEY, executor_id)
+        owner = owner.decode() if isinstance(owner, bytes) else owner
+        if not owner or owner == miner_hotkey:
+            return {}
+        data = await self.hget(VERIFIED_JOB_COUNT_KEY, verified_job_field(owner, executor_id))
+        anchor = json.loads(data).get(GPU_ANCHOR_KEY) if data else None
+        if anchor:
+            return {GPU_ANCHOR_KEY: anchor, LEGACY_FALLBACK_KEY: True, FOREIGN_FALLBACK_KEY: True}
         return {}
 
     async def set_portion_per_gpu_type(self, gpu_type: str, portion: float):
