@@ -180,7 +180,7 @@ class _ShellAnsweredByAnotherSshd(_ShellThatRefusesToConnect):
 
 @pytest.mark.asyncio
 async def test_an_untrusted_host_key_points_at_the_ssh_port_not_the_firewall(monkeypatch) -> None:
-    """muam_89937, 11 Oct 2026: the node SSH port reached the host's own sshd, not the executor."""
+    """A provider on Discord, 11 Oct 2026: the node SSH port reached the host's own sshd, not the executor."""
     monkeypatch.setattr(task_service_module, "InteractiveShellService", _ShellAnsweredByAnotherSshd)
     miner, executor = _a_job_for("node-9")
 

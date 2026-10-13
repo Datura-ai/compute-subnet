@@ -116,9 +116,10 @@ def availability_errors(events: list[ValidationEvent] | None) -> list[Availabili
 
 # The executor reports its own sshd's host key and the validator pins it to this address and port,
 # so an untrusted key means a different sshd answered there: in practice the host's own sshd
-# (muam_89937, 11 Oct 2026: the node SSH port was the host's SSH port). Firewall advice misleads.
+# (a provider on Discord, 11 Oct 2026: the node SSH port was the host's SSH port). Firewall advice
+# misleads.
 SSH_HOST_KEY_MISMATCH_REMEDIATION = (
-    "The SSH port answered with a different SSH server than this node's: usually the host's own "
+    "If this repeats every check, another SSH server answers this port: usually the host's own "
     "sshd, or a port forward to another machine. Set the node SSH port (and the public SSH port "
     "forward, if any) to a port that reaches the executor container, not the host's SSH port, "
     "then re-run `lium mine`."
