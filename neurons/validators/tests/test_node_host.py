@@ -3,7 +3,11 @@ import socket
 import pytest
 
 from neurons.validators.src.services import node_host
-from neurons.validators.src.services.node_host import NodeHostError, public_host_sock
+from neurons.validators.src.services.node_host import (
+    NodeHostError,
+    open_public_connection,
+    public_host_sock,
+)
 
 
 def _resolves_to(monkeypatch, *addresses, port=None):
@@ -52,6 +56,23 @@ async def test_public_name_returns_a_socket_connected_to_the_validated_address(m
         assert sock.getpeername() == ("127.0.0.1", port)
     finally:
         sock.close()
+
+
+@pytest.mark.asyncio
+async def test_open_public_connection_reaches_the_validated_address(monkeypatch, listener):
+    # Arrange: the name resolves to the local listener, treated as public for this test
+    port = listener.getsockname()[1]
+    _resolves_to(monkeypatch, "127.0.0.1", port=port)
+    monkeypatch.setattr("ipaddress.IPv4Address.is_global", property(lambda self: True))
+
+    # Act
+    _, writer = await open_public_connection("gpu-node1.example.net", port)
+
+    # Assert
+    try:
+        assert writer.get_extra_info("peername") == ("127.0.0.1", port)
+    finally:
+        writer.close()
 
 
 @pytest.mark.asyncio

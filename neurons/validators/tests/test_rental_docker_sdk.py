@@ -1599,3 +1599,73 @@ async def test_container_status_raises_on_any_other_inspect_failure():
 
     with pytest.raises(RentalDockerOperationError, match="inspect container failed.*daemon exploded"):
         await client.container_status(container_name="pod_slow")
+
+
+def _executor_info_named(address: str) -> ExecutorSSHInfo:
+    return ExecutorSSHInfo(
+        uuid="executor-id",
+        address=address,
+        port=8000,
+        ssh_username="root",
+        ssh_port=2222,
+        python_path="/usr/bin/python",
+        root_dir="/root",
+        ssh_host_key="ssh-ed25519 AAAATESTKEY",
+    )
+
+
+@pytest.mark.asyncio
+async def test_factory_refuses_a_hostname_with_a_private_address_before_building_a_client(monkeypatch):
+    # Arrange
+    async def private(self, host, port, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", port))]
+
+    monkeypatch.setattr("asyncio.BaseEventLoop.getaddrinfo", private)
+    api_client_factory = Mock()
+    factory = RentalDockerSdkClientFactory(api_client_factory=api_client_factory)
+
+    # Act / Assert
+    with pytest.raises(RentalDockerConnectionError, match="non-public"):
+        async with factory.connect(
+            executor_info=_executor_info_named("gpu-node1.example.net"),
+            private_key="PRIVATE KEY",
+        ):
+            pass
+    api_client_factory.assert_not_called()
+
+
+def test_rental_ssh_adapter_hands_paramiko_a_socket_to_the_pinned_address(tmp_path):
+    # Arrange
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    pinned = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+    connected = {}
+
+    class FakeSSHClient:
+        def connect(self, **params):
+            connected.update(params)
+
+        def get_transport(self):
+            return None
+
+    adapter_class = _build_rental_ssh_http_adapter_class(
+        key_path=tmp_path / "id_executor",
+        known_hosts_path=tmp_path / "known_hosts",
+        pinned_addresses=pinned,
+    )
+    adapter = adapter_class.__new__(adapter_class)
+    adapter.ssh_client = FakeSSHClient()
+    adapter.ssh_params = {"hostname": "gpu-node1.example.net", "port": port}
+
+    # Act
+    adapter._connect()
+
+    # Assert: the name stays the hostname (known_hosts); the socket is to the pinned address
+    try:
+        assert connected["hostname"] == "gpu-node1.example.net"
+        assert connected["sock"].getpeername() == ("127.0.0.1", port)
+    finally:
+        connected["sock"].close()
+        listener.close()

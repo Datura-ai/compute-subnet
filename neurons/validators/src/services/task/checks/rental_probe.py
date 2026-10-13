@@ -23,7 +23,7 @@ from core.config import settings
 from core.utils import _m, get_extra_info
 
 from ...const import MIN_PORT_COUNT, POD_CONTAINER_PREFIX
-from ...node_host import public_host_sock
+from ...node_host import open_public_connection, public_host_sock
 from ..messages import NO_OUTBOUND_INTERNET_REMEDIATION, OutboundInternetMessages
 from ..messages import RentalProbeMessages as Msg
 from ..messages import render_message
@@ -1178,7 +1178,7 @@ async def _wait_for_sshd(
     while True:
         try:
             reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port, limit=SSH_ID_LINE_MAX),
+                open_public_connection(host, port, limit=SSH_ID_LINE_MAX),
                 timeout=_SSHD_CONNECT_TIMEOUT_SECONDS,
             )
             try:

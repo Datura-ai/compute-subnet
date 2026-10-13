@@ -17,6 +17,7 @@ from typing import TypeVar
 
 from core.utils import _m, get_extra_info
 from datura.requests.miner_requests import ExecutorSSHInfo
+from services.node_host import NodeHostError, dial_validated, resolve_public_host
 
 
 # 1 h: no rental pull that succeeded in 30 days took more than 44 min (DAH-3720).
@@ -1173,6 +1174,14 @@ class RentalDockerSdkClientFactory:
         private_key: str,
     ) -> AsyncIterator[RentalDockerSdkClient]:
         host_key = require_rental_docker_ssh_host_key(executor_info)
+        # a hostname is resolved and checked once here; paramiko then dials (and re-dials) these
+        # addresses over a socket we open, never a second lookup of the name
+        try:
+            pinned_addresses = await resolve_public_host(executor_info.address, executor_info.ssh_port)
+        except NodeHostError as exc:
+            raise RentalDockerConnectionError(
+                _wrap_error_message("Docker SDK client construction failed", exc)
+            ) from exc
         transport_retry_enabled = (
             bool(self.transport_retry_enabled())
             if callable(self.transport_retry_enabled)
@@ -1205,6 +1214,7 @@ class RentalDockerSdkClientFactory:
                 _build_docker_ssh_base_url(executor_info),
                 key_path,
                 known_hosts_path,
+                pinned_addresses,
             )
             try:
                 try:
@@ -1247,6 +1257,7 @@ class RentalDockerSdkClientFactory:
         base_url: str,
         key_path: Path,
         known_hosts_path: Path,
+        pinned_addresses: list,
     ):
         with _DOCKER_SDK_SSH_ADAPTER_LOCK:
             if self.api_client_factory is not None:
@@ -1262,6 +1273,7 @@ class RentalDockerSdkClientFactory:
                 use_ssh_client=False,
                 key_path=key_path,
                 known_hosts_path=known_hosts_path,
+                pinned_addresses=pinned_addresses,
             )
 
 
@@ -1379,11 +1391,13 @@ def _default_docker_api_client_factory(**kwargs):
 
     key_path = kwargs.pop("key_path", None)
     known_hosts_path = kwargs.pop("known_hosts_path", None)
+    pinned_addresses = kwargs.pop("pinned_addresses", [])
     if key_path is not None and known_hosts_path is not None:
         return _create_docker_api_client_with_rental_ssh_adapter(
             docker_module=docker,
             key_path=key_path,
             known_hosts_path=known_hosts_path,
+            pinned_addresses=pinned_addresses,
             **kwargs,
         )
 
@@ -1395,6 +1409,7 @@ def _create_docker_api_client_with_rental_ssh_adapter(
     docker_module,
     key_path: Path,
     known_hosts_path: Path,
+    pinned_addresses: list = (),
     **kwargs,
 ):
     import docker.api.client as docker_api_client
@@ -1406,6 +1421,7 @@ def _create_docker_api_client_with_rental_ssh_adapter(
     docker_api_client.SSHHTTPAdapter = _build_rental_ssh_http_adapter_class(
         key_path=key_path,
         known_hosts_path=known_hosts_path,
+        pinned_addresses=pinned_addresses,
     )
     try:
         return docker_module.APIClient(**kwargs)
@@ -1421,7 +1437,11 @@ def _build_rental_ssh_http_adapter_class(
     *,
     key_path: Path,
     known_hosts_path: Path,
+    pinned_addresses: list = (),
 ):
+    """``pinned_addresses``: ``resolve_public_host``'s results for a node registered by hostname.
+    Every (re)connect then hands paramiko a socket to one of them, so the name is not looked up
+    again; paramiko still checks the host key against the name. Empty for an IP literal."""
     from docker.transport.sshconn import SSHConnection, SSHConnectionPool, SSHHTTPAdapter
 
     class RentalSSHConnection(SSHConnection):
@@ -1466,6 +1486,10 @@ def _build_rental_ssh_http_adapter_class(
 
     class RentalSSHHTTPAdapter(SSHHTTPAdapter):
         def _connect(self) -> None:
+            if self.ssh_client and pinned_addresses:
+                self.ssh_params["sock"] = dial_validated(
+                    pinned_addresses, _DOCKER_SSH_REOPEN_TIMEOUT_SECONDS
+                )
             super()._connect()
             transport = self.ssh_client.get_transport() if self.ssh_client else None
             if transport is not None:
