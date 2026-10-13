@@ -163,6 +163,27 @@ class JobResult(BaseModel):
     zero_incentive_reasons: list[IncentiveReason] = Field(default_factory=list, exclude=True)
 
     _mixed_formula_inputs: "MixedFormulaInputs | None" = PrivateAttr(default=None)
+    _per_gpu_model_formula_inputs: list[dict[str, Any]] | None = PrivateAttr(default=None)
+
+    @property
+    def gpu_model_counts(self) -> dict[str, int]:
+        """Cards per model as the scrape listed them, first card's model first (DAH-4219).
+
+        Empty when the spec does not name every one of the `gpu_count` cards or its first
+        card is not `gpu_model`: the node is then scored as `gpu_count` x `gpu_model`.
+        """
+        details = ((self.spec or {}).get("gpu") or {}).get("details")
+        if not isinstance(details, list) or not details or len(details) != self.gpu_count:
+            return {}
+        counts: dict[str, int] = {}
+        for detail in details:
+            name = detail.get("name") if isinstance(detail, dict) else None
+            if not name or not isinstance(name, str):
+                return {}
+            counts[name] = counts.get(name, 0) + 1
+        if next(iter(counts)) != self.gpu_model:
+            return {}
+        return counts
 
     def set_incentive_split(self, rented: float, idle: float) -> None:
         """Record the two-pool breakdown and keep `incentive` equal to their sum."""
@@ -174,6 +195,11 @@ class JobResult(BaseModel):
         """Take both portions' formula snapshots — call it while each portion still holds
         the GPU count its own formula ran on, before the merge restores the whole box."""
         self._mixed_formula_inputs = inputs
+
+    def record_per_gpu_model_formula_inputs(self, portions: list[dict[str, Any]]) -> None:
+        """Take each model's formula snapshot of a mixed-GPU node — call it while every
+        portion still holds the cards its own formula ran on, before the merge."""
+        self._per_gpu_model_formula_inputs = portions
 
     def record_incentive_log(self, line: "MinerLogLine") -> None:
         """Append the line to the miner-facing log; zero-incentive lines also become data for the backend."""
@@ -209,6 +235,8 @@ class JobResult(BaseModel):
 
     @property
     def incentive_formula_version(self) -> str:
+        if self._per_gpu_model_formula_inputs is not None:
+            return "per_gpu_model_v1"
         if self._is_mixed:
             return "mixed_v1"
         return "rental_price_v2" if self._paid_from_rental_share else "mining_v1"
@@ -220,6 +248,9 @@ class JobResult(BaseModel):
     @property
     def incentive_formula_inputs(self) -> dict[str, Any]:
         """Snapshot the exact scalar inputs needed to explain this cycle's incentive."""
+        if self._per_gpu_model_formula_inputs is not None:
+            # DAH-4219: one block per model; their incentives sum to this node's.
+            return {"portions": self._per_gpu_model_formula_inputs}
         if self._mixed_formula_inputs is not None:
             # The property's contract is a plain JSON-ready dict, and the payload is
             # published straight into a JSON message.

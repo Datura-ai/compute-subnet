@@ -512,3 +512,16 @@ async def test_a_slow_drip_rpc_answer_is_cut_at_the_timeout(monkeypatch):
     assert (status.deposited, status.read_failed) == (False, True)
     assert "TimeoutError" in status.error_message
     assert elapsed < 3
+
+
+def test_a_mixed_gpu_node_owes_each_cards_own_deposit(monkeypatch):
+    """DAH-4219: 1x H100 + 7 cards without a deposit amount owed 8x the H100 deposit."""
+    amounts = {GPU_MODEL: 0.103, "NVIDIA GeForce RTX 4090": 0.01}
+    config = SimpleNamespace(required_deposit_amount=amounts)
+    monkeypatch.setattr(collateral_status, "shared_client", SimpleNamespace(config=config))
+    cards = (GPU_MODEL, "NVIDIA GeForce RTX 4090", "NVIDIA GeForce RTX 4090", "No amount")
+
+    # (0.103 + 0.01 + 0.01) x COLLATERAL_DAYS (7)
+    assert collateral_status.required_deposit_tao_for_cards(cards) == Decimal("0.861")
+    assert collateral_status.required_deposit_tao_for_cards((GPU_MODEL,) * GPU_COUNT) == REQUIRED_TAO
+    assert collateral_status.required_deposit_tao_for_cards(("No amount", None)) is None

@@ -9,7 +9,8 @@ class GpuModelValidCheck:
 
     This mirrors the legacy guard that rejected unknown models, zero counts, or mismatched
     detail lists. It prevents us from handing out scores when the scrape clearly failed or
-    when a miner advertises off-policy hardware.
+    when a miner advertises off-policy hardware. Every card's model must be supported, not
+    only the first card's (DAH-4219).
 
     A detail list whose length differs from the count (GPU_DETAILS_MISMATCH) also clears the
     verified job (DAH-3519): in production this is a scrape that enumerated fewer cards than the
@@ -45,7 +46,11 @@ class GpuModelValidCheck:
         if gpu_count > 0 and len(gpu_details) > 0:
             gpu_model = gpu_details[0].get("name", None)
 
-        if gpu_model not in gpu_model_rates_map:
+        # DAH-4219: each card is paid at its own model's rate, so every card needs one, not only the first
+        unsupported_models = sorted(
+            {str(detail.get("name")) for detail in gpu_details if detail.get("name") not in gpu_model_rates_map}
+        )
+        if gpu_model not in gpu_model_rates_map or unsupported_models:
             supported_models = list(gpu_model_rates_map.keys())
             event = render_message(
                 Msg.MODEL_UNSUPPORTED,
@@ -53,6 +58,7 @@ class GpuModelValidCheck:
                 check_id=self.check_id,
                 what={
                     "gpu_model": gpu_model,
+                    "unsupported_models": unsupported_models,
                     "gpu_count": gpu_count,
                     "supported_models": supported_models,
                 },

@@ -108,6 +108,18 @@ def required_deposit_tao(gpu_model: str | None, gpu_count: int) -> Decimal | Non
     return Decimal(str(round(unit * gpu_count * settings.COLLATERAL_DAYS, 6)))
 
 
+def required_deposit_tao_for_cards(gpu_models: tuple[str | None, ...]) -> Decimal | None:
+    """DAH-4219: a mixed-GPU node owes each card's own deposit, not gpu_count x its first card's.
+
+    A card whose model has no deposit amount adds nothing; None when no card has one.
+    """
+    amounts = shared_client.config.required_deposit_amount
+    units = [amounts[gpu_model] for gpu_model in gpu_models if gpu_model and amounts.get(gpu_model) is not None]
+    if not units:
+        return None
+    return Decimal(str(round(sum(units) * settings.COLLATERAL_DAYS, 6)))
+
+
 def decide(
     *,
     executor_uuid: str,
@@ -192,12 +204,21 @@ class CollateralStatusReader:
         self._rpc = rpc or _post_batch
         self._evm_address_for_hotkey = evm_address_for_hotkey or _evm_address_for_hotkey
         self._clock = clock
-        self._cache: dict[tuple[str, str, str, str | None, int], tuple[float, CollateralStatus]] = {}
+        self._cache: dict[tuple, tuple[float, CollateralStatus]] = {}
 
     async def status(
-        self, *, miner_hotkey: str, executor_uuid: str, gpu_model: str | None, gpu_count: int
+        self,
+        *,
+        miner_hotkey: str,
+        executor_uuid: str,
+        gpu_model: str | None,
+        gpu_count: int,
+        gpu_models: tuple[str | None, ...] | None = None,
     ) -> tuple[CollateralStatus, bool]:
-        """The executor's status and whether it came from the cache."""
+        """The executor's status and whether it came from the cache.
+
+        `gpu_models` names every card; given, the required deposit is summed over them.
+        """
         evm_address = self._evm_address_for_hotkey(miner_hotkey)
         if evm_address is None:
             # not cached: the miner can associate an address at any time
@@ -205,7 +226,7 @@ class CollateralStatusReader:
                 False, None, f"No evm address found that is associated to this miner hotkey {miner_hotkey} in subnet"
             ), False
 
-        key = (miner_hotkey, executor_uuid, evm_address, gpu_model, gpu_count)
+        key = (miner_hotkey, executor_uuid, evm_address, gpu_model, gpu_count, gpu_models)
         cached = self._cache.get(key)
         now = self._clock()
         if cached and now - cached[0] < settings.COLLATERAL_STATUS_CACHE_SECONDS:
@@ -213,7 +234,13 @@ class CollateralStatusReader:
 
         try:
             status = await asyncio.wait_for(
-                self._read(executor_uuid, evm_address, required_deposit_tao(gpu_model, gpu_count)),
+                self._read(
+                    executor_uuid,
+                    evm_address,
+                    required_deposit_tao_for_cards(gpu_models)
+                    if gpu_models
+                    else required_deposit_tao(gpu_model, gpu_count),
+                ),
                 timeout=settings.COLLATERAL_STATUS_TIMEOUT_SECONDS,
             )
         except Exception as exc:  # noqa: BLE001 - any read failure keeps the last answer

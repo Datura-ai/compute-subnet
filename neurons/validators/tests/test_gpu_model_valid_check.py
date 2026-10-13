@@ -36,6 +36,27 @@ from tests.helpers import build_context_config, build_services, build_state, def
             Msg.MODEL_OK.reason,
         ),
         (
+            # DAH-4219: a supported first card does not cover an unsupported second one
+            {"NVIDIA RTX 3090": 0.05},
+            {
+                "specs": {"gpu": {"count": 2, "details": [{"name": "NVIDIA RTX 3090"}, {"name": "Unsupported"}]}},
+                "gpu_count": 2,
+                "gpu_details": [{"name": "NVIDIA RTX 3090"}, {"name": "Unsupported"}],
+            },
+            False,
+            Msg.MODEL_UNSUPPORTED.reason,
+        ),
+        (
+            {"NVIDIA RTX 3090": 0.05, "NVIDIA GeForce RTX 3080": 0.0},
+            {
+                "specs": {"gpu": {"count": 2, "details": [{"name": "NVIDIA RTX 3090"}, {"name": "NVIDIA GeForce RTX 3080"}]}},
+                "gpu_count": 2,
+                "gpu_details": [{"name": "NVIDIA RTX 3090"}, {"name": "NVIDIA GeForce RTX 3080"}],
+            },
+            True,
+            Msg.MODEL_OK.reason,
+        ),
+        (
             {"NVIDIA GeForce RTX 3080": 0.0},
             {
                 "specs": {"gpu": {"count": 1, "details": [{"name": "NVIDIA GeForce RTX 3080"}]}},

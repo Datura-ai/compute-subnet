@@ -24,6 +24,10 @@ class CollateralStatusCheck:
             executor_uuid=ctx.executor.uuid,
             gpu_model=gpu_model,
             gpu_count=gpu_count,
+            # every card named: the deposit is each card's own (DAH-4219); else gpu_count x the first
+            gpu_models=tuple(detail.get("name") for detail in gpu_details)
+            if gpu_details and len(gpu_details) == gpu_count
+            else None,
         )
         if status.read_failed:
             template = Msg.READ_FAILED

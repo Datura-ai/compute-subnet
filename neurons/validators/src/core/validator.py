@@ -112,7 +112,10 @@ def settle_cycle_results(
                     job_result.is_new_rentals_paused and not job_result.is_rented
                 )
             ):
-                total_gpu_model_count_map[job_result.gpu_model] = total_gpu_model_count_map.get(job_result.gpu_model, 0) + job_result.gpu_count
+                # DAH-4219: a mixed-GPU node adds each card to its own model, not all to the first card's
+                model_counts = job_result.gpu_model_counts or {job_result.gpu_model: job_result.gpu_count}
+                for gpu_model, gpu_count in model_counts.items():
+                    total_gpu_model_count_map[gpu_model] = total_gpu_model_count_map.get(gpu_model, 0) + gpu_count
     return total_gpu_model_count_map
 
 
