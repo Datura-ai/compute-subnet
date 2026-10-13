@@ -172,6 +172,34 @@ LOG_STREAM_INTERVAL = 0.5  # 500ms — keeps build-log p95 emit→publish under 
 # would violate the SSE latency requirement.
 IN_CONTAINER_SSH_BOOTSTRAP_PATH = "/tmp/lium-ssh-bootstrap.sh"
 
+# Each batch goes to the backend as one LogStreamRequest frame, and its validator socket takes at most 1 MiB per
+# frame (lium-platform F-29). JSON escaping can grow a character to 6 bytes, so a batch carries at most 128 Ki
+# characters of log text, and one line (a renter's Dockerfile prints what it likes) at most 16 Ki.
+LOG_BATCH_MAX_CHARS = 128 * 1024
+LOG_LINE_MAX_CHARS = 16 * 1024
+
+
+def log_batches(
+    logs: list[dict], max_chars: int = LOG_BATCH_MAX_CHARS, line_max_chars: int = LOG_LINE_MAX_CHARS
+) -> list[list[dict]]:
+    """The queued log entries in order, split so no batch's log text exceeds max_chars; long lines are cut."""
+    batches: list[list[dict]] = []
+    batch: list[dict] = []
+    size = 0
+    for log in logs:
+        text = log["log_text"]
+        if len(text) > line_max_chars:
+            log = {**log, "log_text": f"{text[:line_max_chars]} [{len(text) - line_max_chars} chars cut]"}
+        chars = len(log["log_text"])
+        if batch and size + chars > max_chars:
+            batches.append(batch)
+            batch, size = [], 0
+        batch.append(log)
+        size += chars
+    if batch:
+        batches.append(batch)
+    return batches
+
 # DAH-2364: SIGTERM grace window (docker stop -t semantics) given to a container before
 # forced removal. SIGKILL-only removal of GPU-heavy workloads repeatedly triggered a
 # containerd/sysbox wedge ("could not kill container ... did not receive an exit event";
@@ -3303,15 +3331,16 @@ class DockerService:
 
             if logs_to_process:
                 try:
-                    await self.redis_service.publish(
-                        STREAMING_LOG_CHANNEL,
-                        {
-                            "logs": logs_to_process,
-                            "miner_hotkey": miner_hotkey,
-                            "executor_uuid": executor_id,
-                            "pod_id": pod_id,
-                        },
-                    )
+                    for batch in log_batches(logs_to_process):
+                        await self.redis_service.publish(
+                            STREAMING_LOG_CHANNEL,
+                            {
+                                "logs": batch,
+                                "miner_hotkey": miner_hotkey,
+                                "executor_uuid": executor_id,
+                                "pod_id": pod_id,
+                            },
+                        )
 
                     logger.info(
                         _m(
