@@ -3,6 +3,7 @@ import contextlib
 import dataclasses
 import enum
 import ipaddress
+import json
 import logging
 import math
 import random
@@ -173,29 +174,32 @@ LOG_STREAM_INTERVAL = 0.5  # 500ms — keeps build-log p95 emit→publish under 
 IN_CONTAINER_SSH_BOOTSTRAP_PATH = "/tmp/lium-ssh-bootstrap.sh"
 
 # Each batch goes to the backend as one LogStreamRequest frame, and its validator socket takes at most 1 MiB per
-# frame (lium-platform F-29). JSON escaping can grow a character to 6 bytes, so a batch carries at most 128 Ki
-# characters of log text, and one line (a renter's Dockerfile prints what it likes) at most 16 Ki.
-LOG_BATCH_MAX_CHARS = 128 * 1024
+# frame (lium-platform F-29). A batch is budgeted by the JSON bytes of its entries, fields included, which leaves
+# half the frame for the envelope; one line (a renter's Dockerfile prints what it likes) is cut at 16 Ki characters,
+# at most 96 KiB once escaped.
+LOG_BATCH_MAX_BYTES = 512 * 1024
 LOG_LINE_MAX_CHARS = 16 * 1024
 
 
 def log_batches(
-    logs: list[dict], max_chars: int = LOG_BATCH_MAX_CHARS, line_max_chars: int = LOG_LINE_MAX_CHARS
+    logs: list[dict], max_bytes: int = LOG_BATCH_MAX_BYTES, line_max_chars: int = LOG_LINE_MAX_CHARS
 ) -> list[list[dict]]:
-    """The queued log entries in order, split so no batch's log text exceeds max_chars; long lines are cut."""
+    """The queued log entries in order, split so no batch serializes to more than max_bytes; long lines are cut."""
     batches: list[list[dict]] = []
     batch: list[dict] = []
     size = 0
     for log in logs:
         text = log["log_text"]
         if len(text) > line_max_chars:
-            log = {**log, "log_text": f"{text[:line_max_chars]} [{len(text) - line_max_chars} chars cut]"}
-        chars = len(log["log_text"])
-        if batch and size + chars > max_chars:
+            # the mark fits inside the cap, so a requeued line is not cut twice
+            mark = f" [cut from {len(text)} chars]"
+            log = {**log, "log_text": text[: line_max_chars - len(mark)] + mark}
+        entry_bytes = len(json.dumps(log)) + 2  # ASCII-escaped, so never smaller than the frame's UTF-8; + ", "
+        if batch and size + entry_bytes > max_bytes:
             batches.append(batch)
             batch, size = [], 0
         batch.append(log)
-        size += chars
+        size += entry_bytes
     if batch:
         batches.append(batch)
     return batches
@@ -3330,8 +3334,10 @@ class DockerService:
                 self.logs_queue.clear()
 
             if logs_to_process:
+                batches = log_batches(logs_to_process)
+                published = 0
                 try:
-                    for batch in log_batches(logs_to_process):
+                    for batch in batches:
                         await self.redis_service.publish(
                             STREAMING_LOG_CHANNEL,
                             {
@@ -3341,6 +3347,7 @@ class DockerService:
                                 "pod_id": pod_id,
                             },
                         )
+                        published += 1
 
                     logger.info(
                         _m(
@@ -3350,6 +3357,9 @@ class DockerService:
                     )
 
                 except Exception as e:
+                    # the batches that did not go out return to the front of the queue for the next pass
+                    async with self.lock:
+                        self.logs_queue[:0] = [log for batch in batches[published:] for log in batch]
                     logger.error(
                         _m(
                             "Error publishing log stream",
