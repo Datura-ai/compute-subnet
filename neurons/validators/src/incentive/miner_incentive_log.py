@@ -258,8 +258,9 @@ class MinerLogLine(BaseModel):
             reason=ZeroIncentiveReason.PROVIDER_EMAIL_NOT_CONFIRMED,
             message=(
                 "No subnet incentive: this executor is not listed until the provider account "
-                "confirms an e-mail address. Confirm it under Profile Settings in the provider "
-                "portal to list the executor and start earning."
+                "confirms an e-mail address. Confirm your e-mail under Profile Settings in the "
+                "provider portal to remove this hold. Other listing and incentive requirements "
+                "still apply."
             ),
             internal_message="Executor excluded from both pools - provider e-mail not confirmed, node not listed",
         )

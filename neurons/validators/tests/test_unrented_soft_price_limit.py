@@ -370,20 +370,17 @@ def test_reasons_excluded_from_both_pools_lists_every_match_in_order():
 
 
 @pytest.mark.asyncio
-async def test_an_email_held_node_without_discord_reports_both_reasons():
-    # A held node has no listing, so the backend never puts it in the Discord-connected list either:
-    # the provider sees the e-mail reason first and the Discord reason beside it.
+async def test_an_email_held_node_reports_only_the_email_reason():
+    # A held node has no listing row, so its absence from the Discord-connected list says nothing
+    # about the provider's Discord: the hold suppresses the Discord reason.
     incentive = _build_incentive()
     job = _make_job(1.0, provider_discord_connected=False, is_provider_email_held=True)
 
-    assert [line.reason for line in incentive._reasons_excluded_from_both_pools(job)] == [
-        "provider_email_not_confirmed",
-        "provider_discord_not_connected",
-    ]
+    reasons = [line.reason for line in incentive._reasons_excluded_from_both_pools(job)]
     result = await incentive.calculate_executor_score(job)
 
+    assert reasons == ["provider_email_not_confirmed"]
     assert result.mining_score == 0
     log = "\n".join(result.incentive_logs)
     assert "provider_email_not_confirmed" in log
-    assert "provider_discord_not_connected" in log
-    assert log.index("provider_email_not_confirmed") < log.index("provider_discord_not_connected")
+    assert "provider_discord_not_connected" not in log

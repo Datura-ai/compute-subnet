@@ -94,7 +94,7 @@ def _job(**overrides) -> JobResult:
         (
             lambda job: MinerLogLine.no_payout_because_email_not_confirmed(job),
             "provider_email_not_confirmed",
-            "confirms an e-mail address",
+            "to remove this hold. Other listing and incentive requirements still apply.",
         ),
         (
             lambda job: MinerLogLine.no_payout_because_paused_for_new_rentals(job),
