@@ -1385,11 +1385,11 @@ class RentalPriceIncentive(DefaultIncentive):
             return job_result
 
         # For rented or non-eligible GPUs, use parent's default scoring logic
-        job_result = await super().calculate_executor_score(job_result)
-        if earns_spot_rental_incentive(job_result) and job_result.mining_score:
-            # A rented spot node is scored as a rented secure node, then paid a fixed share of it.
-            job_result.mining_score *= SPOT_RENTAL_INCENTIVE_FACTOR
-        return job_result
+        return await super().calculate_executor_score(job_result)
+
+    def _spot_rental_factor(self, job_result: JobResult) -> float:
+        # A rented spot node is scored as a rented secure node, then paid a fixed share of it.
+        return SPOT_RENTAL_INCENTIVE_FACTOR if earns_spot_rental_incentive(job_result) else 1.0
 
     async def estimate_executor(
         self,

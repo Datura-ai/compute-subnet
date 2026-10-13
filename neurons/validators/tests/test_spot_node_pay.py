@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from core.config import settings
+from core.validator import settle_cycle_results
 from datura.requests.miner_requests import ExecutorSSHInfo
 from incentive.config import DEFAULT_PRICE, IncentiveConfig
 from incentive import rental_price
@@ -335,6 +336,34 @@ async def test_rented_spot_counts_in_the_gpu_denominator_only_when_it_earns(monk
     assert RentalPriceIncentive(_config(), AsyncMock(), results, {}).get_snapshot().mining.total_gpu_model_count_map == {
         H100: 16
     }
+
+
+@pytest.mark.parametrize("flag_on, gpus", [(False, 8), (True, 16)], ids=["flag-off", "flag-on"])
+def test_the_live_gpu_denominator_counts_rented_spot_only_when_it_earns(monkeypatch, flag_on, gpus):
+    monkeypatch.setattr(settings, "ENABLE_SPOT_RENTAL_INCENTIVE", flag_on)
+    spot = _spot(is_rented=True)
+    spot.executor_info.port = 8081
+    results = {"hk-spot": [spot], "hk-secure": [_node("secure-1", is_rented=True)]}
+
+    assert settle_cycle_results(results, {}) == {H100: gpus}
+
+
+@pytest.mark.asyncio
+async def test_the_rented_spot_score_log_carries_the_factor_and_the_final_score(spot_rental_on):
+    spot = _spot(is_rented=True)
+    secure = _node("secure-1", is_rented=True)
+    redis_service = AsyncMock()
+    redis_service.get_portion_per_gpu_type.return_value = 1.0
+    incentive = RentalPriceIncentive(_config(), redis_service, {"hk": [spot, secure]}, {H100: 16})
+
+    await incentive.calculate_executor_score(spot)
+    await incentive.calculate_executor_score(secure)
+
+    spot_line = next(line for line in spot.incentive_logs if "Mining score is calculated" in line)
+    secure_line = next(line for line in secure.incentive_logs if "Mining score is calculated" in line)
+    assert "spot_rental_factor" in spot_line
+    assert f'"mining_score": {spot.mining_score}' in spot_line
+    assert "spot_rental_factor" not in secure_line
 
 
 @pytest.mark.asyncio

@@ -908,6 +908,7 @@ class MinerService:
             # than hardcoding them: forcing score=1.0 buys a place in the mining pool, it does not
             # exempt the node from spot-tier or Discord exclusions.
             is_spot = executor_uuid in (rented_data.spot_executor_ids or [])
+            is_provider_chosen_spot = is_spot and executor_uuid in (rented_data.provider_spot_executor_ids or [])
             discord_connected_ids = rented_data.provider_discord_connected_executor_ids
             provider_discord_connected = (
                 True if discord_connected_ids is None else executor_uuid in discord_connected_ids
@@ -942,6 +943,7 @@ class MinerService:
                     # Not measurable without the node; a false reading would silently cut the score.
                     sysbox_runtime=True,
                     is_spot=is_spot,
+                    is_provider_chosen_spot=is_provider_chosen_spot,
                     provider_discord_connected=provider_discord_connected,
                 )
             )
