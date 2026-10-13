@@ -159,20 +159,23 @@ async def test_failed_cycle_does_not_import_another_hotkeys_legacy_identity(cont
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("empty", ["", ",", " , "], ids=["blank", "comma", "spaced_comma"])
 @pytest.mark.parametrize(
     "own",
     [
         None,
         {"count": 0, "failed": 1, "spec": "", "uuids": ""},
         {"count": 0, "failed": 0, "spec": "", "uuids": ""},
+        {"count": 0, "failed": 0, "spec": "", "uuids": "EMPTY"},
     ],
-    ids=["absent", "failed", "reset"],
+    ids=["absent", "failed", "reset", "own_empty_value"],
 )
-async def test_empty_uuid_only_record_does_not_hide_an_indexed_foreign_anchor(context_factory, own):
+async def test_empty_uuid_only_record_does_not_hide_an_indexed_foreign_anchor(context_factory, own, empty):
     service = _redis_service()
     assert await _cycle(service, context_factory, hotkey=HOTKEY_A, uuids="gpu-001")
-    await service.redis.hset(VERIFIED_JOB_COUNT_KEY, EXECUTOR, json.dumps({"count": 3, "failed": 0, "spec": "", "uuids": ""}))
+    await service.redis.hset(VERIFIED_JOB_COUNT_KEY, EXECUTOR, json.dumps({"count": 3, "failed": 0, "spec": "", "uuids": empty}))
     if own:
+        own = {**own, "uuids": empty} if own["uuids"] == "EMPTY" else own
         await service.redis.hset(VERIFIED_JOB_COUNT_KEY, verified_job_field(HOTKEY_B, EXECUTOR), json.dumps(own))
 
     ok = await _cycle(service, context_factory, hotkey=HOTKEY_B, uuids="gpu-009")
@@ -180,6 +183,38 @@ async def test_empty_uuid_only_record_does_not_hide_an_indexed_foreign_anchor(co
     assert ok is False
     assert await _field(service, verified_job_field(HOTKEY_B, EXECUTOR)) == own
     assert (await service.get_verified_job_info(EXECUTOR, HOTKEY_B))["uuids"] == "gpu-001"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("own_uuids", "expected"),
+    [("", "gpu-001"), (",", "gpu-001"), (" , ", "gpu-001"), ("a,,", "a,,")],
+)
+async def test_own_record_is_anchored_only_by_a_non_empty_uuid(own_uuids, expected):
+    service = _redis_service()
+    await service.set_verified_job_info(HOTKEY_A, EXECUTOR, prev_info={}, uuids="gpu-001")
+    await service.redis.hset(
+        VERIFIED_JOB_COUNT_KEY, verified_job_field(HOTKEY_B, EXECUTOR), json.dumps({"count": 5, "uuids": own_uuids})
+    )
+
+    verified = await service.get_verified_job_info(EXECUTOR, HOTKEY_B)
+
+    assert verified["uuids"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty", ["", ",", " , "])
+async def test_an_empty_anchor_is_not_indexed_and_a_real_one_replaces_it(empty):
+    service = _redis_service()
+    await service.set_verified_job_info(HOTKEY_B, EXECUTOR, prev_info={}, uuids=empty)
+
+    await service.set_verified_job_info(HOTKEY_A, EXECUTOR, prev_info={}, uuids="gpu-001")
+    await service.set_verified_job_info(
+        HOTKEY_B, EXECUTOR, prev_info=await _field(service, verified_job_field(HOTKEY_B, EXECUTOR)), uuids="gpu-009"
+    )
+
+    assert await service.redis.hget(VERIFIED_JOB_ANCHOR_HOTKEY_KEY, EXECUTOR) == HOTKEY_A.encode()
+    assert (await _field(service, verified_job_field(HOTKEY_B, EXECUTOR)))["uuids"] == "gpu-009"
 
 
 @pytest.mark.asyncio

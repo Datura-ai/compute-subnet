@@ -171,6 +171,21 @@ class RedisWrites:
         return len(self.ops)
 
 
+def split_uuids(csv: str) -> list[str]:
+    """The distinct UUIDs of a comma-joined list, sorted.
+
+    A UUID listed twice is one card read twice (`gpu_uuids` is joined from `gpu_details[*].uuid` by the
+    scrape), never a second card, so one copy counts. Comparing distinct sets keeps a duplicated scrape
+    from breaking the anchor for good under the hard rule. Blank elements are not UUIDs.
+    """
+    return sorted({u.strip() for u in (csv or "").split(",") if u.strip()})
+
+
+def has_gpu_anchor(uuids: str | None) -> bool:
+    """A record is anchored only when its `uuids` holds at least one UUID: "," or " , " anchors nothing."""
+    return bool(split_uuids(uuids or ""))
+
+
 def verified_job_field(miner_hotkey: str, executor_id: str) -> str:
     """Field of an executor's verified-job record in VERIFIED_JOB_COUNT_KEY."""
     return f"{miner_hotkey}:{executor_id}"
@@ -607,7 +622,7 @@ class RedisService:
             "count": count,
             "failed": failed,
             "spec": prev_spec if prev_spec else spec,
-            GPU_ANCHOR_KEY: prev_uuids if prev_uuids else uuids,
+            GPU_ANCHOR_KEY: prev_uuids if has_gpu_anchor(prev_uuids) else uuids,
         }
         # DAH-3457: the anchor and its broken mark outlive every write to the record; only a new executor id starts clean.
         if prev_info.get(GPU_ANCHOR_BROKEN_KEY):
@@ -615,7 +630,7 @@ class RedisService:
 
         # one MULTI/EXEC: an anchored record never lands without the index _foreign_anchor() reads
         writes = RedisWrites().hset(VERIFIED_JOB_COUNT_KEY, verified_job_field(miner_hotkey, executor_id), json.dumps(data))
-        if data[GPU_ANCHOR_KEY] and ":" not in executor_id:
+        if has_gpu_anchor(data[GPU_ANCHOR_KEY]) and ":" not in executor_id:
             writes.hsetnx(VERIFIED_JOB_ANCHOR_HOTKEY_KEY, executor_id, miner_hotkey)
         if success and ":" not in executor_id:
             # an id with ":" is never a uuid-only field; it could name another hotkey's record
@@ -678,11 +693,11 @@ class RedisService:
         data = await self.hget(VERIFIED_JOB_COUNT_KEY, verified_job_field(miner_hotkey, executor_id))
         if data:
             own = json.loads(data)
-            if own.get(GPU_ANCHOR_KEY):
+            if has_gpu_anchor(own.get(GPU_ANCHOR_KEY)):
                 return own
             # an unanchored own record (failed or reset before any anchor) must not bypass an anchor held elsewhere
             other = await self._unowned_anchor(executor_id, miner_hotkey)
-            if other.get(GPU_ANCHOR_KEY):
+            if has_gpu_anchor(other.get(GPU_ANCHOR_KEY)):
                 return {**own, GPU_ANCHOR_KEY: other[GPU_ANCHOR_KEY], LEGACY_FALLBACK_KEY: True, FOREIGN_FALLBACK_KEY: True}
             return own
         return await self._unowned_anchor(executor_id, miner_hotkey)
@@ -694,7 +709,7 @@ class RedisService:
         if not data:
             return await self._foreign_anchor(executor_id, miner_hotkey)
         legacy = json.loads(data)
-        if not legacy.get(GPU_ANCHOR_KEY):
+        if not has_gpu_anchor(legacy.get(GPU_ANCHOR_KEY)):
             # an empty uuid-only record must not hide an anchor another hotkey holds
             return await self._foreign_anchor(executor_id, miner_hotkey)
         return {**legacy, LEGACY_FALLBACK_KEY: True}
@@ -708,7 +723,7 @@ class RedisService:
             return {}
         data = await self.hget(VERIFIED_JOB_COUNT_KEY, verified_job_field(owner, executor_id))
         anchor = json.loads(data).get(GPU_ANCHOR_KEY) if data else None
-        if anchor:
+        if has_gpu_anchor(anchor):
             return {GPU_ANCHOR_KEY: anchor, LEGACY_FALLBACK_KEY: True, FOREIGN_FALLBACK_KEY: True}
         return {}
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from core.config import settings
-from services.redis_service import GPU_ANCHOR_BROKEN_KEY, GPU_ANCHOR_KEY
+from services.redis_service import GPU_ANCHOR_BROKEN_KEY, GPU_ANCHOR_KEY, split_uuids
 
 from ..messages import GpuFingerprintMessages as Msg, render_message
 from ..pipeline import CheckResult, Context
@@ -14,16 +14,6 @@ logger = logging.getLogger(__name__)
 # GPU_UUID_CHANGED event as `anchor_hard_would_be` while GPU_ANCHOR_HARD_ENABLED is off.
 DECISION_GPU_MISSING = "GPU_MISSING"
 DECISION_ANCHOR_BROKEN = "ANCHOR_BROKEN"
-
-
-def split_uuids(csv: str) -> list[str]:
-    """The distinct UUIDs of a comma-joined list, sorted.
-
-    A UUID listed twice is one card read twice (`gpu_uuids` is joined from `gpu_details[*].uuid` by the
-    scrape), never a second card, so one copy counts. Comparing distinct sets keeps a duplicated scrape
-    from breaking the anchor for good under the hard rule.
-    """
-    return sorted({u for u in csv.split(",") if u})
 
 
 class GpuFingerprintCheck:
@@ -76,7 +66,7 @@ class GpuFingerprintCheck:
         # A duplicated scrape is not a set change (split_uuids keeps one copy). It is logged and flagged on the
         # event so the rows show how often the scrape does this. A scrape with zero cards never reaches the
         # comparison. Neither one touches the stored anchor.
-        listed = [u for u in current_uuids.split(",") if u]
+        listed = [u for u in current_uuids.split(",") if u.strip()]
         duplicated = len(listed) != len(current)
         if duplicated:
             logger.warning(
