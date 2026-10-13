@@ -24,6 +24,7 @@ from protocol.vc_protocol.compute_requests import RentedExecutorsResponse
 from core.config import settings
 from incentive.config import IncentiveConfig
 from incentive.rental_price import MIN_POWER_CAP_REVERTS_TO_PENALIZE, RentalPriceIncentive
+from incentive.miner_incentive_log import ZeroIncentiveReason
 from payload_models.payloads import GpuPowerLimit
 from services.const import DEFAULT_JOB_OWNER_LIUM
 from services.gpu_power_limit import (
@@ -568,6 +569,14 @@ async def test_repeated_reverts_are_flagged() -> None:
     assert reverted.revert_count == MIN_POWER_CAP_REVERTS_TO_PENALIZE
     assert reverted.capped_to_watts == 280
     assert reverted.found_watts == 400
+
+
+def test_the_rule_is_the_one_the_provider_docs_publish() -> None:
+    # lium-platform apps/docs providers/nodes/gpu-power-cap.md "Do not put the limit back":
+    # "After 2 such jobs in 24 hours ... the idle payout stops". Change the docs with these.
+    assert MIN_POWER_CAP_REVERTS_TO_PENALIZE == 2
+    assert CAP_REVERT_WINDOW_SECONDS == 24 * 60 * 60
+    assert ZeroIncentiveReason.REVERTS_GPU_POWER_CAP == "reverts_gpu_power_cap"
 
 
 @pytest.mark.asyncio

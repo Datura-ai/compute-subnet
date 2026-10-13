@@ -118,7 +118,7 @@ class PowerCapReverted(BaseModel):
     revert_count: int
     window_hours: int
     capped_to_watts: int  # what the validator applied and read back
-    found_watts: int  # what the host had put back by the time the job ended
+    found_watts: int  # what the host had put back while the job ran
 
 
 class PortLimitedRemainder(BaseModel):
@@ -541,8 +541,8 @@ class RentalPriceIncentive(DefaultIncentive):
         )
 
     async def _power_cap_reverted(self, result: JobResult) -> PowerCapReverted | None:
-        # The validator records one revert per Lium job whose verified cap was gone by the time
-        # the job ended (services/gpu_power_limit.py). A Redis outage returns no reverts, so the
+        # The validator records one revert per Lium job whose verified cap the host raised while
+        # the job ran (services/gpu_power_limit.py). A Redis outage returns no reverts, so the
         # gate fails open like every other unknown here.
         if result.spec is None:
             # a synthetic or estimated job result: no real executor, so nothing to look up
