@@ -159,6 +159,14 @@ class RedisWrites:
         self.ops.append(RedisWrite("expire", (key, seconds), {}))
         return self
 
+    def hsetnx(self, key: str, field: str, value: str) -> "RedisWrites":
+        self.ops.append(RedisWrite("hsetnx", (key, field, value), {}))
+        return self
+
+    def hdel(self, key: str, field: str) -> "RedisWrites":
+        self.ops.append(RedisWrite("hdel", (key, field), {}))
+        return self
+
     def __len__(self) -> int:
         return len(self.ops)
 
@@ -433,10 +441,6 @@ class RedisService:
         async with self.lock:
             return await self.redis.hget(key, field)
 
-    async def hsetnx(self, key: str, field: str, value: str):
-        async with self.lock:
-            await self.redis.hsetnx(key, field, value)
-
     async def hgetall(self, key: str):
         async with self.lock:
             return await self.redis.hgetall(key)
@@ -609,12 +613,14 @@ class RedisService:
         if prev_info.get(GPU_ANCHOR_BROKEN_KEY):
             data[GPU_ANCHOR_BROKEN_KEY] = True
 
-        await self.hset(VERIFIED_JOB_COUNT_KEY, verified_job_field(miner_hotkey, executor_id), json.dumps(data))
+        # one MULTI/EXEC: an anchored record never lands without the index _foreign_anchor() reads
+        writes = RedisWrites().hset(VERIFIED_JOB_COUNT_KEY, verified_job_field(miner_hotkey, executor_id), json.dumps(data))
         if data[GPU_ANCHOR_KEY] and ":" not in executor_id:
-            await self.hsetnx(VERIFIED_JOB_ANCHOR_HOTKEY_KEY, executor_id, miner_hotkey)
+            writes.hsetnx(VERIFIED_JOB_ANCHOR_HOTKEY_KEY, executor_id, miner_hotkey)
         if success and ":" not in executor_id:
             # an id with ":" is never a uuid-only field; it could name another hotkey's record
-            await self.hdel(VERIFIED_JOB_COUNT_KEY, executor_id)
+            writes.hdel(VERIFIED_JOB_COUNT_KEY, executor_id)
+        await self.write_atomically(writes)
 
     async def clear_verified_job_info(
         self,

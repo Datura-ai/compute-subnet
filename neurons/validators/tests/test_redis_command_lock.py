@@ -22,8 +22,10 @@ COMMAND_SECONDS = 0.05
 class _SlowFakeRedis:
     """A Redis whose every command takes COMMAND_SECONDS, so serialisation is measurable."""
 
-    def __init__(self):
+    def __init__(self, lock=None):
         self.calls: list[tuple] = []
+        self.lock = lock
+        self.lock_held_at_exec: list[bool] = []
 
     async def _cmd(self, *args):
         self.calls.append(args)
@@ -32,12 +34,38 @@ class _SlowFakeRedis:
 
     sismember = sadd = hset = hget = hdel = _cmd
 
+    def pipeline(self, transaction: bool = True) -> "_SlowPipeline":
+        assert transaction
+        return _SlowPipeline(self)
+
+
+class _SlowPipeline:
+    """MULTI/EXEC on `_SlowFakeRedis`: queued commands run at execute()."""
+
+    def __init__(self, redis):
+        self.redis = redis
+        self.queued: list[tuple] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: self.queued.append(args)
+
+    async def execute(self):
+        self.redis.lock_held_at_exec.append(self.redis.lock.locked())
+        for args in self.queued:
+            await self.redis._cmd(*args)
+
 
 def _service(monkeypatch, *, lock_enabled: bool) -> RedisService:
     monkeypatch.setattr(settings, "REDIS_COMMAND_LOCK_ENABLED", lock_enabled)
     # The constructor only builds pools from settings; nothing connects until a command runs.
     service = RedisService()
-    service.redis = _SlowFakeRedis()
+    service.redis = _SlowFakeRedis(service.lock)
     return service
 
 
@@ -83,6 +111,18 @@ async def test_flag_off_writes_still_reach_the_client(monkeypatch):
     commands = [call[0] for call in service.redis.calls]
     key = redis_service_module.VERIFIED_JOB_COUNT_KEY
     assert commands == ["set", "hash", key, key]
+
+
+@pytest.mark.asyncio
+async def test_verified_job_transaction_runs_under_the_command_lock(monkeypatch):
+    service = _service(monkeypatch, lock_enabled=True)
+
+    await service.set_verified_job_info("miner", "executor", prev_info={}, success=True, uuids="gpu-001")
+
+    commands = [call[0] for call in service.redis.calls]
+    key = redis_service_module.VERIFIED_JOB_COUNT_KEY
+    assert commands == [key, redis_service_module.VERIFIED_JOB_ANCHOR_HOTKEY_KEY, key]
+    assert service.redis.lock_held_at_exec == [True]
 
 
 @pytest.mark.asyncio

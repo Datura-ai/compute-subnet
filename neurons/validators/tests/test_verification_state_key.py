@@ -8,6 +8,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import redis
 from fakeredis import FakeServer
 from fakeredis.aioredis import FakeRedis
 
@@ -15,7 +16,12 @@ from neurons.validators.src.services.task.checks.gpu_fingerprint import GpuFinge
 from neurons.validators.src.services.task.checks.spec_change import SpecChangeCheck
 from neurons.validators.src.services.task.pipeline import Pipeline
 from neurons.validators.src.services.task.result_handler import ResultHandler
-from services.redis_service import VERIFIED_JOB_COUNT_KEY, RedisService, verified_job_field
+from services.redis_service import (
+    VERIFIED_JOB_ANCHOR_HOTKEY_KEY,
+    VERIFIED_JOB_COUNT_KEY,
+    RedisService,
+    verified_job_field,
+)
 
 from tests.helpers import build_state
 
@@ -179,3 +185,41 @@ async def test_foreign_anchor_lookup_does_not_scan_the_verified_job_hash(context
         "uuids": "gpu-001", "legacy_fallback": True, "foreign_fallback": True
     }
     service.redis.hscan_iter.assert_not_called()
+
+
+_real_execute = redis.asyncio.client.Pipeline.execute
+
+
+async def _lost_before_exec(self, *args, **kwargs):
+    raise redis.exceptions.ConnectionError("connection lost before EXEC")
+
+
+async def _lost_after_exec(self, *args, **kwargs):
+    await _real_execute(self, *args, **kwargs)
+    raise redis.exceptions.ConnectionError("connection lost after EXEC")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("target", "attr", "failure"),
+    [
+        ("client", "hsetnx", AsyncMock(side_effect=redis.exceptions.ConnectionError("index write unavailable"))),
+        (redis.asyncio.client.Pipeline, "execute", _lost_before_exec),
+        (redis.asyncio.client.Pipeline, "execute", _lost_after_exec),
+    ],
+    ids=["index_command_fails", "lost_before_exec", "lost_after_exec"],
+)
+async def test_anchored_record_and_its_index_land_together_or_not_at_all(context_factory, target, attr, failure):
+    service = _redis_service()
+    with patch.object(service.redis if target == "client" else target, attr, failure):
+        try:
+            await _cycle(service, context_factory, hotkey=HOTKEY_A, uuids="gpu-001")
+        except redis.exceptions.ConnectionError:
+            pass
+
+    own = await _field(service, verified_job_field(HOTKEY_A, EXECUTOR))
+    index = await service.redis.hget(VERIFIED_JOB_ANCHOR_HOTKEY_KEY, EXECUTOR)
+    assert (own is None) == (index is None)
+    foreign = await service.get_verified_job_info(EXECUTOR, HOTKEY_B)
+    assert own is None or foreign.get("uuids") == own["uuids"]
+    assert await _cycle(service, context_factory, hotkey=HOTKEY_B, uuids="gpu-009") is (own is None)
