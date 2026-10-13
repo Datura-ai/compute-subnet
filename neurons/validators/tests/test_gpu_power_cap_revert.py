@@ -39,7 +39,6 @@ from services.gpu_power_limit import (
     apply_filler_gpu_power_limits,
     detect_cap_revert,
     read_gpu_power_cap_reverts,
-    restore_tracked_gpu_power_limits,
 )
 from services.task.checks import gpu_power_limit as check_module
 from services.task.checks.gpu_power_limit import GpuPowerLimitCheck
