@@ -1547,6 +1547,48 @@ class GpuFaultProbeMessages:
     )
 
 
+class PinnedMemoryProbeMessages:
+    """F-1599 — the pinned-host-memory H2D/D2H round trip on every GPU. On by default with enforcement:
+    PROBE_FAILED fails the fatal check and keeps the node unrentable; without
+    PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED it is a warning and passed=True."""
+
+    DISABLED = MessageTemplate(
+        event="Pinned-memory copy probe disabled",
+        reason="PINNED_MEMORY_PROBE_DISABLED",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+    PROBE_OK = MessageTemplate(
+        event="Pinned-memory copy probe passed",
+        reason="PINNED_MEMORY_PROBE_OK",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+    PROBE_FAILED = MessageTemplate(
+        event="Pinned-memory copy probe failed",
+        reason="PINNED_MEMORY_PROBE_FAILED",
+        severity="error",
+        category="env",
+        impact="Score set to 0",
+        remediation=(
+            "A GPU could not copy a page-locked (pinned) host buffer to the device and back: wrong data, a CUDA "
+            "error or a copy that never finished. PyTorch pin_memory() / non_blocking copies fail the same way. "
+            "On a TDX guest (Intel TDX confidential VM) the GPUs must be in confidential-computing mode "
+            "(`nvidia-smi conf-compute -f` shows CC status: ON) or the VM must run without TDX; also check the "
+            "IOMMU / swiotlb settings and the host `dmesg` for NVRM Xid lines."
+        ),
+    )
+    UNKNOWN = MessageTemplate(
+        event="Pinned-memory copy probe could not run",
+        reason="PINNED_MEMORY_PROBE_UNKNOWN",
+        severity="info",
+        category="env",
+        impact="Proceed without penalty",
+    )
+
+
 class ScoreMessages:
     SCORE_COMPUTED = MessageTemplate(
         event="Scores computed",

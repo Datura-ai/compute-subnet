@@ -20,6 +20,7 @@ from .inspector import InspectorRentedCheck
 from .local_verify import LocalVerifyCheck
 from .machine_spec_scrape import MachineSpecScrapeCheck
 from .nvml_digest import NvmlDigestCheck
+from .pinned_memory_probe import PinnedMemoryProbeCheck
 from .port_connectivity import PortConnectivityCheck
 from .provider_side_load import ProviderSideLoadCheck
 from .registry_pull import RegistryPullCheck
@@ -60,6 +61,7 @@ __all__ = [
     "LocalVerifyCheck",
     "MachineSpecScrapeCheck",
     "NvmlDigestCheck",
+    "PinnedMemoryProbeCheck",
     "PortConnectivityCheck",
     "PortCountCheck",
     "ProviderSideLoadCheck",

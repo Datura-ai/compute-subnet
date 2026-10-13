@@ -470,6 +470,14 @@ class Settings(BaseSettings):
     # default off: the probe is new GPU work on every idle node per cycle, so it starts as an opt-in shadow.
     GPU_FAULT_PROBE_CHECK_ENABLED: bool = Field(env="GPU_FAULT_PROBE_CHECK_ENABLED", default=False)
     GPU_FAULT_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="GPU_FAULT_PROBE_ENFORCEMENT_ENABLED", default=False)
+    # F-1599 — a 64 MB pinned-host-memory H2D/D2H round trip on every GPU of an idle node, compared on the host.
+    # A TDX guest whose GPUs are not in CC mode passed every check yet could not DMA pinned memory (8x H200,
+    # 13 Oct). CHECK runs it; ENFORCEMENT lets wrong data, a copy error or a hung copy fail the node. Both on:
+    # milliseconds of copy per card, and a probe that cannot start is UNKNOWN, never a fault.
+    PINNED_MEMORY_PROBE_CHECK_ENABLED: bool = Field(env="PINNED_MEMORY_PROBE_CHECK_ENABLED", default=True)
+    PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED: bool = Field(
+        env="PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED", default=True
+    )
     # DAH-3436: the synthetic rental probe. On an idle node (no renter pod, no filler) the validator
     # rents the node from itself once per RENTAL_PROBE_INTERVAL_HOURS: it starts the default renter
     # image through the same create_container path a renter's pod takes, with a probe-owned SSH key
