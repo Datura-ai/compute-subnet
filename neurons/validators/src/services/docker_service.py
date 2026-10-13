@@ -179,9 +179,6 @@ IN_CONTAINER_SSH_BOOTSTRAP_PATH = "/tmp/lium-ssh-bootstrap.sh"
 # at most 96 KiB once escaped.
 LOG_BATCH_MAX_BYTES = 512 * 1024
 LOG_LINE_MAX_CHARS = 16 * 1024
-# waits before each publish pass after finish_stream_logs while lines are still queued (Redis failing): together
-# ~30 s, so a Redis restart or failover does not cost a finished build its last lines; the deploy request waits
-LOG_STREAM_FINAL_BACKOFF_S = (0.5, 1, 2, 4, 8, 15)
 
 
 def log_batches(
@@ -194,7 +191,7 @@ def log_batches(
     for log in logs:
         text = log["log_text"]
         if len(text) > line_max_chars:
-            # the mark fits inside the cap, so a requeued line is not cut twice
+            # the mark fits inside the cap, so the cut line is no longer than the cap
             mark = f" [cut from {len(text)} chars]"
             log = {**log, "log_text": text[: line_max_chars - len(mark)] + mark}
         entry_bytes = len(json.dumps(log)) + 2  # ASCII-escaped, so never smaller than the frame's UTF-8; + ", "
@@ -3330,7 +3327,6 @@ class DockerService:
             "pod_id": pod_id,
         }
 
-        final_attempts = 0
         while True:
             finish_requested = self.log_stream_finish_requested.is_set()
             async with self.lock:
@@ -3361,36 +3357,24 @@ class DockerService:
                     )
 
                 except Exception as e:
-                    # the batches that did not go out return to the front of the queue for the next pass
-                    async with self.lock:
-                        self.logs_queue[:0] = [log for batch in batches[published:] for log in batch]
+                    # as before batching: a failed publish is not retried and its lines are lost. The rest of the
+                    # pass is dropped too, so a Redis outage costs one publish timeout per pass, not one per batch;
+                    # a requeue would resend a batch Redis took but did not acknowledge, and nothing dedupes it
+                    dropped = sum(len(batch) for batch in batches[published:])
                     logger.error(
                         _m(
-                            "Error publishing log stream",
+                            f"Error publishing log stream; dropped {dropped} log lines",
                             extra=get_extra_info({**default_extra, "error": str(e)}),
                         ),
                         exc_info=True,
                     )
 
             if finish_requested:
-                # nothing publishes this service's queue after this task, so a failed final pass retries a few times
-                if not self.logs_queue or final_attempts >= len(LOG_STREAM_FINAL_BACKOFF_S):
-                    break
-                await asyncio.sleep(LOG_STREAM_FINAL_BACKOFF_S[final_attempts])
-                final_attempts += 1
-                continue
+                break
             # publish first, then wait: the first line (the UI's SSH port) goes out at once, and
             # finish_stream_logs cuts the wait short so the last batch does too
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self.log_stream_finish_requested.wait(), LOG_STREAM_INTERVAL)
-
-        if self.logs_queue:
-            logger.error(
-                _m(
-                    f"Dropped {len(self.logs_queue)} log lines: publishing still failed after {sum(LOG_STREAM_FINAL_BACKOFF_S)} s",
-                    extra=get_extra_info(default_extra),
-                )
-            )
 
         logger.info(
             _m(

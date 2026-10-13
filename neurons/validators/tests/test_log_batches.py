@@ -1,13 +1,11 @@
 """lium-platform F-29: a build-log batch goes to the backend as one websocket frame, which it caps at 1 MiB."""
 
-import asyncio
 import json
 from unittest.mock import Mock
 
 import pytest
 from services.docker_service import (
     LOG_LINE_MAX_CHARS,
-    LOG_STREAM_FINAL_BACKOFF_S,
     DockerService,
     log_batches,
 )
@@ -83,105 +81,43 @@ async def test_a_noisy_build_is_published_in_frames_the_backend_accepts():
     assert all(len(json.dumps(p).encode()) < MIB for p in published)
 
 
+class _Redis:
+    """Publishes until the call numbered `fail_on`; that call raises, after delivering the payload if `delivered`
+    (Redis took the PUBLISH, the caller lost the reply)."""
+
+    def __init__(self, fail_on: int, delivered: bool):
+        self.fail_on, self.delivered = fail_on, delivered
+        self.calls = 0
+        self.received: list[str] = []
+
+    async def publish(self, channel, payload):
+        self.calls += 1
+        if self.calls != self.fail_on or self.delivered:
+            self.received += [log["log_text"] for log in payload["logs"]]
+        if self.calls == self.fail_on:
+            raise ConnectionError("redis failed")
+
+
+@pytest.mark.parametrize(
+    "fail_on, delivered",
+    [(1, False), (2, False), (2, True)],
+    ids=["first-batch-refused", "second-batch-refused", "second-batch-delivered-but-unacknowledged"],
+)
 @pytest.mark.asyncio
-async def test_the_batches_after_a_failed_publish_go_back_to_the_front_of_the_queue(monkeypatch):
+async def test_a_failed_publish_ends_the_pass_and_no_line_reaches_the_backend_twice(monkeypatch, fail_on, delivered):
+    # F-29 review: a requeue resent a batch Redis had taken, and the backend appends every batch it gets
     monkeypatch.setattr("services.docker_service.LOG_STREAM_INTERVAL", 0)
-    monkeypatch.setattr("services.docker_service.LOG_STREAM_FINAL_BACKOFF_S", (0,) * 6)
-    published: list[dict] = []
-
-    class _RedisFailingOnTheSecondPublish:
-        async def publish(self, channel, payload):
-            if len(published) == 1:
-                raise ConnectionError("redis is down")
-            published.append(payload)
-
-    svc = _service(_RedisFailingOnTheSecondPublish())
-    lines = [f"{i:04d}" + "z" * 3996 for i in range(1000)]
+    redis = _Redis(fail_on, delivered)
+    svc = _service(redis)
+    lines = [f"{i:04d}" + "z" * 3996 for i in range(1000)]  # 8 batches
     for line in lines:
         await svc.stream_log(line, "success", "build")
     await svc.finish_stream_logs()
 
     await svc.handle_stream_logs(miner_hotkey="m", executor_id="e", pod_id="p")
 
-    sent = [log["log_text"] for log in published[0]["logs"]]
-    assert len(published) == 1
-    assert sent + [log["log_text"] for log in svc.logs_queue] == lines
-
-
-@pytest.mark.asyncio
-async def test_a_publish_failing_during_the_final_pass_is_retried_before_the_stream_ends(
-    monkeypatch,
-):
-    # a per-request DockerService: nothing publishes its queue once handle_stream_logs returns
-    monkeypatch.setattr("services.docker_service.LOG_STREAM_INTERVAL", 0)
-    monkeypatch.setattr("services.docker_service.LOG_STREAM_FINAL_BACKOFF_S", (0,) * 6)
-    published: list[dict] = []
-    calls = 0
-
-    class _RedisFailingOnce:
-        async def publish(self, channel, payload):
-            nonlocal calls
-            calls += 1
-            if calls == 2:
-                raise ConnectionError("redis blipped")
-            published.append(payload)
-
-    svc = _service(_RedisFailingOnce())
-    lines = [f"{i:04d}" + "z" * 3996 for i in range(1000)]
-    for line in lines:
-        await svc.stream_log(line, "success", "build")
-    await svc.finish_stream_logs()
-
-    await svc.handle_stream_logs(miner_hotkey="m", executor_id="e", pod_id="p")
-
-    assert [log["log_text"] for p in published for log in p["logs"]] == lines
-    assert svc.logs_queue == []
-
-
-@pytest.mark.asyncio
-async def test_a_redis_that_stays_down_ends_the_stream_after_the_final_attempts(monkeypatch):
-    monkeypatch.setattr("services.docker_service.LOG_STREAM_INTERVAL", 0)
-    monkeypatch.setattr("services.docker_service.LOG_STREAM_FINAL_BACKOFF_S", (0,) * 6)
-    attempts = 0
-
-    class _RedisDown:
-        async def publish(self, channel, payload):
-            nonlocal attempts
-            attempts += 1
-            raise ConnectionError("redis is down")
-
-    svc = _service(_RedisDown())
-    await svc.stream_log("line", "success", "build")
-    await svc.finish_stream_logs()
-
-    await asyncio.wait_for(svc.handle_stream_logs(miner_hotkey="m", executor_id="e", pod_id="p"), 5)
-
-    assert attempts == 1 + len(LOG_STREAM_FINAL_BACKOFF_S)
-
-
-@pytest.mark.asyncio
-async def test_a_redis_outage_shorter_than_the_final_backoff_loses_no_line(monkeypatch):
-    # F-29 review: a ~1.5 s outage used to exhaust the final retries; a slept second stands in for each wait
-    clock = {"now": 0.0}
-
-    async def fake_sleep(seconds):
-        clock["now"] += seconds
-
-    monkeypatch.setattr("services.docker_service.LOG_STREAM_INTERVAL", 0)
-    monkeypatch.setattr("services.docker_service.asyncio.sleep", fake_sleep)
-    published: list[dict] = []
-
-    class _RedisDownForTwentySeconds:
-        async def publish(self, channel, payload):
-            if clock["now"] < 20:
-                raise ConnectionError("redis is restarting")
-            published.append(payload)
-
-    svc = _service(_RedisDownForTwentySeconds())
-    await svc.stream_log("renter build output", "success", "build")
-    await svc.finish_stream_logs()
-
-    await svc.handle_stream_logs(miner_hotkey="m", executor_id="e", pod_id="p")
-
-    assert [log["log_text"] for p in published for log in p["logs"]] == ["renter build output"]
+    # the batches after the failed one are not tried: one publish timeout per pass while Redis is down
+    assert redis.calls == fail_on
+    assert len(set(redis.received)) == len(redis.received)
+    assert redis.received == lines[: len(redis.received)]
     assert svc.logs_queue == []
