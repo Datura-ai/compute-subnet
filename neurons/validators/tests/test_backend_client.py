@@ -7,6 +7,7 @@ import aiohttp
 import pytest
 from neurons.validators.src.clients.backend_client import BackendClient
 from pydantic import BaseModel
+from tenacity import wait_none
 
 from protocol.vc_protocol.compute_requests import (
     FillerRunActiveResponse,
@@ -475,11 +476,7 @@ def test_get_filler_containers_prefers_list_field_and_falls_back_to_legacy():
 
 @pytest.mark.asyncio
 async def test_get_all_rented_executors_returns_none_after_three_empty_answers(client):
-    """12 Oct 05:03Z: the backend did not answer /internal/executors/rented and tenacity raised
-    RetryError out of PortConnectivityCheck, so 107 nodes failed as PIPELINE_VALIDATION_ERROR.
-    Every caller checks for None; the retried read has to give them None."""
-    from tenacity import wait_none
-
+    """The retried read gives None after three empty answers."""
     rented_read_mock = AsyncMock(return_value=None)
     with patch.object(BackendClient, "get_rented_executors_now", rented_read_mock):
         result = await BackendClient.get_all_rented_executors.retry_with(wait=wait_none())(client)
