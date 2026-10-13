@@ -91,11 +91,12 @@ async def public_host_sock(host: str, port: int = 22, connect_timeout: float | N
     resolving the name again (which a rebinding DNS server could answer with a private address),
     while still matching known_hosts against ``host``, the name.
     """
-    infos = await resolve_public_host(host, port)
-    if not infos:
-        return {}
-    sock = await asyncio.wait_for(_dial_first(asyncio.get_running_loop(), infos), connect_timeout)
-    return {"sock": sock}
+    # one budget for the lookup and the dial: a stalled DNS answer must not outlast connect_timeout
+    async with asyncio.timeout(connect_timeout):
+        infos = await resolve_public_host(host, port)
+        if not infos:
+            return {}
+        return {"sock": await _dial_first(asyncio.get_running_loop(), infos)}
 
 
 async def open_public_connection(

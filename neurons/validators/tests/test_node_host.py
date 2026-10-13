@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import socket
 
@@ -288,3 +289,14 @@ async def test_ip_literal_logs_nothing(caplog):
 
     # Assert
     assert caplog.records == []
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_lookup_is_bounded_by_the_connect_timeout(monkeypatch):
+    async def stalled(*args, **kwargs):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", stalled)
+
+    with pytest.raises(TimeoutError):
+        await public_host_sock("gpu-node1.example.net", 22, connect_timeout=0.05)
