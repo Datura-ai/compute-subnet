@@ -524,6 +524,13 @@ class Settings(BaseSettings):
     RENTED_EXECUTOR_NOT_LISTED_REPORT_ENABLED: bool = Field(
         env="RENTED_EXECUTOR_NOT_LISTED_REPORT_ENABLED", default=False
     )
+    # The unrented twin of the flag above: a node in the miner's known_executor_ids that is missing
+    # from its accepted executors (the miner could not reach it to install our key) gets no
+    # pipeline and no row, so it only "stops reporting". On, the wave writes one failed result per
+    # such unrented node (EXECUTOR_UNREACHABLE_BY_MINER, score 0, availability error). Off = today.
+    UNREACHABLE_EXECUTOR_REPORT_ENABLED: bool = Field(
+        env="UNREACHABLE_EXECUTOR_REPORT_ENABLED", default=False
+    )
     SKIP_COLLATERAL_PENALTY: bool = Field(env="SKIP_COLLATERAL_PENALTY", default=True)
     DRY_RUN: bool = Field(env="DRY_RUN", default=False, description="Run validation without publishing scores/weights")
     # DAH-4001 — delayed idle settlement. off: today's behaviour, nothing reported. shadow: post every cycle's
