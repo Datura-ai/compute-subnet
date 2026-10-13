@@ -73,11 +73,12 @@ GPU_HEALTH_FAILURE_CODES = frozenset(
         "GPU_VERIFY_CUDA_NOT_READY",
         "GPU_VERIFY_NO_CUDA_DEVICE",
         "GPU_VERIFY_VRAM_UNAVAILABLE",
-        "GPU_FAULT_PROBE_FAILED",  # ECC, remapped rows, Xid (GPU_FAULT_PROBE_CHECK_ENABLED)
         "RENTED_GPU_DROP",  # a rented card left the bus (RENTED_GPU_DROP_CHECK_ENABLED)
-        "RENTED_GPU_HEALTH_SHADOW_FAULT",  # the NVML/Xid read on a rented node (lium-io#1552)
     }
 )
+# A probe fault hides the node only when it also fails the check: a hidden node that keeps its
+# score is paid for a GPU nobody can rent.
+GPU_FAULT_PROBE_FAILED = "GPU_FAULT_PROBE_FAILED"
 
 
 def build_availability_event(
@@ -281,15 +282,27 @@ def build_gpu_unhealthy_event(failure: ValidationEvent) -> ValidationEvent:
     )
 
 
-def gpu_health_events(events: list[ValidationEvent] | None) -> list[ValidationEvent]:
+def _is_gpu_health_failure(event: ValidationEvent, fault_probe_enforced: bool) -> bool:
+    if event.reason_code == GPU_FAULT_PROBE_FAILED:
+        return fault_probe_enforced
+    if event.reason_code == "RENTED_GPU_DROP":
+        # A drop the check still holds for its second cycle is not confirmed yet.
+        pods = event.what_we_saw.get("pods") or []
+        return not pods or any(not pod.get("held") for pod in pods)
+    return event.reason_code in GPU_HEALTH_FAILURE_CODES
+
+
+def gpu_health_events(
+    events: list[ValidationEvent] | None, *, fault_probe_enforced: bool
+) -> list[ValidationEvent]:
     """The GPU_UNHEALTHY entry for this cycle's first GPU health failure, or none."""
     for event in events or []:
-        if event.reason_code in GPU_HEALTH_FAILURE_CODES:
+        if _is_gpu_health_failure(event, fault_probe_enforced):
             return [build_gpu_unhealthy_event(event)]
     return []
 
 
-def _is_gpu_health_entry(error: dict) -> bool:
+def _is_gpu_health_entry(error: dict[str, object]) -> bool:
     return error.get("reach_target") == ReachTarget.GPU_HEALTH
 
 

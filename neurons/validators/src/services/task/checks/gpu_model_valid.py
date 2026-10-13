@@ -52,6 +52,15 @@ class GpuModelValidCheck:
         if not gpu_details:
             gpu_details = specs.get("gpu", {}).get("details", [])
 
+        if gpu_count == 0:
+            event = render_message(
+                Msg.COUNT_ZERO,
+                ctx=ctx,
+                check_id=self.check_id,
+                what={"gpu_count": gpu_count},
+            )
+            return CheckResult(passed=False, event=event)
+
         gpu_model = None
         if gpu_count > 0 and len(gpu_details) > 0:
             gpu_model = gpu_details[0].get("name", None)
@@ -71,15 +80,6 @@ class GpuModelValidCheck:
                     "Use a supported GPU model. Supported models: "
                     f"{', '.join(supported_models[:5])}{'...' if len(supported_models) > 5 else ''}"
                 ),
-            )
-            return CheckResult(passed=False, event=event)
-
-        if gpu_count == 0:
-            event = render_message(
-                Msg.COUNT_ZERO,
-                ctx=ctx,
-                check_id=self.check_id,
-                what={"gpu_count": gpu_count},
             )
             return CheckResult(passed=False, event=event)
 

@@ -3,6 +3,7 @@ from unittest.mock import patch
 import pytest
 from neurons.validators.src.services.task.availability import availability_errors
 from neurons.validators.src.services.task.checks.gpu_model_valid import GpuModelValidCheck
+from neurons.validators.src.services.const import GPU_MODEL_RATES
 from neurons.validators.src.services.task.messages import GpuModelMessages as Msg
 from protocol.vc_protocol.compute_requests import RentedExecutor, RentedExecutorsResponse, RentedPod
 
@@ -20,7 +21,7 @@ from tests.helpers import build_context_config, build_services, build_state, def
             Msg.MODEL_UNSUPPORTED.reason,
         ),
         (
-            {None: 1.0, "NVIDIA RTX 3090": 0.05},
+            {"NVIDIA RTX 3090": 0.05},
             {"specs": {"gpu": {"count": 0, "details": []}}, "gpu_count": 0, "gpu_details": []},
             False,
             Msg.COUNT_ZERO.reason,
@@ -175,3 +176,38 @@ async def test_same_model_cards_pass_under_enforcement(context_factory):
 
     assert result.passed is True
     assert result.event.reason_code == Msg.MODEL_OK.reason
+
+
+# The prod node of OD-D850 (a88a338a), its GPU details as the scrape stored them on 13 Oct.
+PROD_MIXED_NODE_DETAILS = [
+    {
+        "cuda": "8.9", "name": "NVIDIA GeForce RTX 4090", "pcie": 8, "uuid": "GPU-7bcb1eea-6bac-643b-93a5-2d12f8519f4f",
+        "capacity": 24564, "pcie_speed": 5000, "power_limit": 450, "memory_speed": 810, "graphics_speed": 2505,
+        "memory_used_mb": 484.0, "gpu_utilization": 0.0, "power_max_limit": 600, "power_min_limit": 150,
+        "memory_utilization": 0.0, "power_default_limit": 450,
+    },
+    {
+        "cuda": "12.0", "name": "NVIDIA GeForce RTX 5060 Ti", "pcie": 8, "uuid": "GPU-297178cb-0afa-854b-f4f2-f4470f871b36",
+        "capacity": 16311, "pcie_speed": 2500, "power_limit": 180, "memory_speed": 405, "graphics_speed": 180,
+        "memory_used_mb": 464.0625, "gpu_utilization": 0.0, "power_max_limit": 180, "power_min_limit": 150,
+        "memory_utilization": 0.0, "power_default_limit": 180,
+    },
+]
+
+
+@pytest.mark.asyncio
+async def test_the_prod_mixed_node_is_reported_by_its_real_cards_and_stays_listed(context_factory):
+    specs = {"gpu": {"count": 2, "driver": "580.126.20", "cuda_driver": 13000, "details": PROD_MIXED_NODE_DETAILS}}
+    state = build_state(specs=specs, gpu_count=2, gpu_details=PROD_MIXED_NODE_DETAILS)
+    ctx = context_factory(
+        services=build_services(), config=build_context_config(gpu_model_rates=GPU_MODEL_RATES), state=state
+    )
+
+    with patch("neurons.validators.src.services.task.checks.gpu_model_valid.settings") as s:
+        s.MIXED_GPU_MODEL_ENFORCEMENT_ENABLED = False
+        result = await GpuModelValidCheck().run(ctx)
+
+    assert result.passed is True
+    assert result.event.reason_code == Msg.MODEL_MIXED.reason
+    assert result.event.what_we_saw["models"] == {"NVIDIA GeForce RTX 4090": 1, "NVIDIA GeForce RTX 5060 Ti": 1}
+    assert availability_errors([result.event]) == []

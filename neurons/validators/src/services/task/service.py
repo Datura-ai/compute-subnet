@@ -243,7 +243,9 @@ class TaskService:
                 # DAH-2748: any check that could not reach something hides the node. The whole
                 # event list is read, so a new reachability check needs no change here.
                 # A broken GPU hides the node too (GPU_HEALTH_UNLISTABLE_ENABLED); off, it is only logged.
-                gpu_events = gpu_health_events(events)
+                gpu_events = gpu_health_events(
+                    events, fault_probe_enforced=settings.GPU_FAULT_PROBE_ENFORCEMENT_ENABLED
+                )
                 if gpu_events and not settings.GPU_HEALTH_UNLISTABLE_ENABLED:
                     logger.warning(
                         _m(

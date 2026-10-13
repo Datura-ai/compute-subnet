@@ -23,8 +23,15 @@ from services.task.models import JobResult, build_msg
 from services.task.service import TaskService
 
 
-def _event(reason: str, event: str = "GPU check", remediation: str | None = "Reset the card.") -> object:
-    return build_msg(event=event, reason=reason, severity="error", impact="Score is zero.", remediation=remediation)
+def _event(
+    reason: str,
+    event: str = "GPU check",
+    remediation: str | None = "Reset the card.",
+    what: dict[str, object] | None = None,
+) -> object:
+    return build_msg(
+        event=event, reason=reason, severity="error", impact="Score is zero.", remediation=remediation, what=what
+    )
 
 
 @pytest.mark.parametrize("reason", sorted(GPU_HEALTH_FAILURE_CODES))
@@ -33,7 +40,7 @@ def test_every_gpu_health_failure_becomes_one_gpu_unhealthy_entry(reason: str) -
     events = [_event("GPU_MODEL_OK"), _event(reason, event="GPU 0 is wedged"), _event("FINALIZE")]
 
     # Act
-    problems = availability_errors(gpu_health_events(events))
+    problems = availability_errors(gpu_health_events(events, fault_probe_enforced=True))
 
     # Assert
     assert [p.model_dump() for p in problems] == [
@@ -51,14 +58,44 @@ def test_every_gpu_health_failure_becomes_one_gpu_unhealthy_entry(reason: str) -
 @pytest.mark.parametrize(
     "reason",
     # a check that could not run, or did not finish, says nothing about the card
-    ["GPU_VERIFY_TIMEOUT", "GPU_VERIFY_SKIPPED_RENTED", "GPU_FAULT_PROBE_UNKNOWN", "GPU_VERIFY_OK", "GPU_MODEL_MIXED"],
+    [
+        "GPU_VERIFY_TIMEOUT",
+        "GPU_VERIFY_SKIPPED_RENTED",
+        "GPU_FAULT_PROBE_UNKNOWN",
+        "GPU_VERIFY_OK",
+        "GPU_MODEL_MIXED",
+        "RENTED_GPU_HEALTH_SHADOW_FAULT",  # a log-only read
+    ],
 )
 def test_a_check_that_did_not_find_a_broken_card_hides_nothing(reason: str) -> None:
-    assert gpu_health_events([_event(reason)]) == []
+    assert gpu_health_events([_event(reason)], fault_probe_enforced=True) == []
+
+
+@pytest.mark.parametrize("enforced", [False, True])
+def test_a_fault_probe_failure_hides_the_node_only_when_it_also_fails_the_check(enforced: bool) -> None:
+    # Unenforced, the probe passes and the node keeps its score: hiding it would pay for a GPU nobody can rent.
+    events = gpu_health_events([_event("GPU_FAULT_PROBE_FAILED")], fault_probe_enforced=enforced)
+
+    assert len(events) == int(enforced)
+
+
+@pytest.mark.parametrize(
+    ("pods", "hidden"),
+    [
+        ([{"pod_id": "p1", "held": True}], False),  # first cycle of a drop, not confirmed yet
+        ([{"pod_id": "p1", "held": True}, {"pod_id": "p2", "held": False}], True),
+        ([{"pod_id": "p1", "held": False}], True),
+        ([], True),  # a dry run tracks no pods
+    ],
+)
+def test_a_rented_gpu_drop_hides_the_node_once_confirmed(pods: list[dict[str, object]], hidden: bool) -> None:
+    events = gpu_health_events([_event("RENTED_GPU_DROP", what={"pods": pods})], fault_probe_enforced=False)
+
+    assert len(events) == int(hidden)
 
 
 def test_the_entry_falls_back_to_a_generic_remediation() -> None:
-    [event] = gpu_health_events([_event("GPU_WEDGED", remediation=None)])
+    [event] = gpu_health_events([_event("GPU_WEDGED", remediation=None)], fault_probe_enforced=True)
 
     assert "dmesg" in event.remediation
 
