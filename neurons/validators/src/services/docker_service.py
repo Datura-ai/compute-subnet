@@ -79,6 +79,7 @@ from services.const import (
     PREFERRED_POD_PORTS,
 )
 from services.cvm_quote_broker import ensure_quote_broker, quote_socket_pod_mount
+from services.node_host import public_host_sock
 from services.default_docker_image_digest_service import fetch_docker_hub_digest
 from services.gpu_power_limit import (
     NVIDIA_SMI_TIMEOUT_SECONDS,
@@ -9000,6 +9001,7 @@ class DockerService:
             async with asyncssh.connect(
                 host=executor_info.address,
                 port=executor_info.ssh_port,
+                **await public_host_sock(executor_info.address, executor_info.ssh_port),
                 username=executor_info.ssh_username,
                 client_keys=[pkey],
                 known_hosts=known_hosts_policy,
@@ -9676,6 +9678,7 @@ class DockerService:
                 asyncssh.connect(
                     host=executor_info.address,
                     port=executor_info.ssh_port,
+                    **await public_host_sock(executor_info.address, executor_info.ssh_port),
                     username=executor_info.ssh_username,
                     client_keys=[pkey],
                     known_hosts=known_hosts_policy,
@@ -9874,6 +9877,7 @@ class DockerService:
             async with asyncssh.connect(
                 host=executor_info.address,
                 port=executor_info.ssh_port,
+                **await public_host_sock(executor_info.address, executor_info.ssh_port),
                 username=executor_info.ssh_username,
                 client_keys=[pkey],
                 known_hosts=known_hosts_policy,

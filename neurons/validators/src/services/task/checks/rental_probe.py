@@ -23,6 +23,7 @@ from core.config import settings
 from core.utils import _m, get_extra_info
 
 from ...const import MIN_PORT_COUNT, POD_CONTAINER_PREFIX
+from ...node_host import public_host_sock
 from ..messages import NO_OUTBOUND_INTERNET_REMEDIATION, OutboundInternetMessages
 from ..messages import RentalProbeMessages as Msg
 from ..messages import render_message
@@ -1249,6 +1250,7 @@ async def _login_and_list_gpus(
             conn = await asyncssh.connect(
                 host=host,
                 port=port,
+                **await public_host_sock(host, port, _SSH_LOGIN_TIMEOUT_SECONDS),
                 username="root",
                 client_keys=[pkey],
                 known_hosts=None,
