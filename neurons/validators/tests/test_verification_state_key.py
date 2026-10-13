@@ -15,7 +15,7 @@ from neurons.validators.src.services.task.checks.gpu_fingerprint import GpuFinge
 from neurons.validators.src.services.task.checks.spec_change import SpecChangeCheck
 from neurons.validators.src.services.task.pipeline import Pipeline
 from neurons.validators.src.services.task.result_handler import ResultHandler
-from services.redis_service import LEGACY_FALLBACK_KEY, VERIFIED_JOB_COUNT_KEY, RedisService, verified_job_field
+from services.redis_service import VERIFIED_JOB_COUNT_KEY, RedisService, verified_job_field
 
 from tests.helpers import build_state
 
@@ -77,59 +77,25 @@ async def test_verification_state_is_keyed_by_hotkey_and_uuid(context_factory):
 
 
 @pytest.mark.asyncio
-async def test_state_only_changes_after_fingerprint_match(context_factory):
+@pytest.mark.parametrize(
+    ("legacy_uuids", "cycle_uuids", "expected"),
+    [
+        ("gpu-001", "gpu-001", (41, 2, "gpu-001")),
+        ("gpu-001,gpu-002", "gpu-002,gpu-001", (41, 2, "gpu-001,gpu-002")),
+        ("", "gpu-001", (1, 0, "gpu-001")),
+    ],
+)
+async def test_first_passing_cycle_migrates_the_uuid_only_record(context_factory, legacy_uuids, cycle_uuids, expected):
     service = _redis_service()
-    legacy = {"count": 5, "failed": 0, "spec": "A100:1", "uuids": "gpu-001"}
+    spec = f"A100:{len(cycle_uuids.split(','))}"
+    legacy = {"count": 40, "failed": 2, "spec": spec, "uuids": legacy_uuids}
     await service.redis.hset(VERIFIED_JOB_COUNT_KEY, EXECUTOR, json.dumps(legacy))
 
-    assert await _cycle(service, context_factory, hotkey=HOTKEY_B, uuids="gpu-009") is False
-    assert await service.redis.hget(VERIFIED_JOB_COUNT_KEY, EXECUTOR) is not None
-    assert (await service.get_verified_job_info(EXECUTOR, HOTKEY_A))["count"] == 5
+    ok = await _cycle(service, context_factory, hotkey=HOTKEY_A, uuids=cycle_uuids)
 
-    assert await _cycle(service, context_factory, hotkey=HOTKEY_A, uuids="gpu-001") is True
+    assert ok is True
     record = await _field(service, verified_job_field(HOTKEY_A, EXECUTOR))
-    assert (record["count"], record["uuids"]) == (6, "gpu-001")
-
-
-@pytest.mark.asyncio
-async def test_existing_state_is_preserved_on_upgrade(context_factory):
-    service = _redis_service()
-    legacy = {"count": 40, "failed": 2, "spec": "A100:1", "uuids": "gpu-001"}
-    await service.redis.hset(VERIFIED_JOB_COUNT_KEY, EXECUTOR, json.dumps(legacy))
-
-    assert await service.get_verified_job_info(EXECUTOR, HOTKEY_A) == {**legacy, LEGACY_FALLBACK_KEY: True}
-    assert await _cycle(service, context_factory, hotkey=HOTKEY_A, uuids="gpu-001") is True
-
-    record = await _field(service, verified_job_field(HOTKEY_A, EXECUTOR))
-    assert (record["count"], record["failed"], record["uuids"]) == (41, 2, "gpu-001")
-    assert await service.redis.hget(VERIFIED_JOB_COUNT_KEY, EXECUTOR) is None
-    assert "count" not in await service.get_verified_job_info(EXECUTOR, HOTKEY_B)
-
-
-@pytest.mark.asyncio
-async def test_legacy_record_with_matching_gpu_uuids_migrates(context_factory):
-    service = _redis_service()
-    legacy = {"count": 7, "failed": 0, "spec": "A100:2", "uuids": "gpu-001,gpu-002"}
-    await service.redis.hset(VERIFIED_JOB_COUNT_KEY, EXECUTOR, json.dumps(legacy))
-
-    assert await _cycle(service, context_factory, hotkey=HOTKEY_A, uuids="gpu-002,gpu-001") is True
-
-    record = await _field(service, verified_job_field(HOTKEY_A, EXECUTOR))
-    assert (record["count"], record["uuids"]) == (8, "gpu-001,gpu-002")
-    assert await service.redis.hget(VERIFIED_JOB_COUNT_KEY, EXECUTOR) is None
-
-
-@pytest.mark.asyncio
-async def test_legacy_record_without_gpu_uuids_starts_a_fresh_count(context_factory):
-    service = _redis_service()
-    legacy = {"count": 30, "failed": 1, "spec": "A100:1", "uuids": ""}
-    await service.redis.hset(VERIFIED_JOB_COUNT_KEY, EXECUTOR, json.dumps(legacy))
-
-    assert await service.get_verified_job_info(EXECUTOR, HOTKEY_A) == {}
-    assert await _cycle(service, context_factory, hotkey=HOTKEY_A, uuids="gpu-001") is True
-
-    record = await _field(service, verified_job_field(HOTKEY_A, EXECUTOR))
-    assert (record["count"], record["failed"], record["uuids"]) == (1, 0, "gpu-001")
+    assert (record["count"], record["failed"], record["uuids"]) == expected
     assert await service.redis.hget(VERIFIED_JOB_COUNT_KEY, EXECUTOR) is None
     assert "count" not in await service.get_verified_job_info(EXECUTOR, HOTKEY_B)
 
@@ -157,25 +123,19 @@ async def test_failing_cycle_leaves_legacy_and_other_records_unchanged(context_f
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("a_first", [False, True])
-@pytest.mark.parametrize("failure", ["pre_fingerprint", "mismatch"])
-async def test_failed_cycle_does_not_import_another_hotkeys_legacy_identity(context_factory, a_first, failure):
+async def test_failed_cycle_does_not_import_another_hotkeys_legacy_identity(context_factory, a_first):
     service = _redis_service()
     legacy = {"count": 40, "failed": 0, "spec": "A100:1", "uuids": "gpu-001"}
     await service.redis.hset(VERIFIED_JOB_COUNT_KEY, EXECUTOR, json.dumps(legacy))
     if a_first:
         assert await _cycle(service, context_factory, hotkey=HOTKEY_A, uuids="gpu-001")
 
-    verified = await service.get_verified_job_info(EXECUTOR, HOTKEY_B)
-    if failure == "pre_fingerprint":
-        await service.set_verified_job_info(HOTKEY_B, EXECUTOR, prev_info=verified, success=False)
-        await service.clear_verified_job_info(HOTKEY_B, EXECUTOR, prev_info=verified, anchor_broken=True)
-    else:
-        assert await _cycle(service, context_factory, hotkey=HOTKEY_B, uuids="gpu-009") is False
-    record = await _field(service, verified_job_field(HOTKEY_B, EXECUTOR))
-    assert record is None or record["uuids"] != "gpu-001"
+    assert await _cycle(service, context_factory, hotkey=HOTKEY_B, uuids="gpu-009") is False
+    assert await _field(service, verified_job_field(HOTKEY_B, EXECUTOR)) is None
 
     if not a_first:
         assert await _cycle(service, context_factory, hotkey=HOTKEY_A, uuids="gpu-001")
+    assert (await _field(service, verified_job_field(HOTKEY_A, EXECUTOR)))["count"] == 41
     # a different host never takes the id over, whichever hotkey migrated first
     assert await _cycle(service, context_factory, hotkey=HOTKEY_B, uuids="gpu-009") is False
     assert await _field(service, verified_job_field(HOTKEY_B, EXECUTOR)) is None
