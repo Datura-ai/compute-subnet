@@ -118,14 +118,16 @@ def availability_errors(events: list[ValidationEvent] | None) -> list[Availabili
 # so an untrusted key means a different sshd answered there: in practice the host's own sshd
 # (a provider on Discord, 11 Oct 2026: the node SSH port was the host's SSH port). Firewall advice
 # misleads. The key is re-read from the miner every cycle, so a recreated executor (new key, same
-# port) fails one check and then passes; a restarted one keeps its key, so a repeat means the port.
+# port) fails one check and then passes. A repeat usually means the port; rarely the executor's
+# sshd still serves a key it no longer reports (host-key files rotated without a reload).
 SSH_HOST_KEY_MISMATCH_REMEDIATION = (
-    "If this repeats every check, another SSH server answers this port: usually the host's own "
-    "sshd, or a port forward to another machine. Set the node SSH port (and the public SSH port "
-    "forward, if any) to a port that reaches the executor container, not the host's SSH port, "
-    "then re-run `lium mine`. Restarting the executor keeps its host key and does not fix this; "
-    "only a single failure while the executor container was being recreated clears by itself on "
-    "the next check."
+    "If this repeats every check, the SSH server on this port is not presenting the host key the "
+    "executor reports. Usually another SSH server answers the port (the host's own sshd, or a "
+    "port forward to another machine): set the node SSH port (and the public SSH port forward, if "
+    "any) to a port that reaches the executor container, not the host's SSH port, then re-run "
+    "`lium mine`. If the port already reaches the executor, restart the executor container so its "
+    "SSH server loads the key it reports. A single failure while the executor container was being "
+    "recreated clears by itself on the next check."
 )
 
 
