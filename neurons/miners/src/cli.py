@@ -364,7 +364,7 @@ def update_executor_price(address: str, port: int, price: float):
     cli_service = CliService(with_executor_db=True)
     success = asyncio.run(cli_service.update_executor_price(address, port, price_per_gpu=price))
     if success:
-        logger.info("✅ Successfully updated executor price.")
+        logger.info("✅ Price saved. Check the marketplace after the next sync for the listed price.")
     else:
         logger.error("❌ Failed to update executor price.")
 
