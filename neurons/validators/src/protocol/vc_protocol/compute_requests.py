@@ -150,8 +150,8 @@ class RentedExecutorsResponse(BaseModel):
     gpu_splitting_config: dict[str, int] = {}  # executor_id → min_gpu_count_for_rental
     network_ema: dict[str, NetworkEMA] = {}  # executor_id → EMA network speeds, all active executors
     spot_executor_ids: list[str] = []  # executor_ids in spot tier (no incentive, no penalty)
-    # The subset of spot_executor_ids whose provider chose the Spot tier: no demotion, force-spot
-    # hotkey, pin or no-incentive rental put it there. Only these may take spot-node pay. Defaults
+    # The subset of spot_executor_ids that may take spot-node pay: set to Spot by the provider, or
+    # demoted for penalties; never a banned hotkey, pin or no-incentive rental. Defaults
     # to empty so a backend that does not send it pays no spot node.
     provider_spot_executor_ids: list[str] = []
     new_rentals_paused_executor_ids: list[str] = []  # executor_ids paused from unrented incentives
