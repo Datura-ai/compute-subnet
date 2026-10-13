@@ -211,3 +211,18 @@ async def test_the_prod_mixed_node_is_reported_by_its_real_cards_and_stays_liste
     assert result.event.reason_code == Msg.MODEL_MIXED.reason
     assert result.event.what_we_saw["models"] == {"NVIDIA GeForce RTX 4090": 1, "NVIDIA GeForce RTX 5060 Ti": 1}
     assert availability_errors([result.event]) == []
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_node_with_an_unsupported_second_card_is_refused(context_factory):
+    details = [PROD_MIXED_NODE_DETAILS[0], dict(PROD_MIXED_NODE_DETAILS[1], name="NVIDIA MADE-UP 9000")]
+    state = build_state(specs={"gpu": {"count": 2, "details": details}}, gpu_count=2, gpu_details=details)
+    ctx = context_factory(
+        services=build_services(), config=build_context_config(gpu_model_rates=GPU_MODEL_RATES), state=state
+    )
+
+    result = await GpuModelValidCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.event.reason_code == Msg.MODEL_UNSUPPORTED.reason
+    assert result.event.what_we_saw["gpu_model"] == "NVIDIA MADE-UP 9000"

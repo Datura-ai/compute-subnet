@@ -284,9 +284,11 @@ class ValidationService:
             return None
 
         gpu_model = details[0].get("name", "") or ""
-        sized_vram_mb = matmul_probe_vram_mb(gpu_model)
-        if not sized_vram_mb:
+        # Sized for the smallest card: one challenge size runs on every card of a mixed node.
+        card_vram_mb = [matmul_probe_vram_mb(detail.get("name", "") or "") for detail in details]
+        if not all(card_vram_mb):
             return None
+        sized_vram_mb = min(card_vram_mb)
 
         gpu_uuids = ",".join(detail.get("uuid", "") for detail in details)
         # machine_info is identical across cards — the executor's .so reconstructs it locally from

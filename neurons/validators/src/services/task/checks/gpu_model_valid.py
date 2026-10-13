@@ -65,14 +65,17 @@ class GpuModelValidCheck:
         if gpu_count > 0 and len(gpu_details) > 0:
             gpu_model = gpu_details[0].get("name", None)
 
-        if gpu_model not in gpu_model_rates_map:
+        # Every card must be a supported model, not card 0 alone: a mixed node is listed by its real cards.
+        card_models = [gpu_model, *(detail.get("name") for detail in gpu_details)]
+        unsupported_model = next((model for model in card_models if model not in gpu_model_rates_map), None)
+        if gpu_model not in gpu_model_rates_map or unsupported_model is not None:
             supported_models = list(gpu_model_rates_map.keys())
             event = render_message(
                 Msg.MODEL_UNSUPPORTED,
                 ctx=ctx,
                 check_id=self.check_id,
                 what={
-                    "gpu_model": gpu_model,
+                    "gpu_model": unsupported_model,
                     "gpu_count": gpu_count,
                     "supported_models": supported_models,
                 },

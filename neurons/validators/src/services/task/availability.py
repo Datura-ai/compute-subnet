@@ -66,6 +66,7 @@ class AvailabilityErrorCode(StrEnum):
 GPU_HEALTH_FAILURE_CODES = frozenset(
     {
         "GPU_COUNT_ZERO",
+        "SCRAPE_FAILED_NO_GPU",  # the scrape found no GPU at all: every card left the bus
         "GPU_DETAILS_MISMATCH",  # the scrape lists fewer cards than the node reports
         "GPU_MISSING",  # an anchored card is gone
         "GPU_WEDGED",  # 100% utilisation with no process, and the cure did not clear it

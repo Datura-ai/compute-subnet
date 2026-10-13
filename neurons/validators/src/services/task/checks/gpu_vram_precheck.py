@@ -29,9 +29,14 @@ class GpuVramPrecheck:
         capacity_mb = 0
         if gpu_details:
             capacity_mb = gpu_details[0].get("capacity", 0) or 0
+        # Every card against its own model: a mixed node is listed by each card's name.
+        cards = [(detail.get("name") or gpu_model, detail.get("capacity", 0) or 0) for detail in gpu_details] or [
+            (gpu_model, capacity_mb)
+        ]
 
         try:
-            precheck_gpu_spec(gpu_model=gpu_model, gpu_capacity_mb=int(capacity_mb))
+            for gpu_model, capacity_mb in cards:
+                precheck_gpu_spec(gpu_model=gpu_model, gpu_capacity_mb=int(capacity_mb))
         except GpuPrecheckError as exc:
             event = render_message(
                 Msg.VRAM_REJECTED,

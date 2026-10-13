@@ -755,12 +755,12 @@ class Validator:
                                 extra={"silenced_results": silenced_count},
                             )
                         )
-                    silenced_gpu_count = silence_gpu_health_errors_on_our_own_fault(cycle_results)
-                    if silenced_gpu_count:
+                    silenced_gpu_health_result_count = silence_gpu_health_errors_on_our_own_fault(cycle_results)
+                    if silenced_gpu_health_result_count:
                         logger.error(
                             _m(
                                 "[sync] Most of the cycle failed a GPU health check; reporting no GPU_UNHEALTHY",
-                                extra={"silenced_results": silenced_gpu_count},
+                                extra={"silenced_results": silenced_gpu_health_result_count},
                             )
                         )
 

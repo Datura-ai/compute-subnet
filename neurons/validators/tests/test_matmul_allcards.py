@@ -233,3 +233,29 @@ async def test_a_plain_card_failure_does_not_sweep(svc, monkeypatch):
     probe = await svc._probe_all_claimed_cards(SimpleNamespace(run=run), _executor(), {}, _spec(2))
     assert probe is not None and probe.passed is False
     killed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_node_sizes_every_challenge_for_its_smallest_card(svc, monkeypatch):
+    sized_for: list[float] = []
+    real_dimensions = svc.get_max_matrix_dimensions
+
+    def record(vram_mb, dim_n):
+        sized_for.append(vram_mb)
+        return real_dimensions(vram_mb, dim_n)
+
+    monkeypatch.setattr(svc, "get_max_matrix_dimensions", record)
+    spec = {
+        "gpu": {
+            "count": 2,
+            "details": [
+                {"name": "NVIDIA GeForce RTX 4090", "uuid": "GPU-0", "capacity": 24564},
+                {"name": "NVIDIA GeForce RTX 5060 Ti", "uuid": "GPU-1", "capacity": 16311},
+            ],
+        }
+    }
+
+    probe = await svc._probe_all_claimed_cards(_ssh(real_cards=2), _executor(), {}, spec)
+
+    assert probe is not None
+    assert set(sized_for) == {matmul_probe_vram_mb("NVIDIA GeForce RTX 5060 Ti")}

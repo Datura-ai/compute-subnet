@@ -19,7 +19,7 @@ from services.task.availability import (
     silence_availability_errors_on_our_own_outage,
     silence_gpu_health_errors_on_our_own_fault,
 )
-from services.task.models import JobResult, build_msg
+from services.task.models import JobResult, ValidationEvent, build_msg
 from services.task.service import TaskService
 
 
@@ -152,7 +152,7 @@ def test_broken_gpus_do_not_count_as_failed_connects() -> None:
     assert results[0].availability_errors == [UNHEALTHY]
 
 
-def _service_whose_pipeline_ends_with(events: list) -> TaskService:
+def _service_whose_pipeline_ends_with(events: list[ValidationEvent]) -> TaskService:
     service = TaskService.__new__(TaskService)
     service.ssh_service = MagicMock()
     service.ssh_service.decrypt_payload = MagicMock(return_value="decrypted-key")

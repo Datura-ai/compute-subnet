@@ -73,3 +73,17 @@ async def test_multivariant_real_variant_passes(context_factory):
     ctx = context_factory(state=_state("NVIDIA RTX PRO 5000 Blackwell", 73728))
     result = await GpuVramPrecheck().run(ctx)
     assert result.passed is True
+
+
+@pytest.mark.asyncio
+async def test_every_card_of_a_mixed_node_is_checked_against_its_own_model(context_factory):
+    details = [
+        {"name": "NVIDIA GeForce RTX 4090", "uuid": "GPU-0", "capacity": 24564},
+        {"name": "NVIDIA H100 80GB HBM3", "uuid": "GPU-1", "capacity": 16311},  # a small card named as an H100
+    ]
+    state = build_state(gpu_model="NVIDIA GeForce RTX 4090", gpu_count=2, gpu_details=details)
+
+    result = await GpuVramPrecheck().run(context_factory(state=state))
+
+    assert result.passed is False
+    assert result.event.what_we_saw["gpu_model"] == "NVIDIA H100 80GB HBM3"
