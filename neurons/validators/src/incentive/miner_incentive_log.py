@@ -106,6 +106,7 @@ class ZeroIncentiveReason(StrEnum):
     CANNOT_APPLY_GPU_POWER_CAP = "cannot_apply_gpu_power_cap"
     OUTDATED_EXECUTOR_IMAGE = "outdated_executor_image"
     PORT_LIMITED_REMAINDER = "port_limited_remainder"
+    IDLE_WITHOUT_LIUM_DEFAULT_JOB = "idle_without_lium_default_job"
     # Spot-node pay (ENABLE_SPOT_NODE_PAY): an idle spot node that is not paid
     SPOT_WITHOUT_LIUM_FILLER = "spot_without_lium_filler"
     SPOT_NO_FILLER_REVENUE_FOR_GPU_CONFIG = "spot_no_filler_revenue_for_gpu_config"
@@ -464,6 +465,19 @@ class MinerLogLine(BaseModel):
                 "available_port_count": port_limited.available_port_count,
                 "required_port_count": port_limited.required_port_count,
             },
+        )
+
+    @staticmethod
+    def no_payout_because_idle_without_lium_default_job(result: JobResult) -> MinerLogLine:
+        return MinerLogLine._no_payout(
+            result,
+            reason=ZeroIncentiveReason.IDLE_WITHOUT_LIUM_DEFAULT_JOB,
+            message=(
+                "No unrented incentive: Lium's default job is not running on this idle executor. "
+                "Idle executors earn the unrented incentive only while Lium's default job runs on "
+                "them. Rent this executor out to earn while it is not running."
+            ),
+            extra_fields={"has_lium_filler": result.has_lium_filler},
         )
 
     # ── Spot-node pay: an idle spot node that is not paid ────────────────────

@@ -597,6 +597,12 @@ class Settings(BaseSettings):
     # to logging the breach without withholding anything.
     ENABLE_UNRENTED_POWER_CAP_LIMIT: bool = Field(env="ENABLE_UNRENTED_POWER_CAP_LIMIT", default=True)
 
+    # DAH-4256 — True: an idle secure node earns the unrented incentive only while a Lium default
+    # job (filler) runs on it, as spot-node pay already requires. A cycle whose backend sent no
+    # filler list for any node keeps the incentive (nothing to read). False: only logs the nodes
+    # that would lose it (shadow). Enabling it is the owner's call.
+    ENABLE_IDLE_REQUIRES_LIUM_DEFAULT_JOB: bool = Field(env="ENABLE_IDLE_REQUIRES_LIUM_DEFAULT_JOB", default=False)
+
     # DAH-2467 — mixed scoring for a partially rented GPU-split node: the rented GPUs earn in
     # the mining pool and the free GPUs in the unrented pool. Set to False to fall back to
     # scoring the whole box as rented.

@@ -1089,7 +1089,18 @@ async def test_result_reads_the_nodes_filler_and_its_config_average(context_fact
     result = await _handled(context_factory, data)
 
     assert result.has_lium_filler is True
+    assert result.lium_filler_list_received is True
     assert result.filler_revenue_per_gpu_hour == 2.0
+
+
+@pytest.mark.asyncio
+async def test_a_node_missing_from_a_received_filler_list_reads_as_no_default_job(context_factory):
+    data = RentedExecutorsResponse(executors={}, all_filler_containers_by_executor={"other-node": ["filler_run-2"]})
+
+    result = await _handled(context_factory, data)
+
+    assert result.has_lium_filler is False
+    assert result.lium_filler_list_received is True
 
 
 @pytest.mark.asyncio
@@ -1099,6 +1110,7 @@ async def test_result_without_a_filler_or_backend_data(context_factory):
 
     for result in (no_filler, no_data):
         assert result.has_lium_filler is False
+        assert result.lium_filler_list_received is False
         assert result.filler_revenue_per_gpu_hour is None
 
 

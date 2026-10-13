@@ -142,6 +142,12 @@ GATE_LOG_CASES = [
         "insufficient_disk_unmeasured",
     ),
     ("ENABLE_UNRENTED_POWER_CAP_LIMIT", {"gpu_count": 4}, None, "power_cap_capability_unmeasured"),
+    (
+        "ENABLE_IDLE_REQUIRES_LIUM_DEFAULT_JOB",
+        {"gpu_count": 4, "spec": None, "lium_filler_list_received": True},
+        "idle_without_lium_default_job",
+        "idle_without_lium_default_job",
+    ),
 ]
 
 
@@ -402,3 +408,66 @@ async def test_an_excluded_node_with_a_model_the_validator_does_not_know_scores_
     assert _codes(result) == ["spot_tier"]
     assert result.mining_score == 0
     assert result.eligible_for_rental_share is False
+
+
+# ── DAH-4256: idle pay needs Lium's default job ──────────────────────────────
+
+
+@pytest.fixture
+def default_job_required(monkeypatch):
+    monkeypatch.setattr(settings, "ENABLE_IDLE_REQUIRES_LIUM_DEFAULT_JOB", True)
+
+
+@pytest.mark.asyncio
+async def test_an_idle_secure_node_without_lium_default_job_earns_no_idle_incentive(default_job_required):
+    result = await _incentive().calculate_executor_score(
+        _idle_flagship(gpu_count=4, spec=None, lium_filler_list_received=True)
+    )
+
+    assert _codes(result) == ["idle_without_lium_default_job"]
+    assert result.eligible_for_rental_share is False
+    assert result.mining_score == 0
+
+
+@pytest.mark.asyncio
+async def test_an_idle_secure_node_running_lium_default_job_keeps_idle_incentive(default_job_required):
+    result = await _incentive().calculate_executor_score(
+        _idle_flagship(gpu_count=4, spec=None, lium_filler_list_received=True, has_lium_filler=True)
+    )
+
+    assert result.zero_incentive_reasons == []
+    assert result.eligible_for_rental_share is True
+
+
+@pytest.mark.asyncio
+async def test_a_cycle_without_a_filler_list_keeps_idle_incentive(default_job_required):
+    # a backend that sent no filler list for any node is no reading of this one
+    result = await _incentive().calculate_executor_score(_idle_flagship(gpu_count=4, spec=None))
+
+    assert result.zero_incentive_reasons == []
+    assert result.eligible_for_rental_share is True
+
+
+@pytest.mark.asyncio
+async def test_the_default_job_gate_off_keeps_idle_incentive(monkeypatch):
+    monkeypatch.setattr(settings, "ENABLE_IDLE_REQUIRES_LIUM_DEFAULT_JOB", False)
+
+    result = await _incentive().calculate_executor_score(
+        _idle_flagship(gpu_count=4, spec=None, lium_filler_list_received=True)
+    )
+
+    assert result.zero_incentive_reasons == []
+    assert result.eligible_for_rental_share is True
+
+
+@pytest.mark.asyncio
+async def test_a_rented_secure_node_without_lium_default_job_keeps_its_rental_score(default_job_required):
+    incentive = RentalPriceIncentive(IncentiveConfig(), AsyncMock(), {}, {H200: 8})
+    incentive.redis_service.get_portion_per_gpu_type.return_value = 1.0
+
+    result = await incentive.calculate_executor_score(
+        _idle_flagship(is_rented=True, lium_filler_list_received=True)
+    )
+
+    assert "idle_without_lium_default_job" not in _codes(result)
+    assert result.mining_score > 0

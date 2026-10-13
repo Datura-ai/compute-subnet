@@ -516,6 +516,29 @@ class RentalPriceIncentive(DefaultIncentive):
             )
         )
 
+    def _log_idle_without_lium_default_job(self, result: JobResult) -> None:
+        enforced: bool = settings.ENABLE_IDLE_REQUIRES_LIUM_DEFAULT_JOB
+        logger.info(
+            _m(
+                "Unrented executor is not running Lium's default job"
+                + ("" if enforced else " (shadow only - flag off)"),
+                extra={
+                    "executor_id": str(result.executor_info.uuid),
+                    "gpu_model": result.gpu_model,
+                    "gpu_count": result.gpu_count,
+                    "default_job_owner": result.default_job_owner,
+                    "enforced": enforced,
+                    "reason": ZeroIncentiveReason.IDLE_WITHOUT_LIUM_DEFAULT_JOB,
+                    "pool": "rental_excluded" if enforced else "rental_kept_shadow",
+                },
+            )
+        )
+
+    @staticmethod
+    def _idle_without_lium_default_job(result: JobResult) -> bool:
+        # only on a reading: a cycle with no filler list at all says nothing about this node
+        return result.lium_filler_list_received and not result.has_lium_filler
+
     @staticmethod
     def _port_limited_remainder(result: JobResult) -> PortLimitedRemainder | None:
         # None whenever the spec does not carry a readable count: a synthetic result or an
@@ -1313,7 +1336,7 @@ class RentalPriceIncentive(DefaultIncentive):
         # DAH-2715 power cap gate: an idle machine whose container cannot apply a GPU power
         # cap is not fully usable for Lium's own jobs, so it forfeits the unrented incentive
         # (node stays active). While the flag is off we only log the would-be exclusion.
-        # Last in the chain, so a node already excluded by an ENFORCED gate above is not
+        # Like every gate here, a node already excluded by an ENFORCED gate above is not
         # logged here - read the shadow numbers against the flags that were on that cycle.
         power_cap_enforced: bool = settings.ENABLE_UNRENTED_POWER_CAP_LIMIT
         power_cap_incapable: PowerCapIncapable | None = (
@@ -1330,6 +1353,21 @@ class RentalPriceIncentive(DefaultIncentive):
                     job_result, power_cap_incapable
                 )
                 job_result.record_incentive_log(reason)
+
+        # DAH-4256: an idle node earns only while Lium's default job runs on it, as a spot node
+        # does; shadow-only while the flag is off. Spot nodes never reach here (spot_tier or the
+        # spot-pay path above), so this is the secure side of the same rule.
+        default_job_enforced: bool = settings.ENABLE_IDLE_REQUIRES_LIUM_DEFAULT_JOB
+        if self._should_run_idle_pool_gate(
+            idle_pool_candidate, eligible_for_rental_share, default_job_enforced
+        ) and self._idle_without_lium_default_job(job_result):
+            if eligible_for_rental_share:
+                self._log_idle_without_lium_default_job(job_result)
+            if default_job_enforced:
+                eligible_for_rental_share = False
+                job_result.record_incentive_log(
+                    MinerLogLine.no_payout_because_idle_without_lium_default_job(job_result)
+                )
 
         # an eligible node has these two factors checked after pricing (_explain_zero_effective_rate)
         if idle_pool_candidate and not eligible_for_rental_share:

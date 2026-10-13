@@ -153,6 +153,10 @@ class ResultHandler:
         has_lium_filler = bool(
             rented_data and rented_data.get_filler_containers(executor_info.uuid)
         )
+        lium_filler_list_received = bool(
+            rented_data
+            and (rented_data.all_filler_containers_by_executor or rented_data.filler_containers_by_executor)
+        )
         filler_revenue_per_gpu_hour = (
             rented_data.get_filler_revenue_per_gpu_hour(
                 BASE_GPU_MAP.get(gpu_model or ""), gpu_count, settings.FILLER_REVENUE_MIN_GPU_HOURS
@@ -242,6 +246,7 @@ class ResultHandler:
             rental_created_at=self._get_rental_created_at(context),
             default_job_owner=default_job_owner,
             has_lium_filler=has_lium_filler,
+            lium_filler_list_received=lium_filler_list_received,
             filler_revenue_per_gpu_hour=filler_revenue_per_gpu_hour,
             tdx_attestation_passed=context.tdx_attestation_passed,
             gpu_attestation_passed=context.gpu_attestation_passed,
