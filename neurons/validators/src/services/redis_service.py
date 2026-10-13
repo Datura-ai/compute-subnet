@@ -661,8 +661,17 @@ class RedisService:
         A uuid-only record without an anchor is not carried: that executor starts a fresh count."""
         data = await self.hget(VERIFIED_JOB_COUNT_KEY, verified_job_field(miner_hotkey, executor_id))
         if data:
-            return json.loads(data)
+            own = json.loads(data)
+            if own.get(GPU_ANCHOR_KEY):
+                return own
+            # an unanchored own record (failed or reset before any anchor) must not bypass an anchor held elsewhere
+            other = await self._unowned_anchor(executor_id, miner_hotkey)
+            if other.get(GPU_ANCHOR_KEY):
+                return {**own, GPU_ANCHOR_KEY: other[GPU_ANCHOR_KEY], LEGACY_FALLBACK_KEY: True, FOREIGN_FALLBACK_KEY: True}
+            return own
+        return await self._unowned_anchor(executor_id, miner_hotkey)
 
+    async def _unowned_anchor(self, executor_id: str, miner_hotkey: str) -> dict:
         if ":" in executor_id:
             return {}  # uuid-only fields never contain ":"; such an id would read another hotkey's record
         data = await self.hget(VERIFIED_JOB_COUNT_KEY, executor_id)

@@ -123,22 +123,33 @@ async def test_failing_cycle_leaves_legacy_and_other_records_unchanged(context_f
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("a_first", [False, True])
-async def test_failed_cycle_does_not_import_another_hotkeys_legacy_identity(context_factory, a_first):
+@pytest.mark.parametrize(
+    "preseed",
+    [
+        None,
+        {"count": 0, "failed": 1, "spec": "", "uuids": ""},
+        {"count": 0, "failed": 0, "spec": "", "uuids": ""},
+    ],
+    ids=["absent", "failed", "reset"],
+)
+async def test_failed_cycle_does_not_import_another_hotkeys_legacy_identity(context_factory, a_first, preseed):
     service = _redis_service()
     legacy = {"count": 40, "failed": 0, "spec": "A100:1", "uuids": "gpu-001"}
     await service.redis.hset(VERIFIED_JOB_COUNT_KEY, EXECUTOR, json.dumps(legacy))
+    if preseed:
+        await service.redis.hset(VERIFIED_JOB_COUNT_KEY, verified_job_field(HOTKEY_B, EXECUTOR), json.dumps(preseed))
     if a_first:
         assert await _cycle(service, context_factory, hotkey=HOTKEY_A, uuids="gpu-001")
 
     assert await _cycle(service, context_factory, hotkey=HOTKEY_B, uuids="gpu-009") is False
-    assert await _field(service, verified_job_field(HOTKEY_B, EXECUTOR)) is None
+    assert await _field(service, verified_job_field(HOTKEY_B, EXECUTOR)) == preseed
 
     if not a_first:
         assert await _cycle(service, context_factory, hotkey=HOTKEY_A, uuids="gpu-001")
     assert (await _field(service, verified_job_field(HOTKEY_A, EXECUTOR)))["count"] == 41
-    # a different host never takes the id over, whichever hotkey migrated first
+    # a different host never takes the id over, whichever hotkey migrated first, even from an empty own record
     assert await _cycle(service, context_factory, hotkey=HOTKEY_B, uuids="gpu-009") is False
-    assert await _field(service, verified_job_field(HOTKEY_B, EXECUTOR)) is None
+    assert await _field(service, verified_job_field(HOTKEY_B, EXECUTOR)) == preseed
 
 
 @pytest.mark.asyncio
