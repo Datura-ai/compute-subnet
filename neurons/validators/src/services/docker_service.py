@@ -179,8 +179,9 @@ IN_CONTAINER_SSH_BOOTSTRAP_PATH = "/tmp/lium-ssh-bootstrap.sh"
 # at most 96 KiB once escaped.
 LOG_BATCH_MAX_BYTES = 512 * 1024
 LOG_LINE_MAX_CHARS = 16 * 1024
-# publish passes after finish_stream_logs while lines are still queued (Redis failing), LOG_STREAM_INTERVAL apart
-LOG_STREAM_FINAL_ATTEMPTS = 3
+# waits before each publish pass after finish_stream_logs while lines are still queued (Redis failing): together
+# ~30 s, so a Redis restart or failover does not cost a finished build its last lines; the deploy request waits
+LOG_STREAM_FINAL_BACKOFF_S = (0.5, 1, 2, 4, 8, 15)
 
 
 def log_batches(
@@ -3373,10 +3374,10 @@ class DockerService:
 
             if finish_requested:
                 # nothing publishes this service's queue after this task, so a failed final pass retries a few times
-                if not self.logs_queue or final_attempts >= LOG_STREAM_FINAL_ATTEMPTS:
+                if not self.logs_queue or final_attempts >= len(LOG_STREAM_FINAL_BACKOFF_S):
                     break
+                await asyncio.sleep(LOG_STREAM_FINAL_BACKOFF_S[final_attempts])
                 final_attempts += 1
-                await asyncio.sleep(LOG_STREAM_INTERVAL)
                 continue
             # publish first, then wait: the first line (the UI's SSH port) goes out at once, and
             # finish_stream_logs cuts the wait short so the last batch does too
@@ -3386,7 +3387,7 @@ class DockerService:
         if self.logs_queue:
             logger.error(
                 _m(
-                    f"Dropped {len(self.logs_queue)} log lines: publishing failed {LOG_STREAM_FINAL_ATTEMPTS} more times",
+                    f"Dropped {len(self.logs_queue)} log lines: publishing still failed after {sum(LOG_STREAM_FINAL_BACKOFF_S)} s",
                     extra=get_extra_info(default_extra),
                 )
             )

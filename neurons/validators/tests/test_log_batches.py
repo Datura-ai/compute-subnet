@@ -5,10 +5,9 @@ import json
 from unittest.mock import Mock
 
 import pytest
-
 from services.docker_service import (
     LOG_LINE_MAX_CHARS,
-    LOG_STREAM_FINAL_ATTEMPTS,
+    LOG_STREAM_FINAL_BACKOFF_S,
     DockerService,
     log_batches,
 )
@@ -87,6 +86,7 @@ async def test_a_noisy_build_is_published_in_frames_the_backend_accepts():
 @pytest.mark.asyncio
 async def test_the_batches_after_a_failed_publish_go_back_to_the_front_of_the_queue(monkeypatch):
     monkeypatch.setattr("services.docker_service.LOG_STREAM_INTERVAL", 0)
+    monkeypatch.setattr("services.docker_service.LOG_STREAM_FINAL_BACKOFF_S", (0,) * 6)
     published: list[dict] = []
 
     class _RedisFailingOnTheSecondPublish:
@@ -114,6 +114,7 @@ async def test_a_publish_failing_during_the_final_pass_is_retried_before_the_str
 ):
     # a per-request DockerService: nothing publishes its queue once handle_stream_logs returns
     monkeypatch.setattr("services.docker_service.LOG_STREAM_INTERVAL", 0)
+    monkeypatch.setattr("services.docker_service.LOG_STREAM_FINAL_BACKOFF_S", (0,) * 6)
     published: list[dict] = []
     calls = 0
 
@@ -140,6 +141,7 @@ async def test_a_publish_failing_during_the_final_pass_is_retried_before_the_str
 @pytest.mark.asyncio
 async def test_a_redis_that_stays_down_ends_the_stream_after_the_final_attempts(monkeypatch):
     monkeypatch.setattr("services.docker_service.LOG_STREAM_INTERVAL", 0)
+    monkeypatch.setattr("services.docker_service.LOG_STREAM_FINAL_BACKOFF_S", (0,) * 6)
     attempts = 0
 
     class _RedisDown:
@@ -154,4 +156,32 @@ async def test_a_redis_that_stays_down_ends_the_stream_after_the_final_attempts(
 
     await asyncio.wait_for(svc.handle_stream_logs(miner_hotkey="m", executor_id="e", pod_id="p"), 5)
 
-    assert attempts == 1 + LOG_STREAM_FINAL_ATTEMPTS
+    assert attempts == 1 + len(LOG_STREAM_FINAL_BACKOFF_S)
+
+
+@pytest.mark.asyncio
+async def test_a_redis_outage_shorter_than_the_final_backoff_loses_no_line(monkeypatch):
+    # F-29 review: a ~1.5 s outage used to exhaust the final retries; a slept second stands in for each wait
+    clock = {"now": 0.0}
+
+    async def fake_sleep(seconds):
+        clock["now"] += seconds
+
+    monkeypatch.setattr("services.docker_service.LOG_STREAM_INTERVAL", 0)
+    monkeypatch.setattr("services.docker_service.asyncio.sleep", fake_sleep)
+    published: list[dict] = []
+
+    class _RedisDownForTwentySeconds:
+        async def publish(self, channel, payload):
+            if clock["now"] < 20:
+                raise ConnectionError("redis is restarting")
+            published.append(payload)
+
+    svc = _service(_RedisDownForTwentySeconds())
+    await svc.stream_log("renter build output", "success", "build")
+    await svc.finish_stream_logs()
+
+    await svc.handle_stream_logs(miner_hotkey="m", executor_id="e", pod_id="p")
+
+    assert [log["log_text"] for p in published for log in p["logs"]] == ["renter build output"]
+    assert svc.logs_queue == []
