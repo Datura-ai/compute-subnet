@@ -68,6 +68,10 @@ MINER_SCORES_KEY = "miner_scores"
 PENDING_INCLUSION_KEY = "settlement_pending_inclusion"
 # cycle reports the backend has not acknowledged yet, replayed every cycle until it does
 UNACKED_CYCLE_REPORTS_KEY = "settlement_unacked_cycle_reports"
+# DAH-4001: the cycles summed into miner_scores since the last live submission, and live submissions not yet
+# acknowledged by the backend
+LIVE_CYCLE_IDS_KEY = "settlement_live_cycle_ids"
+UNACKED_LIVE_WEIGHTS_KEY = "settlement_unacked_live_weights"
 UNACKED_CYCLE_REPORTS_MAX = 200
 # one cycle's settlement HTTP (kept reports, pending inclusions, this cycle's report) is cut off past this, retries
 # included, so a slow backend cannot hold up the cycle; what was not delivered stays in Redis for the next cycle
@@ -137,6 +141,7 @@ class Validator:
         self.first_cycle_started_at: datetime | None = None
 
         self.miner_scores = {}
+        self.live_cycle_ids: list[str] = []
         # Hotkeys with at least one live executor in the last completed cycle. Rebuilt
         # every cycle, never persisted — set_weights floors them to u16=1.
         self.active_hotkeys: set[str] = set()
@@ -229,6 +234,7 @@ class Validator:
                 self.miner_scores = {}
             else:
                 self.miner_scores = json.loads(miner_scores_json)
+            self.live_cycle_ids = json.loads(await self.redis_service.get(LIVE_CYCLE_IDS_KEY) or "[]")
 
             # remove pod renting-in-progress status
             await self.redis_service.delete(PENDING_PODS_PREFIX)
@@ -333,17 +339,37 @@ class Validator:
                             )
                         )
                         self.miner_scores = {}
+                        self.live_cycle_ids = []
                     elif settings.SETTLEMENT_MODE == SETTLEMENT_ENFORCE:
                         # DAH-4001: the accumulator is scored but not submitted; the backend's settled window is
                         await self.submit_settled_window()
                         self.miner_scores = {}
+                        self.live_cycle_ids = []
+                        # a live report left unacknowledged when settlement switched to enforce still goes out
+                        await self.drain_live_weights()
                     else:
-                        live_scores = self.miner_scores
-                        await self.subtensor_client.set_weights(
+                        live_scores, live_cycle_ids = self.miner_scores, self.live_cycle_ids
+                        block_before = self._current_block_or_none()
+                        accepted = await self.subtensor_client.set_weights(
                             miner_scores=live_scores,
                             active_hotkeys=self.active_hotkeys,
+                            wait_for_inclusion=True,
                         )
                         self.miner_scores = {}
+                        self.live_cycle_ids = []
+                        if accepted:
+                            # the block read after it landed, or before it when that read fails, as for a window
+                            block = self._current_block_or_none()
+                            block = block if block is not None else block_before
+                            if block is not None:
+                                await self.report_live_weights(block, live_cycle_ids)
+                            else:
+                                logger.warning(
+                                    _m(
+                                        "[settlement] live weights landed but no block could be read; not reported",
+                                        extra=get_extra_info(self.default_extra),
+                                    )
+                                )
                         # after the live submission: a slow or failing backend must not delay or skip it
                         if settings.SETTLEMENT_MODE == SETTLEMENT_SHADOW:
                             await self.shadow_settled_window(live_scores)
@@ -706,6 +732,7 @@ class Validator:
                     # PHASE 3: Accumulate scores with burning applied
                     for miner_hotkey, score in cycle_scores.items():
                         self.miner_scores[miner_hotkey] = self.miner_scores.get(miner_hotkey, 0) + score
+                    self.live_cycle_ids.append(job_batch_id)
 
                     if settings.SETTLEMENT_MODE != SETTLEMENT_OFF:
                         await self.report_cycle_scores(
@@ -870,6 +897,7 @@ class Validator:
                 await self.redis_service.set(
                     MINER_SCORES_KEY, json.dumps(self.miner_scores)
                 )
+                await self.redis_service.set(LIVE_CYCLE_IDS_KEY, json.dumps(self.live_cycle_ids))
             except Exception as e:
                 logger.warning(
                     _m(
@@ -1039,6 +1067,73 @@ class Validator:
                 await self.redis_service.lrem(UNACKED_CYCLE_REPORTS_KEY, raw)
             except Exception:
                 pass
+
+    async def report_live_weights(self, inclusion_block: int, cycle_ids: list[str]) -> None:
+        """DAH-4001: tell the backend where live weights landed and which cycles they summed, so it credits the epochs
+        they pay to those cycles instead of the last settled window. Kept in Redis before it is sent: a lost report
+        misattributes epochs. Never fails the tempo."""
+        report = {"inclusion_block": inclusion_block, "cycle_ids": cycle_ids}
+        try:
+            await self.redis_service.lpush(UNACKED_LIVE_WEIGHTS_KEY, json.dumps(report).encode())
+        except Exception as exc:
+            logger.error(
+                _m(
+                    "[settlement] could not keep the live weights report; sending it once without replay",
+                    extra=get_extra_info({**self.default_extra, "inclusion_block": inclusion_block, "error": str(exc)}),
+                )
+            )
+            await self._send_live_weights(report)
+            return
+        await self.drain_live_weights()
+        try:
+            # one report per tempo: past the cap during a long outage the oldest go, as for the cycle reports
+            await self.redis_service.ltrim(UNACKED_LIVE_WEIGHTS_KEY, UNACKED_CYCLE_REPORTS_MAX)
+        except Exception:
+            pass
+
+    async def drain_live_weights(self) -> None:
+        """Send the kept live weights reports, oldest first, until one is not taken: after every tempo's submission in
+        every mode, so the first failure costs one request per tempo and never delays a submission."""
+        try:
+            kept = list(reversed(await self.redis_service.lrange(UNACKED_LIVE_WEIGHTS_KEY)))
+        except Exception as exc:
+            logger.warning(
+                _m("[settlement] could not read kept live weights reports", extra=get_extra_info({**self.default_extra, "error": str(exc)}))
+            )
+            return
+        for raw in kept:
+            if not await self._send_live_weights(json.loads(raw)):
+                return
+            try:
+                await self.redis_service.lrem(UNACKED_LIVE_WEIGHTS_KEY, raw)
+            except Exception:
+                pass
+
+    async def _send_live_weights(self, report: dict) -> bool:
+        """Whether the report is done with: taken, or rejected as wrong (keeping it would block every later one)."""
+        try:
+            # bounded like the cycle reports: a hung backend costs one budget per tempo and the report stays kept
+            receipt = await asyncio.wait_for(
+                self.backend_client.report_live_weights(report["inclusion_block"], report["cycle_ids"]),
+                timeout=SETTLEMENT_REPORTING_BUDGET_SECONDS,
+            )
+            return receipt is not None
+        except BackendRejected as exc:
+            logger.error(
+                _m(
+                    "[settlement] live weights report rejected by the backend; dropped",
+                    extra=get_extra_info({**self.default_extra, "error": str(exc), **report}),
+                )
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                _m(
+                    "[settlement] live weights report failed; kept for the next tempo",
+                    extra=get_extra_info({**self.default_extra, "error": str(exc), "inclusion_block": report["inclusion_block"]}),
+                )
+            )
+            return False
 
     def _settlement_burner(self, miners) -> str | None:
         """The verified burner. A test network has none, so our own hotkey stands in; on mainnet a burner that fails
@@ -1506,6 +1601,7 @@ class Validator:
 
         try:
             await self.redis_service.set(MINER_SCORES_KEY, json.dumps(self.miner_scores))
+            await self.redis_service.set(LIVE_CYCLE_IDS_KEY, json.dumps(self.live_cycle_ids))
         except Exception as e:
             logger.info(
                 _m(
