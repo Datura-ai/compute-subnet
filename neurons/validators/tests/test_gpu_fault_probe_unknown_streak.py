@@ -58,7 +58,10 @@ async def test_a_verdict_ends_the_streak(context_factory, caplog):
 @pytest.mark.asyncio
 async def test_under_both_switches_a_no_verdict_streak_fails_like_a_fault(context_factory):
     results = await _cycles(
-        context_factory, [NO_VERDICT] * UNKNOWN_STREAK_LIMIT, enforce=True, unknown_streak=True
+        context_factory,
+        [NO_VERDICT] * UNKNOWN_STREAK_LIMIT,
+        enforce=True,
+        enforce_unknown_streak=True,
     )
 
     assert [result.passed for result in results] == [True] * (UNKNOWN_STREAK_LIMIT - 1) + [False]
@@ -69,7 +72,10 @@ async def test_under_both_switches_a_no_verdict_streak_fails_like_a_fault(contex
 @pytest.mark.asyncio
 async def test_the_streak_switch_alone_stays_in_shadow(context_factory):
     results = await _cycles(
-        context_factory, [NO_VERDICT] * UNKNOWN_STREAK_LIMIT, enforce=False, unknown_streak=True
+        context_factory,
+        [NO_VERDICT] * UNKNOWN_STREAK_LIMIT,
+        enforce=False,
+        enforce_unknown_streak=True,
     )
 
     assert all(result.passed for result in results)
