@@ -5,6 +5,7 @@ and converting the validation context into a JobResult for reporting.
 """
 
 import logging
+import math
 from datetime import datetime
 from typing import Any, Optional
 
@@ -45,6 +46,27 @@ def _canonicalize_published_gpu_names(specs: dict) -> dict:
 
     return {**specs, "gpu": {**gpu, "details": canonical_details}}
 
+
+
+def model_filler_revenue_per_gpu_hour(rented_data: Any, base_model: str | None) -> float | None:
+    """The base model's filler USD per GPU-hour over every GPU count, weighted by GPU-hours
+    (DAH-4299: the spot fallback for a configuration with no average of its own). None under the
+    sample floor."""
+    entries = [
+        entry
+        for entry in rented_data.filler_revenue_by_gpu_config
+        if base_model
+        and entry.base_model == base_model
+        and math.isfinite(entry.usd_per_gpu_hour)
+        and math.isfinite(entry.gpu_hours)
+        and entry.usd_per_gpu_hour >= 0
+        and entry.gpu_hours > 0
+    ]
+    gpu_hours = sum(entry.gpu_hours for entry in entries)
+    if not gpu_hours >= settings.FILLER_REVENUE_MIN_GPU_HOURS:
+        return None
+    average = sum(entry.usd_per_gpu_hour * entry.gpu_hours for entry in entries) / gpu_hours
+    return average if average > 0 else None
 
 class ResultHandler:
     """Handles post-pipeline result processing and persistence."""
@@ -243,6 +265,11 @@ class ResultHandler:
             default_job_owner=default_job_owner,
             has_lium_filler=has_lium_filler,
             filler_revenue_per_gpu_hour=filler_revenue_per_gpu_hour,
+            filler_revenue_model_average_per_gpu_hour=(
+                model_filler_revenue_per_gpu_hour(rented_data, BASE_GPU_MAP.get(gpu_model or ""))
+                if rented_data
+                else None
+            ),
             tdx_attestation_passed=context.tdx_attestation_passed,
             gpu_attestation_passed=context.gpu_attestation_passed,
             executor_image_report=executor_image_report,

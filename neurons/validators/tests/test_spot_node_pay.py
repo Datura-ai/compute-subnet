@@ -187,6 +187,7 @@ def floor_on(monkeypatch):
 def flags_default_off(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_SPOT_NODE_PAY", False)
     monkeypatch.setattr(settings, "SPOT_IDLE_PAY_SECURE_DECISION_ENABLED", False)
+    monkeypatch.setattr(settings, "SPOT_FILLER_REVENUE_MODEL_FALLBACK_ENABLED", False)
     monkeypatch.setattr(settings, "ENABLE_SECURE_FILLER_REVENUE_FLOOR", False)
 
 
@@ -260,6 +261,63 @@ async def test_spot_whose_config_has_no_average_gets_zero(spot_pay_on):
 
     assert spot.incentive == 0
     assert _codes(spot) == [ZeroIncentiveReason.SPOT_NO_FILLER_REVENUE_FOR_GPU_CONFIG]
+
+
+@pytest.mark.asyncio
+async def test_spot_with_no_config_average_is_priced_on_the_model_average(spot_pay_on, monkeypatch):
+    monkeypatch.setattr(settings, "SPOT_FILLER_REVENUE_MODEL_FALLBACK_ENABLED", True)
+    spot = _spot(filler_revenue_per_gpu_hour=None, filler_revenue_model_average_per_gpu_hour=2.0)
+
+    incentive = await _run([spot, _node("secure-1")])
+
+    assert spot.effective_rate == pytest.approx(SPOT_FACTOR * 2.0)
+    assert spot.filler_revenue_from_model_average
+    assert _codes(spot) == []
+    _assert_pool_pays_exactly(incentive)
+
+
+@pytest.mark.asyncio
+async def test_the_model_average_fallback_is_off_by_default(spot_pay_on):
+    spot = _spot(filler_revenue_per_gpu_hour=None, filler_revenue_model_average_per_gpu_hour=2.0)
+
+    await _run([spot])
+
+    assert spot.incentive == 0
+    assert _codes(spot) == [ZeroIncentiveReason.SPOT_NO_FILLER_REVENUE_FOR_GPU_CONFIG]
+
+
+@pytest.mark.asyncio
+async def test_the_config_average_wins_over_the_model_average(spot_pay_on, monkeypatch):
+    monkeypatch.setattr(settings, "SPOT_FILLER_REVENUE_MODEL_FALLBACK_ENABLED", True)
+    spot = _spot(filler_revenue_per_gpu_hour=1.0, filler_revenue_model_average_per_gpu_hour=2.0)
+
+    await _run([spot, _node("secure-1")])
+
+    assert spot.effective_rate == pytest.approx(SPOT_FACTOR * 1.0)
+    assert not spot.filler_revenue_from_model_average
+
+
+@pytest.mark.asyncio
+async def test_a_spot_model_with_no_average_at_all_still_gets_zero(spot_pay_on, monkeypatch):
+    monkeypatch.setattr(settings, "SPOT_FILLER_REVENUE_MODEL_FALLBACK_ENABLED", True)
+    spot = _spot(filler_revenue_per_gpu_hour=None)
+
+    await _run([spot])
+
+    assert spot.incentive == 0
+    assert _codes(spot) == [ZeroIncentiveReason.SPOT_NO_FILLER_REVENUE_FOR_GPU_CONFIG]
+
+
+@pytest.mark.asyncio
+async def test_the_secure_floor_never_uses_the_model_average(floor_on, monkeypatch):
+    monkeypatch.setattr(settings, "SPOT_FILLER_REVENUE_MODEL_FALLBACK_ENABLED", True)
+    nodes = _over_cap_cycle(None)
+    for node in nodes:
+        node.filler_revenue_model_average_per_gpu_hour = 100.0
+
+    await _run(nodes)
+
+    assert all(node.filler_revenue_per_gpu_hour is None for node in nodes)
 
 
 @pytest.mark.asyncio

@@ -632,6 +632,13 @@ class Settings(BaseSettings):
     # A configuration's filler average is used only when it was taken over at least this many
     # filler GPU-hours; a thinner sample reads as no average.
     FILLER_REVENUE_MIN_GPU_HOURS: float = Field(env="FILLER_REVENUE_MIN_GPU_HOURS", default=24.0)
+    # DAH-4299: a spot node whose GPU configuration has no filler average (a new configuration,
+    # or one too few Lium fillers ran on) is priced on its GPU model's average over every GPU
+    # count instead of earning 0. Secure's floor keeps the configuration's own average.
+    # False: 0, as before.
+    SPOT_FILLER_REVENUE_MODEL_FALLBACK_ENABLED: bool = Field(
+        env="SPOT_FILLER_REVENUE_MODEL_FALLBACK_ENABLED", default=False
+    )
 
     # True: when the --network=host batch verifies fewer than MIN_PORT_COUNT ports, the ports it
     # failed are re-probed through the published-port (-p) tiers renters' pods use, and the two

@@ -652,6 +652,7 @@ class MinerLogLine(BaseModel):
                 "gpu_model": result.gpu_model,
                 "gpu_count": result.gpu_count,
                 "filler_revenue_per_gpu_hour": result.filler_revenue_per_gpu_hour,
+                "filler_revenue_from_model_average": result.filler_revenue_from_model_average,
                 "filler_rate": filler_rate,
                 "hourly_rate": result.hourly_rate,
                 "sysbox_multiplier": result.sysbox_multiplier,
