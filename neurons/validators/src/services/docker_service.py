@@ -2499,7 +2499,7 @@ class DockerService:
         memory_gb = self._rental_memory_gb(payload.memory_gb, host_ram_kib, gpu_share)
         # Swap off and the renter-first OOM score need a memory limit to hang on (Docker refuses
         # --memory-swap without --memory).
-        swap_off = settings.RENTAL_SWAP_OFF_ENABLED and bool(memory_gb)
+        swap_off = bool(memory_gb)
         environment = {
             key: str(value)
             for key, value in (custom_options.environment or {}).items()

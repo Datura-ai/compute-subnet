@@ -2,7 +2,6 @@
 
 import pytest
 
-from core.config import settings
 from services.rental_docker_sdk import ContainerRunSpec, _build_host_config_kwargs
 from tests.test_deploy_optimizations import svc  # noqa: F401  (pytest fixture)
 
@@ -59,14 +58,10 @@ def _run_spec(docker_service, memory_gb):
 
 
 @pytest.mark.parametrize(
-    "enabled, memory_gb, expected",
-    [(True, 30, (30, 30, 500)), (True, 0, (None, None, None)), (False, 30, (30, None, None))],
+    "memory_gb, expected",
+    [(30, (30, 30, 500)), (0, (None, None, None))],
 )
-def test_run_spec_swap_off_follows_the_flag_and_the_memory_limit(
-    svc, monkeypatch, enabled, memory_gb, expected  # noqa: F811
-):
-    monkeypatch.setattr(settings, "RENTAL_SWAP_OFF_ENABLED", enabled)
-
+def test_run_spec_swap_off_follows_the_memory_limit(svc, memory_gb, expected):  # noqa: F811
     run_spec = _run_spec(svc, memory_gb)
 
     assert (run_spec.memory_gb or None, run_spec.memory_swap_gb, run_spec.oom_score_adj) == expected
