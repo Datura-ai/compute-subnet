@@ -537,6 +537,11 @@ class Settings(BaseSettings):
     PINNED_MEMORY_PROBE_CHECK_ENABLED: bool = Field(env="PINNED_MEMORY_PROBE_CHECK_ENABLED", default=True)
     PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED: bool = Field(
         env="PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED", default=True
+    # A fault probe with no verdict passes. Five such cycles in a row on one node are logged
+    # (GPU_FAULT_PROBE_UNKNOWN_STREAK); with this on they are judged like a fault, which fails the
+    # node only while GPU_FAULT_PROBE_ENFORCEMENT_ENABLED is on too. Off by default.
+    GPU_FAULT_PROBE_UNKNOWN_STREAK_ENFORCEMENT_ENABLED: bool = Field(
+        env="GPU_FAULT_PROBE_UNKNOWN_STREAK_ENFORCEMENT_ENABLED", default=False
     )
     # DAH-3436: the synthetic rental probe. On an idle node (no renter pod, no filler) the validator
     # rents the node from itself once per RENTAL_PROBE_INTERVAL_HOURS: it starts the default renter

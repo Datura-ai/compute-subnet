@@ -23,11 +23,12 @@ from tests.helpers import build_context_config, build_services, build_state, def
 
 
 @contextmanager
-def probe_gate(*, check_enabled: bool = True, enforce: bool = False):
+def probe_gate(*, check_enabled: bool = True, enforce: bool = False, unknown_streak: bool = False):
     # shadow-first like every score-zeroing gate: the check runs and logs, enforcement fails the node
     with patch("neurons.validators.src.services.task.checks.gpu_fault_probe.settings") as s:
         s.GPU_FAULT_PROBE_CHECK_ENABLED = check_enabled
         s.GPU_FAULT_PROBE_ENFORCEMENT_ENABLED = enforce
+        s.GPU_FAULT_PROBE_UNKNOWN_STREAK_ENFORCEMENT_ENABLED = unknown_streak
         yield s
 
 
