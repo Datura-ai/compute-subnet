@@ -394,6 +394,27 @@ async def get_version():
     return version
 
 
+# A hex nonce of 16 to 64 bytes: long enough that an answer cannot be prepared before the request,
+# short enough that the echo stays small.
+MINER_IDENTITY_NONCE_PATTERN = r"^[0-9a-fA-F]{32,128}$"
+
+
+@apis_router.get("/miner-identity")
+async def get_miner_identity(
+    nonce: Annotated[str, Query(pattern=MINER_IDENTITY_NONCE_PATTERN)],
+):
+    """
+    The miner hotkey this executor is configured for (`MINER_HOTKEY_SS58_ADDRESS`), with the
+    caller's nonce echoed back so the answer belongs to this request. Lets a service that is about
+    to list this executor under an account confirm that the machine at this address is set up for
+    that account's hotkey. Public: the hotkey is public on chain, and nothing else is returned.
+
+    Returns:
+        dict: {"miner_hotkey": "<ss58>", "nonce": "<the nonce sent>"}
+    """
+    return {"miner_hotkey": settings.MINER_HOTKEY_SS58_ADDRESS, "nonce": nonce}
+
+
 def _is_loopback_client(request: Request) -> bool:
     """True when the TCP peer is this host's loopback: the validator's SSH tunnel (a direct-tcpip
     channel sshd opens to 127.0.0.1) lands here; a request from the network does not. executor.py
