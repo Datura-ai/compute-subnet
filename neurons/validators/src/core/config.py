@@ -315,6 +315,13 @@ class Settings(BaseSettings):
     # The matmul is sized from min(card VRAM, this) instead of the whole card: same challenge,
     # seal and UUID check, 5–17x less data to generate and copy.
     FIRST_PASS_MATMUL_VRAM_MB: int = Field(env="FIRST_PASS_MATMUL_VRAM_MB", default=8192)
+    # A filler-only node skips the matmul while the filler runs. With N > 0, every Nth such cycle
+    # runs the challenge on a small VRAM budget beside the filler and records the answer
+    # (FILLER_MATMUL_SAMPLE); the check result never depends on it. 0 = never, the default.
+    FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES: int = Field(
+        env="FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES", default=0, ge=0
+    )
+    FILLER_MATMUL_SAMPLE_VRAM_MB: int = Field(env="FILLER_MATMUL_SAMPLE_VRAM_MB", default=2048, gt=0)
     # VerifyX challenge config for the first pass (defaults 128 GB / 5 GB in VerifyXSettings). The
     # measurements are still taken and published; only the amount of RAM/disk written shrinks.
     FIRST_PASS_VERIFYX_MEMORY_MAX_TEST_GB: int = Field(env="FIRST_PASS_VERIFYX_MEMORY_MAX_TEST_GB", default=16)
