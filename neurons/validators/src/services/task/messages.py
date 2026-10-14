@@ -1791,7 +1791,7 @@ class GpuKernelCountMessages:
     """Reported GPU list against the kernel's list (/proc/driver/nvidia/gpus). Shadow
     (GPU_KERNEL_COUNT_CHECK_ENABLED without enforcement) renders COUNT_MISMATCH as a warning and
     keeps passed=True; only GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED makes it fail the validation.
-    UUID_MISMATCH is logged only, under either flag."""
+    UUID_MISMATCH and SHADOW_SIGNAL are logged only, under either flag."""
 
     COUNT_OK = MessageTemplate(
         event="Reported GPUs match the kernel's GPU list",
@@ -1814,6 +1814,13 @@ class GpuKernelCountMessages:
     UUID_MISMATCH = MessageTemplate(
         event="Reported GPU UUIDs are missing from the kernel's GPU list",
         reason="GPU_KERNEL_UUID_MISMATCH",
+        severity="warning",
+        category="env",
+        impact="Shadow observation only: the validation result was NOT changed",
+    )
+    SHADOW_SIGNAL = MessageTemplate(
+        event="Reported GPU list raised a shadow signal",
+        reason="GPU_KERNEL_COUNT_SHADOW_SIGNAL",
         severity="warning",
         category="env",
         impact="Shadow observation only: the validation result was NOT changed",

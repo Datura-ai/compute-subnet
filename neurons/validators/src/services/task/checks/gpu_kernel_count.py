@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -11,6 +12,22 @@ from ..messages import MessageTemplate, render_message
 from ..models import ValidationEvent
 from ..pipeline import CheckResult, Context
 from .banned_provider import has_live_rental, kernel_gpu_view, reported_gpu_uuids
+from .cpu_truth import advertised_cpu_count
+
+# A reported GPU UUID shaped like a random (RFC 4122 version 4) UUID: version nibble 4 and variant
+# nibble 8, 9, a or b. A driver-issued UUID lands on that shape about once in 64, so one such card
+# on a node says nothing; this many on one node is logged.
+GPU_UUID_V4_SHAPE_RE = re.compile(
+    r"^(?:gpu-)?[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+GPU_UUID_V4_SHAPE_FLAG_MIN = 2
+# Host-shape hint: a multi-GPU host with less CPU or RAM per reported card than this is logged.
+# Deliberately low floors; a host below them is unusual, not proven wrong.
+HOST_SHAPE_MIN_GPU_COUNT = 2
+HOST_SHAPE_MIN_VCPU_PER_GPU = 2.0
+HOST_SHAPE_MIN_RAM_GB_PER_GPU = 8.0
+# specs.ram.total is in kB (machine_scrape: psutil total / 1024)
+KB_PER_GB = 1024 * 1024
 
 SHADOW_ONLY_IMPACT = "Shadow observation only: the validation result was NOT changed"
 KERNEL_VIEW_SOURCE_CONTAINER = "container"
@@ -40,6 +57,71 @@ def reported_gpu_count(ctx: Context, reported_uuids: list[str]) -> int:
     if count is None:
         count = _as_count(((ctx.state.specs or {}).get("gpu") or {}).get("count")) or 0
     return max(count, len(reported_uuids))
+
+
+def count_v4_shaped_uuids(uuids: list[str]) -> int:
+    return sum(1 for gpu_uuid in _normalized(uuids) if GPU_UUID_V4_SHAPE_RE.fullmatch(gpu_uuid))
+
+
+def reported_ram_gb(specs: dict[str, Any] | None) -> float | None:
+    ram = (specs or {}).get("ram")
+    if not isinstance(ram, dict):
+        return None
+    try:
+        total_kb = float(ram.get("total"))
+    except (TypeError, ValueError):
+        return None
+    return total_kb / KB_PER_GB if total_kb > 0 else None
+
+
+@dataclass(frozen=True)
+class HostShapeHint:
+    """CPU and RAM per reported card, and which of the two floors (if any) the host is below."""
+
+    cpu_count: int | None
+    ram_gb: float | None
+    vcpu_per_gpu: float | None
+    ram_gb_per_gpu: float | None
+    host_shape_reasons: list[str]
+
+    @property
+    def host_shape_flag(self) -> bool:
+        return bool(self.host_shape_reasons)
+
+    def as_fields(self) -> dict[str, Any]:
+        return {
+            "cpu_count": self.cpu_count,
+            "ram_gb": self.ram_gb,
+            "vcpu_per_gpu": self.vcpu_per_gpu,
+            "ram_gb_per_gpu": self.ram_gb_per_gpu,
+            "min_vcpu_per_gpu": HOST_SHAPE_MIN_VCPU_PER_GPU,
+            "min_ram_gb_per_gpu": HOST_SHAPE_MIN_RAM_GB_PER_GPU,
+            "host_shape_reasons": self.host_shape_reasons,
+            "host_shape_flag": self.host_shape_flag,
+        }
+
+
+def host_shape_hint(
+    *, gpu_count: int, cpu_count: int | None, ram_gb: float | None
+) -> HostShapeHint:
+    reasons: list[str] = []
+    vcpu_per_gpu = ram_gb_per_gpu = None
+    if gpu_count >= HOST_SHAPE_MIN_GPU_COUNT:
+        if cpu_count is not None:
+            vcpu_per_gpu = round(cpu_count / gpu_count, 2)
+            if vcpu_per_gpu < HOST_SHAPE_MIN_VCPU_PER_GPU:
+                reasons.append("vcpu_per_gpu_below_floor")
+        if ram_gb is not None:
+            ram_gb_per_gpu = round(ram_gb / gpu_count, 2)
+            if ram_gb_per_gpu < HOST_SHAPE_MIN_RAM_GB_PER_GPU:
+                reasons.append("ram_gb_per_gpu_below_floor")
+    return HostShapeHint(
+        cpu_count=cpu_count,
+        ram_gb=round(ram_gb, 1) if ram_gb is not None else None,
+        vcpu_per_gpu=vcpu_per_gpu,
+        ram_gb_per_gpu=ram_gb_per_gpu,
+        host_shape_reasons=reasons,
+    )
 
 
 @dataclass(frozen=True)
@@ -174,6 +256,9 @@ class GpuKernelCountCheck:
 
     A kernel list that is missing (unreadable, empty, read failed, withheld behind a foreign
     mount) is never a failure: the verdict is GPU_KERNEL_COUNT_NOT_EVALUATED.
+
+    The same event carries two hints that are never enforced: how many reported UUIDs are shaped
+    like random version-4 UUIDs, and CPU and RAM per reported card.
     """
 
     check_id = "gpu.validate.kernel_count"
@@ -222,6 +307,12 @@ class GpuKernelCountCheck:
             kernel_check_fields["not_evaluated_reason"] = (
                 "kernel_list_behind_foreign_mount" if foreign_mounts else "kernel_list_unavailable"
             )
+        v4_count = count_v4_shaped_uuids(reported_uuids)
+        shape = host_shape_hint(
+            gpu_count=reported_count,
+            cpu_count=advertised_cpu_count(ctx),
+            ram_gb=reported_ram_gb(ctx.state.specs),
+        )
         enforce = bool(settings.GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED)
         would_fail = verdict == "count_lower"
         kernel_check_fields.update(
@@ -229,10 +320,16 @@ class GpuKernelCountCheck:
                 "reported_uuids": reported_uuids,
                 "kernel_gpu_uuids": kernel_uuids,
                 "kernel_gpu_foreign_mounts": foreign_mounts,
+                "v4_shaped_uuid_count": v4_count,
+                "v4_shape_flag": v4_count >= GPU_UUID_V4_SHAPE_FLAG_MIN,
+                **shape.as_fields(),
                 "would_fail": would_fail,
                 "enforced": enforce,
             }
         )
+        kernel_check_fields["shadow_flags"] = [
+            name for name in ("v4_shape_flag", "host_shape_flag") if kernel_check_fields[name]
+        ]
 
         event = self._render_event(ctx, kernel_check_fields)
         if would_fail and enforce:
@@ -266,6 +363,8 @@ class GpuKernelCountCheck:
         verdict = kernel_check_fields["kernel_verdict"]
         if verdict == "uuid_mismatch":
             return Msg.UUID_MISMATCH
+        if kernel_check_fields["shadow_flags"]:
+            return Msg.SHADOW_SIGNAL
         if verdict == "not_evaluated":
             return Msg.NOT_EVALUATED
         return Msg.COUNT_OK
