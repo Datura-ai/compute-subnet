@@ -230,7 +230,7 @@ Causes the installer names:
 - **`error setting up ID-mapped mount on path /…` (an absolute path) from the volume test**: Sysbox mounts volumes through ID-mapped mounts, and the filesystem under Docker's data-root does not support them. Put the data-root on ext4 or XFS ([Docker Storage Setup](https://docs.lium.io/providers/nodes/docker-storage)), then run the installer again.
 - **`docker plugin install` fails**: the host cannot pull `ashald/docker-volume-loopback` from Docker Hub. Check the host's proxy or DNS, then run the installer again.
 
-Validators run the same test in the machine scrape: plugin, `Mountpoint`, and a volume mounted into a container under the runtime this node's rentals get (Sysbox when the scrape's Sysbox GPU test passes, Docker's default runtime otherwise). They only read the plugin, never install or change it. A pass is reused for six hours on the same boot, plugin and runtime, and test containers and volumes (`lium_storage_check_*`) older than an hour are removed.
+Validator releases after this change also run the test in the machine scrape, on nodes whose Docker accepts `--storage-opt` (a node without it is rented without a disk limit and is not tested); a validator on an earlier release does not run it. The scrape checks the plugin, `Mountpoint`, and a volume mounted into a container under the runtime this node's rentals get (Sysbox when the scrape's Sysbox GPU test passes, Docker's default runtime otherwise). They only read the plugin, never install or change it. A pass is reused for six hours on the same boot, plugin and runtime, and test containers and volumes (`lium_storage_check_*`) older than an hour are removed.
 
 ## The executor image
 
