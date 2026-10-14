@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import Counter
+
 from ..messages import GpuModelMessages as Msg, render_message
 from ..pipeline import CheckResult, Context
 
@@ -17,6 +19,9 @@ class GpuModelValidCheck:
     runs before SpecChangeCheck, so the reset has to happen here; the node then leaves the market
     through the same path banned_gpu, gpu_fingerprint, duplicate_executor and spec_change use,
     rented or idle, and is verified again on the first cycle whose scrape lists every card.
+
+    Every card is read, not only the first (DAH-4304): each must be a supported model, and a node
+    whose cards are more than one model fails with GPU_MODEL_MIXED.
     """
 
     check_id = "gpu.validate.model"
@@ -41,11 +46,17 @@ class GpuModelValidCheck:
         if not gpu_details:
             gpu_details = specs.get("gpu", {}).get("details", [])
 
-        gpu_model = None
-        if gpu_count > 0 and len(gpu_details) > 0:
-            gpu_model = gpu_details[0].get("name", None)
+        card_models = []
+        if gpu_count > 0:
+            card_models = [detail.get("name", None) for detail in gpu_details]
+        gpu_model = card_models[0] if card_models else None
 
-        if gpu_model not in gpu_model_rates_map:
+        # Every card, not only the first: a second card of another model used to pass unread.
+        unsupported = [
+            model for model in card_models or [gpu_model] if model not in gpu_model_rates_map
+        ]
+        if unsupported:
+            gpu_model = unsupported[0]
             supported_models = list(gpu_model_rates_map.keys())
             event = render_message(
                 Msg.MODEL_UNSUPPORTED,
@@ -59,6 +70,23 @@ class GpuModelValidCheck:
                 remediation=(
                     "Use a supported GPU model. Supported models: "
                     f"{', '.join(supported_models[:5])}{'...' if len(supported_models) > 5 else ''}"
+                ),
+            )
+            return CheckResult(passed=False, event=event)
+
+        # DAH-4304: a node is listed, priced and rented as one model, so every GPU on it must be
+        # the same model. A mixed node fails the way an unsupported model does.
+        model_counts = dict(Counter(card_models))
+        if len(model_counts) > 1:
+            models_found = ", ".join(f"{count}x {model}" for model, count in model_counts.items())
+            event = render_message(
+                Msg.MODEL_MIXED,
+                ctx=ctx,
+                check_id=self.check_id,
+                what={"gpu_models": model_counts, "gpu_count": gpu_count},
+                remediation=(
+                    "Every GPU on a node must be the same model. Models found on this node: "
+                    f"{models_found}."
                 ),
             )
             return CheckResult(passed=False, event=event)

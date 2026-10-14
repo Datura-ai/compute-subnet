@@ -307,6 +307,14 @@ class GpuModelMessages:
         category="policy",
         impact="Job skipped; score set to 0",
     )
+    MODEL_MIXED = MessageTemplate(
+        event="Mixed GPU models on one node",
+        reason="GPU_MODEL_MIXED",
+        severity="warning",
+        category="policy",
+        impact="Job skipped; score set to 0",
+        remediation="Every GPU on a node must be the same model.",
+    )
     COUNT_ZERO = MessageTemplate(
         event="No GPUs detected",
         reason="GPU_COUNT_ZERO",
