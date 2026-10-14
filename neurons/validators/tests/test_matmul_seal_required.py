@@ -7,8 +7,6 @@ MATMUL_SEAL_REQUIRED_ENABLED, failed. A sealed answer is judged as before.
 import json
 import logging
 
-import pytest
-
 from core.config import settings
 from services import matrix_validation_service as mvs
 from tests.test_local_verify import SPECS, matmul_service
