@@ -196,6 +196,7 @@ class _FakeRentalDockerClient:
         driver: str | None = None,
         driver_opts: dict[str, str] | None = None,
         timeout: int | None = None,
+        labels: dict[str, str] | None = None,
     ) -> None:
         self.created_volumes.append(
             {
@@ -3229,7 +3230,10 @@ def test_ssh_bootstrap_script_supports_multi_distro_install(docker_service):
     script = docker_service._ssh_bootstrap_script_path().read_text()
 
     assert "apt-get update" in script
-    assert "apt-get install -y openssh-server" in script
+    assert (
+        "apt-get install -y --no-install-recommends openssh-server ncurses-term xauth python3 wget ca-certificates"
+        in script
+    )
     assert "apk add --no-cache openssh" in script
     assert "dnf install -y openssh-server" in script
     assert "yum install -y openssh-server" in script

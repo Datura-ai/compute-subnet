@@ -326,12 +326,14 @@ def test_a_host_that_never_opens_a_channel_does_not_hold_another_hosts_client_bu
     def build(base_url: str):
         # the factory's own client build, the one every rental's connect runs in a docker-sdk thread
         return factory._create_api_client(
-            base_url, tmp_path / "id_executor", tmp_path / "known_hosts"
+            base_url, tmp_path / "id_executor", tmp_path / "known_hosts", []
         )
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         stuck_build = pool.submit(build, "ssh://root@203.0.113.10:2222")
         while not silent_host.open_session_timeouts:
+            # a build that raised instead of waiting fails here, not as a hang
+            assert not stuck_build.done(), stuck_build.exception()
             threading.Event().wait(0.01)
 
         healthy_api = build("ssh://root@203.0.113.11:2222")
