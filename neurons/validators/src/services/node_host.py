@@ -5,12 +5,14 @@ it does); this check only refuses a name that points anywhere but the public int
 """
 
 import asyncio
+import contextlib
+import contextvars
+import functools
 import ipaddress
 import logging
 import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 
 import aiohttp
 from aiohttp.abc import AbstractResolver, ResolveResult
@@ -68,52 +70,79 @@ def _log_dialed(infos: list, sockaddr: tuple) -> None:
 # A hostname node's DNS is the miner's: a zone that never answers holds each lookup until the system
 # resolver gives up, and the thread cannot be cancelled. These lookups run in their own pool, never the
 # loop's default executor, where the validator's Redis/WebSocket DNS and other blocking calls run, and
-# each waits at most NODE_DNS_TIMEOUT_SECONDS. Within the pool, one DNS zone (the name's last two
-# labels) holds at most NODE_DNS_PER_ZONE threads, counted until the thread really finishes: a miner
-# whose zone stalls delays only names in that zone, never another miner's (review of #1609: eight
-# hostile names would otherwise fill the pool and get honest hostname nodes hidden).
+# each waits at most NODE_DNS_TIMEOUT_SECONDS.
+# Inside the pool, one MINER holds at most NODE_DNS_PER_MINER threads, counted until each thread really
+# finishes, so a miner whose DNS stalls delays only its own nodes. The key is the authenticated miner
+# hotkey the validator is working for (node_owner() / for_payload_miner, set where per-miner work starts), never a part of
+# the hostname: a miner chooses its names, so a name-derived key can be split across domains to fill
+# the pool, or shared with other miners' names (co.uk, duckdns.org). Work with no miner set (none in the
+# validator today) is keyed by the full name.
 NODE_DNS_MAX_WORKERS = 32
-NODE_DNS_PER_ZONE = 2
+NODE_DNS_PER_MINER = 4
 NODE_DNS_TIMEOUT_SECONDS = 15.0
 NODE_DNS_EXECUTOR = ThreadPoolExecutor(max_workers=NODE_DNS_MAX_WORKERS, thread_name_prefix="node-dns")
-_zone_lock = threading.Lock()
-_zone_busy: dict[str, int] = {}
+_NODE_OWNER: contextvars.ContextVar[str | None] = contextvars.ContextVar("node_owner", default=None)
+_dns_slot_lock = threading.Lock()
+_dns_busy: dict[str, int] = {}
 
 
-def dns_zone(host: str) -> str:
-    """The share key: the name's last two labels (``a.b.evil.example`` → ``evil.example``)."""
-    return ".".join(host.rstrip(".").lower().split(".")[-2:])
+@contextlib.contextmanager
+def node_owner(miner_hotkey: str | None):
+    """Attribute the node lookups made inside this block (and in tasks created inside it) to a miner."""
+    token = _NODE_OWNER.set(miner_hotkey or None)
+    try:
+        yield
+    finally:
+        _NODE_OWNER.reset(token)
 
 
-def _take_zone_slot(zone: str) -> bool:
-    with _zone_lock:
-        if _zone_busy.get(zone, 0) >= NODE_DNS_PER_ZONE:
+def for_payload_miner(handler):
+    """Decorates an async ``handler(self, payload, ...)`` of per-miner work: the node lookups it makes,
+    and those of every task it creates, are attributed to ``payload.miner_hotkey``."""
+
+    @functools.wraps(handler)
+    async def wrapper(self, payload, *args, **kwargs):
+        with node_owner(getattr(payload, "miner_hotkey", None)):
+            return await handler(self, payload, *args, **kwargs)
+
+    return wrapper
+
+
+def dns_quota_key(host: str) -> str:
+    """Whose share of the pool a lookup of ``host`` uses: the miner set by node_owner(), else the name."""
+    owner = _NODE_OWNER.get()
+    return f"miner:{owner}" if owner else f"name:{host.rstrip('.').lower()}"
+
+
+def _take_dns_slot(key: str) -> bool:
+    with _dns_slot_lock:
+        if _dns_busy.get(key, 0) >= NODE_DNS_PER_MINER:
             return False
-        _zone_busy[zone] = _zone_busy.get(zone, 0) + 1
+        _dns_busy[key] = _dns_busy.get(key, 0) + 1
         return True
 
 
-def _give_zone_slot(zone: str) -> None:
-    with _zone_lock:
-        left = _zone_busy.get(zone, 0) - 1
+def _give_dns_slot(key: str) -> None:
+    with _dns_slot_lock:
+        left = _dns_busy.get(key, 0) - 1
         if left > 0:
-            _zone_busy[zone] = left
+            _dns_busy[key] = left
         else:
-            _zone_busy.pop(zone, None)
+            _dns_busy.pop(key, None)
 
 
-class _ZoneSlotExecutor:
-    """Runs one lookup in NODE_DNS_EXECUTOR and frees its zone slot when the thread finishes (not when
+class _QuotaSlotExecutor:
+    """Runs one lookup in NODE_DNS_EXECUTOR and frees its quota slot when the thread finishes (not when
     the caller stops waiting: an abandoned lookup still occupies its thread)."""
 
-    def __init__(self, zone: str):
-        self.zone = zone
+    def __init__(self, key: str):
+        self.key = key
         self.submitted = False
 
     def submit(self, fn, *args, **kwargs):
         future = NODE_DNS_EXECUTOR.submit(fn, *args, **kwargs)
         self.submitted = True
-        future.add_done_callback(lambda _: _give_zone_slot(self.zone))
+        future.add_done_callback(lambda _: _give_dns_slot(self.key))
         return future
 
 
@@ -132,7 +161,7 @@ async def resolve_public_host(host: str, port: int = 22, executor=None) -> list:
             infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
         else:
             infos = await loop.run_in_executor(
-                executor, partial(socket.getaddrinfo, host, port, type=socket.SOCK_STREAM)
+                executor, functools.partial(socket.getaddrinfo, host, port, type=socket.SOCK_STREAM)
             )
     except socket.gaierror as exc:
         raise _refused(host, port, f"does not resolve: {exc}") from exc
@@ -152,17 +181,17 @@ async def resolve_node_host(host: str, port: int) -> list:
     not answered within NODE_DNS_TIMEOUT_SECONDS. A caller's own, shorter deadline still applies."""
     if is_ip_literal(host):
         return []
-    zone = dns_zone(host)
+    key = dns_quota_key(host)
     try:
         async with asyncio.timeout(NODE_DNS_TIMEOUT_SECONDS):
-            while not _take_zone_slot(zone):  # this zone's lookups are all still running
+            while not _take_dns_slot(key):  # this miner's lookups are all still running
                 await asyncio.sleep(0.02)
-            slot = _ZoneSlotExecutor(zone)
+            slot = _QuotaSlotExecutor(key)
             try:
                 return await resolve_public_host(host, port, executor=slot)
             finally:
                 if not slot.submitted:
-                    _give_zone_slot(zone)
+                    _give_dns_slot(key)
     except TimeoutError as exc:
         raise _refused(host, port, f"did not resolve within {NODE_DNS_TIMEOUT_SECONDS:g} s") from exc
 

@@ -12,6 +12,8 @@ from neurons.validators.src.services.node_host import (
     NodeHostError,
     PublicHostResolver,
     dial_validated,
+    for_payload_miner,
+    node_owner,
     open_public_connection,
     public_host_connector,
     public_host_sock,
@@ -356,37 +358,86 @@ async def test_stalled_node_lookups_never_occupy_the_default_executor(stalled_dn
     assert stalled_dns and all(name.startswith("node-dns") for name in stalled_dns)
 
 
-@pytest.mark.asyncio
-async def test_a_miner_whose_dns_stalls_cannot_stop_another_miners_name_resolving(monkeypatch):
-    # review of #1609: eight hostile hostname executors behind a deliberately slow zone filled the shared
-    # pool, and every other miner's hostname node then hit the deadline and was hidden
-    monkeypatch.setattr(node_host, "NODE_DNS_TIMEOUT_SECONDS", 0.3)
+def _stall_names_containing(monkeypatch, marker):
+    """socket.getaddrinfo that holds every name containing ``marker`` until released; others resolve to 1.1.1.1."""
     release = threading.Event()
 
     def lookup(host, port, *args, **kwargs):
-        if host.endswith("evil.example"):
+        if marker in host:
             release.wait(5)
             raise socket.gaierror(-3, "Temporary failure in name resolution")
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", port))]
 
     monkeypatch.setattr("socket.getaddrinfo", lookup)
+    return release
+
+
+async def _resolve_as(miner, host):
+    with node_owner(miner):
+        return await PublicHostResolver().resolve(host, 8080)
+
+
+@pytest.mark.asyncio
+async def test_a_miner_whose_dns_stalls_cannot_stop_another_miners_name_resolving(monkeypatch):
+    # review of #1609: hostile hostname executors behind a deliberately slow zone filled the shared pool, and
+    # every other miner's hostname node then hit the deadline and was hidden. Spreading the names over many
+    # domains must not help: the quota belongs to the authenticated miner, not to anything in the name.
+    monkeypatch.setattr(node_host, "NODE_DNS_TIMEOUT_SECONDS", 0.3)
+    release = _stall_names_containing(monkeypatch, "evil")
     try:
         hostile = [
-            asyncio.create_task(PublicHostResolver().resolve(f"gpu{i}.evil.example", 8080))
+            asyncio.create_task(_resolve_as("hostile-hotkey", f"gpu.evil{i}.example"))
             for i in range(node_host.NODE_DNS_MAX_WORKERS + 8)
         ]
         await asyncio.sleep(0.05)
 
-        [honest] = await PublicHostResolver().resolve("gpu-node1.good.example", 8080)
+        [honest] = await _resolve_as("honest-hotkey", "gpu-node1.good.example")
 
         assert honest["host"] == "1.1.1.1"
         results = await asyncio.gather(*hostile, return_exceptions=True)
         assert all(isinstance(r, NodeHostError) for r in results)
-        assert node_host._zone_busy.get("evil.example", 0) <= node_host.NODE_DNS_PER_ZONE
+        assert node_host._dns_busy.get("miner:hostile-hotkey", 0) <= node_host.NODE_DNS_PER_MINER
     finally:
         release.set()
 
 
-def test_names_share_a_zone_by_their_last_two_labels():
-    assert node_host.dns_zone("a.b.Evil.Example.") == "evil.example"
-    assert node_host.dns_zone("gpu1.duckdns.org") == "duckdns.org"
+@pytest.mark.asyncio
+async def test_names_under_a_shared_public_suffix_do_not_share_a_quota(monkeypatch):
+    # review of #1609: a key of the last two labels put every *.co.uk (and *.duckdns.org) name in one bucket,
+    # so two stalled evil.co.uk lookups blocked gpu.good.co.uk
+    monkeypatch.setattr(node_host, "NODE_DNS_TIMEOUT_SECONDS", 0.3)
+    release = _stall_names_containing(monkeypatch, "evil")
+    try:
+        hostile = [asyncio.create_task(_resolve_as("hostile-hotkey", f"gpu{i}.evil.co.uk")) for i in range(8)]
+        anonymous = [asyncio.create_task(_resolve_as(None, f"gpu{i}.evil.co.uk")) for i in range(8)]
+        await asyncio.sleep(0.05)
+
+        [honest] = await _resolve_as("honest-hotkey", "gpu.good.co.uk")
+        [no_miner] = await _resolve_as(None, "gpu2.good.co.uk")
+
+        assert honest["host"] == no_miner["host"] == "1.1.1.1"
+        await asyncio.gather(*hostile, *anonymous, return_exceptions=True)
+    finally:
+        release.set()
+
+
+def test_the_quota_key_is_the_miner_and_otherwise_the_whole_name():
+    assert node_host.dns_quota_key("gpu.Evil.co.uk.") == "name:gpu.evil.co.uk"
+    with node_owner("5Hotkey"):
+        assert node_host.dns_quota_key("gpu.evil.co.uk") == "miner:5Hotkey"
+    assert node_host.dns_quota_key("gpu.evil.co.uk") == "name:gpu.evil.co.uk"
+
+
+@pytest.mark.asyncio
+async def test_per_miner_handlers_attribute_their_tasks_lookups_to_the_payload_miner():
+    class Payload:
+        miner_hotkey = "5Hotkey"
+
+    class Service:
+        @for_payload_miner
+        async def handle(self, payload, host):
+            # the validation cycle runs each node in its own task: those lookups count against the miner too
+            return await asyncio.create_task(asyncio.sleep(0, node_host.dns_quota_key(host)))
+
+    assert await Service().handle(Payload(), "gpu.example") == "miner:5Hotkey"
+    assert node_host.dns_quota_key("gpu.example") == "name:gpu.example"
