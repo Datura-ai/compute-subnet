@@ -1,7 +1,9 @@
 """A rental container runs with swap off and a renter-first OOM score."""
 
 import pytest
+from pydantic import ValidationError
 
+from core.config import Settings
 from services.rental_docker_sdk import ContainerRunSpec, _build_host_config_kwargs
 from tests.test_deploy_optimizations import svc  # noqa: F401  (pytest fixture)
 
@@ -65,3 +67,18 @@ def test_run_spec_swap_off_follows_the_memory_limit(svc, memory_gb, expected):  
     run_spec = _run_spec(svc, memory_gb)
 
     assert (run_spec.memory_gb or None, run_spec.memory_swap_gb, run_spec.oom_score_adj) == expected
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1001"])
+def test_an_oom_score_outside_1_to_1000_fails_startup(monkeypatch: pytest.MonkeyPatch, value: str):
+    monkeypatch.setenv("RENTAL_CONTAINER_OOM_SCORE_ADJ", value)
+
+    with pytest.raises(ValidationError, match="RENTAL_CONTAINER_OOM_SCORE_ADJ"):
+        Settings(_env_file=None)
+
+
+@pytest.mark.parametrize("value", ["1", "1000"])
+def test_an_oom_score_at_the_bounds_is_accepted(monkeypatch: pytest.MonkeyPatch, value: str):
+    monkeypatch.setenv("RENTAL_CONTAINER_OOM_SCORE_ADJ", value)
+
+    assert Settings(_env_file=None).RENTAL_CONTAINER_OOM_SCORE_ADJ == int(value)
