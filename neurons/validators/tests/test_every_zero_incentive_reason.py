@@ -449,6 +449,17 @@ async def test_a_cycle_without_a_filler_list_keeps_idle_incentive(default_job_re
 
 
 @pytest.mark.asyncio
+async def test_a_lium_filler_outage_keeps_idle_incentive(default_job_required):
+    # miners' own default jobs still listed, no Lium filler anywhere: the handler reads no Lium list
+    result = await _incentive().calculate_executor_score(
+        _idle_flagship(gpu_count=4, spec=None, lium_filler_list_received=False, has_lium_filler=False)
+    )
+
+    assert result.zero_incentive_reasons == []
+    assert result.eligible_for_rental_share is True
+
+
+@pytest.mark.asyncio
 async def test_the_default_job_gate_off_keeps_idle_incentive(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_IDLE_REQUIRES_LIUM_DEFAULT_JOB", False)
 

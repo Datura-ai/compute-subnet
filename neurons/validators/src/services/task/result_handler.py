@@ -11,6 +11,7 @@ from typing import Any, Optional
 from datura.requests.miner_requests import ExecutorSSHInfo
 from payload_models.payloads import MinerJobRequestPayload
 from protocol.vc_protocol.validator_requests import ResetVerifiedJobReason, ValidationEvent
+from services.const import DEFAULT_JOB_OWNER_LIUM
 from services.gpu_spec_table import normalize_gpu_model
 from services.redis_service import INSPECTOR_EVENT_CHANNEL, RedisService
 
@@ -153,9 +154,17 @@ class ResultHandler:
         has_lium_filler = bool(
             rented_data and rented_data.get_filler_containers(executor_info.uuid)
         )
+        # a Lium-owned filler somewhere this cycle: a miner's own default job is no reading of Lium's
+        # fillers, so during a Lium filler outage the default-job idle gate keeps every node's pay
         lium_filler_list_received = bool(
             rented_data
-            and (rented_data.all_filler_containers_by_executor or rented_data.filler_containers_by_executor)
+            and any(
+                rented_data.get_default_job_owner(executor_id) == DEFAULT_JOB_OWNER_LIUM
+                for executor_id in (
+                    rented_data.all_filler_containers_by_executor.keys()
+                    | rented_data.filler_containers_by_executor.keys()
+                )
+            )
         )
         filler_revenue_per_gpu_hour = (
             rented_data.get_filler_revenue_per_gpu_hour(

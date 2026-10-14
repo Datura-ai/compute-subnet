@@ -68,8 +68,8 @@ class JobResult(BaseModel):
     rental_created_at: datetime | None = None
     default_job_owner: str | None = None  # "miner" | "lium" | None; miner default job is excluded from unrented incentive
     has_lium_filler: bool = False  # the backend lists at least one active Lium filler container on the node
-    # the backend sent a filler list this cycle (some node has a filler), so has_lium_filler=False is a
-    # reading, not a missing input; the default-job idle gate acts only on a reading
+    # the backend lists a Lium-owned filler on some node this cycle, so has_lium_filler=False is a
+    # reading, not a missing input or a Lium filler outage; the default-job idle gate acts only on a reading
     lium_filler_list_received: bool = False
     # the node's GPU configuration's average filler USD per GPU-hour; None = no usable sample
     filler_revenue_per_gpu_hour: float | None = None

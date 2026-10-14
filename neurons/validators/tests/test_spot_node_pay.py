@@ -1076,6 +1076,7 @@ async def test_result_reads_the_nodes_filler_and_its_config_average(context_fact
     data = RentedExecutorsResponse(
         executors={},
         all_filler_containers_by_executor={executor_id: ["filler_run-1"]},
+        default_job_owner_by_executor={executor_id: "lium"},
         filler_revenue_by_gpu_config=[
             FillerRevenueByGpuConfig(
                 base_model="H100", gpu_count=1, usd_per_gpu_hour=3.0, gpu_hours=100
@@ -1095,12 +1096,30 @@ async def test_result_reads_the_nodes_filler_and_its_config_average(context_fact
 
 @pytest.mark.asyncio
 async def test_a_node_missing_from_a_received_filler_list_reads_as_no_default_job(context_factory):
-    data = RentedExecutorsResponse(executors={}, all_filler_containers_by_executor={"other-node": ["filler_run-2"]})
+    data = RentedExecutorsResponse(
+        executors={},
+        all_filler_containers_by_executor={"other-node": ["filler_run-2"]},
+        default_job_owner_by_executor={"other-node": "lium"},
+    )
 
     result = await _handled(context_factory, data)
 
     assert result.has_lium_filler is False
     assert result.lium_filler_list_received is True
+
+
+@pytest.mark.asyncio
+async def test_only_miner_owned_default_jobs_are_no_reading_of_lium_fillers(context_factory):
+    # a Lium filler outage while miners run their own default jobs: the idle gate must not act
+    data = RentedExecutorsResponse(
+        executors={},
+        all_filler_containers_by_executor={"other-node": ["filler_run-2"]},
+        default_job_owner_by_executor={"other-node": "miner"},
+    )
+
+    result = await _handled(context_factory, data)
+
+    assert result.lium_filler_list_received is False
 
 
 @pytest.mark.asyncio
