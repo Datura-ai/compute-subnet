@@ -41,6 +41,7 @@ from services.local_verify_client import (
     executor_deadline_s,
 )
 from services.matrix_validation_service import (
+    ELAPSED_SOURCE_EXECUTOR,
     MATRIX_VERIFY_TIMEOUT_SECONDS,
     MatmulChallenge,
 )
@@ -334,6 +335,10 @@ class LocalVerifyCheck:
                 matmul_challenge, stdout=step.stdout, stderr=step.stderr_tail or ""
             )
             if result.success:
+                # The step time is the executor's own word; the speed log labels it as such.
+                if step.ms:
+                    result.elapsed_seconds = step.ms / 1000
+                    result.elapsed_source = ELAPSED_SOURCE_EXECUTOR
                 outcome.matmul = result
                 self._metric(ctx, "consumed", "matmul", "ok", step_ms=step.ms, **common)
             else:
