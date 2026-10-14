@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from core.config import settings
 from pydantic import BaseModel
 from services.const import DEFAULT_JOB_OWNER_LIUM
 from services.gpu_power_limit import (
@@ -139,8 +140,11 @@ class GpuPowerLimitCheck:
             )
 
         if incomplete:
+            # No reading is no proof of a full limit: a host that hides the value from NVML is not
+            # compared at all. Passing stays the default (some hypervisors expose no power management).
+            enforced = settings.GPU_POWER_LIMIT_INCOMPLETE_ENFORCEMENT_ENABLED
             event = render_message(
-                Msg.DATA_INCOMPLETE,
+                Msg.DATA_INCOMPLETE_REJECTED if enforced else Msg.DATA_INCOMPLETE,
                 ctx=ctx,
                 check_id=self.check_id,
                 what={
@@ -149,6 +153,16 @@ class GpuPowerLimitCheck:
                     "incomplete_gpus": _dump_measurements(incomplete),
                 },
             )
+            if enforced:
+                return CheckResult(
+                    passed=False,
+                    event=event,
+                    updates={
+                        "score": 0.0,
+                        "job_score": 0.0,
+                        "score_warning": " WARNING: GPU power limit could not be read",
+                    },
+                )
             return CheckResult(passed=True, event=event)
 
         event = render_message(
