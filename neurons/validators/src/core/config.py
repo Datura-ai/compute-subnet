@@ -504,6 +504,15 @@ class Settings(BaseSettings):
     PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED: bool = Field(
         env="PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED", default=False
     )
+    # The executor's own stack is excused from the provider-side load by image digest, and any
+    # container started from that image carries it. Cores excused that way above this number are
+    # logged (PROVIDER_SIDE_LOAD_STACK_EXCUSE_HIGH); with the cap on, the tier then excuses nothing.
+    PROVIDER_SIDE_LOAD_STACK_EXCUSE_CORES: float = Field(
+        env="PROVIDER_SIDE_LOAD_STACK_EXCUSE_CORES", default=8.0, gt=0
+    )
+    PROVIDER_SIDE_LOAD_STACK_EXCUSE_CAP_ENABLED: bool = Field(
+        env="PROVIDER_SIDE_LOAD_STACK_EXCUSE_CAP_ENABLED", default=False
+    )
     FOREIGN_GPU_WORKLOAD_CHECK_ENABLED: bool = Field(env="FOREIGN_GPU_WORKLOAD_CHECK_ENABLED", default=True)
     FOREIGN_GPU_WORKLOAD_ENFORCEMENT_ENABLED: bool = Field(
         env="FOREIGN_GPU_WORKLOAD_ENFORCEMENT_ENABLED", default=False
