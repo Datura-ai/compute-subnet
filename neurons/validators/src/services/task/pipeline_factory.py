@@ -129,9 +129,9 @@ class PipelineFactory:
         self.backend_client = backend_client
         self.pod_recovery = pod_recovery
 
-        dry_run = settings.DRY_RUN or settings.CONTAINER_CLEANUP_DRY_RUN
-        logger.info(f"ContainerCleanup dry_run={dry_run}")
-        self.container_cleanup = ContainerCleanup(dry_run=dry_run)
+        # Cleanup only reports, removing nothing, when the whole validator runs under DRY_RUN.
+        logger.info(f"ContainerCleanup dry_run={settings.DRY_RUN}")
+        self.container_cleanup = ContainerCleanup(dry_run=settings.DRY_RUN)
         # One tracker for the factory's lifetime: build_pipeline() makes a new sink every cycle.
         self.status_tracker = StatusChangeTracker()
 
