@@ -438,14 +438,6 @@ class GpuPowerLimitMessages:
             "reported by NVML."
         ),
     )
-    DATA_INCOMPLETE = MessageTemplate(
-        event="GPU power limit baseline incomplete",
-        reason="GPU_POWER_LIMIT_BASELINE_INCOMPLETE",
-        severity="info",
-        category="env",
-        impact="Proceed without power-limit penalty",
-        remediation="Ensure NVML exposes the current and default power limits for every GPU.",
-    )
     DATA_INCOMPLETE_REJECTED = MessageTemplate(
         event="GPU power limit could not be read",
         reason="GPU_POWER_LIMIT_UNREADABLE",

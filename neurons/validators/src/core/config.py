@@ -260,12 +260,6 @@ class Settings(BaseSettings):
     # a stored EMA publishes its sample on every passing cycle. See verifyx_ema_hold_reason. Off:
     # the EMA moves as before and the would-be hold is only logged.
     VERIFYX_EMA_HOLD_ENABLED: bool = Field(env="VERIFYX_EMA_HOLD_ENABLED", default=False)
-    # Probes in a row whose download gate used the package download because Cloudflare failed are
-    # counted per node and logged as VERIFYX_PACKAGE_FALLBACK_STREAK past the eighth. On: from then
-    # on the missing Cloudflare reading is fed to the EMA as 0 until a probe measures it again.
-    VERIFYX_PACKAGE_FALLBACK_CAP_ENABLED: bool = Field(
-        env="VERIFYX_PACKAGE_FALLBACK_CAP_ENABLED", default=False
-    )
     ENABLE_INSPECTOR: bool = True
     # DAH-2794: feed the obfuscated scrape to the executor's own interpreter over stdin
     # instead of freezing it into a ~13 MB onefile and uploading that every cycle.
@@ -390,11 +384,6 @@ class Settings(BaseSettings):
     # from a real 8-GPU box show what that costs an honest miner.
     MATMUL_ALLCARDS_CHECK_ENABLED: bool = Field(env="MATMUL_ALLCARDS_CHECK_ENABLED", default=False)
     MATMUL_ALLCARDS_ENFORCEMENT_ENABLED: bool = Field(env="MATMUL_ALLCARDS_ENFORCEMENT_ENABLED", default=False)
-    # A scrape with no NVIDIA driver version skips the libnvidia-ml digest check; it is always logged
-    # (NVML_DRIVER_MISSING) and with this on it fails the check. Off by default.
-    NVML_DRIVER_MISSING_ENFORCEMENT_ENABLED: bool = Field(
-        env="NVML_DRIVER_MISSING_ENFORCEMENT_ENABLED", default=False
-    )
     # Item 2b — send the advertised CPU-core count in the rental-verification health check so the
     # host's Docker daemon creates the probe with `--cpus=<advertised>` and rejects a count that
     # exceeds the machine's physical cores (a signal the lscpu wrapper cannot forge, since dockerd
@@ -462,12 +451,6 @@ class Settings(BaseSettings):
     # re-registers the node to list a different set. Off again = the mark stays in the record but is ignored.
     # Flip after reading a week of the warn-mode rows.
     GPU_ANCHOR_HARD_ENABLED: bool = Field(env="GPU_ANCHOR_HARD_ENABLED", default=False)
-    # A card whose current or default power limit the scrape could not read passes the power-limit
-    # check (GPU_POWER_LIMIT_BASELINE_INCOMPLETE). On: it fails with score 0, like a limit below the
-    # threshold. Off by default: some hypervisors expose no power management to the guest.
-    GPU_POWER_LIMIT_INCOMPLETE_ENFORCEMENT_ENABLED: bool = Field(
-        env="GPU_POWER_LIMIT_INCOMPLETE_ENFORCEMENT_ENABLED", default=False
-    )
     PROVIDER_SIDE_LOAD_CHECK_ENABLED: bool = Field(env="PROVIDER_SIDE_LOAD_CHECK_ENABLED", default=True)
     PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED: bool = Field(
         env="PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED", default=False
@@ -538,14 +521,6 @@ class Settings(BaseSettings):
     )
     REGISTRY_PULL_PROBE_RETRY_MINUTES: float = Field(
         env="REGISTRY_PULL_PROBE_RETRY_MINUTES", default=30.0, gt=0
-    )
-    # DAH-3558: a rented node missing from the miner's answer to the wave gets no pipeline, so the
-    # wave writes nothing about it: no report row, no availability error, no evidence for the
-    # backend's staleness sweep. On, the wave writes one failed result per rented executor of that
-    # miner that the backend lists and the miner did not return (RENTED_EXECUTOR_NOT_LISTED,
-    # score 0, availability error). Manual rentals keep their forced pass. Off = today's behaviour.
-    RENTED_EXECUTOR_NOT_LISTED_REPORT_ENABLED: bool = Field(
-        env="RENTED_EXECUTOR_NOT_LISTED_REPORT_ENABLED", default=False
     )
     SKIP_COLLATERAL_PENALTY: bool = Field(env="SKIP_COLLATERAL_PENALTY", default=True)
     DRY_RUN: bool = Field(env="DRY_RUN", default=False, description="Run validation without publishing scores/weights")
