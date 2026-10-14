@@ -26,6 +26,8 @@ PENDING_PODS_PREFIX = "pending_pods_prefix"
 DUPLICATED_MACHINE_SET = "duplicated_machines"
 RENTAL_SUCCEED_MACHINE_SET = "rental_succeed_machines"
 AVAILABLE_PORT_MAPS_PREFIX = "available_port_maps"
+RENTAL_PROBE_OK_PREFIX = "rental_probe_ok"
+RENTAL_PROBE_FAILED_PREFIX = "rental_probe_failed"
 VERIFIED_JOB_COUNT_KEY = "verified_job_counts"
 # The anchor: the GPU UUID set of the executor's first successful verification, kept by every later write.
 GPU_ANCHOR_KEY = "uuids"
@@ -389,6 +391,11 @@ class RedisService:
         async with self.lock:
             return await self.redis.lrange(key, 0, -1)
 
+    async def llen(self, key: str) -> int:
+        """Number of elements in a list in Redis."""
+        async with self.lock:
+            return await self.redis.llen(key)
+
     async def lrem(self, key: str, element: bytes, count: int = 0):
         """Remove elements from a list in Redis."""
         async with self.lock:
@@ -559,7 +566,10 @@ class RedisService:
         success: bool = True,
         spec: str = '',
         uuids: str = '',
+        record_owner: str | None = None,
     ):
+        if self._log_foreign_writer_and_should_refuse(miner_hotkey, executor_id, record_owner):
+            return
         count = prev_info.get('count', 0)
         failed = prev_info.get('failed', 0)
         prev_spec = prev_info.get('spec', '')
@@ -597,7 +607,10 @@ class RedisService:
         reason: ResetVerifiedJobReason = ResetVerifiedJobReason.DEFAULT,
         evidence: dict | None = None,
         anchor_broken: bool = False,
+        record_owner: str | None = None,
     ):
+        if self._log_foreign_writer_and_should_refuse(miner_hotkey, executor_id, record_owner):
+            return
         spec = prev_info.get('spec', '')
         uuids = prev_info.get(GPU_ANCHOR_KEY, '')
 
@@ -627,6 +640,30 @@ class RedisService:
                 "evidence": evidence or None,
             },
         )
+
+    def _log_foreign_writer_and_should_refuse(
+        self, miner_hotkey: str, executor_id: str, record_owner: str | None
+    ) -> bool:
+        """`record_owner` is the backend's owner of the executor (its MinerExecutor row's miner
+        hotkey, RentedExecutorsResponse.executor_owner_hotkeys). A write by any other hotkey is
+        always logged and is refused only under VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED. No
+        owner (an executor the backend has not listed yet, or a backend that does not send the
+        map) lets the write through: a new node must still be verified."""
+        if not record_owner or record_owner == miner_hotkey:
+            return False
+        enforced = settings.VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED
+        logger.warning(
+            _m(
+                "VERIFIED_RECORD_FOREIGN_WRITER",
+                extra={
+                    "executor_uuid": executor_id,
+                    "miner_hotkey": miner_hotkey,
+                    "record_hotkey": record_owner,
+                    "enforced": enforced,
+                },
+            )
+        )
+        return enforced
 
     async def get_verified_job_info(self, executor_id: str):
         data = await self.hget(VERIFIED_JOB_COUNT_KEY, executor_id)
