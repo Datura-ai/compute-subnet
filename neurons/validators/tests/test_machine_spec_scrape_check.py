@@ -610,15 +610,14 @@ MOUNT_FAILED = {
     "reason_code": "VLOOPBACK_MOUNT_FAILED",
     "detail": "docker: Error response from daemon: error setting up ID-mapped mount on path 206/fs",
     "runtime": "sysbox-runc",
-    "cached": False,
 }
-PASSED = {"verdict": "pass", "reason_code": "", "detail": "", "runtime": "default", "cached": True}
+PASSED = {"verdict": "pass", "reason_code": "", "detail": "", "runtime": "default"}
 FORGED_FAIL = {
     "verdict": "fail",
     "reason_code": "R" * 100_000,
     "detail": "x" * 100_000,
     "runtime": {"nested": "dict"},
-    "cached": "yes",
+    "extra": "yes",
 }
 
 
@@ -651,7 +650,7 @@ async def _scrape_ok_event_for(context_factory, extra_specs: dict[str, Any]):
             {"storage_limit_supported": False, "storage_limit_scrape_error": "Storage limit is not supported."},
             {"supported": False, "detail": "Storage limit is not supported."},
         ),
-        # host-sent fields reach the event only as strings of at most 300 characters, cached only as a bool
+        # host-sent fields reach the event only as strings of at most 300 characters; unknown fields are dropped
         (
             {"storage_limit_supported": True, "vloopback_check": FORGED_FAIL},
             {
@@ -661,7 +660,6 @@ async def _scrape_ok_event_for(context_factory, extra_specs: dict[str, Any]):
                     "reason_code": "R" * 300,
                     "detail": "x" * 300,
                     "runtime": None,
-                    "cached": None,
                 },
             },
         ),

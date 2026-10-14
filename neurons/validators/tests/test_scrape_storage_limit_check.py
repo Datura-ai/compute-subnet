@@ -36,19 +36,12 @@ STORAGE_HELPERS = {
     "VLOOPBACK_PROBE_IMAGE",
     "VLOOPBACK_PROBE_TOKEN",
     "VLOOPBACK_CHECK_SWITCH",
-    "VLOOPBACK_CHECK_BUDGET_SECONDS",
     "VLOOPBACK_COMMAND_TIMEOUT_SECONDS",
+    "VLOOPBACK_RUN_TIMEOUT_SECONDS",
     "VLOOPBACK_CLEANUP_TIMEOUT_SECONDS",
     "VLOOPBACK_CHECK_NAME_PREFIX",
-    "VLOOPBACK_STALE_AFTER_SECONDS",
-    "VLOOPBACK_PASS_CACHE_SECONDS",
     "STORAGE_PROBE_DETAIL_CAP",
-    "note_storage_check_error",
     "run_storage_probe",
-    "run_storage_step",
-    "sweep_stale_storage_checks",
-    "read_vloopback_pass",
-    "write_vloopback_pass",
     "remove_storage_check",
     "vloopback_mount_test",
     "check_vloopback_volume_ability",
@@ -63,14 +56,13 @@ TICKET_0331_RUNC_ERROR = (
 NO_SYSBOX_ERROR = (
     "docker: Error response from daemon: unknown or invalid runtime name: sysbox-runc."
 )
-UPTIME = 90_000
-NAME = re.compile(rf"lium_storage_check_{UPTIME}_{os.getpid()}_[0-9a-f]{{6}}")
+NAME = re.compile(rf"lium_storage_check_{os.getpid()}_[0-9a-f]{{6}}")
 
 
 class FakeDockerHost:
     """The docker CLI as the scrape sees it from inside the executor container: a vloopback plugin
-    (id, enabled, DATA_DIR) or None, the containers and volumes on the host, a clock that each call moves
-    on, and one knob per way a step can fail. A container left running by a `docker run` timeout keeps
+    (id, enabled, DATA_DIR) or None, the containers and volumes on the host, and one knob
+    per way a step can fail. A container left running by a `docker run` timeout keeps
     its volume busy until `docker rm -f`."""
 
     def __init__(
@@ -82,7 +74,6 @@ class FakeDockerHost:
         mountpoint: str | None = None,
         failing: set[str] | frozenset[str] = frozenset(),
         timing_out: set[str] | frozenset[str] = frozenset(),
-        durations: dict[str, float] | None = None,
         containers: set[str] | None = None,
         volumes: set[str] | None = None,
         probe_output: str = "lium-vloopback-ok\n",
@@ -94,24 +85,16 @@ class FakeDockerHost:
         self.mountpoint = mountpoint
         self.failing = failing
         self.timing_out = timing_out
-        self.durations = durations or {}
         self.containers: set[str] = set(containers or ())
         self.volumes: set[str] = set(volumes or ())
         self.calls: list[list[str]] = []
-        self.timeouts: list[float] = []
-        self.clock = 1000.0
-        self.uptime = UPTIME
-        self.boot_id = "3f7c2a9e-boot"
 
     def run(self, command, stdout=None, stderr=None, text=None, timeout=None):
         self.calls.append(list(command))
-        self.timeouts.append(timeout)
         step = self._step(command)
         if step in self.timing_out:
             self._side_effect_before_timeout(step, command)
-            self.clock += timeout
             raise subprocess.TimeoutExpired(command, timeout)
-        self.clock += self.durations.get(step, 0.1)
         if step in self.failing:
             return SimpleNamespace(returncode=1, stdout="", stderr=self._error(step, command))
         return self._answer(step, command)
@@ -139,18 +122,14 @@ class FakeDockerHost:
 
     def _answer(self, step: str, command: list[str]) -> SimpleNamespace:
         stdout, returncode, stderr = "", 0, ""
-        if step == "ps -a":
-            stdout = "\n".join(sorted(self.containers))
-        elif step == "volume ls":
-            stdout = "\n".join(sorted(self.volumes))
-        elif step == "info --format":
+        if step == "info --format":
             stdout = f"{self.docker_root}\n"
         elif step == "plugin inspect":
             if self.plugin is None:
                 returncode, stdout, stderr = 1, "\n", f"Error: No such plugin: {command[-1]}"
             else:
-                plugin_id, enabled, data_dir = self.plugin
-                stdout = f"{plugin_id}\n{enabled}\nDATA_DIR={data_dir}\nLOG_LEVEL=2\n"
+                _, enabled, data_dir = self.plugin
+                stdout = f"Enabled={enabled}\nDATA_DIR={data_dir}\nLOG_LEVEL=2\n"
         elif step == "volume create":
             self.volumes.add(command[-1])
             stdout = command[-1]
@@ -199,10 +178,6 @@ def _scrape(host: FakeDockerHost, tmp_path: Path) -> dict[str, Any]:
             "os": os,
             "re": re,
             "sys": sys,
-            "storage_check_clock": lambda: host.clock,
-            "host_uptime_seconds": lambda: host.uptime,
-            "get_host_boot_id": lambda: host.boot_id,
-            "VLOOPBACK_PASS_CACHE_PATH": str(tmp_path / "lium_vloopback_check_pass"),
         },
     )
 
@@ -214,8 +189,6 @@ def _check(
 
 
 MOUNT_TEST_STEPS = [
-    "ps -a",
-    "volume ls",
     "info --format",
     "plugin inspect",
     "volume create",
@@ -239,7 +212,6 @@ def test_a_sysbox_host_that_mounts_a_vloopback_volume_passes(tmp_path: Path) -> 
         "vc_reason_code": "",
         "vc_detail": "",
         "vc_runtime": "sysbox-runc",
-        "vc_cached": False,
     }
     assert host.steps() == MOUNT_TEST_STEPS
     create = host.call("volume create")
@@ -334,7 +306,7 @@ def test_a_missing_or_disabled_plugin_is_skipped_and_never_changed(
         (
             {"timing_out": {"plugin inspect"}},
             "VLOOPBACK_CHECK_TIMEOUT",
-            "docker plugin inspect timed out after 30s",
+            "docker plugin inspect timed out after 10s",
         ),
         (
             {"failing": {"volume create"}},
@@ -360,13 +332,7 @@ def test_a_missing_or_disabled_plugin_is_skipped_and_never_changed(
         (
             {"timing_out": {"volume create"}},
             "VLOOPBACK_CHECK_TIMEOUT",
-            "docker volume create timed out after 30s",
-        ),
-        # the steps share one 60 s budget
-        (
-            {"durations": {"volume inspect": 60}},
-            "VLOOPBACK_CHECK_TIMEOUT",
-            "docker run --rm not started: the check's 60s ran out",
+            "docker volume create timed out after 10s",
         ),
     ],
 )
@@ -389,142 +355,6 @@ def test_each_failing_step_is_reported_with_its_reason_code(
     # nothing left, but the volume that would not remove
     assert host.containers == set()
     assert host.volumes == ({name} if reason_code == "VLOOPBACK_VOLUME_REMOVE_FAILED" else set())
-
-
-def test_the_steps_share_one_60_second_budget(tmp_path: Path) -> None:
-    # Arrange: a slow create leaves the run less than its own 30 s
-    host = FakeDockerHost(durations={"volume create": 45})
-
-    # Act
-    payload = _check(host, tmp_path)
-
-    # Assert
-    assert payload["vc_verdict"] == "pass"
-    run_timeout = host.timeouts[host.steps().index("run")]
-    assert 14 < run_timeout < 15
-    assert all(timeout <= 30 for timeout in host.timeouts)
-
-
-def test_stale_test_objects_are_swept_and_other_validators_current_ones_are_kept(
-    tmp_path: Path,
-) -> None:
-    # Arrange
-    stale = f"lium_storage_check_{UPTIME - 4000}_311_a1b2c3"
-    earlier_boot = f"lium_storage_check_{UPTIME + 500}_77_d4e5f6"
-    running_now = f"lium_storage_check_{UPTIME - 100}_902_0a0b0c"
-    not_ours = "lium_storage_check_backup"
-    host = FakeDockerHost(
-        containers={stale, running_now},
-        volumes={stale, earlier_boot, running_now, not_ours},
-    )
-
-    # Act
-    payload = _check(host, tmp_path)
-
-    # Assert
-    assert payload["vc_verdict"] == "pass"
-    assert ["docker", "rm", "-f", stale] in host.calls
-    assert ["docker", "volume", "rm", "-f", stale] in host.calls
-    assert ["docker", "volume", "rm", "-f", earlier_boot] in host.calls
-    assert host.containers == {running_now}
-    assert host.volumes == {running_now, not_ours}
-
-
-class PeerStartsDuringListing(FakeDockerHost):
-    """Another validator's check starts a second after this one read the uptime, in `docker ps`."""
-
-    def run(self, command, stdout=None, stderr=None, text=None, timeout=None):
-        if self._step(command) == "ps -a":
-            self.uptime += 1
-            self.peer = f"lium_storage_check_{self.uptime}_555_abcdef"
-            self.containers.add(self.peer)
-            self.volumes.add(self.peer)
-        return super().run(command, stdout, stderr, text, timeout)
-
-
-def test_the_sweep_keeps_a_peer_check_that_started_during_the_listing(tmp_path: Path) -> None:
-    # Arrange
-    host = PeerStartsDuringListing()
-
-    # Act
-    payload = _check(host, tmp_path)
-
-    # Assert
-    assert payload["vc_verdict"] == "pass"
-    assert host.containers == {host.peer}
-    assert host.volumes == {host.peer}
-
-
-def test_the_sweep_keeps_names_that_only_contain_the_test_pattern(tmp_path: Path) -> None:
-    # Arrange: docker's name filter matches a substring, so these are listed too
-    stale = f"lium_storage_check_{UPTIME - 4000}_311_a1b2c3"
-    lookalikes = {f"old_{stale}", f"{stale}_keep"}
-    host = FakeDockerHost(containers=set(lookalikes), volumes=set(lookalikes))
-
-    # Act
-    payload = _check(host, tmp_path)
-
-    # Assert
-    assert payload["vc_verdict"] == "pass"
-    assert host.containers == lookalikes
-    assert host.volumes == lookalikes
-
-
-def test_a_pass_is_reused_for_six_hours_on_the_same_boot_plugin_and_runtime(tmp_path: Path) -> None:
-    # Arrange
-    host = FakeDockerHost()
-    assert _check(host, tmp_path)["vc_cached"] is False
-    host.calls.clear()
-    host.uptime += 3600
-
-    # Act
-    payload = _check(host, tmp_path)
-
-    # Assert
-    assert payload["vc_verdict"] == "pass" and payload["vc_cached"] is True
-    assert "volume create" not in host.steps()
-
-
-@pytest.mark.parametrize(
-    "change",
-    ["past_ttl", "plugin", "runtime", "reboot"],
-)
-def test_the_cached_pass_ends_when_its_host_changes(tmp_path: Path, change: str) -> None:
-    # Arrange
-    host = FakeDockerHost()
-    assert _check(host, tmp_path)["vc_verdict"] == "pass"
-    host.calls.clear()
-    sysbox = True
-    if change == "past_ttl":
-        host.uptime += 6 * 3600 + 1
-    elif change == "plugin":
-        host.plugin = ("9c0d11", "true", "/var/lib/docker/loopback")
-    elif change == "runtime":
-        sysbox = False
-    else:
-        host.boot_id = "e81f00c4-boot"
-        host.uptime = 300
-
-    # Act
-    payload = _check(host, tmp_path, sysbox=sysbox)
-
-    # Assert
-    assert payload["vc_cached"] is False
-    assert "volume create" in host.steps()
-
-
-def test_a_failure_is_never_cached(tmp_path: Path) -> None:
-    # Arrange
-    host = FakeDockerHost(failing={"run"})
-    assert _check(host, tmp_path)["vc_verdict"] == "fail"
-    host.calls.clear()
-
-    # Act
-    payload = _check(host, tmp_path)
-
-    # Assert
-    assert payload["vc_cached"] is False
-    assert "run" in host.steps()
 
 
 def test_without_storage_opt_the_mount_test_does_not_run(tmp_path: Path) -> None:
@@ -571,104 +401,6 @@ def test_no_docker_cli_is_an_error_with_its_own_code(tmp_path: Path) -> None:
     # Assert
     assert payload["vc_verdict"] == "fail"
     assert payload["vc_reason_code"] == "VLOOPBACK_CHECK_ERROR"
-
-
-def test_host_uptime_is_read_from_proc_uptime(tmp_path: Path) -> None:
-    # Arrange
-    uptime_file = tmp_path / "uptime"
-    uptime_file.write_text("90061.42 712003.18\n")
-    scrape = _uptime_scrape(uptime_file)
-
-    # Act
-    seconds = scrape["host_uptime_seconds"]()
-    uptime_file.unlink()
-    missing = scrape["host_uptime_seconds"]()
-
-    # Assert
-    assert seconds == 90061
-    assert missing is None
-
-
-def _uptime_scrape(uptime_path: Path, **seed: Any) -> dict[str, Any]:
-    return build_scrape_namespace(
-        SCRAPE,
-        {"note_storage_check_error", "host_uptime_seconds"},
-        {"sys": sys, "HOST_UPTIME_PATH": str(uptime_path), **seed},
-    )
-
-
-@pytest.mark.parametrize(
-    ("content", "error_class"),
-    [(None, "FileNotFoundError"), ("", "IndexError"), ("up since monday\n", "ValueError")],
-)
-def test_an_unreadable_uptime_is_none_and_names_the_error_class(
-    tmp_path: Path, capsys, content: str | None, error_class: str
-) -> None:
-    # Arrange
-    uptime_file = tmp_path / "uptime"
-    if content is not None:
-        uptime_file.write_text(content)
-    scrape = _uptime_scrape(uptime_file)
-
-    # Act
-    seconds = scrape["host_uptime_seconds"]()
-
-    # Assert
-    captured = capsys.readouterr()
-    assert seconds is None
-    assert captured.out == ""
-    assert captured.err == f"vloopback check: {uptime_file} unreadable ({error_class})\n"
-
-
-def test_a_pass_that_cannot_be_written_is_not_cached_and_names_the_error_class(
-    tmp_path: Path, capsys
-) -> None:
-    # Arrange
-    scrape = _scrape(FakeDockerHost(), tmp_path)
-    scrape["VLOOPBACK_PASS_CACHE_PATH"] = str(tmp_path / "gone" / "lium_vloopback_check_pass")
-
-    # Act
-    scrape["write_vloopback_pass"]("boot|plugin", UPTIME)
-
-    # Assert
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err == "vloopback check: pass not cached (FileNotFoundError)\n"
-    assert scrape["read_vloopback_pass"]("boot|plugin", UPTIME) is False
-
-
-@pytest.mark.parametrize(
-    ("content", "error_class"),
-    [("garbage", "ValueError"), ("soon boot|plugin", "ValueError")],
-)
-def test_a_corrupt_cached_pass_is_a_miss_and_names_the_error_class(
-    tmp_path: Path, capsys, content: str, error_class: str
-) -> None:
-    # Arrange
-    scrape = _scrape(FakeDockerHost(), tmp_path)
-    Path(scrape["VLOOPBACK_PASS_CACHE_PATH"]).write_text(content)
-
-    # Act
-    cached = scrape["read_vloopback_pass"]("boot|plugin", UPTIME)
-
-    # Assert
-    assert cached is False
-    assert (
-        capsys.readouterr().err
-        == f"vloopback check: cached pass unreadable, testing again ({error_class})\n"
-    )
-
-
-def test_no_cached_pass_yet_is_a_quiet_miss(tmp_path: Path, capsys) -> None:
-    # Arrange
-    scrape = _scrape(FakeDockerHost(), tmp_path)
-
-    # Act
-    cached = scrape["read_vloopback_pass"]("boot|plugin", UPTIME)
-
-    # Assert
-    assert cached is False
-    assert capsys.readouterr().err == ""
 
 
 def test_the_kill_switch_survives_obfuscation_and_is_rewritten_when_disabled() -> None:

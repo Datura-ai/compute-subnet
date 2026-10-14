@@ -992,21 +992,16 @@ VLOOPBACK_PROBE_IMAGE = "daturaai/compute-subnet-executor:latest"
 VLOOPBACK_PROBE_TOKEN = "lium-vloopback-ok"
 # FileEncryptService.ecrypt_miner_job_files rewrites ":on" to ":off" when VLOOPBACK_SCRAPE_CHECK_ENABLED is false
 VLOOPBACK_CHECK_SWITCH = "lium-vloopback-check:on"
-# the whole check, well inside the scrape's 300 s job; removing the test objects has its own timeouts on top
-VLOOPBACK_CHECK_BUDGET_SECONDS = 60
-VLOOPBACK_COMMAND_TIMEOUT_SECONDS = 30
-VLOOPBACK_CLEANUP_TIMEOUT_SECONDS = 15
-# test container and volume are both "<prefix><host uptime s>_<pid>_<random>". Other validators may be testing
-# this host at the same moment, so the sweep only removes objects older than an hour or from an earlier boot.
+# fixed per-step timeouts: four Docker reads and writes and the test container, then the two removals, at most
+# 90 s inside the scrape's 300 s job
+VLOOPBACK_COMMAND_TIMEOUT_SECONDS = 10
+VLOOPBACK_RUN_TIMEOUT_SECONDS = 30
+VLOOPBACK_CLEANUP_TIMEOUT_SECONDS = 10
 VLOOPBACK_CHECK_NAME_PREFIX = "lium_storage_check_"
-VLOOPBACK_STALE_AFTER_SECONDS = 3600
-VLOOPBACK_PASS_CACHE_SECONDS = 6 * 3600
-VLOOPBACK_PASS_CACHE_PATH = "/tmp/lium_vloopback_check_pass"
-HOST_UPTIME_PATH = "/proc/uptime"
 STORAGE_PROBE_DETAIL_CAP = 300
 
 
-def run_storage_probe(command, timeout):
+def run_storage_probe(command, timeout=VLOOPBACK_COMMAND_TIMEOUT_SECONDS):
     # (exit status, stdout, last stderr line); the exit status is None when the command timed out
     try:
         result = subprocess.run(
@@ -1023,84 +1018,6 @@ def run_storage_probe(command, timeout):
     return result.returncode, (result.stdout or "").strip(), last_error
 
 
-def storage_check_clock():
-    # seconds on a clock that only moves forward, for the check's own deadline
-    return os.times()[4]
-
-
-def note_storage_check_error(what, error):
-    # stdout carries the encrypted payload; stderr reaches the validator's event only when the scrape fails
-    print(f"vloopback check: {what} ({type(error).__name__})", file=sys.stderr)
-
-
-def host_uptime_seconds():
-    # the host's seconds since boot: the same in every container on it, and back near 0 after a reboot
-    try:
-        with open(HOST_UPTIME_PATH) as uptime_file:
-            return int(float(uptime_file.read().split()[0]))
-    except (OSError, ValueError, IndexError) as e:
-        note_storage_check_error(f"{HOST_UPTIME_PATH} unreadable", e)
-        return None
-
-
-def run_storage_step(command, deadline, cap):
-    remaining = min(cap, deadline - storage_check_clock())
-    if remaining < 1:
-        return None, "", f"{' '.join(command[:3])} not started: the check's {VLOOPBACK_CHECK_BUDGET_SECONDS}s ran out"
-    return run_storage_probe(command, remaining)
-
-
-def sweep_stale_storage_checks(deadline):
-    # a check cut off part-way (scrape killed, executor restarted) leaves its container and volume behind
-    for list_command, remove_command in (
-        (
-            ["docker", "ps", "-a", "--filter", f"name={VLOOPBACK_CHECK_NAME_PREFIX}", "--format", "{{.Names}}"],
-            ["docker", "rm", "-f"],
-        ),
-        (
-            ["docker", "volume", "ls", "-q", "--filter", f"name={VLOOPBACK_CHECK_NAME_PREFIX}"],
-            ["docker", "volume", "rm", "-f"],
-        ),
-    ):
-        status, names, _ = run_storage_step(list_command, deadline, VLOOPBACK_CLEANUP_TIMEOUT_SECONDS)
-        # sampled after the listing: a peer started while it ran is not newer than this,
-        # so a negative age can only be an object from an earlier boot
-        uptime = host_uptime_seconds()
-        if status != 0 or uptime is None:
-            continue
-        for name in names.split():
-            started = re.fullmatch(VLOOPBACK_CHECK_NAME_PREFIX + r"(\d+)_\d+_[0-9a-f]+", name)
-            if started is None:
-                continue
-            age = uptime - int(started.group(1))
-            if age < 0 or age > VLOOPBACK_STALE_AFTER_SECONDS:
-                run_storage_step(remove_command + [name], deadline, VLOOPBACK_CLEANUP_TIMEOUT_SECONDS)
-
-
-def read_vloopback_pass(cache_key, uptime):
-    # one line "<uptime> <key>": a pass on this boot, plugin, data-root and runtime within VLOOPBACK_PASS_CACHE_SECONDS
-    try:
-        with open(VLOOPBACK_PASS_CACHE_PATH) as cache_file:
-            cached_uptime, cached_key = cache_file.read().strip().split(" ", 1)
-        return cached_key == cache_key and 0 <= uptime - int(cached_uptime) <= VLOOPBACK_PASS_CACHE_SECONDS
-    except FileNotFoundError:
-        return False
-    except (OSError, ValueError) as e:
-        note_storage_check_error("cached pass unreadable, testing again", e)
-        return False
-
-
-def write_vloopback_pass(cache_key, uptime):
-    # a pass that cannot be cached only means the next scrape runs the mount test again
-    try:
-        partial_path = f"{VLOOPBACK_PASS_CACHE_PATH}.{os.getpid()}"
-        with open(partial_path, "w") as cache_file:
-            cache_file.write(f"{uptime} {cache_key}\n")
-        os.replace(partial_path, VLOOPBACK_PASS_CACHE_PATH)
-    except OSError as e:
-        note_storage_check_error("pass not cached", e)
-
-
 def remove_storage_check(name):
     # the container first: a `docker run` cut off by its timeout leaves it running with the volume attached.
     # Returns the error of the volume removal, "" once it is gone.
@@ -1109,30 +1026,26 @@ def remove_storage_check(name):
     return "" if status == 0 else error or "docker volume rm failed"
 
 
-def vloopback_mount_test(name, runtime, deadline):
+def vloopback_mount_test(name, runtime):
     # sparse: this runs on every node, and a sparse file only takes the blocks the probe writes
-    status, _, error = run_storage_step(
-        ["docker", "volume", "create", "-d", VLOOPBACK_PLUGIN, "-o", "size=1G", "-o", "sparse=true", name],
-        deadline,
-        VLOOPBACK_COMMAND_TIMEOUT_SECONDS,
+    status, _, error = run_storage_probe(
+        ["docker", "volume", "create", "-d", VLOOPBACK_PLUGIN, "-o", "size=1G", "-o", "sparse=true", name]
     )
     if status is None:
-        return "fail", "VLOOPBACK_CHECK_TIMEOUT", error, False
+        return "fail", "VLOOPBACK_CHECK_TIMEOUT", error
     if status != 0:
-        return "fail", "VLOOPBACK_VOLUME_CREATE_FAILED", error, False
+        return "fail", "VLOOPBACK_VOLUME_CREATE_FAILED", error
 
-    status, mountpoint, error = run_storage_step(
-        ["docker", "volume", "inspect", "--format", "{{.Mountpoint}}", name], deadline, VLOOPBACK_COMMAND_TIMEOUT_SECONDS
-    )
+    status, mountpoint, error = run_storage_probe(["docker", "volume", "inspect", "--format", "{{.Mountpoint}}", name])
     if status is None:
-        return "fail", "VLOOPBACK_CHECK_TIMEOUT", error, False
+        return "fail", "VLOOPBACK_CHECK_TIMEOUT", error
     if not mountpoint.startswith("/"):
         detail = f"docker volume inspect gave Mountpoint {mountpoint!r} {error}".rstrip()
-        return "fail", "VLOOPBACK_MOUNTPOINT_NOT_ABSOLUTE", detail, False
+        return "fail", "VLOOPBACK_MOUNTPOINT_NOT_ABSOLUTE", detail
 
     # a rental runs under sysbox-runc only when the sysbox probe passed (docker_service: payload.is_sysbox)
     runtime_args = ["--runtime=sysbox-runc"] if runtime == "sysbox-runc" else []
-    status, output, error = run_storage_step(
+    status, output, error = run_storage_probe(
         ["docker", "run", "--rm", "--name", name]
         + runtime_args
         + [
@@ -1140,98 +1053,78 @@ def vloopback_mount_test(name, runtime, deadline):
             VLOOPBACK_PROBE_IMAGE,
             "sh", "-c", f"echo {VLOOPBACK_PROBE_TOKEN} > /lium-vol/probe && cat /lium-vol/probe",
         ],
-        deadline,
-        VLOOPBACK_COMMAND_TIMEOUT_SECONDS,
+        VLOOPBACK_RUN_TIMEOUT_SECONDS,
     )
     if status is None:
-        return "fail", "VLOOPBACK_CHECK_TIMEOUT", error, False
+        return "fail", "VLOOPBACK_CHECK_TIMEOUT", error
     if status != 0 or output.splitlines()[-1:] != [VLOOPBACK_PROBE_TOKEN]:
-        return "fail", "VLOOPBACK_MOUNT_FAILED", error or output[-STORAGE_PROBE_DETAIL_CAP:], False
-    return "pass", "", "", False
+        return "fail", "VLOOPBACK_MOUNT_FAILED", error or output[-STORAGE_PROBE_DETAIL_CAP:]
+    return "pass", "", ""
 
 
 def check_vloopback_volume_ability(runtime):
-    # -> (verdict, reason code, detail, cached); the verdict is "pass", "fail" or "skipped"
-    deadline = storage_check_clock() + VLOOPBACK_CHECK_BUDGET_SECONDS
-    uptime = host_uptime_seconds()
-    sweep_stale_storage_checks(deadline)
-
-    status, docker_root_dir, error = run_storage_step(
-        ["docker", "info", "--format", "{{.DockerRootDir}}"], deadline, VLOOPBACK_COMMAND_TIMEOUT_SECONDS
-    )
+    # -> (verdict, reason code, detail); the verdict is "pass", "fail" or "skipped"
+    status, docker_root_dir, error = run_storage_probe(["docker", "info", "--format", "{{.DockerRootDir}}"])
     if status is None:
-        return "fail", "VLOOPBACK_CHECK_TIMEOUT", error, False
+        return "fail", "VLOOPBACK_CHECK_TIMEOUT", error
     if status != 0 or not docker_root_dir.startswith("/"):
-        return "fail", "VLOOPBACK_DOCKER_ROOT_UNREADABLE", f"data-root {docker_root_dir!r} {error}".rstrip(), False
+        return "fail", "VLOOPBACK_DOCKER_ROOT_UNREADABLE", f"data-root {docker_root_dir!r} {error}".rstrip()
 
-    status, plugin_state, error = run_storage_step(
+    status, plugin_state, error = run_storage_probe(
         [
             "docker", "plugin", "inspect", "--format",
-            "{{.Id}}\n{{.Enabled}}\n{{range .Settings.Env}}{{println .}}{{end}}",
+            "Enabled={{.Enabled}}\n{{range .Settings.Env}}{{println .}}{{end}}",
             VLOOPBACK_PLUGIN,
-        ],
-        deadline,
-        VLOOPBACK_COMMAND_TIMEOUT_SECONDS,
+        ]
     )
     if status is None:
-        return "fail", "VLOOPBACK_CHECK_TIMEOUT", error, False
+        return "fail", "VLOOPBACK_CHECK_TIMEOUT", error
     if status != 0:
         if "no such plugin" in error.lower() or "not found" in error.lower():
             # the first rental with a disk limit installs it (create_local_volume), and so does setup
-            return "skipped", "VLOOPBACK_PLUGIN_ABSENT", error, False
-        return "fail", "VLOOPBACK_PLUGIN_UNREADABLE", error, False
+            return "skipped", "VLOOPBACK_PLUGIN_ABSENT", error
+        return "fail", "VLOOPBACK_PLUGIN_UNREADABLE", error
     plugin_lines = plugin_state.splitlines()
-    plugin_id = plugin_lines[0] if plugin_lines else ""
-    enabled = plugin_lines[1] if len(plugin_lines) > 1 else ""
+    enabled = plugin_lines[0].partition("Enabled=")[2] if plugin_lines else ""
     if enabled == "false":
         # the first rental with a disk limit enables it (create_local_volume), and so does setup
-        return "skipped", "VLOOPBACK_PLUGIN_DISABLED", "docker plugin inspect says Enabled='false'", False
+        return "skipped", "VLOOPBACK_PLUGIN_DISABLED", "docker plugin inspect says Enabled='false'"
     if enabled != "true":
-        return "fail", "VLOOPBACK_PLUGIN_UNREADABLE", f"docker plugin inspect says Enabled={enabled!r}", False
+        return "fail", "VLOOPBACK_PLUGIN_UNREADABLE", f"docker plugin inspect says Enabled={enabled!r}"
     data_dir = ""
-    for env_line in plugin_lines[2:]:
+    for env_line in plugin_lines[1:]:
         if env_line.startswith("DATA_DIR="):
             data_dir = env_line[len("DATA_DIR="):]
     if not data_dir.startswith("/"):
-        detail = f"the {VLOOPBACK_PLUGIN} plugin's DATA_DIR is {data_dir!r}"
-        return "fail", "VLOOPBACK_DATA_DIR_NOT_ABSOLUTE", detail, False
+        return "fail", "VLOOPBACK_DATA_DIR_NOT_ABSOLUTE", f"the {VLOOPBACK_PLUGIN} plugin's DATA_DIR is {data_dir!r}"
 
-    cache_key = "|".join([get_host_boot_id(), plugin_id, data_dir, docker_root_dir, runtime])
-    if uptime is not None and read_vloopback_pass(cache_key, uptime):
-        return "pass", "", "", True
-
-    name = f"{VLOOPBACK_CHECK_NAME_PREFIX}{uptime or 0}_{os.getpid()}_{os.urandom(3).hex()}"
+    name = f"{VLOOPBACK_CHECK_NAME_PREFIX}{os.getpid()}_{os.urandom(3).hex()}"
     try:
-        verdict = vloopback_mount_test(name, runtime, deadline)
+        verdict = vloopback_mount_test(name, runtime)
     finally:
         remove_error = remove_storage_check(name)
-    if verdict[0] != "pass":
-        return verdict
-    if remove_error:
-        return "fail", "VLOOPBACK_VOLUME_REMOVE_FAILED", remove_error, False
-    if uptime is not None:
-        write_vloopback_pass(cache_key, uptime)
+    if verdict[0] == "pass" and remove_error:
+        return "fail", "VLOOPBACK_VOLUME_REMOVE_FAILED", remove_error
     return verdict
 
 
 def vloopback_check_payload(storage_opt_supported, sysbox_supported):
     runtime = "sysbox-runc" if sysbox_supported else "default"
     if not VLOOPBACK_CHECK_SWITCH.endswith(":on"):
-        verdict = ("off", "", "", False)
+        verdict = ("off", "", "")
     elif not storage_opt_supported:
         # without --storage-opt the backend already rents this node without a disk limit
-        verdict = ("skipped", "STORAGE_OPT_UNSUPPORTED", "", False)
+        verdict = ("skipped", "STORAGE_OPT_UNSUPPORTED", "")
     else:
         try:
             verdict = check_vloopback_volume_ability(runtime)
         except Exception as e:
-            verdict = ("fail", "VLOOPBACK_CHECK_ERROR", f"{e}"[:STORAGE_PROBE_DETAIL_CAP], False)
+            verdict = ("fail", "VLOOPBACK_CHECK_ERROR", f"{e}"[:STORAGE_PROBE_DETAIL_CAP])
     return {
         "vc_verdict": verdict[0],
         "vc_reason_code": verdict[1],
         "vc_detail": verdict[2],
         "vc_runtime": runtime,
-        "vc_cached": verdict[3],
     }
 
 

@@ -327,10 +327,7 @@ def _host_text(value: Any) -> str | None:
 
 
 def _vloopback_fields(vloopback: dict[str, Any]) -> dict[str, Any]:
-    reported = {field: _host_text(vloopback.get(field)) for field in VLOOPBACK_TEXT_FIELDS}
-    cached = vloopback.get("cached")
-    reported["cached"] = cached if isinstance(cached, bool) else None
-    return reported
+    return {field: _host_text(vloopback.get(field)) for field in VLOOPBACK_TEXT_FIELDS}
 
 
 def _storage_limit_summary(specs: dict[str, Any], vloopback: Any) -> dict[str, Any]:
