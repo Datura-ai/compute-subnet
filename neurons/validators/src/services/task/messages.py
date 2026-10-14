@@ -307,6 +307,14 @@ class GpuModelMessages:
         category="policy",
         impact="Job skipped; score set to 0",
     )
+    MODEL_MIXED = MessageTemplate(
+        event="Mixed GPU models on one node",
+        reason="GPU_MODEL_MIXED",
+        severity="warning",
+        category="policy",
+        impact="Job skipped; score set to 0",
+        remediation="Every GPU on a node must be the same model.",
+    )
     COUNT_ZERO = MessageTemplate(
         event="No GPUs detected",
         reason="GPU_COUNT_ZERO",
@@ -446,6 +454,14 @@ class GpuPowerLimitMessages:
         impact="Proceed without power-limit penalty",
         remediation="Ensure NVML exposes the current and default power limits for every GPU.",
     )
+    DATA_INCOMPLETE_REJECTED = MessageTemplate(
+        event="GPU power limit could not be read",
+        reason="GPU_POWER_LIMIT_UNREADABLE",
+        severity="warning",
+        category="policy",
+        impact="Job skipped; score set to 0",
+        remediation="Ensure NVML exposes the current and default power limits for every GPU.",
+    )
     LIMIT_OK = MessageTemplate(
         event="GPU power limit check passed",
         reason="GPU_POWER_LIMIT_OK",
@@ -493,6 +509,14 @@ class NvmlDigestMessages:
         category="env",
         impact="Score set to 0 for this cycle",
         remediation="Update to a supported NVIDIA driver version. Your current driver version is not recognized.",
+    )
+    DRIVER_MISSING = MessageTemplate(
+        event="NVIDIA driver version not reported",
+        reason="NVML_DRIVER_MISSING",
+        severity="error",
+        category="env",
+        impact="Score set to 0 for this cycle",
+        remediation="Make sure `nvidia-smi` reports the driver version on the host.",
     )
     DIGEST_OK = MessageTemplate(
         event="NVML library digest verified",

@@ -1,5 +1,6 @@
 """DAH-2748: an availability error means we could not reach something, and hides the node."""
 
+import socket
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncssh
@@ -170,6 +171,43 @@ async def test_a_cycle_that_cannot_open_ssh_scores_zero_and_reports_the_code(mon
     assert result.score == 0
     assert [e["reason_code"] for e in result.availability_errors] == ["EXECUTOR_SSH_UNREACHABLE"]
     assert "EXECUTOR_SSH_UNREACHABLE" in result.log_text
+
+
+async def _does_not_resolve(self, host, port, **kwargs):
+    raise socket.gaierror(-2, "Name or service not known")
+
+
+async def _resolves_to_a_private_address(self, host, port, **kwargs):
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", port))]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fake_getaddrinfo", "detail"),
+    [
+        (_does_not_resolve, "does not resolve"),
+        (_resolves_to_a_private_address, "non-public address"),
+    ],
+)
+async def test_a_node_hostname_that_fails_the_preflight_hides_the_node(
+    monkeypatch, fake_getaddrinfo, detail
+) -> None:
+    """DAH-4035: the real shell's hostname preflight fails at the connect, so the node is unreachable.
+
+    A generic error here would leave availability_errors unset and the node listed.
+    """
+    monkeypatch.setattr("asyncio.BaseEventLoop.getaddrinfo", fake_getaddrinfo)
+    dialled = AsyncMock(side_effect=AssertionError("the preflight must stop the dial"))
+    monkeypatch.setattr("services.interactive_shell_service.asyncssh.connect", dialled)
+    miner, executor = _a_job_for("node-9")
+    executor = executor.model_copy(update={"address": "gpu-node1.example.net"})
+
+    result = await _run_cycle(_task_service_that_reaches_the_ssh_connect(), miner, executor)
+
+    assert result.score == 0
+    assert [e["reason_code"] for e in result.availability_errors] == ["EXECUTOR_SSH_UNREACHABLE"]
+    assert detail in result.log_text
+    dialled.assert_not_awaited()
 
 
 @pytest.mark.asyncio
