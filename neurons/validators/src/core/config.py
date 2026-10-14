@@ -383,6 +383,11 @@ class Settings(BaseSettings):
     # on top of the legacy single-card one every cycle. Flip it on once elapsed/VRAM/host-RSS numbers
     # from a real 8-GPU box show what that costs an honest miner.
     MATMUL_ALLCARDS_CHECK_ENABLED: bool = Field(env="MATMUL_ALLCARDS_CHECK_ENABLED", default=False)
+    # A scrape with no NVIDIA driver version skips the libnvidia-ml digest check; it is always logged
+    # (NVML_DRIVER_MISSING) and with this on it fails the check. Off by default.
+    NVML_DRIVER_MISSING_ENFORCEMENT_ENABLED: bool = Field(
+        env="NVML_DRIVER_MISSING_ENFORCEMENT_ENABLED", default=False
+    )
     MATMUL_ALLCARDS_ENFORCEMENT_ENABLED: bool = Field(env="MATMUL_ALLCARDS_ENFORCEMENT_ENABLED", default=False)
     # Item 2b — send the advertised CPU-core count in the rental-verification health check so the
     # host's Docker daemon creates the probe with `--cpus=<advertised>` and rejects a count that
