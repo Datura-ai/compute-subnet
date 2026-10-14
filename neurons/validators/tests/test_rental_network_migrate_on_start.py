@@ -3,7 +3,6 @@
 import pytest
 from docker.errors import NotFound
 
-import services.docker_service as docker_service
 from services.rental_docker_sdk import (
     RENTAL_NETWORK_ICC_OPTION,
     RENTAL_NETWORK_NAME,
@@ -113,18 +112,3 @@ async def test_start_without_a_network_only_starts():
 
     assert api.events == [("start", "pod_a")]
 
-
-def test_restart_network_is_none_when_the_flag_is_off(monkeypatch):
-    monkeypatch.setattr(docker_service.settings, "RENTAL_NETWORK_MIGRATE_ON_START_ENABLED", False)
-
-    network = docker_service._restart_network()
-
-    assert network is None
-
-
-def test_restart_network_is_the_rental_network_when_the_flag_is_on(monkeypatch):
-    monkeypatch.setattr(docker_service.settings, "RENTAL_NETWORK_MIGRATE_ON_START_ENABLED", True)
-
-    network = docker_service._restart_network()
-
-    assert network == RENTAL_NETWORK_NAME

@@ -1540,11 +1540,6 @@ def _is_filler_create_beside_customer_create(payload: ContainerCreateRequest) ->
     )
 
 
-def _restart_network() -> str | None:
-    # a pod created before rentals ran on RENTAL_NETWORK_NAME keeps docker0 across every `docker start`
-    return RENTAL_NETWORK_NAME if settings.RENTAL_NETWORK_MIGRATE_ON_START_ENABLED else None
-
-
 def _refuse_filler_during_customer_create(payload: ContainerCreateRequest) -> None:
     """Stop a filler create while this connector runs, or since the filler's start ran, a customer
     create on the same executor."""
@@ -9004,8 +8999,10 @@ class DockerService:
             await run_logged_rental_docker_sdk_operation(
                 operation="start_container",
                 log_extra=default_extra,
+                # a pod created before rentals ran on RENTAL_NETWORK_NAME would keep docker0 across
+                # every `docker start`; start moves it onto the rental network
                 call=lambda: docker_client.start(
-                    container_name=container_name, network=_restart_network()
+                    container_name=container_name, network=RENTAL_NETWORK_NAME
                 ),
                 container_name=container_name,
             )
@@ -9041,7 +9038,7 @@ class DockerService:
             operation="start_container",
             log_extra=default_extra,
             call=lambda: docker_client.start(
-                container_name=container_name, network=_restart_network()
+                container_name=container_name, network=RENTAL_NETWORK_NAME
             ),
             container_name=container_name,
         )
