@@ -6158,7 +6158,8 @@ class DockerService:
         # The build context is fetched and checked before anything starts on the executor.
         build_context: bytes | None = None
         if payload.build_context_url:
-            if not settings.CUSTOM_DOCKERFILE_BUILD_CONTEXT_ENABLED:
+            context_hosts = build_context_service.allowed_hosts(settings.CUSTOM_DOCKERFILE_BUILD_CONTEXT_HOSTS)
+            if not context_hosts:
                 return CustomBuildOutcome(
                     False, "build_context", "this validator does not take build contexts yet"
                 )
@@ -6166,7 +6167,7 @@ class DockerService:
                 build_context = await build_context_service.fetch(
                     payload.build_context_url,
                     payload.build_context_sha256 or "",
-                    hosts=build_context_service.allowed_hosts(settings.CUSTOM_DOCKERFILE_BUILD_CONTEXT_HOSTS),
+                    hosts=context_hosts,
                     max_bytes=int(settings.CUSTOM_DOCKERFILE_BUILD_CONTEXT_MAX_BYTES),
                     max_unpacked_bytes=int(settings.CUSTOM_DOCKERFILE_BUILD_CONTEXT_MAX_UNPACKED_BYTES),
                 )

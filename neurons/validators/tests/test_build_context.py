@@ -242,7 +242,6 @@ async def test_custom_build_unpacks_the_context_before_the_dockerfile(svc, monke
     from core.config import settings
 
     data = _archive()
-    monkeypatch.setattr(settings, "CUSTOM_DOCKERFILE_BUILD_CONTEXT_ENABLED", True)
     monkeypatch.setattr(settings, "CUSTOM_DOCKERFILE_BUILD_CONTEXT_HOSTS", "contexts.example.com")
     _serve(monkeypatch, data)
     ssh_client = _make_dind_ssh()
@@ -270,13 +269,13 @@ async def test_custom_build_unpacks_the_context_before_the_dockerfile(svc, monke
 
 
 @pytest.mark.asyncio
-async def test_custom_build_with_a_context_fails_before_the_executor_when_the_setting_is_off(
+async def test_custom_build_with_a_context_fails_before_the_executor_when_no_host_is_allowed(
     svc, monkeypatch  # noqa: F811
 ):
     # Arrange
     from core.config import settings
 
-    monkeypatch.setattr(settings, "CUSTOM_DOCKERFILE_BUILD_CONTEXT_ENABLED", False)
+    monkeypatch.setattr(settings, "CUSTOM_DOCKERFILE_BUILD_CONTEXT_HOSTS", "")
     calls = _serve(monkeypatch, _archive())
     ssh_client = _make_dind_ssh()
     monkeypatch.setattr(svc, "stream_log", AsyncMock())
@@ -305,7 +304,6 @@ async def test_custom_build_with_a_refused_context_never_starts_the_build_contai
     # Arrange
     from core.config import settings
 
-    monkeypatch.setattr(settings, "CUSTOM_DOCKERFILE_BUILD_CONTEXT_ENABLED", True)
     monkeypatch.setattr(settings, "CUSTOM_DOCKERFILE_BUILD_CONTEXT_HOSTS", "contexts.example.com")
     _serve(monkeypatch, _archive())
     ssh_client = _make_dind_ssh()
