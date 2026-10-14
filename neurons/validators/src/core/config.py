@@ -495,6 +495,12 @@ class Settings(BaseSettings):
     # A card that faults under indexed access (Blender "Illegal address in CUDA queue", 6 Sep) passes the
     # sequential matmul. CHECK runs it and logs the verdict; ENFORCEMENT lets a fault zero the score. Both
     # default off: the probe is new GPU work on every idle node per cycle, so it starts as an opt-in shadow.
+    # DAH-3110 — a card NVML reports broken (uncorrected ECC since the driver loaded, a pending or failed
+    # row remap, a required recovery action) fails the node like a GPU ban until the host resets or
+    # replaces it. On: a broken card faults renters' jobs. Off is the kill switch back to flag-only.
+    GPU_MEMORY_HEALTH_ENFORCEMENT_ENABLED: bool = Field(
+        env="GPU_MEMORY_HEALTH_ENFORCEMENT_ENABLED", default=True
+    )
     GPU_FAULT_PROBE_CHECK_ENABLED: bool = Field(env="GPU_FAULT_PROBE_CHECK_ENABLED", default=False)
     GPU_FAULT_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="GPU_FAULT_PROBE_ENFORCEMENT_ENABLED", default=False)
     # A fault probe with no verdict passes. Five such cycles in a row on one node are logged

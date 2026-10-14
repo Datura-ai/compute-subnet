@@ -1,9 +1,10 @@
 """DAH-3110: a card NVML reports broken (uncorrected ECC, pending/failed row remap, recovery
-action) is flagged on rented and idle nodes alike; flag only, the score is not changed."""
+action) fails the node like a GPU ban, on rented and idle nodes alike; a live rental is kept."""
 
 import json
 import subprocess
 import sys
+from unittest.mock import AsyncMock
 
 import pytest
 from neurons.validators.src.services.task import pipeline_factory
@@ -13,7 +14,11 @@ from neurons.validators.src.services.task.checks.gpu_fault_probe import (
 )
 from neurons.validators.src.services.task.checks.gpu_memory_health import GpuMemoryHealthCheck
 from neurons.validators.src.services.task.messages import GpuMemoryHealthMessages as Msg
+from neurons.validators.src.services.task.pipeline import Pipeline
+from protocol.vc_protocol.compute_requests import RentedExecutor, RentedExecutorsResponse, RentedPod
 
+from core.config import settings
+from tests.helpers import default_executor
 from tests.test_gpu_fault_probe_check import FakeRunner, _probe_namespace, make_ctx
 
 # a card seen on a rented 8x RTX PRO 6000 node, 14 Oct: 1 uncorrectable DRAM ECC error, a pending
@@ -74,18 +79,66 @@ def test_nvml_only_runs_no_cuda_and_always_prints_a_report():
     assert "devices" not in report
 
 
+FLAGS = ["gpu 2 (GPU-2): 1 uncorrected ECC error(s) since the driver loaded"]
+
+
+def _live_rental() -> RentedExecutorsResponse:
+    executor = default_executor()
+    return RentedExecutorsResponse(
+        executors={
+            executor.uuid: RentedExecutor(
+                miner_hotkey="miner-hotkey",
+                executor_ip_address=executor.address,
+                executor_ip_port=str(executor.port),
+                pods=[RentedPod(pod_id="pod-1", container_name="pod_p1")],
+            )
+        },
+        banned_guids=[],
+    )
+
+
 @pytest.mark.asyncio
-async def test_a_flagged_card_is_reported_and_the_check_still_passes(context_factory):
-    flags = ["gpu 2 (GPU-2): row remap pending (needs a GPU reset)"]
-    runner = FakeRunner(_report("flagged", flags=flags))
+async def test_a_broken_card_fails_an_idle_node_and_stops_its_pipeline(context_factory):
+    runner = FakeRunner(_report("flagged", flags=FLAGS))
+    ctx = make_ctx(context_factory, runner)
+
+    result = await GpuMemoryHealthCheck().run(ctx)
+    success, _, _ = await Pipeline(checks=[GpuMemoryHealthCheck()], sink=AsyncMock()).run(ctx)
+
+    assert (result.passed, result.fatal, result.event.reason_code) == (
+        False,
+        True,
+        Msg.FAILED.reason,
+    )
+    assert result.updates == {"clear_verified_job_info": True}
+    assert result.event.what_we_saw["flags"] == FLAGS
+    assert success is False
+    assert runner.calls[0]["cmd"].endswith("-I - --nvml-only")
+    assert runner.calls[0]["stdin_text"] == PROBE_SOURCE
+
+
+@pytest.mark.asyncio
+async def test_a_broken_card_under_a_live_rental_fails_without_stopping_verification(
+    context_factory,
+):
+    ctx = make_ctx(
+        context_factory, FakeRunner(_report("flagged", flags=FLAGS)), rented_data=_live_rental()
+    )
+
+    result = await GpuMemoryHealthCheck().run(ctx)
+
+    assert (result.passed, result.fatal) == (False, False)
+    assert result.updates == {"clear_verified_job_info": True}
+
+
+@pytest.mark.asyncio
+async def test_with_enforcement_off_a_broken_card_is_only_flagged(context_factory, monkeypatch):
+    monkeypatch.setattr(settings, "GPU_MEMORY_HEALTH_ENFORCEMENT_ENABLED", False)
+    runner = FakeRunner(_report("flagged", flags=FLAGS))
 
     result = await GpuMemoryHealthCheck().run(make_ctx(context_factory, runner))
 
-    assert result.passed is True
-    assert result.event.reason_code == Msg.FLAGGED.reason
-    assert result.event.what_we_saw["flags"] == flags
-    assert runner.calls[0]["cmd"].endswith("-I - --nvml-only")
-    assert runner.calls[0]["stdin_text"] == PROBE_SOURCE
+    assert (result.passed, result.event.reason_code) == (True, Msg.FLAGGED.reason)
 
 
 @pytest.mark.asyncio

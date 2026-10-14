@@ -305,8 +305,9 @@ class PipelineFactory:
                 # short-circuit so a rented host that has just lost its disk is reported too. The
                 # score is not changed until the reading is proven on live executors.
                 DiskHealthCheck(),
-                # one NVML read, no CUDA, flag only: a card with uncorrected ECC or a pending row
-                # remap is reported on rented nodes too, so it sits before the rented short-circuit
+                # one NVML read, no CUDA: a card with uncorrected ECC or a pending row remap fails
+                # the node like a GPU ban (not fatal under a live pod), so it sits before the rented
+                # short-circuit
                 GpuMemoryHealthCheck(),
                 # DAH-2671 item 2a: non-fatal, observe-only CPU-count corroboration. Placed right
                 # after the GPU spec-check group (and before the rented short-circuit) so it reads
@@ -503,7 +504,7 @@ class PipelineFactory:
                 GpuVramPrecheck(),
                 # DAH-2928: pure-data report on specs.disk_health, same place as in build_checks.
                 DiskHealthCheck(),
-                # one NVML read, no CUDA: safe in dry run
+                # one NVML read, no CUDA: safe in dry run, and a broken card is not rented out
                 GpuMemoryHealthCheck(),
                 # DAH-2671 item 2a: read-only SSH corroboration, safe in dry run (mutates nothing).
                 CpuTruthCheck(),
