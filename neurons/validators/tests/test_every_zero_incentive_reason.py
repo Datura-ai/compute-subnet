@@ -413,6 +413,11 @@ async def test_an_excluded_node_with_a_model_the_validator_does_not_know_scores_
 # ── DAH-4256: idle pay needs Lium's default job ──────────────────────────────
 
 
+def test_the_default_job_gate_ships_enforced():
+    # the owner turned it on (14 Oct); False stays as the kill-switch
+    assert type(settings).model_fields["ENABLE_IDLE_REQUIRES_LIUM_DEFAULT_JOB"].default is True
+
+
 @pytest.fixture
 def default_job_required(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_IDLE_REQUIRES_LIUM_DEFAULT_JOB", True)
@@ -460,7 +465,7 @@ async def test_a_lium_filler_outage_keeps_idle_incentive(default_job_required):
 
 
 @pytest.mark.asyncio
-async def test_the_default_job_gate_off_keeps_idle_incentive(monkeypatch):
+async def test_the_default_job_kill_switch_keeps_idle_incentive(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_IDLE_REQUIRES_LIUM_DEFAULT_JOB", False)
 
     result = await _incentive().calculate_executor_score(

@@ -600,9 +600,9 @@ class Settings(BaseSettings):
     # DAH-4256 — True: an idle secure node earns the unrented incentive only while a Lium default
     # job (filler) runs on it, as spot-node pay already requires. A cycle in which the backend lists
     # no Lium-owned filler on any node (a missing list or a Lium filler outage) keeps the incentive.
-    # False: only logs the nodes
-    # that would lose it (shadow). Enabling it is the owner's call.
-    ENABLE_IDLE_REQUIRES_LIUM_DEFAULT_JOB: bool = Field(env="ENABLE_IDLE_REQUIRES_LIUM_DEFAULT_JOB", default=False)
+    # Ships ENFORCED on the owner's word (14 Oct: "that's a gap"); every excluded node is still
+    # logged. Set to False as a kill-switch: the gate then only logs the nodes it would exclude.
+    ENABLE_IDLE_REQUIRES_LIUM_DEFAULT_JOB: bool = Field(env="ENABLE_IDLE_REQUIRES_LIUM_DEFAULT_JOB", default=True)
 
     # DAH-2467 — mixed scoring for a partially rented GPU-split node: the rented GPUs earn in
     # the mining pool and the free GPUs in the unrented pool. Set to False to fall back to
