@@ -639,6 +639,10 @@ class ValidationService:
             return CardOutcome(
                 index, ok=False, reason="unverified", elapsed_seconds=elapsed_seconds
             )
+        # A passing proof returns card 0's result in place of the single-card run, so it carries
+        # the card's own clock for the matmul speed log (DAH-4286).
+        verdict.elapsed_seconds = elapsed_seconds
+        verdict.elapsed_source = ELAPSED_SOURCE_VALIDATOR
         return CardOutcome(
             index, ok=True, reason="", elapsed_seconds=elapsed_seconds, result=verdict
         )
@@ -903,8 +907,8 @@ class ValidationService:
         # `decrypt_challenge.py` run → evaluate_matmul_output. The local transport (checks/
         # local_verify.py) calls the same two functions around `POST /verify`.
         # DAH-2671 item 3: all-claimed-cards work-proof. Shadow (MATMUL_ALLCARDS_CHECK_ENABLED
-        # without enforcement, the default) logs timing + per-card verdict and NEVER changes the
-        # returned result; MATMUL_ALLCARDS_ENFORCEMENT_ENABLED fails the validation when fewer cards
+        # with enforcement switched off) logs timing + per-card verdict and NEVER changes the
+        # returned result; MATMUL_ALLCARDS_ENFORCEMENT_ENABLED (the default) fails the validation when fewer cards
         # are verified than reported or the aggregate wall-clock is over. Single-card hosts and
         # hosts with no card of a known model skip it (probe returns None), which also keeps the
         # legacy single-card path below unchanged. `first_pass` is the caller's word that this is a

@@ -173,10 +173,10 @@ def _reasons(probe) -> list[str]:
     return [card["reason"] for card in probe.per_card]
 
 
-def test_check_runs_by_default_and_enforcement_stays_off():
+def test_check_runs_and_enforces_by_default():
     fields = Settings.model_fields
     assert fields["MATMUL_ALLCARDS_CHECK_ENABLED"].default is True
-    assert fields["MATMUL_ALLCARDS_ENFORCEMENT_ENABLED"].default is False
+    assert fields["MATMUL_ALLCARDS_ENFORCEMENT_ENABLED"].default is True
 
 
 @pytest.mark.asyncio
@@ -932,3 +932,28 @@ async def test_each_run_card_logs_its_own_run_time(svc, lib):
     for card in probe.per_card:
         assert isinstance(card["elapsed_seconds"], float)
         assert 0 <= card["elapsed_seconds"] <= probe.elapsed_seconds + 0.001
+
+
+@pytest.mark.asyncio
+async def test_a_node_reporting_more_cards_than_it_has_fails_under_the_default_flags(svc, lib, monkeypatch):
+    for name in ("MATMUL_ALLCARDS_CHECK_ENABLED", "MATMUL_ALLCARDS_ENFORCEMENT_ENABLED"):
+        monkeypatch.setattr(mvs.settings, name, Settings.model_fields[name].default, raising=False)
+    uuids = _uuids(8)
+    host = FakeHost(lib, uuids, real=uuids[:2])
+    result = await svc.validate_gpu_model_and_process_job(
+        ssh_client=host, executor_info=_executor(), default_extra={}, machine_spec=_spec(8)
+    )
+    assert result.success is False
+    assert "All-cards GPU work-proof failed" in result.error_message
+
+
+@pytest.mark.asyncio
+async def test_a_passing_proof_returns_card_zero_with_its_own_run_time(svc, lib, monkeypatch):
+    _flags(monkeypatch, enforce=True)
+    host = FakeHost(lib, _uuids(4))
+    result = await svc.validate_gpu_model_and_process_job(
+        ssh_client=host, executor_info=_executor(), default_extra={}, machine_spec=_spec(4)
+    )
+    assert result.success is True
+    assert result.elapsed_seconds is not None and result.elapsed_seconds >= 0
+    assert result.elapsed_source == mvs.ELAPSED_SOURCE_VALIDATOR

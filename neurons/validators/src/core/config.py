@@ -401,15 +401,16 @@ class Settings(BaseSettings):
     # card's reported UUID and model; the verdict passes when every reported card is verified.
     # The check runs by default and logs its verdict ("All-cards GPU work-proof"). A passing verdict
     # replaces the single-card run (card 0's own result is returned, card 0 is not run twice); a
-    # failing one in shadow leaves the result to the single-card run, as before.
+    # failing one fails the validation (with enforcement off it is left to the single-card run).
     # A first pass on the fast path (FIRST_PASS_FAST_PATH_ENABLED, off by default) skips the proof
     # while enforcement is off (its verdict could not change anything). With the fast path off a
     # node's first pass is not marked as one, so it runs the proof like a scored cycle.
     # Set MATMUL_ALLCARDS_CHECK_ENABLED=false to turn the run off.
-    # MATMUL_ALLCARDS_ENFORCEMENT_ENABLED=true makes a failed verdict fail the validation and runs
-    # the proof on the first pass as well; it stays off until the logged verdicts have been reviewed.
+    # MATMUL_ALLCARDS_ENFORCEMENT_ENABLED (on by default; owner 14 Oct: a listed node whose cards
+    # cannot do the work fails validation, it is not only logged) makes a failed verdict fail the
+    # validation and runs the proof on the first pass as well. =false is the kill switch: log only.
     MATMUL_ALLCARDS_CHECK_ENABLED: bool = Field(env="MATMUL_ALLCARDS_CHECK_ENABLED", default=True)
-    MATMUL_ALLCARDS_ENFORCEMENT_ENABLED: bool = Field(env="MATMUL_ALLCARDS_ENFORCEMENT_ENABLED", default=False)
+    MATMUL_ALLCARDS_ENFORCEMENT_ENABLED: bool = Field(env="MATMUL_ALLCARDS_ENFORCEMENT_ENABLED", default=True)
     # Item 2b — send the advertised CPU-core count in the rental-verification health check so the
     # host's Docker daemon creates the probe with `--cpus=<advertised>` and rejects a count that
     # exceeds the machine's physical cores (a signal the lscpu wrapper cannot forge, since dockerd
