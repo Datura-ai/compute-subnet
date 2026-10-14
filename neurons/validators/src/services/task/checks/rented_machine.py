@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from core.docker_utils import DockerCommand, collect_container_death_diagnostics
 from core.utils import _m, get_extra_info
-from protocol.vc_protocol.compute_requests import RentedPod
+from protocol.vc_protocol.compute_requests import RentedExecutor, RentedPod
 from protocol.vc_protocol.validator_requests import (
     ContainerState,
     PodContainerState,
@@ -96,6 +96,29 @@ def _gpu_usage_violation_details(
     }
 
 
+def _rental_of_validated_miner(
+    ctx: Context, rented_executor: RentedExecutor | None
+) -> RentedExecutor | None:
+    """The rental listed under this executor's UUID, or None when enforcement is on and it belongs
+    to another miner. The mismatch is logged either way."""
+    if not rented_executor or rented_executor.miner_hotkey == ctx.miner_hotkey:
+        return rented_executor
+    logger.warning(
+        _m(
+            "RENTED_OWNER_MISMATCH",
+            extra=get_extra_info(
+                {
+                    **ctx.default_extra,
+                    "executor_uuid": ctx.executor.uuid,
+                    "rental_miner_hotkey": rented_executor.miner_hotkey,
+                    "enforced": settings.RENTED_OWNER_MISMATCH_ENFORCEMENT_ENABLED,
+                }
+            ),
+        )
+    )
+    return None if settings.RENTED_OWNER_MISMATCH_ENFORCEMENT_ENABLED else rented_executor
+
+
 @dataclass
 class _DownedPodOutcome:
     """What the check does with a rented pod that was found not running."""
@@ -133,23 +156,9 @@ class TenantEnforcementCheck:
 
         # Get rented executor from context instead of Redis
         rented_data = ctx.state.rented_data
-        rented_executor = rented_data.executors.get(ctx.executor.uuid) if rented_data else None
-        if rented_executor and rented_executor.miner_hotkey != ctx.miner_hotkey:
-            logger.warning(
-                _m(
-                    "RENTED_OWNER_MISMATCH",
-                    extra=get_extra_info(
-                        {
-                            **ctx.default_extra,
-                            "executor_uuid": ctx.executor.uuid,
-                            "rental_miner_hotkey": rented_executor.miner_hotkey,
-                            "enforced": settings.RENTED_OWNER_MISMATCH_ENFORCEMENT_ENABLED,
-                        }
-                    ),
-                )
-            )
-            if settings.RENTED_OWNER_MISMATCH_ENFORCEMENT_ENABLED:
-                rented_executor = None
+        rented_executor = _rental_of_validated_miner(
+            ctx, rented_data.executors.get(ctx.executor.uuid) if rented_data else None
+        )
         # EVERY filler on the node: a partially rented split node keeps one filler per free VRAM
         # bundle running beside the renter (DAH-2465/DAH-2467), and allowlisting only the first
         # makes its siblings' GPU processes read as usage outside the tenant.
