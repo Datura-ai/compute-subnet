@@ -279,7 +279,7 @@ def test_manual_rental_forced_pass_marks_spot_when_executor_in_spot_ids():
     # Assert -- executor id is in spot_executor_ids, so the synthetic result is marked spot
     assert len(results) == 1
     assert results[0].is_spot is True
-    assert results[0].is_provider_chosen_spot is False
+    assert results[0].is_on_spot_pay_list is False
 
 
 def test_manual_rental_forced_pass_marks_provider_chosen_spot_from_the_provider_list():
@@ -300,7 +300,7 @@ def test_manual_rental_forced_pass_marks_provider_chosen_spot_from_the_provider_
 
     assert len(results) == 1
     assert results[0].is_spot is True
-    assert results[0].is_provider_chosen_spot is True
+    assert results[0].is_on_spot_pay_list is True
 
 
 def test_manual_rental_forced_pass_discord_disconnected_when_excluded_from_list():

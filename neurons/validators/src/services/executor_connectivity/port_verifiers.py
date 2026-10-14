@@ -10,6 +10,7 @@ from services.executor_connectivity.container_runner import ContainerRunner
 from services.executor_connectivity.models import BatchResult, PortPair
 from services.executor_connectivity.netcat_script import NetcatScript
 from services.executor_connectivity.port_tester import PortTester
+from services.node_host import public_host_connector
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +115,7 @@ class BatchVerifier:
             return BatchResult([], ports, completed=False)
 
         try:
-            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=0)) as session:
+            async with aiohttp.ClientSession(connector=public_host_connector(limit=0)) as session:
                 successful, failed = await self.port_tester.test_many(session, host, ports, token, log_ctx)
                 logger.info(
                     _m(f"progress: {len(successful)}/{len(ports)} verified", extra=get_extra_info(log_ctx))
@@ -150,7 +151,7 @@ class FallbackVerifier:
 
         successful, failed = [], []
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=public_host_connector()) as session:
             for idx, port in enumerate(ports_to_test, 1):
                 token = uuid.uuid4().hex
                 name = f"port_test_seq_{token[:8]}"
@@ -298,7 +299,7 @@ class SemiBatchVerifier:
                 return [], ports
 
             started = True
-            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=0)) as session:
+            async with aiohttp.ClientSession(connector=public_host_connector(limit=0)) as session:
                 return await self.port_tester.test_many(session, host, ports, token, log_ctx)
 
         except Exception as e:

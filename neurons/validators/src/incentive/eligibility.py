@@ -28,7 +28,7 @@ def earns_spot_rental_incentive(job_result: JobResult) -> bool:
     return (
         settings.ENABLE_SPOT_RENTAL_INCENTIVE
         and job_result.is_spot
-        and job_result.is_provider_chosen_spot
+        and job_result.is_on_spot_pay_list
         and job_result.is_rented
         and not job_result.is_split_remainder
     )

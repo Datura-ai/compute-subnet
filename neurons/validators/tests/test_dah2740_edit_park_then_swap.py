@@ -367,8 +367,11 @@ def test_the_cycle_cleanup_protects_the_parked_twin_of_every_rented_pod():
     from services.container_cleanup import listed_container_names
     from types import SimpleNamespace
 
+    from protocol.vc_protocol.compute_requests import RentedPod
+
+    pods = [RentedPod(pod_id=pod_id, container_name=f"pod_{pod_id}") for pod_id in ("aaaa", "bbbb")]
     rented = SimpleNamespace(
-        executors={"exec-1": SimpleNamespace(pods=[SimpleNamespace(container_name="pod_aaaa"), SimpleNamespace(container_name="pod_bbbb")])},
+        executors={"exec-1": SimpleNamespace(pods=pods)},
         all_filler_containers_by_executor={},
         filler_containers_by_executor={},
     )
