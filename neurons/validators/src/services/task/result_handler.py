@@ -11,7 +11,7 @@ from typing import Any, Optional
 from datura.requests.miner_requests import ExecutorSSHInfo
 from payload_models.payloads import MinerJobRequestPayload
 from protocol.vc_protocol.validator_requests import ResetVerifiedJobReason, ValidationEvent
-from services.const import DEFAULT_JOB_OWNER_LIUM
+from services.const import DEFAULT_JOB_OWNER_MINER
 from services.gpu_spec_table import normalize_gpu_model
 from services.redis_service import INSPECTOR_EVENT_CHANNEL, RedisService
 
@@ -137,8 +137,7 @@ class ResultHandler:
             and executor_info.uuid in context.state.rented_data.spot_executor_ids
         )
         is_provider_chosen_spot = bool(
-            is_spot
-            and executor_info.uuid in context.state.rented_data.provider_spot_executor_ids
+            is_spot and executor_info.uuid in context.state.rented_data.provider_spot_executor_ids
         )
         is_new_rentals_paused = bool(
             context.state.rented_data
@@ -154,12 +153,14 @@ class ResultHandler:
         has_lium_filler = bool(
             rented_data and rented_data.get_filler_containers(executor_info.uuid)
         )
-        # a Lium-owned filler somewhere this cycle: a miner's own default job is no reading of Lium's
-        # fillers, so during a Lium filler outage the default-job idle gate keeps every node's pay
+        # some node runs a filler that is not a miner's own default job: the backend maps only the
+        # miner's default job to "miner" and leaves Lium strategies it has no owner for (ENGY_TEE)
+        # unmapped, so anything but "miner" is Lium's. One such node is enough for the fleet signal;
+        # with none (a Lium filler outage, or no list) the default-job idle gate keeps every node's pay
         lium_filler_list_received = bool(
             rented_data
             and any(
-                rented_data.get_default_job_owner(executor_id) == DEFAULT_JOB_OWNER_LIUM
+                rented_data.get_default_job_owner(executor_id) != DEFAULT_JOB_OWNER_MINER
                 for executor_id in (
                     rented_data.all_filler_containers_by_executor.keys()
                     | rented_data.filler_containers_by_executor.keys()
