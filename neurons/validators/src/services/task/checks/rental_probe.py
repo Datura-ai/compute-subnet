@@ -318,7 +318,8 @@ class RentalProbeCheck:
             )
         image_present = await _image_present_on_host(ctx, image_ref)
         if image_present is None:
-            await _log_if_long_unprobed(ctx, "could not read the node's image list")
+            if standing is None:
+                await _log_if_long_unprobed(ctx, "could not read the node's image list")
             return self._inconclusive(
                 ctx,
                 "could not read the node's image list",
@@ -329,7 +330,8 @@ class RentalProbeCheck:
         if not image_present:
             # a pull would put minutes of Docker Hub traffic inside the validation cycle; the
             # cached-template check already reports a node that has not pre-pulled the image
-            await _log_if_long_unprobed(ctx, "default renter image is not pulled on the node")
+            if standing is None:
+                await _log_if_long_unprobed(ctx, "default renter image is not pulled on the node")
             return self._skipped(
                 ctx,
                 "default renter image is not pulled on the node",

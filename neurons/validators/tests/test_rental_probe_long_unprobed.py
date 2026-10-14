@@ -22,8 +22,8 @@ async def _count_unprobed_logs_and_reason(caplog, ctx, docker) -> tuple[int, str
     with probe_settings(), caplog.at_level(logging.WARNING, logger=module.logger.name):
         result = await RentalProbeCheck().run(ctx)
     assert docker.create_calls == []
-    logs = sum("RENTAL_PROBE_LONG_UNPROBED" in record.getMessage() for record in caplog.records)
-    return logs, result.event.reason_code
+    unprobed_log_count = sum("RENTAL_PROBE_LONG_UNPROBED" in record.getMessage() for record in caplog.records)
+    return unprobed_log_count, result.event.reason_code
 
 
 @pytest.mark.asyncio
