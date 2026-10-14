@@ -523,11 +523,12 @@ check_sysbox() {
 
 vloopback_plugin_state() {
     # true / false / absent; a missing plugin makes `docker plugin inspect` print a blank line before it fails
-    (docker plugin inspect --format '{{.Enabled}}' "$VLOOPBACK_PLUGIN" 2>/dev/null || echo absent) | tail -n 1
+    (timeout "$VLOOPBACK_CLEANUP_TIMEOUT" docker plugin inspect --format '{{.Enabled}}' "$VLOOPBACK_PLUGIN" 2>/dev/null \
+        || echo absent) | tail -n 1
 }
 
 vloopback_plugin_data_dir() {
-    docker plugin inspect --format '{{range .Settings.Env}}{{println .}}{{end}}' "$VLOOPBACK_PLUGIN" 2>/dev/null \
+    timeout "$VLOOPBACK_CLEANUP_TIMEOUT" docker plugin inspect --format '{{range .Settings.Env}}{{println .}}{{end}}' "$VLOOPBACK_PLUGIN" 2>/dev/null \
         | sed -n 's/^DATA_DIR=//p' | head -1
 }
 
@@ -538,7 +539,7 @@ ensure_vloopback_plugin() {
     # has an absolute DATA_DIR keeps it (the validators never reinstall an enabled plugin either).
     local root state data_dir wanted out
     VLOOPBACK_CHANGED="" VLOOPBACK_REASON=""
-    root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)
+    root=$(timeout "$VLOOPBACK_CLEANUP_TIMEOUT" docker info --format '{{.DockerRootDir}}' 2>/dev/null)
     case "$root" in
         /*) ;;
         *) VLOOPBACK_REASON="Docker reports the data-root '${root}', not an absolute path (docker info --format '{{.DockerRootDir}}')."
@@ -564,12 +565,14 @@ ensure_vloopback_plugin() {
             # changing the plugin under a running pod would pull its disk away
             abort_on_active_rentals
             if [ "$state" = "true" ]; then
-                out=$(docker plugin disable "$VLOOPBACK_PLUGIN" 2>&1) || {
+                out=$(timeout "$VLOOPBACK_CLEANUP_TIMEOUT" docker plugin disable "$VLOOPBACK_PLUGIN" 2>&1) || {
+                    [ -n "$out" ] || out="timed out after ${VLOOPBACK_CLEANUP_TIMEOUT}s"
                     VLOOPBACK_REASON="the $VLOOPBACK_PLUGIN plugin has DATA_DIR '${data_dir}' and cannot be disabled to change it: $(echo "$out" | vloopback_last_line)"
                     return 1
                 }
             fi
-            out=$(docker plugin set "$VLOOPBACK_PLUGIN" "DATA_DIR=$wanted" 2>&1) || {
+            out=$(timeout "$VLOOPBACK_CLEANUP_TIMEOUT" docker plugin set "$VLOOPBACK_PLUGIN" "DATA_DIR=$wanted" 2>&1) || {
+                [ -n "$out" ] || out="timed out after ${VLOOPBACK_CLEANUP_TIMEOUT}s"
                 VLOOPBACK_REASON="docker plugin set $VLOOPBACK_PLUGIN DATA_DIR=$wanted failed: $(echo "$out" | vloopback_last_line)"
                 return 1
             }
@@ -578,7 +581,8 @@ ensure_vloopback_plugin() {
             ;;
     esac
     if [ "$state" != "true" ]; then
-        out=$(docker plugin enable "$VLOOPBACK_PLUGIN" 2>&1) || {
+        out=$(timeout "$VLOOPBACK_CLEANUP_TIMEOUT" docker plugin enable "$VLOOPBACK_PLUGIN" 2>&1) || {
+            [ -n "$out" ] || out="timed out after ${VLOOPBACK_CLEANUP_TIMEOUT}s"
             VLOOPBACK_REASON="docker plugin enable $VLOOPBACK_PLUGIN failed: $(echo "$out" | vloopback_last_line)"
             return 1
         }
@@ -645,7 +649,7 @@ check_vloopback() {
     fi
     state=$(vloopback_plugin_state)
     if [ "$state" = "absent" ]; then
-        pf_fix "The $VLOOPBACK_PLUGIN volume plugin is not installed — rentals with a disk limit cannot start." \
+        pf_fix "The $VLOOPBACK_PLUGIN volume plugin is not installed; the mount test cannot run until it is." \
             "$(self_cmd)   # installs it with DATA_DIR=<Docker data-root>/loopback and tests a volume in a sysbox container"
         return 1
     fi
@@ -657,7 +661,7 @@ check_vloopback() {
            return 1 ;;
     esac
     if [ "$state" != "true" ]; then
-        pf_fix "The $VLOOPBACK_PLUGIN plugin is installed but disabled — rentals with a disk limit cannot start." \
+        pf_fix "The $VLOOPBACK_PLUGIN volume plugin is not enabled; the mount test cannot run until it is." \
             "docker plugin enable $VLOOPBACK_PLUGIN"
         return 1
     fi

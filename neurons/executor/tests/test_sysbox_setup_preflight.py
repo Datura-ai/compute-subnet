@@ -94,7 +94,7 @@ STUBS = {
                 # the daemon finished creating it after `timeout` killed the CLI
                 [ -z "${STUB_VOLUME_CREATE_HANGS:-}" ] || exit 124
                 echo "${!#}" ;;
-            "volume inspect") case "$data_dir" in /*) echo "/mnt/${!#}" ;; *) echo "206/fs" ;; esac ;;
+            "volume inspect") case "${STUB_RELATIVE_MOUNTPOINT:+relative}$data_dir" in /*) echo "/mnt/${!#}" ;; *) echo "206/fs" ;; esac ;;
             "volume rm")
                 [ -z "${STUB_VOLUME_RM_FAILS:-}" ] || { echo "Error response from daemon: remove ${!#}: VolumeDriver.Unmount: context deadline exceeded" >&2; exit 1; }
                 if [ -s "$st/containers" ]; then echo "Error response from daemon: remove ${!#}: volume is in use - [$(head -1 "$st/containers")]" >&2; exit 1; fi
@@ -705,44 +705,37 @@ def test_vloopback_already_fixed_changes_nothing_and_mounts_a_volume(tmp_path):
 PINNED_PLUGIN = "ashald/docker-volume-loopback@sha256:caafc80c60c3630812433c6e5ebb4df5ca514333cbec4af6a3a5164c150fd170"
 
 
-def test_vloopback_missing_plugin_is_installed_like_the_validators_install_it(tmp_path):
+LOOPBACK_DIR = "{root}/var/lib/docker/loopback"
+
+
+@pytest.mark.parametrize(
+    "seed, changes, message",
+    [
+        # installed like the validators install it, pinned by digest
+        (
+            "absent",
+            [f"plugin install {PINNED_PLUGIN} --alias vloopback --grant-all-permissions DATA_DIR={LOOPBACK_DIR}"],
+            f"vloopback: installed the vloopback plugin with DATA_DIR={LOOPBACK_DIR}.",
+        ),
+        # the ticket-0331 shape: the volume reports '206/fs' until DATA_DIR is absolute
+        (
+            "relative",
+            ["plugin disable vloopback", f"plugin set vloopback DATA_DIR={LOOPBACK_DIR}", "plugin enable vloopback"],
+            f"vloopback: set the vloopback plugin's DATA_DIR from 'loopback' to {LOOPBACK_DIR}.",
+        ),
+        ("disabled", ["plugin enable vloopback"], "vloopback: enabled the vloopback plugin."),
+    ],
+)
+def test_vloopback_fix_is_idempotent(tmp_path, seed, changes, message):
+    # the first run fixes the plugin and mounts a volume; the second finds it fixed and changes nothing
     root = tmp_path / "root"
-    rc, out, _ = run_check(tmp_path, "setup_vloopback", env={"STUB_VLOOPBACK": "absent"})
-    assert rc == 0, out
-    assert _plugin_changes(tmp_path) == [
-        f"plugin install {PINNED_PLUGIN} --alias vloopback --grant-all-permissions DATA_DIR={root}/var/lib/docker/loopback"
-    ]
-    assert f"vloopback: installed the vloopback plugin with DATA_DIR={root}/var/lib/docker/loopback." in out
-    assert _test_volumes_left(tmp_path) == set()
-
-
-def test_vloopback_relative_data_dir_is_reset_to_the_data_root_then_mounts(tmp_path):
-    # the ticket-0331 shape: the volume reports '206/fs' until DATA_DIR is absolute
-    root = tmp_path / "root"
-    rc, out, _ = run_check(tmp_path, "setup_vloopback", env={"STUB_VLOOPBACK": "relative"})
-    assert rc == 0, out
-    assert _plugin_changes(tmp_path) == [
-        "plugin disable vloopback",
-        f"plugin set vloopback DATA_DIR={root}/var/lib/docker/loopback",
-        "plugin enable vloopback",
-    ]
-    assert f"set the vloopback plugin's DATA_DIR from 'loopback' to {root}/var/lib/docker/loopback" in out
-    assert _plugin(tmp_path) == f"true {root}/var/lib/docker/loopback"
-
-
-def test_vloopback_disabled_plugin_is_enabled(tmp_path):
-    rc, out, _ = run_check(tmp_path, "setup_vloopback", env={"STUB_VLOOPBACK": "disabled"})
-    assert rc == 0, out
-    assert _plugin_changes(tmp_path) == ["plugin enable vloopback"]
-    assert "vloopback: enabled the vloopback plugin." in out
-
-
-@pytest.mark.parametrize("seed", ["absent", "relative", "disabled"])
-def test_vloopback_fix_is_idempotent(tmp_path, seed):
-    # the second run finds the fixed plugin and changes nothing
     rc, out, _ = run_check(tmp_path, "setup_vloopback", env={"STUB_VLOOPBACK": seed})
     assert rc == 0, out
     first = _plugin_changes(tmp_path)
+    assert first == [change.format(root=root) for change in changes]
+    assert message.format(root=root) in out
+    assert _plugin(tmp_path) == f"true {LOOPBACK_DIR.format(root=root)}"
+    assert _test_volumes_left(tmp_path) == set()
     rc, out, _ = run_check(tmp_path, "setup_vloopback", env={"STUB_VLOOPBACK": seed})
     assert rc == 0, out
     assert _plugin_changes(tmp_path) == first
@@ -761,6 +754,8 @@ def test_vloopback_fix_is_idempotent(tmp_path, seed):
         ({"STUB_VOLUME_CREATE_FAILS": "1"}, "docker volume create -d vloopback -o size=1G failed: Error response from daemon: create lium_vloopback_check_"),
         ({"STUB_VOLUME_RM_FAILS": "1"}, "the test volume lium_vloopback_check_"),
         ({"STUB_DOCKER_ROOT": "docker"}, "Docker reports the data-root 'docker', not an absolute path"),
+        # what `docker volume inspect t` showed on the ticket-0331 host: no container starts
+        ({"STUB_RELATIVE_MOUNTPOINT": "1"}, "the vloopback plugin reports the Mountpoint '206/fs', not an absolute path"),
     ],
 )
 def test_vloopback_unfixable_host_fails_with_the_cause(tmp_path, env, reason):
@@ -769,6 +764,14 @@ def test_vloopback_unfixable_host_fails_with_the_cause(tmp_path, env, reason):
     assert f"Size-limited volumes (vloopback) do not work on this host: {reason}" in out
     assert "What to do: https://github.com/Datura-ai/lium-io/blob/main/neurons/executor/README.md#volume-plugin-vloopback" in out
     assert "vloopback: a size-limited volume mounts" not in out
+    # nothing left but the volume that will not remove; a hung container goes before its volume
+    calls = _docker_calls(tmp_path)
+    for name in {call.split()[-1] for call in calls if call.startswith("volume create ")}:
+        assert calls.index(f"rm -f {name}") < calls.index(f"volume rm -f {name}")
+    containers = _stub_state(tmp_path) / "containers"
+    assert not containers.exists() or containers.read_text() == ""
+    if "STUB_VOLUME_RM_FAILS" not in env:
+        assert _test_volumes_left(tmp_path) == set()
 
 
 def test_vloopback_volume_that_will_not_remove_names_the_unmount(tmp_path):
@@ -776,42 +779,25 @@ def test_vloopback_volume_that_will_not_remove_names_the_unmount(tmp_path):
     assert re.search(r"REASON=the test volume lium_vloopback_check_\d+ did not unmount and remove: .*VolumeDriver.Unmount", out), out
 
 
-def test_vloopback_mount_failure_still_removes_the_test_volume(tmp_path):
-    rc, _, _ = run_check(tmp_path, "vloopback_mount_test", env={"STUB_VLOOPBACK_MOUNT_FAILS": "1"})
-    assert rc == 1
-    assert (_stub_state(tmp_path) / "volumes").exists()
-    assert _test_volumes_left(tmp_path) == set()
-
-
-def test_vloopback_hung_container_is_removed_before_its_volume(tmp_path):
-    # the sysbox exit wedge: `timeout` ends the CLI, the container keeps the volume busy until `docker rm -f`
-    rc, _, _ = run_check(tmp_path, "vloopback_mount_test", env={"STUB_VLOOPBACK_RUN_HANGS": "1"})
-    assert rc == 1
-    calls = _docker_calls(tmp_path)
-    name = next(call.split()[3] for call in calls if call.startswith("run --rm --name "))
-    assert calls.index(f"rm -f {name}") < calls.index(f"volume rm -f {name}")
-    assert (_stub_state(tmp_path) / "containers").read_text() == ""
-    assert _test_volumes_left(tmp_path) == set()
-
-
-def test_vloopback_volume_created_after_a_create_timeout_is_removed(tmp_path):
-    rc, _, _ = run_check(tmp_path, "vloopback_mount_test", env={"STUB_VOLUME_CREATE_HANGS": "1"})
-    assert rc == 1
-    assert (_stub_state(tmp_path) / "volumes").exists()
-    assert _test_volumes_left(tmp_path) == set()
-
-
-def test_vloopback_install_and_mount_test_run_under_timeouts(tmp_path):
-    rc, out, _ = run_check(tmp_path, "setup_vloopback", env={"STUB_VLOOPBACK": "absent"})
+@pytest.mark.parametrize(
+    "seed, plugin_calls",
+    [
+        ("absent", ["300 docker plugin install"]),
+        ("disabled", ["30 docker plugin enable vloopback"]),
+        ("relative", ["30 docker plugin disable vloopback", "30 docker plugin set vloopback", "30 docker plugin enable vloopback"]),
+    ],
+)
+def test_vloopback_install_and_mount_test_run_under_timeouts(tmp_path, seed, plugin_calls):
+    # the fix and the mount test: a hung daemon cannot keep full install from restarting the executor
+    rc, out, _ = run_check(tmp_path, "setup_vloopback", env={"STUB_VLOOPBACK": seed})
     assert rc == 0, out
-    limits = {
-        " ".join(line.split()[1:3]): line.split()[0]
-        for line in (_stub_state(tmp_path) / "timeouts").read_text().splitlines()
-    }
-    assert limits["docker plugin"] == "300"
-    assert limits["docker run"] == "120"
-    assert limits["docker volume"] == "30"
-    assert limits["docker rm"] == "30"
+    calls = (_stub_state(tmp_path) / "timeouts").read_text().splitlines()
+    for plugin_call in plugin_calls:
+        assert any(call.startswith(plugin_call) for call in calls), calls
+    assert any(call.startswith("30 docker info --format {{.DockerRootDir}}") for call in calls)
+    assert any(call.startswith("30 docker plugin inspect") for call in calls)
+    limits = {" ".join(line.split()[1:3]): line.split()[0] for line in calls if "plugin" not in line}
+    assert limits == {"docker info": "30", "docker volume": "30", "docker run": "120", "docker rm": "30"}
 
 
 def test_interrupted_mount_test_is_cleaned_up_by_the_exit_trap(tmp_path):
@@ -837,16 +823,6 @@ def test_interrupted_mount_test_is_cleaned_up_by_the_exit_trap(tmp_path):
     assert _test_volumes_left(tmp_path) == set()
 
 
-def test_vloopback_relative_mountpoint_fails_before_any_container_runs(tmp_path):
-    # what `docker volume inspect t` showed on the ticket-0331 host; --check does not touch the plugin
-    rc, out, _ = run_check(
-        tmp_path, "vloopback_mount_test; echo \"REASON=$VLOOPBACK_REASON\"", env={"STUB_VLOOPBACK": "relative"}
-    )
-    assert "REASON=the vloopback plugin reports the Mountpoint '206/fs', not an absolute path" in out
-    assert not [call for call in _docker_calls(tmp_path) if " -v " in f" {call} "]
-    assert _test_volumes_left(tmp_path) == set()
-
-
 def test_check_vloopback_passes_on_a_fixed_host(tmp_path):
     rc, out, fix = run_check(tmp_path, "check_vloopback")
     assert rc == 0 and fix == 0
@@ -856,9 +832,9 @@ def test_check_vloopback_passes_on_a_fixed_host(tmp_path):
 @pytest.mark.parametrize(
     "seed, fix_line, command",
     [
-        ("absent", "FIX  The vloopback volume plugin is not installed", "bash   # installs it with DATA_DIR=<Docker data-root>/loopback"),
+        ("absent", "FIX  The vloopback volume plugin is not installed; the mount test cannot run until it is.", "bash   # installs it with DATA_DIR=<Docker data-root>/loopback"),
         ("relative", "FIX  The vloopback plugin's DATA_DIR is 'loopback', not an absolute path", "bash   # sets DATA_DIR=<Docker data-root>/loopback"),
-        ("disabled", "FIX  The vloopback plugin is installed but disabled", "docker plugin enable vloopback"),
+        ("disabled", "FIX  The vloopback volume plugin is not enabled; the mount test cannot run until it is.", "docker plugin enable vloopback"),
     ],
 )
 def test_check_vloopback_reports_the_fix_and_changes_nothing(tmp_path, seed, fix_line, command):
