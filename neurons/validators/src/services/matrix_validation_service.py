@@ -58,11 +58,28 @@ def should_run_allcards_probe(first_pass: bool) -> bool:
 
     While its verdict is only logged (enforcement off) it cannot fail the node, so a node's first
     pass skips it and the first verification stays as fast as the single-card run; the next cycle
-    runs it. Once enforcement is on it runs on the first pass as well.
+    runs it. Once enforcement is on it runs on the first pass as well. `first_pass` is the
+    pipeline's `ctx.config.first_pass`, which is set only while FIRST_PASS_FAST_PATH_ENABLED is on
+    (off by default): with the fast path off a first pass runs like a scored cycle, proof included.
     """
     if not settings.MATMUL_ALLCARDS_CHECK_ENABLED:
         return False
     return not first_pass or settings.MATMUL_ALLCARDS_ENFORCEMENT_ENABLED
+
+
+def allcards_probe_applies(machine_spec: dict) -> bool:
+    """Whether the all-cards work-proof has anything to prove on this machine.
+
+    It needs more than one claimed card, a reported card detail, and at least one claimed card of
+    a model with a registry VRAM size (the others fail on their own as `unknown_model`). A
+    single-GPU node, or one with no card that can be sized, is left to the single-card run.
+    """
+    gpu = (machine_spec or {}).get("gpu", {}) or {}
+    gpu_count = gpu.get("count", 0) or 0
+    details = gpu.get("details", []) or []
+    if gpu_count <= 1 or not details:
+        return False
+    return any(matmul_probe_vram_mb(card.get("name", "") or "") for card in details[:gpu_count])
 
 # VRAM (MB) the work-proof leaves untouched: a quarter of the card, clamped between the two.
 # The reserve must clear what an idle card may legally hold (GPU_HELD_VRAM_MB_LIMIT, 2048 MB —
@@ -235,11 +252,30 @@ class AllCardsProbe:
 
 
 @dataclass
+class CardOutcome:
+    """One card's run in the all-cards work-proof: its logged outcome and, when verified, its judged
+    result (the same shape the single-card run returns). `as_log()` is the per-card log shape."""
+
+    card_index: int
+    ok: bool
+    reason: str
+    elapsed_seconds: float | None = None
+    result: "ValidationResult | None" = None
+
+    def as_log(self) -> dict:
+        logged = {"card_index": self.card_index, "ok": self.ok, "reason": self.reason}
+        if self.elapsed_seconds is not None:
+            logged["elapsed_seconds"] = self.elapsed_seconds
+        return logged
+
+
+@dataclass
 class CardChallenges:
     """The per-card challenges of one all-cards work-proof, built before any card runs.
 
     `per_card` holds every claimed card's outcome so far: the cards decided without a run (no
-    detail, an invalid or duplicated UUID) already carry their failure reason. `challenges` holds
+    detail, a model with no registry size, an invalid or duplicated UUID) already carry their
+    failure reason. `challenges` holds
     one challenge per card that runs, keyed by card index; `close()` releases their keys.
     """
 
@@ -346,14 +382,15 @@ class ValidationService:
         self,
         cards: list[dict],
         gpu_count: int,
-        sized_vram_mb: list[int],
+        sized_vram_mb: list[int | None],
         default_extra: dict,
     ) -> CardChallenges | None:
         """Decide the cards that cannot be verified and build one challenge per remaining card.
 
-        A claimed card with no reported detail, a UUID that is not a GPU UUID, or a UUID reported
-        for more than one card gets no run. Returns None (every built challenge released) when the
-        native library fails to produce a cipher: our own fault, not the host's.
+        A claimed card with no reported detail, a model with no registry size (`unknown_model`:
+        it cannot be sized), a UUID that is not a GPU UUID, or a UUID reported for more than one
+        card gets no run and fails on its own. Returns None (every built challenge released) when
+        the native library fails to produce a cipher: our own fault, not the host's.
         """
         reported_uuids = [str(card.get("uuid", "") or "") for card in cards]
         prepared = CardChallenges(
@@ -368,6 +405,9 @@ class ValidationService:
             for index, card in enumerate(cards):
                 gpu_uuid = reported_uuids[index]
                 prepared.per_card[index]["gpu_uuid"] = gpu_uuid
+                if not sized_vram_mb[index]:
+                    prepared.per_card[index]["reason"] = "unknown_model"
+                    continue
                 if not GPU_UUID_PATTERN.match(gpu_uuid):
                     prepared.per_card[index]["reason"] = "uuid_invalid"
                     continue
@@ -428,20 +468,17 @@ class ValidationService:
         # one card's time per round. `vram_budget_mb` caps each card's size as it caps the
         # single-card run.
         # Returns None when it does not apply — a single claimed card (legacy/whole-single-GPU path)
-        # or a model with no known registry VRAM size (cannot size safely) — so the caller's
-        # single-card path stays authoritative.
+        # or no card of a model with a known registry VRAM size (none can be sized safely) — so the
+        # caller's single-card path stays authoritative. When only some cards have an unknown model,
+        # those cards fail on their own (`unknown_model`) and the others are still proved.
+        if not allcards_probe_applies(machine_spec):
+            return None
         gpu = machine_spec.get("gpu", {}) or {}
         gpu_count = gpu.get("count", 0) or 0
-        details = gpu.get("details", []) or []
-        if gpu_count <= 1 or not details:
-            return None
-
-        cards = details[:gpu_count]
+        cards = (gpu.get("details", []) or [])[:gpu_count]
         sized_vram_mb = [self._card_probe_vram_mb(card) for card in cards]
-        if not all(sized_vram_mb):
-            return None
         if vram_budget_mb:
-            sized_vram_mb = [min(sized, vram_budget_mb) for sized in sized_vram_mb]
+            sized_vram_mb = [sized and min(sized, vram_budget_mb) for sized in sized_vram_mb]
 
         script_path = f"{executor_info.root_dir}/src/decrypt_challenge.py"
         prepared = self._prepare_card_challenges(cards, gpu_count, sized_vram_mb, default_extra)
@@ -456,7 +493,7 @@ class ValidationService:
             # push the tail channels into the ssh_error branch and read as a failed work-proof.
             gate = asyncio.Semaphore(MATMUL_ALLCARDS_MAX_CONCURRENT_CARDS)
 
-            async def run_gated(index: int, challenge: MatmulChallenge) -> dict:
+            async def run_gated(index: int, challenge: MatmulChallenge) -> CardOutcome:
                 async with gate:
                     return await self._run_one_card(
                         ssh_client,
@@ -477,10 +514,10 @@ class ValidationService:
 
         # Each run returns its own card's outcome and judged result; nothing is shared between runs.
         card_results: dict[int, ValidationResult] = {}
-        for outcome, card_result in outcomes:
-            per_card[outcome["card_index"]].update(outcome)
-            if outcome["ok"]:
-                card_results[outcome["card_index"]] = card_result
+        for outcome in outcomes:
+            per_card[outcome.card_index].update(outcome.as_log())
+            if outcome.ok:
+                card_results[outcome.card_index] = outcome.result
 
         verified_count = sum(1 for outcome in per_card if outcome["ok"])
         wall_clock_limit = allcards_wall_clock_limit_seconds(len(challenges))
@@ -546,7 +583,7 @@ class ValidationService:
         index: int,
         gpu_uuid: str,
         challenge: "MatmulChallenge",
-    ) -> tuple[dict, ValidationResult | None]:
+    ) -> CardOutcome:
         # run one card's challenge pinned to that card's reported UUID and judge the answer with
         # this challenge's own key. The command sent to the executor is the single-card command with
         # a CUDA_VISIBLE_DEVICES prefix, and never reveals which card/signal disagreed
@@ -560,9 +597,9 @@ class ValidationService:
         try:
             result = await ssh_client.run(command, timeout=MATRIX_VERIFY_TIMEOUT_SECONDS)
         except (TimeoutError, asyncssh.TimeoutError):
-            return {"card_index": index, "ok": False, "reason": "timeout"}, None
+            return CardOutcome(index, ok=False, reason="timeout")
         except Exception as e:
-            return {"card_index": index, "ok": False, "reason": f"ssh_error: {e}"}, None
+            return CardOutcome(index, ok=False, reason=f"ssh_error: {e}")
         # This card's own run time on the validator's clock, for the logs only; no verdict reads it.
         elapsed_seconds = round(time.perf_counter() - run_started, 3)
 
@@ -570,36 +607,27 @@ class ValidationService:
         stdout = getattr(result, "stdout", "") or ""
         stderr = getattr(result, "stderr", "") or ""
         if exit_status != 0:
-            return {
-                "card_index": index,
-                "ok": False,
-                "reason": f"exit_status={exit_status}",
-                "elapsed_seconds": elapsed_seconds,
-            }, None
+            return CardOutcome(
+                index,
+                ok=False,
+                reason=f"exit_status={exit_status}",
+                elapsed_seconds=elapsed_seconds,
+            )
         if not stdout.strip():
-            return {
-                "card_index": index,
-                "ok": False,
-                "reason": "empty_output",
-                "elapsed_seconds": elapsed_seconds,
-            }, None
+            return CardOutcome(
+                index, ok=False, reason="empty_output", elapsed_seconds=elapsed_seconds
+            )
         # Output alone proves nothing: the answer has to carry this card's nonce.
         verdict = self.evaluate_matmul_output(
             challenge, stdout=stdout.strip(), stderr=stderr.strip()
         )
         if not verdict.success:
-            return {
-                "card_index": index,
-                "ok": False,
-                "reason": "unverified",
-                "elapsed_seconds": elapsed_seconds,
-            }, None
-        return {
-            "card_index": index,
-            "ok": True,
-            "reason": "",
-            "elapsed_seconds": elapsed_seconds,
-        }, verdict
+            return CardOutcome(
+                index, ok=False, reason="unverified", elapsed_seconds=elapsed_seconds
+            )
+        return CardOutcome(
+            index, ok=True, reason="", elapsed_seconds=elapsed_seconds, result=verdict
+        )
 
     def prepare_matmul_challenge(
         self,
@@ -829,10 +857,10 @@ class ValidationService:
         # DAH-2671 item 3: all-claimed-cards work-proof. Shadow (MATMUL_ALLCARDS_CHECK_ENABLED
         # without enforcement, the default) logs timing + per-card verdict and NEVER changes the
         # returned result; MATMUL_ALLCARDS_ENFORCEMENT_ENABLED fails the validation when fewer cards
-        # are verified than reported or the aggregate wall-clock is over. Single-card /
-        # unknown-model hosts skip it (probe returns None), which also keeps the legacy single-card
-        # path below unchanged. `first_pass` is the caller's word that this is a node's first,
-        # unscored verification: see `should_run_allcards_probe`.
+        # are verified than reported or the aggregate wall-clock is over. Single-card hosts and
+        # hosts with no card of a known model skip it (probe returns None), which also keeps the
+        # legacy single-card path below unchanged. `first_pass` is the caller's word that this is a
+        # node's first, unscored verification: see `should_run_allcards_probe`.
         # A passing verdict replaces the single-card run: card 0 was just verified with a challenge
         # of its own, sized from its reported capacity as the single-card run sizes it, so its
         # result is returned and card 0 is not run a second time. A failing

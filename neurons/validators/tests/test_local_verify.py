@@ -61,6 +61,16 @@ from core.config import settings
 from tests.helpers import build_context_config, build_services, build_state, make_context
 
 SPECS = {"gpu": {"count": 1, "details": [{"uuid": "GPU-1", "name": "H100", "capacity": 81559}]}}
+# A node the all-cards proof applies to: more than one card, of a model with a registry size.
+MULTI_GPU_SPECS = {
+    "gpu": {
+        "count": 2,
+        "details": [
+            {"uuid": f"GPU-{index}", "name": "NVIDIA H100 80GB HBM3", "capacity": 81559}
+            for index in range(2)
+        ],
+    }
+}
 EXECUTOR_UUID = "executor-123"
 MINER_HOTKEY = "5MinerHotkeyOfTheExecutorUnderTest"
 
@@ -1175,6 +1185,7 @@ async def test_all_cards_check_keeps_the_matmul_on_ssh(
             validation=validation,
             verifyx=verifyx_service,
             first_pass=first_pass,
+            state=build_state(specs=MULTI_GPU_SPECS),
         )
         local, verifyx, capability = await run_local_then_consumers(
             ctx, LocalVerifyCheck(client_factory=client_factory(keypair))
@@ -1210,6 +1221,7 @@ async def test_all_cards_check_in_shadow_leaves_the_first_pass_matmul_in_the_one
             validation=validation,
             verifyx=verifyx_service,
             first_pass=True,
+            state=build_state(specs=MULTI_GPU_SPECS),
         )
         local, _verifyx, capability = await run_local_then_consumers(
             ctx, LocalVerifyCheck(client_factory=client_factory(keypair))
@@ -1236,12 +1248,44 @@ async def test_all_cards_check_with_verifyx_off_makes_no_call(
             verifyx=verifyx_service,
             verifyx_enabled=False,
             first_pass=first_pass,
+            state=build_state(specs=MULTI_GPU_SPECS),
         )
         factory = MagicMock(side_effect=AssertionError("nothing to run: no client, no /version"))
         result = await LocalVerifyCheck(client_factory=factory).run(ctx)
     assert result.passed and result.event.reason_code == "LOCAL_VERIFY_FALLBACK"
     assert result.event.what_we_saw["reason"] == "allcards_ssh"
     assert executor.intents == [] and not factory.called
+
+
+@pytest.mark.asyncio
+@ALLCARDS_RUNS
+async def test_single_gpu_node_keeps_the_matmul_in_the_one_call(
+    keypair, monkeypatch, local_verify_on, verifyx_service, first_pass, enforce
+):
+    """A single-GPU node gets no all-cards proof (the probe does not apply), so the check being on
+    must not move its matmul to SSH: with VerifyX off the call carries the matmul alone."""
+    monkeypatch.setattr(settings, "MATMUL_ALLCARDS_CHECK_ENABLED", True)
+    monkeypatch.setattr(settings, "MATMUL_ALLCARDS_ENFORCEMENT_ENABLED", enforce)
+    validation = matmul_service(monkeypatch)
+    validation.validate_gpu_model_and_process_job = AsyncMock(
+        side_effect=AssertionError("SSH matmul must not run")
+    )
+    async with FakeExecutor(keypair) as executor:
+        ctx = context(
+            keypair,
+            executor.executor_info,
+            validation=validation,
+            verifyx=verifyx_service,
+            verifyx_enabled=False,
+            first_pass=first_pass,
+        )
+        local, _verifyx, capability = await run_local_then_consumers(
+            ctx, LocalVerifyCheck(client_factory=client_factory(keypair))
+        )
+    assert executor.intents[0]["steps"]["matmul"] is not None
+    assert local.event.what_we_saw["consumed"] == ["matmul"]
+    assert local.event.what_we_saw["fallbacks"] == {}
+    assert capability.passed and capability.event.what_we_saw["transport"] == "local_verify"
 
 
 @pytest.mark.asyncio

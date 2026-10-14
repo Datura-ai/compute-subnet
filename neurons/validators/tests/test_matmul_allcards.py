@@ -393,13 +393,62 @@ async def test_legacy_single_card_is_not_judged_by_all_cards(svc, lib):
 
 @pytest.mark.asyncio
 async def test_unknown_model_skips_probe(svc, lib):
-    # a model with no registry VRAM size cannot be sized safely → probe returns None (fail-open).
+    # no card of a model with a registry VRAM size: none can be sized safely → probe returns None
+    # (fail-open to the single-card run). A mix fails only the unknown cards (test below).
     host = FakeHost(lib, _uuids(8), model="NVIDIA MADE-UP 9000")
     probe = await svc._probe_all_claimed_cards(
         host, _executor(), {}, _spec(8, model="NVIDIA MADE-UP 9000")
     )
     assert probe is None
     assert host.commands == []
+
+
+def _spec_with_unknown_card(count, unknown_index):
+    spec = _spec(count)
+    spec["gpu"]["details"][unknown_index]["name"] = "NVIDIA MADE-UP 9000"
+    return spec
+
+
+@pytest.mark.asyncio
+async def test_one_unknown_model_card_fails_alone_and_the_others_are_proved(svc, lib):
+    # one card of a model with no registry size cannot be sized: that card fails on its own
+    # (no run), every other card is still proved, and the verdict fails.
+    uuids = _uuids(4)
+    host = FakeHost(lib, uuids)
+    probe = await svc._probe_all_claimed_cards(
+        host, _executor(), {}, _spec_with_unknown_card(4, 2)
+    )
+    assert probe is not None
+    assert _reasons(probe) == ["", "", "unknown_model", ""]
+    assert probe.verified_count == 3
+    assert probe.passed is False
+    assert probe.failure_reason == "1/4 card(s) failed device work-proof"
+    assert sorted(host.pinned_runs) == sorted(uuids[:2] + uuids[3:])
+    assert sorted(probe.card_results) == [0, 1, 3]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enforce", [False, True])
+async def test_one_unknown_model_card_under_each_mode(svc, lib, monkeypatch, enforce):
+    _flags(monkeypatch, enforce=enforce)
+    host = FakeHost(lib, _uuids(4))
+    result = await svc.validate_gpu_model_and_process_job(
+        ssh_client=host,
+        executor_info=_executor(),
+        default_extra={},
+        machine_spec=_spec_with_unknown_card(4, 2),
+    )
+    unpinned_runs = sum(1 for cmd in host.commands if _pinned(cmd) is None)
+    if enforce:
+        assert result.success is False
+        assert result.error_message == (
+            "All-cards GPU work-proof failed: 1/4 card(s) failed device work-proof"
+        )
+        assert unpinned_runs == 0
+    else:
+        # shadow: the failed verdict leaves the result to the single-card run, as before
+        assert result.success is True
+        assert unpinned_runs == 1
 
 
 @pytest.mark.asyncio

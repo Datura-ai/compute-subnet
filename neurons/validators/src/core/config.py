@@ -384,8 +384,9 @@ class Settings(BaseSettings):
     # The check runs by default and logs its verdict ("All-cards GPU work-proof"). A passing verdict
     # replaces the single-card run (card 0's own result is returned, card 0 is not run twice); a
     # failing one in shadow leaves the result to the single-card run, as before.
-    # A node's first pass skips the proof while enforcement is off (its verdict could not change
-    # anything), so the first verification stays as fast as the single-card run.
+    # A first pass on the fast path (FIRST_PASS_FAST_PATH_ENABLED, off by default) skips the proof
+    # while enforcement is off (its verdict could not change anything). With the fast path off a
+    # node's first pass is not marked as one, so it runs the proof like a scored cycle.
     # Set MATMUL_ALLCARDS_CHECK_ENABLED=false to turn the run off.
     # MATMUL_ALLCARDS_ENFORCEMENT_ENABLED=true makes a failed verdict fail the validation and runs
     # the proof on the first pass as well; it stays off until the logged verdicts have been reviewed.
