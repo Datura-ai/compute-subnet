@@ -598,6 +598,24 @@ class ValidationService:
             # Authenticated: these override anything in the plaintext line.
             uuid = inner_obj["uuid"].strip()
             metrics = inner_obj.get("metrics")
+        elif getattr(self.wrapper, "_has_sealed", False):
+            # A seal-aware library got no sealed blob: the uuid and metrics are the executor's plaintext,
+            # which its own wrapper can edit, and the metrics reach the published specs.
+            logger.warning(
+                _m(
+                    "MATMUL_RESULT_UNSEALED",
+                    extra=get_extra_info({**log_extra, "enforced": settings.MATMUL_SEAL_REQUIRED_ENABLED}),
+                )
+            )
+            if settings.MATMUL_SEAL_REQUIRED_ENABLED:
+                return ValidationResult(
+                    success=False,
+                    expected_uuid=verifier_params.uuid,
+                    returned_uuid="",
+                    stdout=stdout,
+                    stderr=stderr,
+                    error_message="Unsealed result from a seal-aware verifier",
+                )
 
         try:
             uuid_array = verifier_params.uuid.split(",")
