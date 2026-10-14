@@ -51,6 +51,7 @@ class DummyValidationService:
         executor_info,
         default_extra,
         machine_spec,
+        first_pass=False,
     ):
         """Mock method that mimics the real validation service."""
         # Store the call parameters so we can verify them in tests
@@ -59,6 +60,7 @@ class DummyValidationService:
             "executor_info": executor_info,
             "default_extra": default_extra,
             "machine_spec": machine_spec,
+            "first_pass": first_pass,
         }
 
         # Simulate an exception if requested

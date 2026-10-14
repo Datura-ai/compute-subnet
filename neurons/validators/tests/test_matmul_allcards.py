@@ -8,7 +8,11 @@ CUDA_VISIBLE_DEVICES, judged like the single-card run and timed in aggregate on 
   - shadow (the default) logs the verdict and leaves the validation result alone, enforcement
     fails the validation;
   - an aggregate wall-clock over threshold fails the verdict;
-  - a single-card (legacy) executor is never judged by the all-cards path (probe returns None).
+  - a single-card (legacy) executor is never judged by the all-cards path (probe returns None);
+  - the cards run at the same time, and a passing verdict replaces the single-card run (card 0's
+    own result is returned, card 0 is not run twice); a failing verdict in shadow leaves the result
+    to the single-card run;
+  - a node's first pass skips the proof while it is not enforced and runs it once it is.
 """
 import asyncio
 import json
@@ -280,9 +284,10 @@ async def test_enforcement_off_logs_verdict_and_leaves_result_unchanged(
         result = await svc.validate_gpu_model_and_process_job(
             ssh_client=host, executor_info=_executor(), default_extra={}, machine_spec=_spec(8)
         )
-    # shadow: the validation result is the single-card run's, untouched
+    # shadow: a failed verdict leaves the validation result to the single-card run
     assert result.success is True
     assert result.error_message == ""
+    assert sum(1 for cmd in host.commands if _pinned(cmd) is None) == 1
     verdicts = [rec for rec in caplog.records if "All-cards GPU work-proof" in rec.getMessage()]
     assert len(verdicts) == 1
     assert verdicts[0].levelname == "WARNING"
@@ -477,3 +482,243 @@ async def test_a_plain_card_failure_does_not_sweep(svc, lib, monkeypatch):
     assert probe is not None and probe.passed is False
     assert _reasons(probe) == ["exit_status=1", ""]
     killed.assert_not_awaited()
+
+
+# --- first pass ------------------------------------------------------------------------------------
+
+
+def _unpinned_runs(host) -> int:
+    return sum(1 for cmd in host.commands if not cmd.startswith("pkill") and _pinned(cmd) is None)
+
+
+@pytest.mark.parametrize(
+    "check, enforce, first_pass, runs",
+    [
+        (False, False, False, False),
+        (False, True, True, False),
+        (True, False, False, True),
+        (True, False, True, False),
+        (True, True, False, True),
+        (True, True, True, True),
+    ],
+)
+def test_allcards_probe_runs(monkeypatch, check, enforce, first_pass, runs):
+    monkeypatch.setattr(mvs.settings, "MATMUL_ALLCARDS_CHECK_ENABLED", check, raising=False)
+    monkeypatch.setattr(mvs.settings, "MATMUL_ALLCARDS_ENFORCEMENT_ENABLED", enforce, raising=False)
+    assert mvs.allcards_probe_runs(first_pass) is runs
+
+
+@pytest.mark.asyncio
+async def test_first_pass_in_shadow_skips_the_per_card_runs(svc, lib, monkeypatch, caplog):
+    _flags(monkeypatch, enforce=False)
+    host = FakeHost(lib, _uuids(4))
+    with caplog.at_level("INFO", logger=mvs.logger.name):
+        result = await svc.validate_gpu_model_and_process_job(
+            ssh_client=host,
+            executor_info=_executor(),
+            default_extra={},
+            machine_spec=_spec(4),
+            vram_budget_mb=8192,
+            first_pass=True,
+        )
+    assert result.success is True
+    assert host.pinned_runs == []
+    assert _unpinned_runs(host) == 1
+    assert any("skipped on the first pass" in rec.getMessage() for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_first_pass_under_enforcement_runs_every_card_within_the_budget(
+    svc, lib, monkeypatch
+):
+    _flags(monkeypatch, enforce=True)
+    uuids = _uuids(4)
+    host = FakeHost(lib, uuids)
+    sized = []
+    real_dims = svc.get_max_matrix_dimensions
+    monkeypatch.setattr(
+        svc, "get_max_matrix_dimensions", lambda mb, n: sized.append(mb) or real_dims(mb, n)
+    )
+    result = await svc.validate_gpu_model_and_process_job(
+        ssh_client=host,
+        executor_info=_executor(),
+        default_extra={},
+        machine_spec=_spec(4),
+        vram_budget_mb=8192,
+        first_pass=True,
+    )
+    assert result.success is True
+    assert sorted(host.pinned_runs) == sorted(uuids)
+    assert _unpinned_runs(host) == 0
+    assert sized == [8192] * 4
+
+
+@pytest.mark.asyncio
+async def test_first_pass_under_enforcement_fails_on_a_bad_card(svc, lib, monkeypatch):
+    _flags(monkeypatch, enforce=True)
+    uuids = _uuids(4)
+    host = FakeHost(lib, uuids, real=uuids[:3])
+    result = await svc.validate_gpu_model_and_process_job(
+        ssh_client=host,
+        executor_info=_executor(),
+        default_extra={},
+        machine_spec=_spec(4),
+        vram_budget_mb=8192,
+        first_pass=True,
+    )
+    assert result.success is False
+    assert "1/4 card(s) failed" in result.error_message
+
+
+@pytest.mark.asyncio
+async def test_a_budget_alone_is_not_read_as_a_first_pass(svc, lib, monkeypatch):
+    # first_pass is passed explicitly; a VRAM budget without it still runs the proof
+    _flags(monkeypatch, enforce=False)
+    uuids = _uuids(4)
+    host = FakeHost(lib, uuids)
+    result = await svc.validate_gpu_model_and_process_job(
+        ssh_client=host,
+        executor_info=_executor(),
+        default_extra={},
+        machine_spec=_spec(4),
+        vram_budget_mb=8192,
+    )
+    assert result.success is True
+    assert sorted(host.pinned_runs) == sorted(uuids)
+
+
+# --- scored cycles: parallel runs, card 0 once -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cards_run_at_the_same_time(svc, lib):
+    # every card's run must be in flight before any returns: sequential runs would never get there
+    uuids = _uuids(4)
+    host = FakeHost(lib, uuids)
+    started: set[str] = set()
+    all_started = asyncio.Event()
+
+    async def run(cmd, *a, **k):
+        started.add(_pinned(cmd))
+        if len(started) == len(uuids):
+            all_started.set()
+        await asyncio.wait_for(all_started.wait(), timeout=2)
+        return await host.run(cmd, *a, **k)
+
+    probe = await svc._probe_all_claimed_cards(SimpleNamespace(run=run), _executor(), {}, _spec(4))
+    assert probe.passed is True
+    assert started == set(uuids)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enforce", [False, True])
+async def test_passing_verdict_replaces_the_single_card_run(svc, lib, monkeypatch, enforce):
+    _flags(monkeypatch, enforce=enforce)
+    uuids = _uuids(4)
+    host = FakeHost(lib, uuids)
+    result = await svc.validate_gpu_model_and_process_job(
+        ssh_client=host, executor_info=_executor(), default_extra={}, machine_spec=_spec(4)
+    )
+    assert result.success is True
+    # each card ran once, card 0 included, and no unpinned single-card run followed
+    assert sorted(host.pinned_runs) == sorted(uuids)
+    assert _unpinned_runs(host) == 0
+    # the returned result is card 0's own: it proves the nonce of the challenge built for card 0
+    card0 = next(c for c in lib.challenges.values() if c["machine_info"]["uuids"] == uuids[0])
+    assert result.expected_uuid == card0["nonce"]
+    assert result.returned_uuid == card0["nonce"]
+
+
+@pytest.mark.asyncio
+async def test_each_card_keeps_its_own_result_whatever_order_they_finish(svc, lib):
+    uuids = _uuids(4)
+    host = FakeHost(lib, uuids)
+
+    async def run(cmd, *a, **k):
+        # card 0 finishes last, card 3 first
+        await asyncio.sleep(0.01 * (len(uuids) - uuids.index(_pinned(cmd))))
+        return await host.run(cmd, *a, **k)
+
+    probe = await svc._probe_all_claimed_cards(SimpleNamespace(run=run), _executor(), {}, _spec(4))
+    assert probe.passed is True
+    for index, uuid in enumerate(uuids):
+        built_for = next(c for c in lib.challenges.values() if c["machine_info"]["uuids"] == uuid)
+        assert probe.card_results[index].expected_uuid == built_for["nonce"]
+        assert probe.card_results[index].returned_uuid == built_for["nonce"]
+    assert len({result.expected_uuid for result in probe.card_results.values()}) == 4
+
+
+@pytest.mark.asyncio
+async def test_answers_swapped_between_cards_verify_none(svc, lib):
+    # cards 0 and 1 each hand back the other's genuine answer: neither seal opens
+    uuids = _uuids(2)
+    honest = FakeHost(lib, uuids)
+    commands: dict[str, str] = {}
+    both = asyncio.Event()
+
+    async def run(cmd, *a, **k):
+        commands[_pinned(cmd)] = cmd
+        if len(commands) == 2:
+            both.set()
+        await both.wait()
+        other = commands[uuids[1] if _pinned(cmd) == uuids[0] else uuids[0]]
+        return await honest.run(other, *a, **k)
+
+    probe = await svc._probe_all_claimed_cards(SimpleNamespace(run=run), _executor(), {}, _spec(2))
+    assert probe.passed is False
+    assert _reasons(probe) == ["unverified", "unverified"]
+    assert probe.card_results == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [0, 2])
+async def test_one_bad_card_among_several(svc, lib, monkeypatch, bad):
+    uuids = _uuids(4)
+    real = [uuid for i, uuid in enumerate(uuids) if i != bad]
+
+    _flags(monkeypatch, enforce=True)
+    host = FakeHost(lib, uuids, real=real)
+    result = await svc.validate_gpu_model_and_process_job(
+        ssh_client=host, executor_info=_executor(), default_extra={}, machine_spec=_spec(4)
+    )
+    assert result.success is False
+    assert result.error_message == (
+        "All-cards GPU work-proof failed: 1/4 card(s) failed device work-proof"
+    )
+    assert _unpinned_runs(host) == 0
+
+    # shadow: flagged in the log, and the single-card run decides as before
+    _flags(monkeypatch, enforce=False)
+    host = FakeHost(lib, uuids, real=real)
+    probe = await svc._probe_all_claimed_cards(host, _executor(), {}, _spec(4))
+    assert probe.passed is False
+    assert [card["ok"] for card in probe.per_card] == [i != bad for i in range(4)]
+    assert bad not in probe.card_results
+    host = FakeHost(lib, uuids, real=real)
+    result = await svc.validate_gpu_model_and_process_job(
+        ssh_client=host, executor_info=_executor(), default_extra={}, machine_spec=_spec(4)
+    )
+    assert result.success is True
+    assert _unpinned_runs(host) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enforce", [False, True])
+async def test_one_card_timing_out(svc, lib, monkeypatch, enforce):
+    _flags(monkeypatch, enforce=enforce)
+    killed = AsyncMock()
+    monkeypatch.setattr(svc, "_kill_remote_matmul", killed)
+    uuids = _uuids(4)
+    host = FakeHost(lib, uuids, overrides={uuids[1]: TimeoutError()})
+    result = await svc.validate_gpu_model_and_process_job(
+        ssh_client=host, executor_info=_executor(), default_extra={}, machine_spec=_spec(4)
+    )
+    killed.assert_awaited_once()
+    if enforce:
+        assert result.success is False
+        assert "1/4 card(s) failed" in result.error_message
+        assert _unpinned_runs(host) == 0
+    else:
+        # the orphan was swept before the single-card run that now decides
+        assert result.success is True
+        assert _unpinned_runs(host) == 1

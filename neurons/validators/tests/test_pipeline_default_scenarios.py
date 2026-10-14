@@ -220,7 +220,9 @@ class DummyRedisService:
 class DummyValidationService:
     """Mock validation service for GPU capability checks."""
 
-    async def validate_gpu_model_and_process_job(self, *, ssh_client, executor_info, default_extra, machine_spec):
+    async def validate_gpu_model_and_process_job(
+        self, *, ssh_client, executor_info, default_extra, machine_spec, first_pass=False
+    ):
         return ValidationResult(
             success=True,
             expected_uuid="test-uuid-123",
