@@ -348,3 +348,22 @@ async def test_flag_off_zero_executors_is_still_a_miner_failure(rest_service, mo
     [result] = out["results"]
     assert result.executor_info.uuid == "11111111-1111-1111-1111-111111111111"
     assert "zero executors" in result.log_text
+
+
+@pytest.mark.asyncio
+async def test_flag_off_zero_executors_logs_the_rented_node_once(rest_service, monkeypatch, caplog):
+    """Zero executors never reaches the builder: the shadow log comes from the probe."""
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "RENTED_EXECUTOR_NOT_LISTED_REPORT_ENABLED", False)
+    rest_service.miner_returns()
+    rented_data = RentedExecutorsResponse(executors={MISSING: rented()})
+
+    with caplog.at_level("WARNING"):
+        out = await request(rest_service, rented_data)
+
+    [result] = out["results"]
+    assert result.executor_info.uuid == "11111111-1111-1111-1111-111111111111"
+    shadow = [r for r in caplog.records if "RENTED_EXECUTOR_NOT_LISTED_SHADOW" in r.getMessage()]
+    assert len(shadow) == 1
+    assert shadow[0].msg.extra["executor_uuid"] == MISSING
