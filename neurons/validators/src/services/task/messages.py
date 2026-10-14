@@ -1320,13 +1320,6 @@ def _verify_failed(label: str, reason_suffix: str, remediation: str) -> MessageT
 
 
 class VerifyXMessages:
-    DISABLED = MessageTemplate(
-        event="VerifyX validation skipped",
-        reason="VERIFYX_DISABLED",
-        severity="info",
-        category="env",
-        impact="Proceed",
-    )
     FILLER_SKIPPED = MessageTemplate(
         event="VerifyX validation skipped",
         reason="VERIFYX_SKIPPED_ACTIVE_FILLER",
