@@ -21,6 +21,7 @@ from datura.requests.miner_requests import ExecutorSSHInfo
 from docker.errors import APIError, NotFound
 from payload_models.payloads import FailedContainerRequest
 from services.docker_service import DockerService
+from services.node_host import node_owner
 from urllib3.util import Timeout
 from services.rental_docker_sdk import (
     TRANSPORT_ERROR_CLASS,
@@ -646,8 +647,57 @@ async def test_a_stalled_hostname_lookup_fails_the_connect_at_the_deadline_off_t
         release.set()
 
     assert elapsed < 2
-    assert len(lookup_threads) == 1 and lookup_threads[0].startswith("rental-dns")
+    assert len(lookup_threads) == 1 and lookup_threads[0].startswith("node-dns")
     api_client_factory.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_miner_whose_dns_stalls_cannot_stop_another_miners_rental_connect(monkeypatch):
+    # review of #1565: hostname executors behind a zone that drops queries held every thread of the rental
+    # lookup pool, and honest miners' hostname rentals then failed at the deadline. The rental connect now
+    # resolves under the authenticated miner's quota (node_owner), like every other node lookup.
+    import services.node_host as node_host
+    import services.rental_docker_sdk as sdk
+
+    release = threading.Event()
+
+    def lookup(host, port, *args, **kwargs):
+        if "evil" in host:
+            release.wait(5)
+            raise socket.gaierror(-3, "Temporary failure in name resolution")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", lookup)
+    monkeypatch.setattr(sdk, "_validate_paramiko_known_hosts", lambda path: None)
+    monkeypatch.setattr(sdk, "_DOCKER_SSH_REOPEN_TIMEOUT_SECONDS", 0.5)
+    api_client_factory = Mock(return_value=_FakeApiClient())
+    factory = RentalDockerSdkClientFactory(api_client_factory=api_client_factory)
+
+    def info(address):
+        return SimpleNamespace(
+            address=address, ssh_port=2222, ssh_username="root", ssh_host_key="ssh-ed25519 AAAATESTKEY"
+        )
+
+    async def connect_as(miner, address):
+        with node_owner(miner):
+            async with factory.connect(executor_info=info(address), private_key="PRIVATE KEY"):
+                pass
+
+    try:
+        hostile = [
+            asyncio.create_task(connect_as("hostile-hotkey", f"gpu.evil{i}.example"))
+            for i in range(node_host.NODE_DNS_MAX_WORKERS + 8)
+        ]
+        await asyncio.sleep(0.05)
+
+        await connect_as("honest-hotkey", "gpu-node1.good.example")
+
+        api_client_factory.assert_called_once()
+        results = await asyncio.gather(*hostile, return_exceptions=True)
+        assert all(isinstance(r, RentalDockerConnectionError) for r in results)
+        assert node_host._dns_busy.get("miner:hostile-hotkey", 0) <= node_host.NODE_DNS_PER_MINER
+    finally:
+        release.set()
 
 
 # ---------------------------------------------------------------------------

@@ -17,7 +17,7 @@ from typing import TypeVar
 
 from core.utils import _m, get_extra_info
 from datura.requests.miner_requests import ExecutorSSHInfo
-from services.node_host import NodeHostError, dial_validated, resolve_public_host
+from services.node_host import NodeHostError, dial_validated, resolve_node_host
 
 
 # 1 h: no rental pull that succeeded in 30 days took more than 44 min (DAH-3720).
@@ -67,15 +67,6 @@ _T = TypeVar("_T")
 _DOCKER_EXECUTOR_MAX_WORKERS = 32
 _DOCKER_EXECUTOR = ThreadPoolExecutor(
     max_workers=_DOCKER_EXECUTOR_MAX_WORKERS, thread_name_prefix="docker-sdk"
-)
-# A node registered by hostname is resolved before every connect (services.node_host). The name is the
-# miner's, and so is its DNS: a zone that never answers holds each lookup until the system resolver
-# gives up. Those lookups run here, never in the default executor (see above), and the connect waits
-# for one at most _DOCKER_SSH_REOPEN_TIMEOUT_SECONDS; a stalled lookup can fill only this pool, which
-# delays other hostname nodes' connects, not the validator's Redis/WebSocket DNS or Docker calls.
-_RENTAL_DNS_EXECUTOR_MAX_WORKERS = 8
-_RENTAL_DNS_EXECUTOR = ThreadPoolExecutor(
-    max_workers=_RENTAL_DNS_EXECUTOR_MAX_WORKERS, thread_name_prefix="rental-dns"
 )
 # DAH-3199: every rental on a host shares this user-defined bridge instead of docker0. The daemon's
 # default bridge allows inter-container traffic, and a pod holds NET_ADMIN, so two rentals on a split
@@ -1226,12 +1217,12 @@ class RentalDockerSdkClientFactory:
     ) -> AsyncIterator[RentalDockerSdkClient]:
         host_key = require_rental_docker_ssh_host_key(executor_info)
         # a hostname is resolved and checked once here; paramiko then dials (and re-dials) these
-        # addresses over a socket we open, never a second lookup of the name
+        # addresses over a socket we open, never a second lookup of the name. The name and its DNS are
+        # the miner's: the lookup runs in node_host's pool under that miner's quota (node_owner), so a
+        # zone that never answers stalls only its own miner's connects, never another miner's.
         try:
             async with asyncio.timeout(_DOCKER_SSH_REOPEN_TIMEOUT_SECONDS):
-                pinned_addresses = await resolve_public_host(
-                    executor_info.address, executor_info.ssh_port, executor=_RENTAL_DNS_EXECUTOR
-                )
+                pinned_addresses = await resolve_node_host(executor_info.address, executor_info.ssh_port)
         except TimeoutError as exc:
             raise RentalDockerConnectionError(
                 _wrap_error_message(
@@ -1552,7 +1543,7 @@ def _build_rental_ssh_http_adapter_class(
     known_hosts_path: Path,
     pinned_addresses: list = (),
 ):
-    """``pinned_addresses``: ``resolve_public_host``'s results for a node registered by hostname.
+    """``pinned_addresses``: ``resolve_node_host``'s results for a node registered by hostname.
     Every (re)connect then hands paramiko a socket to one of them, so the name is not looked up
     again; paramiko still checks the host key against the name. Empty for an IP literal."""
     from docker.transport.sshconn import SSHConnection, SSHConnectionPool, SSHHTTPAdapter
