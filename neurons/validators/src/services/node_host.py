@@ -8,6 +8,8 @@ import asyncio
 import ipaddress
 import logging
 import socket
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 import aiohttp
 from aiohttp.abc import AbstractResolver, ResolveResult
@@ -62,13 +64,32 @@ def _log_dialed(infos: list, sockaddr: tuple) -> None:
     )
 
 
-async def resolve_public_host(host: str, port: int = 22) -> list:
+# A hostname node's DNS is the miner's: a zone that never answers holds each lookup until the system
+# resolver gives up, and the thread cannot be cancelled. These lookups run in their own pool, never the
+# loop's default executor, where the validator's Redis/WebSocket DNS and other blocking calls run, and
+# each waits at most NODE_DNS_TIMEOUT_SECONDS. A stalled zone then delays other hostname nodes only.
+NODE_DNS_MAX_WORKERS = 8
+NODE_DNS_TIMEOUT_SECONDS = 15.0
+NODE_DNS_EXECUTOR = ThreadPoolExecutor(max_workers=NODE_DNS_MAX_WORKERS, thread_name_prefix="node-dns")
+
+
+async def resolve_public_host(host: str, port: int = 22, executor=None) -> list:
     """The getaddrinfo results to dial for ``host``: [] for an IP literal (dial it as is), else every
-    address the name resolves to, all of them global; NodeHostError otherwise."""
+    address the name resolves to, all of them global; NodeHostError otherwise.
+
+    ``executor``: the thread pool the blocking lookup runs in. None is the loop's default executor
+    (``loop.getaddrinfo``); a caller whose lookups a miner's DNS can stall passes its own pool, so
+    they cannot fill the one every other connection of the validator resolves in."""
     if is_ip_literal(host):
         return []
+    loop = asyncio.get_running_loop()
     try:
-        infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        if executor is None:
+            infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        else:
+            infos = await loop.run_in_executor(
+                executor, partial(socket.getaddrinfo, host, port, type=socket.SOCK_STREAM)
+            )
     except socket.gaierror as exc:
         raise _refused(host, port, f"does not resolve: {exc}") from exc
     addresses = {ipaddress.ip_address(info[4][0]) for info in infos}
@@ -82,6 +103,16 @@ async def resolve_public_host(host: str, port: int = 22) -> list:
     return checked
 
 
+async def resolve_node_host(host: str, port: int) -> list:
+    """``resolve_public_host`` in NODE_DNS_EXECUTOR, refused (NodeHostError) when the miner's DNS has
+    not answered within NODE_DNS_TIMEOUT_SECONDS. A caller's own, shorter deadline still applies."""
+    try:
+        async with asyncio.timeout(NODE_DNS_TIMEOUT_SECONDS):
+            return await resolve_public_host(host, port, executor=NODE_DNS_EXECUTOR)
+    except TimeoutError as exc:
+        raise _refused(host, port, f"did not resolve within {NODE_DNS_TIMEOUT_SECONDS:g} s") from exc
+
+
 async def public_host_sock(host: str, port: int = 22, connect_timeout: float | None = None) -> dict:
     """Return the extra ``asyncssh.connect`` kwargs that make it dial only a validated address.
 
@@ -93,7 +124,7 @@ async def public_host_sock(host: str, port: int = 22, connect_timeout: float | N
     """
     # one budget for the lookup and the dial: a stalled DNS answer must not outlast connect_timeout
     async with asyncio.timeout(connect_timeout):
-        infos = await resolve_public_host(host, port)
+        infos = await resolve_node_host(host, port)
         if not infos:
             return {}
         return {"sock": await _dial_first(asyncio.get_running_loop(), infos)}
@@ -159,7 +190,7 @@ class PublicHostResolver(AbstractResolver):
     async def resolve(
         self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
     ) -> list[ResolveResult]:
-        infos = await resolve_public_host(host, port)
+        infos = await resolve_node_host(host, port)
         if not infos:  # an IP literal
             infos = [(family or socket.AF_INET, socket.SOCK_STREAM, 0, "", (host.strip("[]"), port))]
         else:

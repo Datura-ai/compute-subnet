@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import socket
+import threading
 
 import aiohttp
 import pytest
@@ -18,12 +19,12 @@ from neurons.validators.src.services.node_host import (
 
 
 def _resolves_to(monkeypatch, *addresses, port=None):
-    async def fake_getaddrinfo(self, host, requested_port, **kwargs):
+    def fake_getaddrinfo(host, requested_port, *args, **kwargs):
         return [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", (a, port or requested_port)) for a in addresses
         ]
 
-    monkeypatch.setattr("asyncio.BaseEventLoop.getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr("socket.getaddrinfo", fake_getaddrinfo)
 
 
 @pytest.fixture
@@ -96,10 +97,10 @@ async def test_name_with_a_non_public_address_is_refused(monkeypatch, bad):
 @pytest.mark.asyncio
 async def test_unresolvable_name_is_refused(monkeypatch):
     # Arrange
-    async def fail(self, host, port, **kwargs):
+    def fail(host, port, *args, **kwargs):
         raise socket.gaierror(-2, "Name or service not known")
 
-    monkeypatch.setattr("asyncio.BaseEventLoop.getaddrinfo", fail)
+    monkeypatch.setattr("socket.getaddrinfo", fail)
 
     # Act / Assert
     with pytest.raises(NodeHostError, match="does not resolve"):
@@ -152,11 +153,11 @@ async def test_http_request_to_a_name_goes_to_the_checked_address_with_the_name_
     port = site._server.sockets[0].getsockname()[1]
     lookups = []
 
-    async def fake_getaddrinfo(self, host, requested_port, **kwargs):
+    def fake_getaddrinfo(host, requested_port, *args, **kwargs):
         lookups.append(host)
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", requested_port))]
 
-    monkeypatch.setattr("asyncio.BaseEventLoop.getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr("socket.getaddrinfo", fake_getaddrinfo)
     monkeypatch.setattr("ipaddress.IPv4Address.is_global", property(lambda self: True))
 
     # Act
@@ -262,10 +263,10 @@ async def test_refused_name_logs_a_warning_with_the_offending_address(monkeypatc
 @pytest.mark.asyncio
 async def test_unresolvable_name_logs_a_warning_with_the_error(monkeypatch, caplog):
     # Arrange
-    async def fail(self, host, port, **kwargs):
+    def fail(host, port, *args, **kwargs):
         raise socket.gaierror(-2, "Name or service not known")
 
-    monkeypatch.setattr("asyncio.BaseEventLoop.getaddrinfo", fail)
+    monkeypatch.setattr("socket.getaddrinfo", fail)
 
     # Act
     with caplog.at_level(logging.WARNING, logger=node_host.logger.name), pytest.raises(NodeHostError):
@@ -291,12 +292,65 @@ async def test_ip_literal_logs_nothing(caplog):
     assert caplog.records == []
 
 
+@pytest.fixture
+def stalled_dns(monkeypatch):
+    """socket.getaddrinfo that never answers until the test ends; records the thread each lookup ran in."""
+    release, threads = threading.Event(), []
+
+    def stalled(*args, **kwargs):
+        threads.append(threading.current_thread().name)
+        release.wait(5)
+        raise socket.gaierror(-3, "Temporary failure in name resolution")
+
+    monkeypatch.setattr("socket.getaddrinfo", stalled)
+    yield threads
+    release.set()
+
+
 @pytest.mark.asyncio
-async def test_a_stalled_lookup_is_bounded_by_the_connect_timeout(monkeypatch):
-    async def stalled(*args, **kwargs):
-        await asyncio.sleep(30)
-
-    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", stalled)
-
+async def test_a_stalled_lookup_is_bounded_by_the_connect_timeout(stalled_dns):
     with pytest.raises(TimeoutError):
         await public_host_sock("gpu-node1.example.net", 22, connect_timeout=0.05)
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_lookup_without_a_connect_timeout_is_refused_at_the_dns_deadline(stalled_dns, monkeypatch):
+    # most callers (miner_service, docker_service, interactive_shell) pass no connect_timeout: before, they waited as long as the miner's DNS did
+    monkeypatch.setattr(node_host, "NODE_DNS_TIMEOUT_SECONDS", 0.05)
+
+    with pytest.raises(NodeHostError, match="did not resolve within 0.05 s"):
+        await public_host_sock("gpu-node1.example.net", 22)
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_resolver_lookup_is_refused_at_the_dns_deadline(stalled_dns, monkeypatch):
+    # the aiohttp resolver (port checks, local verify) had no deadline at all
+    monkeypatch.setattr(node_host, "NODE_DNS_TIMEOUT_SECONDS", 0.05)
+
+    with pytest.raises(NodeHostError, match="did not resolve"):
+        await PublicHostResolver().resolve("gpu-node1.example.net", 8080)
+
+
+@pytest.mark.asyncio
+async def test_stalled_node_lookups_never_occupy_the_default_executor(stalled_dns, monkeypatch):
+    # a miner zone that never answers must not fill the pool the validator's own DNS (Redis, WebSocket) resolves in
+    monkeypatch.setattr(node_host, "NODE_DNS_TIMEOUT_SECONDS", 0.05)
+    loop = asyncio.get_running_loop()
+    default_pool_used = []
+    real_run_in_executor = loop.run_in_executor
+
+    def watch(executor, *args):
+        if executor is None:
+            default_pool_used.append(args)
+        return real_run_in_executor(executor, *args)
+
+    monkeypatch.setattr(loop, "run_in_executor", watch)
+
+    for _ in range(3):
+        with pytest.raises(NodeHostError):
+            await public_host_sock("gpu-node1.example.net", 22)
+    with pytest.raises(NodeHostError):
+        await PublicHostResolver().resolve("gpu-node1.example.net", 8080)
+
+    assert default_pool_used == []
+    assert stalled_dns and all(name.startswith("node-dns") for name in stalled_dns)
