@@ -598,9 +598,14 @@ class ValidationService:
             # Authenticated: these override anything in the plaintext line.
             uuid = inner_obj["uuid"].strip()
             metrics = inner_obj.get("metrics")
-        elif getattr(self.wrapper, "_has_sealed", False):
+        elif getattr(self.wrapper, "_has_sealed", False) and (
+            uuid in verifier_params.uuid.split(",")
+        ):
             # A seal-aware library got no sealed blob: the uuid and metrics are the executor's plaintext,
-            # which its own wrapper can edit, and the metrics reach the published specs.
+            # which its own wrapper can edit, and the metrics reach the published specs. Only a
+            # matching plaintext uuid is a real answer that skipped the seal; a probe that never
+            # answered (out of memory, `sealed: null`) falls through to the mismatch below, which
+            # the capability check can still waive for a busy GPU.
             logger.warning(
                 _m(
                     "MATMUL_RESULT_UNSEALED",

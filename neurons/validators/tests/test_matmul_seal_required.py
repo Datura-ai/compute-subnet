@@ -1,7 +1,8 @@
 """G18: a seal-aware verifier that gets no sealed blob judges the executor's plaintext uuid and metrics.
 
-The plaintext is printed by the executor's own wrapper, so the answer is logged and, under
-MATMUL_SEAL_REQUIRED_ENABLED, failed. A sealed answer is judged as before.
+The plaintext is printed by the executor's own wrapper, so a matching answer is logged and, under
+MATMUL_SEAL_REQUIRED_ENABLED, failed. A sealed answer, or a probe that never answered (out of
+memory), is judged as before.
 """
 
 import json
@@ -9,6 +10,8 @@ import logging
 
 from core.config import settings
 from services import matrix_validation_service as mvs
+from services.task.checks import capability
+from services.task.checks.capability import Msg
 from tests.test_local_verify import SPECS, matmul_service
 
 
@@ -71,6 +74,43 @@ def test_sealed_answer_passes_and_logs_nothing_when_the_seal_is_required(monkeyp
     assert result.success is True
     assert result.metrics == {"tflops": 42.0}
     assert _unsealed_logs(caplog) == []
+
+
+def test_out_of_memory_probe_keeps_the_busy_gpu_waiver_when_the_seal_is_required(
+    monkeypatch, caplog
+):
+    # a probe that never allocated prints no uuid and `sealed: null`; it is not a skipped seal
+    monkeypatch.setattr(settings, "MATMUL_SEAL_REQUIRED_ENABLED", True)
+    validation = matmul_service(monkeypatch)
+    challenge = validation.prepare_matmul_challenge(SPECS, {}, vram_budget_mb=8192)
+    stdout = "UUID:  None\nRESULT_JSON: " + json.dumps(
+        {"uuid": "None", "metrics": None, "sealed": None}
+    )
+
+    with caplog.at_level(logging.WARNING, logger=mvs.logger.name):
+        result = validation.evaluate_matmul_output(
+            challenge, stdout=stdout, stderr="cudaMalloc failed: out of memory"
+        )
+    challenge.close()
+
+    assert result.success is False
+    assert result.error_message.startswith(mvs.UUID_MISMATCH_ERROR_PREFIX)
+    assert capability._probe_gave_no_answer(result) is True
+    assert capability._failure_template(result) is Msg.VERIFY_FAILED_VRAM_UNAVAILABLE
+    assert _unsealed_logs(caplog) == []
+
+
+def test_unsealed_wrong_uuid_is_still_a_mismatch_when_the_seal_is_required(monkeypatch):
+    monkeypatch.setattr(settings, "MATMUL_SEAL_REQUIRED_ENABLED", True)
+    validation = matmul_service(monkeypatch)
+    challenge = validation.prepare_matmul_challenge(SPECS, {}, vram_budget_mb=8192)
+
+    result = validation.evaluate_matmul_output(challenge, stdout=_unsealed_stdout("forged"))
+    challenge.close()
+
+    assert result.success is False
+    assert result.error_message.startswith(mvs.UUID_MISMATCH_ERROR_PREFIX)
+    assert capability._probe_gave_no_answer(result) is False
 
 
 def test_seal_is_not_required_by_default():
