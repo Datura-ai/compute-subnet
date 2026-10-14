@@ -62,6 +62,45 @@ def test_a_card_whose_reads_are_not_supported_is_not_flagged():
     assert nvml_health({"available": True, "gpus": [consumer]}) == []
 
 
+def test_the_snapshot_reads_the_recovery_action_through_field_value_230(monkeypatch):
+    # released bindings have no nvmlDeviceGetGpuRecoveryAction; the action is field 230 (review)
+    from types import ModuleType, SimpleNamespace
+
+    namespace = _probe_namespace("nvml_snapshot", "nvml_recovery_action", "FI_GPU_RECOVERY_ACTION")
+    asked = []
+
+    def field_values(handle, ids):
+        asked.append(ids)
+        code = 0 if handle == 0 else 3  # the second card does not support the field
+        return [SimpleNamespace(nvmlReturn=code, value=SimpleNamespace(uiVal=4))]
+
+    class NVMLError(Exception):
+        pass
+
+    fake = ModuleType("pynvml")
+    fake.__dict__.update(
+        NVML_SUCCESS=0,
+        NVMLError=NVMLError,
+        NVML_MEMORY_ERROR_TYPE_UNCORRECTED=1,
+        NVML_VOLATILE_ECC=0,
+        nvmlInit=lambda: None,
+        nvmlShutdown=lambda: None,
+        nvmlDeviceGetCount=lambda: 2,
+        nvmlDeviceGetHandleByIndex=lambda i: i,
+        nvmlDeviceGetUUID=lambda h: f"GPU-{h}",
+        nvmlDeviceGetPciInfo=lambda h: SimpleNamespace(busId=b"0000:01:00.0"),
+        nvmlDeviceGetTotalEccErrors=lambda h, kind, counter: 0,
+        nvmlDeviceGetRemappedRows=lambda h: (0, 0, 0, 0),
+        nvmlDeviceGetFieldValues=field_values,
+    )
+    monkeypatch.setitem(sys.modules, "pynvml", fake)
+
+    gpus = namespace["nvml_snapshot"]()["gpus"]
+
+    assert [gpu["recovery_action"] for gpu in gpus] == [4, None]
+    assert asked == [[230], [230]]
+
+
 def test_nvml_only_runs_no_cuda_and_always_prints_a_report():
     # no NVML binding here: the mode still prints its marker line and exits 0
     run = subprocess.run(

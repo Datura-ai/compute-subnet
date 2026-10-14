@@ -754,6 +754,19 @@ def _device_count(mp) -> int:
     return reply["count"]
 
 
+# NVML_FI_DEV_GET_GPU_RECOVERY_ACTION (nvml.h); no released binding has a getter for it
+FI_GPU_RECOVERY_ACTION = 230
+
+
+def nvml_recovery_action(handle):
+    import pynvml
+
+    field = pynvml.nvmlDeviceGetFieldValues(handle, [FI_GPU_RECOVERY_ACTION])[0]
+    if field.nvmlReturn != pynvml.NVML_SUCCESS:
+        raise pynvml.NVMLError(field.nvmlReturn)  # driver older than R570 or card without the field
+    return field.value.uiVal
+
+
 def nvml_snapshot() -> dict:
     """Per-GPU counters that move when hardware faults: uncorrected ECC, remapped rows, recovery action."""
     try:
@@ -779,7 +792,7 @@ def nvml_snapshot() -> dict:
                     ),
                 ),
                 ("remapped_rows", lambda h: list(pynvml.nvmlDeviceGetRemappedRows(h))),
-                ("recovery_action", lambda h: pynvml.nvmlDeviceGetGpuRecoveryAction(h)),
+                ("recovery_action", nvml_recovery_action),
             ):
                 try:
                     value = read(handle)
