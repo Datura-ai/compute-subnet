@@ -68,6 +68,15 @@ _DOCKER_EXECUTOR_MAX_WORKERS = 32
 _DOCKER_EXECUTOR = ThreadPoolExecutor(
     max_workers=_DOCKER_EXECUTOR_MAX_WORKERS, thread_name_prefix="docker-sdk"
 )
+# A node registered by hostname is resolved before every connect (services.node_host). The name is the
+# miner's, and so is its DNS: a zone that never answers holds each lookup until the system resolver
+# gives up. Those lookups run here, never in the default executor (see above), and the connect waits
+# for one at most _DOCKER_SSH_REOPEN_TIMEOUT_SECONDS; a stalled lookup can fill only this pool, which
+# delays other hostname nodes' connects, not the validator's Redis/WebSocket DNS or Docker calls.
+_RENTAL_DNS_EXECUTOR_MAX_WORKERS = 8
+_RENTAL_DNS_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_RENTAL_DNS_EXECUTOR_MAX_WORKERS, thread_name_prefix="rental-dns"
+)
 # DAH-3199: every rental on a host shares this user-defined bridge instead of docker0. The daemon's
 # default bridge allows inter-container traffic, and a pod holds NET_ADMIN, so two rentals on a split
 # host could otherwise reach each other's unpublished ports. Docker enforces ICC=false with a FORWARD
@@ -1216,7 +1225,20 @@ class RentalDockerSdkClientFactory:
         # a hostname is resolved and checked once here; paramiko then dials (and re-dials) these
         # addresses over a socket we open, never a second lookup of the name
         try:
-            pinned_addresses = await resolve_public_host(executor_info.address, executor_info.ssh_port)
+            async with asyncio.timeout(_DOCKER_SSH_REOPEN_TIMEOUT_SECONDS):
+                pinned_addresses = await resolve_public_host(
+                    executor_info.address, executor_info.ssh_port, executor=_RENTAL_DNS_EXECUTOR
+                )
+        except TimeoutError as exc:
+            raise RentalDockerConnectionError(
+                _wrap_error_message(
+                    "Docker SDK client construction failed",
+                    NodeHostError(
+                        f"{executor_info.address} did not resolve within"
+                        f" {_DOCKER_SSH_REOPEN_TIMEOUT_SECONDS}s"
+                    ),
+                )
+            ) from exc
         except NodeHostError as exc:
             raise RentalDockerConnectionError(
                 _wrap_error_message("Docker SDK client construction failed", exc)

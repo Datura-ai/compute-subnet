@@ -8,6 +8,7 @@ import asyncio
 import ipaddress
 import logging
 import socket
+from functools import partial
 
 import aiohttp
 from aiohttp.abc import AbstractResolver, ResolveResult
@@ -62,13 +63,23 @@ def _log_dialed(infos: list, sockaddr: tuple) -> None:
     )
 
 
-async def resolve_public_host(host: str, port: int = 22) -> list:
+async def resolve_public_host(host: str, port: int = 22, executor=None) -> list:
     """The getaddrinfo results to dial for ``host``: [] for an IP literal (dial it as is), else every
-    address the name resolves to, all of them global; NodeHostError otherwise."""
+    address the name resolves to, all of them global; NodeHostError otherwise.
+
+    ``executor``: the thread pool the blocking lookup runs in. None is the loop's default executor
+    (``loop.getaddrinfo``); a caller whose lookups a miner's DNS can stall passes its own pool, so
+    they cannot fill the one every other connection of the validator resolves in."""
     if is_ip_literal(host):
         return []
+    loop = asyncio.get_running_loop()
     try:
-        infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        if executor is None:
+            infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        else:
+            infos = await loop.run_in_executor(
+                executor, partial(socket.getaddrinfo, host, port, type=socket.SOCK_STREAM)
+            )
     except socket.gaierror as exc:
         raise _refused(host, port, f"does not resolve: {exc}") from exc
     addresses = {ipaddress.ip_address(info[4][0]) for info in infos}

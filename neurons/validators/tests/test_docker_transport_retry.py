@@ -6,6 +6,7 @@ timed out (60 s)`, `create volume failed: 'NoneType' object has no attribute 'se
 last one is docker-py/urllib3 dereferencing a channel that is `None`.
 """
 
+import asyncio
 import http.client
 import socket
 import struct
@@ -602,6 +603,51 @@ async def test_factory_reads_the_flag_callable_per_connect(monkeypatch):
     flag["on"] = True
     async with factory.connect(executor_info=info, private_key="PRIVATE KEY") as client:
         assert client._transport_retry_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_hostname_lookup_fails_the_connect_at_the_deadline_off_the_default_executor(
+    monkeypatch,
+):
+    # a miner's DNS zone that never answers: the lookup must neither outlive the connect's deadline
+    # nor sit in the event loop's default executor, where the validator's own DNS runs
+    import services.rental_docker_sdk as sdk
+
+    release = threading.Event()
+    lookup_threads = []
+
+    def stalled_getaddrinfo(*args, **kwargs):
+        lookup_threads.append(threading.current_thread().name)
+        release.wait(10)
+        raise socket.gaierror("released")
+
+    async def default_executor_lookup(*args, **kwargs):
+        raise AssertionError("the lookup ran in the loop's default executor")
+
+    monkeypatch.setattr(socket, "getaddrinfo", stalled_getaddrinfo)
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", default_executor_lookup)
+    monkeypatch.setattr(sdk, "_DOCKER_SSH_REOPEN_TIMEOUT_SECONDS", 0.2)
+    api_client_factory = Mock(return_value=_FakeApiClient())
+    factory = RentalDockerSdkClientFactory(api_client_factory=api_client_factory)
+    info = SimpleNamespace(
+        address="gpu-node1.example.net",
+        ssh_port=2222,
+        ssh_username="root",
+        ssh_host_key="ssh-ed25519 AAAATESTKEY",
+    )
+
+    started = asyncio.get_running_loop().time()
+    try:
+        with pytest.raises(RentalDockerConnectionError, match="did not resolve within"):
+            async with factory.connect(executor_info=info, private_key="PRIVATE KEY"):
+                pass
+        elapsed = asyncio.get_running_loop().time() - started
+    finally:
+        release.set()
+
+    assert elapsed < 2
+    assert len(lookup_threads) == 1 and lookup_threads[0].startswith("rental-dns")
+    api_client_factory.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

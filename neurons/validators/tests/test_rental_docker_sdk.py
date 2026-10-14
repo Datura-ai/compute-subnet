@@ -1625,10 +1625,11 @@ def _executor_info_named(address: str) -> ExecutorSSHInfo:
 @pytest.mark.asyncio
 async def test_factory_refuses_a_hostname_with_a_private_address_before_building_a_client(monkeypatch):
     # Arrange
-    async def private(self, host, port, **kwargs):
+    # the rental connect resolves in its own pool (socket.getaddrinfo), not via loop.getaddrinfo
+    def private(host, port, **kwargs):
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", port))]
 
-    monkeypatch.setattr("asyncio.BaseEventLoop.getaddrinfo", private)
+    monkeypatch.setattr(socket, "getaddrinfo", private)
     api_client_factory = Mock()
     factory = RentalDockerSdkClientFactory(api_client_factory=api_client_factory)
 
