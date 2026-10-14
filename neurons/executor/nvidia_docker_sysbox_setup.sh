@@ -652,10 +652,13 @@ vloopback_mount_test() {
     return "$rc"
 }
 
-vloopback_storage_opt_supported() {
+vloopback_storage_opt_unsupported() {
     # the scrape's CHECK_STORAGE_LIMIT_ABILITY without the GPU: a node whose Docker refuses --storage-opt is rented
-    # without a disk limit, so no rental there ever gets a vloopback volume
-    timeout "$VLOOPBACK_CLEANUP_TIMEOUT" docker run --rm --storage-opt size=1g "$VERIFY_IMAGE" true &>/dev/null
+    # without a disk limit, so no rental there ever gets a vloopback volume. Only Docker's own refusal counts: a
+    # timeout or any other error leaves the plugin repair and mount test to run.
+    local out
+    out=$(timeout "$VLOOPBACK_CLEANUP_TIMEOUT" docker run --rm --storage-opt size=1g "$VERIFY_IMAGE" true 2>&1) && return 1
+    echo "$out" | grep -qi -e 'storage-opt' -e 'storage opt'
 }
 
 VLOOPBACK_NOT_USED="Docker here does not accept --storage-opt, so rentals run without a disk limit and never use the plugin."
@@ -672,7 +675,7 @@ check_vloopback() {
         pf_skip "vloopback volumes — the test runs $VERIFY_IMAGE, which is not on this host yet (install mode pulls it)."
         return 0
     fi
-    vloopback_storage_opt_supported || { pf_skip "vloopback volumes — $VLOOPBACK_NOT_USED"; return 0; }
+    ! vloopback_storage_opt_unsupported || { pf_skip "vloopback volumes — $VLOOPBACK_NOT_USED"; return 0; }
     state=$(vloopback_plugin_state)
     if [ "$state" = "absent" ]; then
         pf_fix "The $VLOOPBACK_PLUGIN volume plugin is not installed; the mount test cannot run until it is." \
@@ -705,7 +708,7 @@ fail_vloopback() {
 
 setup_vloopback() {
     # install mode: the plugin fix, then the mount test; on a failure the caller prints fail_vloopback
-    vloopback_storage_opt_supported || { ok "vloopback: skipped. $VLOOPBACK_NOT_USED"; return 0; }
+    ! vloopback_storage_opt_unsupported || { ok "vloopback: skipped. $VLOOPBACK_NOT_USED"; return 0; }
     ensure_vloopback_plugin || return 1
     [ -z "$VLOOPBACK_CHANGED" ] || ok "vloopback: $VLOOPBACK_CHANGED."
     vloopback_mount_test || return 1

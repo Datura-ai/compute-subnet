@@ -111,7 +111,10 @@ STUBS = {
                         [ -z "${STUB_VLOOPBACK_MOUNT_FAILS:-}" ] && echo lium-vloopback-ok || {
                             echo "docker: Error response from daemon: failed to create task for container: OCI runtime create failed: error during container init: error setting up ID-mapped mount on path 206/fs (likely means idmapped mounts are not supported on the filesystem at this path): lstat 206: no such file or directory: unknown." >&2
                             exit 125; } ;;
-                    *" --storage-opt "*) [ -z "${STUB_STORAGE_OPT_UNSUPPORTED:-}" ] || { echo "docker: Error response from daemon: --storage-opt is supported only for overlay over xfs with 'pquota' mount option." >&2; exit 125; } ;;
+                    *" --storage-opt "*)
+                        [ -z "${STUB_STORAGE_OPT_UNSUPPORTED:-}" ] || { echo "docker: Error response from daemon: --storage-opt is supported only for overlay over xfs with 'pquota' mount option." >&2; exit 125; }
+                        [ "${STUB_STORAGE_OPT_PROBE:-}" != hangs ] || exit 124
+                        [ "${STUB_STORAGE_OPT_PROBE:-}" != errors ] || { echo "docker: Error response from daemon: failed to create task for container: context deadline exceeded" >&2; exit 125; } ;;
                     *) [ -z "${STUB_SYSBOX_RUN_FAILS:-}" ] && echo ok || { echo "OCI runtime create failed" >&2; exit 125; } ;;
                 esac ;;
         esac
@@ -899,6 +902,23 @@ def test_install_mode_leaves_the_plugin_alone_where_rentals_get_no_disk_limit(tm
     assert "vloopback: skipped. Docker here does not accept --storage-opt" in proc.stdout
     assert _plugin_changes(tmp_path) == []
     assert not [call for call in _docker_calls(tmp_path) if call.startswith("volume ")]
+
+
+@pytest.mark.parametrize("probe", ["hangs", "errors"])
+def test_a_storage_opt_probe_that_fails_for_another_reason_still_repairs_and_tests(tmp_path, probe):
+    # only Docker's refusal of --storage-opt means no disk limit; a slow or broken start is not that
+    proc = run_script(tmp_path, env={"STUB_VLOOPBACK": "relative", "STUB_STORAGE_OPT_PROBE": probe})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "vloopback: skipped" not in proc.stdout
+    assert "vloopback: set the vloopback plugin's DATA_DIR from 'loopback' to " in proc.stdout
+    assert "vloopback: a size-limited volume mounts" in proc.stdout
+
+
+@pytest.mark.parametrize("probe", ["hangs", "errors"])
+def test_check_vloopback_runs_the_mount_test_when_the_probe_fails_for_another_reason(tmp_path, probe):
+    rc, out, fix = run_check(tmp_path, "check_vloopback", env={"STUB_STORAGE_OPT_PROBE": probe})
+    assert rc == 0 and fix == 0, out
+    assert "PASS vloopback plugin" in out or "vloopback plugin (DATA_DIR=" in out
 
 
 def test_install_mode_on_a_fixed_host_still_says_nothing_to_do(tmp_path):
