@@ -34,25 +34,9 @@ class NvmlDigestCheck:
 
         if not driver_version:
             # The driver string comes from the node's own scrape: reporting none skips the comparison below.
-            logger.warning(
-                _m(
-                    "NVML_DRIVER_MISSING",
-                    extra=get_extra_info(
-                        {
-                            **ctx.default_extra,
-                            "enforced": settings.NVML_DRIVER_MISSING_ENFORCEMENT_ENABLED,
-                        }
-                    ),
-                )
-            )
-            if settings.NVML_DRIVER_MISSING_ENFORCEMENT_ENABLED:
-                event = render_message(
-                    Msg.DRIVER_MISSING,
-                    ctx=ctx,
-                    check_id=self.check_id,
-                    what={"libnvidia_ml": lib_digest},
-                )
-                return CheckResult(passed=False, event=event)
+            missing_result = self._log_missing_driver_and_fail_if_enforced(ctx, lib_digest)
+            if missing_result is not None:
+                return missing_result
 
         if driver_version and expected_digest != lib_digest:
             # Check if driver version is unknown (not in our map)
@@ -107,3 +91,28 @@ class NvmlDigestCheck:
             },
         )
         return CheckResult(passed=True, event=event)
+
+    def _log_missing_driver_and_fail_if_enforced(
+        self, ctx: Context, lib_digest: str
+    ) -> CheckResult | None:
+        """Log NVML_DRIVER_MISSING; return a failing result only when enforcement is on."""
+        logger.warning(
+            _m(
+                "NVML_DRIVER_MISSING",
+                extra=get_extra_info(
+                    {
+                        **ctx.default_extra,
+                        "enforced": settings.NVML_DRIVER_MISSING_ENFORCEMENT_ENABLED,
+                    }
+                ),
+            )
+        )
+        if not settings.NVML_DRIVER_MISSING_ENFORCEMENT_ENABLED:
+            return None
+        event = render_message(
+            Msg.DRIVER_MISSING,
+            ctx=ctx,
+            check_id=self.check_id,
+            what={"libnvidia_ml": lib_digest},
+        )
+        return CheckResult(passed=False, event=event)
