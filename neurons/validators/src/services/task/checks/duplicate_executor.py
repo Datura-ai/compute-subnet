@@ -92,9 +92,14 @@ class AcrossMinersDuplicate:
     enforced: bool
 
 
-def _ssh_endpoint(result: JobResult) -> str:
-    info = result.executor_info
+def ssh_endpoint(info) -> str:
+    """The address and ssh_port the validator logged in on; also the verified record's owner
+    proof (VERIFIED_ENDPOINT_KEY)."""
     return f"{info.address.strip().lower()}:{info.ssh_port}"
+
+
+def _ssh_endpoint(result: JobResult) -> str:
+    return ssh_endpoint(result.executor_info)
 
 
 def _gpu_uuids(result: JobResult) -> list[str]:

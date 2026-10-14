@@ -18,6 +18,7 @@ from core.config import settings
 from core.utils import _m, get_extra_info
 from incentive.config import BASE_GPU_MAP
 
+from .checks.duplicate_executor import ssh_endpoint
 from .checks.verifyx import hold_verifyx_ema, verifyx_ema_hold_reason
 from .models import JobResult
 from .pipeline import Context
@@ -344,6 +345,9 @@ class ResultHandler:
             context: Pipeline context with verification state
             success: Whether validation succeeded
         """
+        # The pipeline ran inside an SSH login with this request's fresh key, so the endpoint
+        # proves which machine admitted this hotkey; a forced pass (ssh_port 0) proves none.
+        endpoint = ssh_endpoint(context.executor) if context.executor.ssh_port > 0 else ""
         if success:
             # On success, update verification data if we have GPU info
             gpu_model_count = context.state.gpu_model_count or ""
@@ -357,6 +361,7 @@ class ResultHandler:
                     success=True,
                     spec=gpu_model_count,
                     uuids=gpu_uuids,
+                    endpoint=endpoint,
                 )
         else:
             # On failure, either clear or mark as failed
@@ -369,6 +374,7 @@ class ResultHandler:
                     reason=reason,
                     evidence=context.clear_verified_job_evidence,
                     anchor_broken=context.gpu_anchor_broken,
+                    endpoint=endpoint,
                 )
             else:
                 await self.redis_service.set_verified_job_info(
@@ -376,6 +382,7 @@ class ResultHandler:
                     executor_id=executor_id,
                     prev_info=verified_job_info,
                     success=False,
+                    endpoint=endpoint,
                 )
 
     @staticmethod

@@ -454,6 +454,8 @@ class Settings(BaseSettings):
     # The verified record (count, spec, GPU anchor) is keyed by executor id alone and now carries the hotkey that
     # first wrote it. A write or reset by another hotkey is always logged (VERIFIED_RECORD_FOREIGN_WRITER); with this
     # on it is refused, so listing someone else's executor id no longer resets their record. Off by default.
+    # A reset by a hotkey that logged in on the owner's recorded SSH endpoint is the node moving to
+    # that hotkey: it is never refused and takes over the record.
     VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED: bool = Field(
         env="VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", default=False
     )

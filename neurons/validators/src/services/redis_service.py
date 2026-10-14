@@ -37,6 +37,9 @@ GPU_ANCHOR_BROKEN_KEY = "anchor_broken"
 # The hotkey whose cycle first wrote the record. The record is keyed by executor id alone, so without it
 # any hotkey that lists the same id sends the reset for it and sets its broken-anchor mark.
 VERIFIED_OWNER_KEY = "hotkey"
+# The SSH endpoint (address:ssh_port) the owner was last verified on. A reset by another hotkey that
+# logged in on this same endpoint is the node moving to that hotkey, so it takes over the record.
+VERIFIED_ENDPOINT_KEY = "ssh_endpoint"
 EXECUTORS_UPTIME_PREFIX = "executors_uptime"
 NORMALIZED_SCORE_CHANNEL = "normalized_score_channel"
 REVENUE_PER_GPU_TYPE_SET = "revenue_per_gpu_type"
@@ -160,6 +163,26 @@ class RedisWrites:
 
     def __len__(self) -> int:
         return len(self.ops)
+
+
+def _same_endpoint(prev_info: dict, endpoint: str) -> bool:
+    return bool(endpoint) and prev_info.get(VERIFIED_ENDPOINT_KEY) == endpoint
+
+
+def _owner_fields(miner_hotkey: str, prev_info: dict, endpoint: str, *, takeover: bool) -> dict:
+    """Owner and endpoint of the record after this write: a takeover records the writer at its
+    endpoint, the owner (or the first writer) refreshes its endpoint, a foreign writer that was
+    let through keeps both as they were."""
+    owner = prev_info.get(VERIFIED_OWNER_KEY)
+    prev_endpoint = prev_info.get(VERIFIED_ENDPOINT_KEY) or ''
+    if takeover or not owner or owner == miner_hotkey:
+        owner, kept_endpoint = miner_hotkey, endpoint or prev_endpoint
+    else:
+        kept_endpoint = prev_endpoint
+    fields = {VERIFIED_OWNER_KEY: owner}
+    if kept_endpoint:
+        fields[VERIFIED_ENDPOINT_KEY] = kept_endpoint
+    return fields
 
 
 class RedisService:
@@ -569,8 +592,9 @@ class RedisService:
         success: bool = True,
         spec: str = '',
         uuids: str = '',
+        endpoint: str = '',
     ):
-        if self._is_refused_foreign_writer(miner_hotkey, executor_id, prev_info):
+        if self._is_refused_foreign_writer(miner_hotkey, executor_id, prev_info, endpoint):
             return
         count = prev_info.get('count', 0)
         failed = prev_info.get('failed', 0)
@@ -594,7 +618,7 @@ class RedisService:
             "failed": failed,
             "spec": prev_spec if prev_spec else spec,
             GPU_ANCHOR_KEY: prev_uuids if prev_uuids else uuids,
-            VERIFIED_OWNER_KEY: prev_info.get(VERIFIED_OWNER_KEY) or miner_hotkey,
+            **_owner_fields(miner_hotkey, prev_info, endpoint, takeover=False),
         }
         # DAH-3457: the anchor and its broken mark outlive every write to the record; only a new executor id starts clean.
         if prev_info.get(GPU_ANCHOR_BROKEN_KEY):
@@ -610,8 +634,12 @@ class RedisService:
         reason: ResetVerifiedJobReason = ResetVerifiedJobReason.DEFAULT,
         evidence: dict | None = None,
         anchor_broken: bool = False,
+        endpoint: str = '',
     ):
-        if self._is_refused_foreign_writer(miner_hotkey, executor_id, prev_info):
+        takeover = _same_endpoint(prev_info, endpoint)
+        if self._is_refused_foreign_writer(
+            miner_hotkey, executor_id, prev_info, endpoint, takeover=takeover
+        ):
             return
         spec = prev_info.get('spec', '')
         uuids = prev_info.get(GPU_ANCHOR_KEY, '')
@@ -621,7 +649,7 @@ class RedisService:
             "failed": 0,
             "spec": spec,
             GPU_ANCHOR_KEY: uuids,
-            VERIFIED_OWNER_KEY: prev_info.get(VERIFIED_OWNER_KEY) or miner_hotkey,
+            **_owner_fields(miner_hotkey, prev_info, endpoint, takeover=takeover),
         }
         if anchor_broken or prev_info.get(GPU_ANCHOR_BROKEN_KEY):
             data[GPU_ANCHOR_BROKEN_KEY] = True
@@ -644,14 +672,24 @@ class RedisService:
             },
         )
 
-    def _is_refused_foreign_writer(self, miner_hotkey: str, executor_id: str, prev_info: dict) -> bool:
-        """A write to a verified record by a hotkey other than the one that first wrote it is always logged; it is
-        refused only under VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED. A record from before the owner field has none
-        and is claimed by its next writer."""
+    def _is_refused_foreign_writer(
+        self,
+        miner_hotkey: str,
+        executor_id: str,
+        prev_info: dict,
+        endpoint: str = '',
+        takeover: bool = False,
+    ) -> bool:
+        """A write to a verified record by a hotkey other than the one that first wrote it is always
+        logged; it is refused only under VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED. A record from
+        before the owner field has none and is claimed by its next writer. A reset from a hotkey
+        that logged in on the owner's recorded endpoint (`takeover`) is the node moving to that
+        hotkey: it is never refused and takes over the record. A record with no endpoint yet cannot
+        be taken over this way; its owner's next write records one."""
         owner = prev_info.get(VERIFIED_OWNER_KEY)
         if not owner or owner == miner_hotkey:
             return False
-        enforced = settings.VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED
+        enforced = settings.VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED and not takeover
         logger.warning(
             _m(
                 "VERIFIED_RECORD_FOREIGN_WRITER",
@@ -659,6 +697,8 @@ class RedisService:
                     "executor_uuid": executor_id,
                     "miner_hotkey": miner_hotkey,
                     "record_hotkey": owner,
+                    "ssh_endpoint": endpoint,
+                    "same_endpoint": takeover,
                     "enforced": enforced,
                 },
             )
