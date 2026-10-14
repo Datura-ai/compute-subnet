@@ -268,8 +268,9 @@ class Settings(BaseSettings):
         env="INSPECTOR_ENSURE_COLLECTOR_ON_RENTED_CHECK",
         default=True,
     )
-    # Rented cycles in a row in which the inspector saw nothing (error, failed canary, stopped
-    # collector) are counted per node and logged as INSPECTOR_BLIND_STREAK from this many on.
+    # Rented cycles in a row in which the inspector saw nothing (error, failed canary, stopped or
+    # just-started collector) are counted per node and logged as INSPECTOR_BLIND_STREAK from this
+    # many on.
     INSPECTOR_BLIND_STREAK_LIMIT: int = Field(env="INSPECTOR_BLIND_STREAK_LIMIT", default=5)
     # On: the Inspector check fails from that cycle until the sensor reports again. Off by default.
     INSPECTOR_BLIND_STREAK_ENFORCEMENT_ENABLED: bool = Field(

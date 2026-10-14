@@ -92,16 +92,33 @@ async def test_a_blind_streak_in_shadow_sets_no_score_flag(context_factory, monk
 
 
 @pytest.mark.asyncio
-async def test_a_just_started_collector_keeps_the_streak(context_factory, caplog, monkeypatch):
-    # the collector is restarted every cycle, so a host that stops it reads as just started
+async def test_a_just_started_collector_counts_as_a_blind_cycle(
+    context_factory, caplog, monkeypatch
+):
+    # the collector is restarted before every read, so a host that kills it reads as just started
     monkeypatch.setattr(inspector.settings, "INSPECTOR_BLIND_STREAK_LIMIT", 3)
     redis = FakeRedis()
 
     with caplog.at_level(logging.WARNING, logger=inspector.logger.name):
         await _run_cycles(context_factory, redis, ERROR, ERROR, JUST_STARTED, ERROR)
 
-    assert _streak_logs(caplog) == 1
-    assert list(redis.store.values()) == ["3"]
+    assert _streak_logs(caplog) == 2
+    assert list(redis.store.values()) == ["4"]
+
+
+@pytest.mark.asyncio
+async def test_a_host_killing_the_collector_every_cycle_reaches_the_limit(
+    context_factory, monkeypatch
+):
+    monkeypatch.setattr(inspector.settings, "INSPECTOR_BLIND_STREAK_LIMIT", 3)
+    monkeypatch.setattr(inspector.settings, "INSPECTOR_BLIND_STREAK_ENFORCEMENT_ENABLED", True)
+
+    results = await _run_cycles(
+        context_factory, FakeRedis(), JUST_STARTED, JUST_STARTED, JUST_STARTED
+    )
+
+    assert [result.passed for result in results] == [True, True, False]
+    assert results[2].updates["inspector_blind_streak_passed"] is False
 
 
 @pytest.mark.asyncio

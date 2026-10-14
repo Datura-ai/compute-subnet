@@ -20,11 +20,12 @@ from protocol.vc_protocol.compute_requests import RentedPod
 
 logger = logging.getLogger(__name__)
 
-# Outcomes in which the sensor saw nothing of the rental: an error, a failed canary, a stopped collector.
-BLIND_OUTCOMES = frozenset({"ERROR", "CANARY_FAILED", "COLLECTOR_NOT_RUNNING"})
-# The collector is restarted every cycle, so a host that stops it reads as just started: that
-# outcome keeps the streak where it is instead of ending it.
-STREAK_KEPT_OUTCOMES = frozenset({"COLLECTOR_RECENTLY_STARTED"})
+# Outcomes in which the sensor saw nothing of the rental: an error, a failed canary, a stopped
+# collector, or one that only just started (the collector is restarted before every read, so a host
+# that kills it always reads as just started).
+BLIND_OUTCOMES = frozenset(
+    {"ERROR", "CANARY_FAILED", "COLLECTOR_NOT_RUNNING", "COLLECTOR_RECENTLY_STARTED"}
+)
 BLIND_STREAK_KEY_PREFIX = "inspector:blind_streak"
 BLIND_STREAK_TTL_SECONDS = 24 * 60 * 60
 
@@ -94,7 +95,7 @@ class InspectorRentedCheck:
                 updates={
                     "default_extra": extra,
                     "state": replace(ctx.state, inspector_event=inspector_event),
-                    **_blind_streak_flag(passed),
+                    **_score_gate_updates_for_failed_streak(passed),
                 },
             )
 
@@ -124,7 +125,7 @@ class InspectorRentedCheck:
                 updates={
                     "default_extra": extra,
                     "state": replace(ctx.state, inspector_event=inspector_event),
-                    **_blind_streak_flag(passed),
+                    **_score_gate_updates_for_failed_streak(passed),
                 },
             )
         warnings = _collector_start_warnings(report)
@@ -217,7 +218,7 @@ class InspectorRentedCheck:
             updates={
                 "default_extra": extra,
                 "state": replace(ctx.state, inspector_event=inspector_event),
-                **_blind_streak_flag(passed),
+                **_score_gate_updates_for_failed_streak(passed),
             },
         )
 
@@ -276,11 +277,9 @@ async def _record_blind_streak_and_decide_pass(ctx: Context, outcome: str) -> bo
     the sensor dead for a whole rental is never looked at. The streak is logged from
     INSPECTOR_BLIND_STREAK_LIMIT on; it fails the check only under
     INSPECTOR_BLIND_STREAK_ENFORCEMENT_ENABLED. The check is non-fatal, so the caller also sets
-    `inspector_blind_streak_passed` (`_blind_streak_flag`), which calculate_scores zeroes on.
-    A collector that only just started neither counts nor ends the streak. A Redis outage
+    `inspector_blind_streak_passed` (`_score_gate_updates_for_failed_streak`), which
+    calculate_scores zeroes on. A collector that only just started counts as blind. A Redis outage
     decides nothing."""
-    if outcome in STREAK_KEPT_OUTCOMES:
-        return True
     key = f"{BLIND_STREAK_KEY_PREFIX}:{ctx.miner_hotkey}:{ctx.executor.uuid}"
     try:
         if outcome not in BLIND_OUTCOMES:
@@ -308,7 +307,7 @@ async def _record_blind_streak_and_decide_pass(ctx: Context, outcome: str) -> bo
     return not enforced
 
 
-def _blind_streak_flag(passed: bool) -> dict[str, bool]:
+def _score_gate_updates_for_failed_streak(passed: bool) -> dict[str, bool]:
     """The context flag calculate_scores zeroes the score on; set only when the streak failed."""
     return {} if passed else {"inspector_blind_streak_passed": False}
 
