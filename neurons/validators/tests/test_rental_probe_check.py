@@ -403,10 +403,10 @@ def renter_path(
 
 
 @pytest.mark.asyncio
-async def test_off_by_default_rents_nothing():
-    """Regression: a validator that did not opt in rents a container on every idle node each cycle, either
-    because the check ignores the flag or because the setting's default was flipped to True."""
-    assert type(module.settings).model_fields["RENTAL_PROBE_ENABLED"].default is False
+async def test_off_rents_nothing():
+    """Regression: a validator that turned the probe off still rents a container on every idle node each
+    cycle because the check ignores the flag. DAH-4258: on by default, in shadow."""
+    assert type(module.settings).model_fields["RENTAL_PROBE_ENABLED"].default is True
     ctx, docker, _ = make_probe_context()
     with probe_settings(enabled=False):
         result = await RentalProbeCheck().run(ctx)
@@ -1439,10 +1439,10 @@ async def test_pipeline_carries_the_failed_step_to_the_reset_evidence():
     ]
 
 
-def test_enforcement_is_on_by_default():
-    """Regression: a validator that already runs the probe silently stops enforcing it after an upgrade
-    because the new setting's default is off."""
-    assert type(module.settings).model_fields["RENTAL_PROBE_ENFORCEMENT_ENABLED"].default is True
+def test_enforcement_is_off_by_default():
+    """DAH-4258: the probe is on by default, so its default verdict must be shadow: a failure logs
+    RENTAL_PROBE_FAILED_OBSERVED and zeroes nothing until the owner turns enforcement on."""
+    assert type(module.settings).model_fields["RENTAL_PROBE_ENFORCEMENT_ENABLED"].default is False
 
 
 @pytest.mark.asyncio
