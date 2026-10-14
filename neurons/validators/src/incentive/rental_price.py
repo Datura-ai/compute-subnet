@@ -70,19 +70,6 @@ SECURE_FILLER_REVENUE_FLOOR_FACTOR = 0.95
 
 # ── Spec measurements ────────────────────────────────────────────────────────
 
-
-def _fall_back_to_the_model_filler_average(job_result: JobResult) -> None:
-    """DAH-4299: a spot node whose GPU configuration has no filler average yet is priced on its
-    GPU model's average over every GPU count, not left at 0 until Lium's fillers run on it."""
-    if (
-        job_result.filler_revenue_per_gpu_hour is None
-        and settings.SPOT_FILLER_REVENUE_MODEL_FALLBACK_ENABLED
-        and job_result.filler_revenue_model_average_per_gpu_hour is not None
-    ):
-        model_average = job_result.filler_revenue_model_average_per_gpu_hour
-        job_result.filler_revenue_per_gpu_hour = model_average
-        job_result.filler_revenue_from_model_average = True
-
 class InsufficientDisk(BaseModel):
     """Measured totals of a machine whose disk is below the required margin over its GPU VRAM."""
 
@@ -1105,7 +1092,6 @@ class RentalPriceIncentive(DefaultIncentive):
         if not job_result.has_lium_filler:
             job_result.record_incentive_log(MinerLogLine.no_payout_because_spot_without_lium_filler(job_result))
             return job_result
-        _fall_back_to_the_model_filler_average(job_result)
         if job_result.filler_revenue_per_gpu_hour is None:
             job_result.record_incentive_log(
                 MinerLogLine.no_payout_because_spot_no_filler_revenue_for_gpu_config(job_result)
@@ -1130,7 +1116,6 @@ class RentalPriceIncentive(DefaultIncentive):
                     MinerLogLine.no_payout_because_gpu_model_not_in_unrented_program(job_result)
                 )
             return job_result
-        _fall_back_to_the_model_filler_average(job_result)
         if job_result.filler_revenue_per_gpu_hour is None:
             job_result.record_incentive_log(
                 MinerLogLine.no_payout_because_spot_no_filler_revenue_for_gpu_config(job_result)

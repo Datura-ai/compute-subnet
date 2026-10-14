@@ -391,3 +391,34 @@ async def test_power_limit_rescues_when_read_partially_fails_but_records_cover(
     assert result.passed is True
     assert result.event.reason_code == "GPU_POWER_LIMIT_RESTORED_STALE_CAP"
     restore_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_power_limit_fails_under_enforcement(context_factory, monkeypatch) -> None:
+    monkeypatch.setattr(check_module.settings, "GPU_POWER_LIMIT_INCOMPLETE_ENFORCEMENT_ENABLED", True)
+    ctx = context_factory(state=_state(current_limit=None, default_limit=350))
+
+    result = await GpuPowerLimitCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.event.reason_code == "GPU_POWER_LIMIT_UNREADABLE"
+    assert result.updates["score"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_power_limit_under_a_lium_filler_passes_under_enforcement(
+    context_factory, monkeypatch
+) -> None:
+    monkeypatch.setattr(check_module.settings, "GPU_POWER_LIMIT_INCOMPLETE_ENFORCEMENT_ENABLED", True)
+    ctx = context_factory(
+        state=_state(current_limit=None, default_limit=350, default_job_owner="lium")
+    )
+
+    result = await GpuPowerLimitCheck().run(ctx)
+
+    assert result.passed is True
+
+
+def test_unreadable_power_limit_enforcement_is_off_by_default() -> None:
+    fields = type(check_module.settings).model_fields
+    assert fields["GPU_POWER_LIMIT_INCOMPLETE_ENFORCEMENT_ENABLED"].default is False

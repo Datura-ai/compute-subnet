@@ -221,17 +221,6 @@ class MinerLogLine(BaseModel):
 
     @staticmethod
     def no_payout_because_spot_tier(result: JobResult) -> MinerLogLine:
-        if result.is_provider_chosen_spot and (result.is_rented or result.is_split_remainder):
-            # Read as "Spot pay is broken" while it listed every restriction (14 Oct 2026).
-            return MinerLogLine._no_payout(
-                result,
-                reason=ZeroIncentiveReason.SPOT_TIER,
-                message=(
-                    "No subnet incentive while rented: a Spot node earns its renter's payment "
-                    "while any of its GPUs is rented, and Spot idle pay only while it is idle."
-                ),
-                internal_message="Executor excluded from both pools - spot tier (rented)",
-            )
         return MinerLogLine._no_payout(
             result,
             reason=ZeroIncentiveReason.SPOT_TIER,
@@ -652,7 +641,6 @@ class MinerLogLine(BaseModel):
                 "gpu_model": result.gpu_model,
                 "gpu_count": result.gpu_count,
                 "filler_revenue_per_gpu_hour": result.filler_revenue_per_gpu_hour,
-                "filler_revenue_from_model_average": result.filler_revenue_from_model_average,
                 "filler_rate": filler_rate,
                 "hourly_rate": result.hourly_rate,
                 "sysbox_multiplier": result.sysbox_multiplier,

@@ -70,9 +70,6 @@ class JobResult(BaseModel):
     has_lium_filler: bool = False  # the backend lists at least one active Lium filler container on the node
     # the node's GPU configuration's average filler USD per GPU-hour; None = no usable sample
     filler_revenue_per_gpu_hour: float | None = None
-    # the same, pooled over every GPU count of the node's base model; None = no usable sample
-    filler_revenue_model_average_per_gpu_hour: float | None = None
-    filler_revenue_from_model_average: bool = False  # spot priced on the model average (DAH-4299)
 
     # tdx attestation relevant fields
     attestation_digest: str | None = None
