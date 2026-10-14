@@ -1050,10 +1050,8 @@ def run_storage_step(command, deadline, cap):
     return run_storage_probe(command, remaining)
 
 
-def sweep_stale_storage_checks(uptime, deadline):
+def sweep_stale_storage_checks(deadline):
     # a check cut off part-way (scrape killed, executor restarted) leaves its container and volume behind
-    if uptime is None:
-        return
     for list_command, remove_command in (
         (
             ["docker", "ps", "-a", "--filter", f"name={VLOOPBACK_CHECK_NAME_PREFIX}", "--format", "{{.Names}}"],
@@ -1065,7 +1063,10 @@ def sweep_stale_storage_checks(uptime, deadline):
         ),
     ):
         status, names, _ = run_storage_step(list_command, deadline, VLOOPBACK_CLEANUP_TIMEOUT_SECONDS)
-        if status != 0:
+        # sampled after the listing: a peer started while it ran is not newer than this,
+        # so a negative age can only be an object from an earlier boot
+        uptime = host_uptime_seconds()
+        if status != 0 or uptime is None:
             continue
         for name in names.split():
             started = re.fullmatch(VLOOPBACK_CHECK_NAME_PREFIX + r"(\d+)_\d+_[0-9a-f]+", name)
@@ -1153,7 +1154,7 @@ def check_vloopback_volume_ability(runtime):
     # -> (verdict, reason code, detail, cached); the verdict is "pass", "fail" or "skipped"
     deadline = storage_check_clock() + VLOOPBACK_CHECK_BUDGET_SECONDS
     uptime = host_uptime_seconds()
-    sweep_stale_storage_checks(uptime, deadline)
+    sweep_stale_storage_checks(deadline)
 
     status, docker_root_dir, error = run_storage_step(
         ["docker", "info", "--format", "{{.DockerRootDir}}"], deadline, VLOOPBACK_COMMAND_TIMEOUT_SECONDS

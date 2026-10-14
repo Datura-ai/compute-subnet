@@ -430,6 +430,31 @@ def test_stale_test_objects_are_swept_and_other_validators_current_ones_are_kept
     assert host.volumes == {running_now, not_ours}
 
 
+class PeerStartsDuringListing(FakeDockerHost):
+    """Another validator's check starts a second after this one read the uptime, in `docker ps`."""
+
+    def run(self, command, stdout=None, stderr=None, text=None, timeout=None):
+        if self._step(command) == "ps -a":
+            self.uptime += 1
+            self.peer = f"lium_storage_check_{self.uptime}_555_abcdef"
+            self.containers.add(self.peer)
+            self.volumes.add(self.peer)
+        return super().run(command, stdout, stderr, text, timeout)
+
+
+def test_the_sweep_keeps_a_peer_check_that_started_during_the_listing(tmp_path: Path) -> None:
+    # Arrange
+    host = PeerStartsDuringListing()
+
+    # Act
+    payload = _check(host, tmp_path)
+
+    # Assert
+    assert payload["vc_verdict"] == "pass"
+    assert host.containers == {host.peer}
+    assert host.volumes == {host.peer}
+
+
 def test_the_sweep_keeps_names_that_only_contain_the_test_pattern(tmp_path: Path) -> None:
     # Arrange: docker's name filter matches a substring, so these are listed too
     stale = f"lium_storage_check_{UPTIME - 4000}_311_a1b2c3"
