@@ -712,13 +712,6 @@ class SysboxRequiredMessages:
         category="policy",
         impact="Proceed",
     )
-    DISABLED = MessageTemplate(
-        event="Sysbox requirement disabled",
-        reason="SYSBOX_REQUIRED_DISABLED",
-        severity="info",
-        category="policy",
-        impact="Proceed",
-    )
 
 
 class DuplicateExecutorMessages:
