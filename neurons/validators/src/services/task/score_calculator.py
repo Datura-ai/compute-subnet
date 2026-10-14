@@ -11,6 +11,12 @@ from services.executor_image_policy import ImageVerdict
 from services.task.pipeline import Context
 
 
+def _model_requires_attestation(gpu_model: str) -> bool:
+    """Every model when ATTESTED_HARDWARE_REQUIRED_GPU_MODELS is empty, else the listed ones."""
+    required = settings.get_attested_hardware_required_gpu_models()
+    return not required or gpu_model in required
+
+
 def calculate_scores(
     ctx: Context,
     rented: bool = False,
@@ -68,6 +74,20 @@ def calculate_scores(
         actual_score = 0.0
         job_score = 0.0
         warning_messages.append("CVM attestation not passed (TDX/GPU attestation required)")
+
+    # Attested-hardware requirement. Every other signal about the cards is produced on the
+    # provider's own host; a verified TDX quote with GPU evidence bound to it is the only one that
+    # is not. Off by default: on 14 Oct 2026 four of 537 active nodes would pass.
+    if (
+        settings.ATTESTED_HARDWARE_REQUIRED_ENABLED
+        and _model_requires_attestation(gpu_model)
+        and not (ctx.tdx_attestation_passed and ctx.gpu_attestation_passed is True)
+    ):
+        actual_score = 0.0
+        job_score = 0.0
+        warning_messages.append(
+            "Attested hardware required (verified TDX quote with GPU attestation)"
+        )
 
     # CPU-truth gate: the advertised CPU(s) count is contradicted by the kernel-present
     # population. CpuTruthCheck is non-fatal and runs before this, so passed=False alone would

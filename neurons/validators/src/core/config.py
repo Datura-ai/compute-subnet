@@ -703,6 +703,18 @@ class Settings(BaseSettings):
     # Optional comma-separated allowlist of NRAS `hwmodel` claims (e.g. "GH100 A01 GSP BROM").
     # Empty = no hwmodel constraint. Substring-prefix match per entry.
     GPU_ATTESTATION_ALLOWED_HWMODELS: str = Field(env="GPU_ATTESTATION_ALLOWED_HWMODELS", default="")
+    # Attested-hardware requirement: on, a node scores 0 unless its TDX quote verified AND its GPU
+    # attestation passed this cycle. It needs ENABLE_TDX_ATTESTATION on to mean anything: with
+    # attestation off no node can pass. Off by default; turning it on delists every node that is
+    # not a confidential VM, so it is an owner decision.
+    ATTESTED_HARDWARE_REQUIRED_ENABLED: bool = Field(
+        env="ATTESTED_HARDWARE_REQUIRED_ENABLED", default=False
+    )
+    # Optional comma-separated GPU model names the requirement applies to (exact scrape names,
+    # e.g. "NVIDIA H100 80GB HBM3,NVIDIA H200"). Empty = every model.
+    ATTESTED_HARDWARE_REQUIRED_GPU_MODELS: str = Field(
+        env="ATTESTED_HARDWARE_REQUIRED_GPU_MODELS", default=""
+    )
 
     # N3 — rental host-key policy. Off preserves today's behavior (a non-attestation
     # error while building the policy falls back to unpinned SSH). On = fail closed:
@@ -725,6 +737,9 @@ class Settings(BaseSettings):
 
     def get_allowed_gpu_hwmodels(self) -> set[str]:
         return {s.strip() for s in self.GPU_ATTESTATION_ALLOWED_HWMODELS.split(",") if s.strip()}
+
+    def get_attested_hardware_required_gpu_models(self) -> set[str]:
+        return {s.strip() for s in self.ATTESTED_HARDWARE_REQUIRED_GPU_MODELS.split(",") if s.strip()}
 
     # Use REST API instead of WebSocket for miner communication
     USE_REST_API: bool = Field(env="USE_REST_API", default=False)
