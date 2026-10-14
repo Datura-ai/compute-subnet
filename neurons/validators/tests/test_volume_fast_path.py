@@ -700,11 +700,15 @@ async def test_run_with_host_timeout_frees_the_channel_or_stops_the_create(
 
 
 def _plugin_host(
-    *, v2_state: str = "absent", old_state: str = "true", install: str = "fails", docker_root: str = "/var/lib/docker"
+    *, v2_state: str = "absent", old_state: str = "true", install: str = "fails", docker_root: str = "/var/lib/docker", enable_succeeds: bool = False
 ) -> Mock:
     # the host's docker through ssh: a v2 install or enable that fails (or never answers), and the plugin states
     async def answer(command: str):
+        nonlocal v2_state
         command = shlex.split(command)[-1] if command.startswith("timeout -k 5 ") else command
+        if "plugin enable" in command and enable_succeeds:
+            v2_state = "true"
+            return Mock(stdout="", stderr="", exit_status=0)
         if "docker info" in command:
             return Mock(stdout=f"{docker_root}\n", stderr="", exit_status=0)
         if "plugin inspect" in command:
@@ -735,6 +739,7 @@ async def test_run_with_host_timeout_waits_the_margin_past_the_host_timeout(monk
         (None, "fails", "absent", "install exit 1, state absent: Error response"),
         (None, "hangs", "absent", "install timed out after 0.1 s"),
         (_disabled_plugin_probe(), "fails", "false", "vloopback plugin disabled on host"),
+        (None, "fails", "false", "vloopback plugin disabled on host"),
         (None, "fails", "unreadable", "install exit 1, state unknown: Error response"),
     ],
 )
@@ -790,10 +795,20 @@ async def test_create_local_volume_without_a_docker_data_root_never_installs_v2(
 
 
 @pytest.mark.asyncio
-async def test_create_local_volume_without_probe_keeps_v2_when_its_install_says_already_exists(docker_service):
-    created = await _create_volume(docker_service, _plugin_host(v2_state="true"), None)
-
+@pytest.mark.parametrize("v2_state", ["true", "false"])
+@pytest.mark.parametrize("old_state", ["absent", "false", "true"])
+async def test_create_local_volume_without_probe_keeps_v2_when_its_install_says_already_exists(
+    docker_service, v2_state, old_state
+):
+    # Arrange: a failed probe leaves the per-command path with an installed v2.
+    ssh_client = _plugin_host(v2_state=v2_state, old_state=old_state, enable_succeeds=True)
+    # Act
+    created = await _create_volume(docker_service, ssh_client, None)
+    # Assert: recover disabled v2 before considering any legacy plugin, whatever its state.
     assert [volume["driver"] for volume in created] == ["vloopback:v2"]
+    commands = [call.args[0] for call in ssh_client.run.await_args_list]
+    assert any("plugin enable" in command for command in commands) is (v2_state == "false")
+    assert all("vloopback:v2" in command for command in commands if "plugin" in command)
 
 
 @pytest.mark.asyncio

@@ -5788,6 +5788,12 @@ class DockerService:
                 if install_failed:
                     # without a probe an installed v2 fails the install with "already exists"
                     v2_state = await self._get_loopback_v2_state(ssh_client, requested_timeout)
+                    if v2_state == "false":
+                        try:
+                            await self._enable_loopback_plugin(ssh_client, requested_timeout, log_extra)
+                            v2_state = "true"
+                        except LoopbackPluginDisabledError as exc:
+                            install_outcome = str(exc)
                     if v2_state != "true":
                         loopback_plugin_name = await self._fall_back_to_old_loopback_plugin(
                             ssh_client,
