@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import random
+import re
 import shlex
 import time
 import uuid as uuid4
@@ -34,6 +35,9 @@ MATMUL_ALLCARDS_WALL_CLOCK_SECONDS = 90
 # while OpenSSH defaults to MaxSessions 10 — 8 keeps the concurrency signal (a count lie still
 # serialises) and stays clear of that ceiling on the widest honest hosts.
 MATMUL_ALLCARDS_MAX_CONCURRENT_CARDS = 8
+
+# The shape a reported GPU UUID must have before it is placed on the per-card command line.
+GPU_UUID_PATTERN = re.compile(r"^GPU-[0-9a-fA-F-]{1,64}$")
 
 # VRAM (MB) the work-proof leaves untouched: a quarter of the card, clamped between the two.
 # The reserve must clear what an idle card may legally hold (GPU_HELD_VRAM_MB_LIMIT, 2048 MB —
@@ -186,9 +190,13 @@ class ValidationResult:
 class AllCardsProbe:
     """Outcome of the all-claimed-cards work-proof (DAH-2671 item 3).
 
+    A card counts only when its own run answered its own challenge: the nonce comes back (sealed
+    when the executor seals) under a key derived from that card's reported UUID and model. The
+    verdict passes when every reported card is verified, so `verified_count == gpu_count`.
+
     Honesty (validator-side only, never sent to the host): this proves N cards' worth of capacity
     existed in the window, NOT that the cards share one chassis — a relay to a genuine 8-GPU host
-    still passes. Chassis-binding (NCCL) and the per-card cryptographic seal are follow-on tickets.
+    still passes. Chassis-binding (NCCL) is a follow-on ticket.
     """
 
     passed: bool
@@ -196,6 +204,7 @@ class AllCardsProbe:
     elapsed_seconds: float
     over_wall_clock: bool
     per_card: list[dict]
+    verified_count: int = 0
 
 
 class ValidationService:
@@ -273,70 +282,110 @@ class ValidationService:
         self, ssh_client, executor_info, default_extra: dict, machine_spec: dict
     ) -> AllCardsProbe | None:
         # concurrent per-card work-proof: one independent challenge per claimed card (own seed + own
-        # uuid + own cipher), each pinned with CUDA_VISIBLE_DEVICES=<index>, sized from the registry
-        # SKU (not host self-report), aggregate timed on the validator. Returns None when it does not
-        # apply — a single claimed card (legacy/whole-single-GPU path) or a model with no known
-        # registry VRAM size (cannot size safely) — so the caller's single-card path stays authoritative.
+        # nonce + own key), each run pinned to that card's reported UUID, sized from the registry
+        # SKU (not host self-report), aggregate timed on the validator. A card is verified only when
+        # its answer passes `evaluate_matmul_output`, the judgement the single-card run gets.
+        # Returns None when it does not apply — a single claimed card (legacy/whole-single-GPU path)
+        # or a model with no known registry VRAM size (cannot size safely) — so the caller's
+        # single-card path stays authoritative.
         gpu = machine_spec.get("gpu", {}) or {}
         gpu_count = gpu.get("count", 0) or 0
         details = gpu.get("details", []) or []
         if gpu_count <= 1 or not details:
             return None
 
-        gpu_model = details[0].get("name", "") or ""
-        sized_vram_mb = matmul_probe_vram_mb(gpu_model)
-        if not sized_vram_mb:
+        cards = details[:gpu_count]
+        sized_vram_mb = [matmul_probe_vram_mb(card.get("name", "") or "") for card in cards]
+        if not all(sized_vram_mb):
             return None
 
-        gpu_uuids = ",".join(detail.get("uuid", "") for detail in details)
-        # machine_info is identical across cards — the executor's .so reconstructs it locally from
-        # getGPUInfo(); only seed+uuid (and thus the cipher) differ per card.
-        machine_info = json.dumps(
-            {"uuids": gpu_uuids, "gpu_count": gpu_count, "gpu_model": gpu_model}, sort_keys=True
-        )
         script_path = f"{executor_info.root_dir}/src/decrypt_challenge.py"
+        reported_uuids = [str(card.get("uuid", "") or "") for card in cards]
 
-        challenges: list[VerifierParams] = []
-        for _ in range(gpu_count):
-            params = VerifierParams()
-            params.generate()
-            params.dim_k = int(self.get_max_matrix_dimensions(sized_vram_mb, params.dim_n))
-            params.cipher_text = self._generate_card_cipher(machine_info, params)
-            # A native error yields an empty cipher, which would go out as a bare `--cipher_text `
-            # and read as a failed work-proof on every card. Our own fault, not the host's: skip
-            # the probe and let the caller's single-card path decide, as the legacy path does.
-            if not params.cipher_text:
-                logger.warning(
-                    _m(
-                        "All-cards matmul skipped: cipher text generation failed (native error)",
-                        extra=get_extra_info(default_extra),
+        # Cards that cannot be verified are decided here and get no run: a claimed card with no
+        # reported detail, a UUID that is not a GPU UUID, or a UUID reported for more than one card.
+        per_card: list[dict] = [
+            {"card_index": index, "gpu_uuid": "", "ok": False, "reason": "not_reported"}
+            for index in range(gpu_count)
+        ]
+        challenges: dict[int, MatmulChallenge] = {}
+        try:
+            for index, card in enumerate(cards):
+                gpu_uuid = reported_uuids[index]
+                per_card[index]["gpu_uuid"] = gpu_uuid
+                if not GPU_UUID_PATTERN.match(gpu_uuid):
+                    per_card[index]["reason"] = "uuid_invalid"
+                    continue
+                if reported_uuids.count(gpu_uuid) > 1:
+                    per_card[index]["reason"] = "uuid_duplicate"
+                    continue
+                # The executor's library derives the challenge key from the devices its process can
+                # see. Pinned to one card that is this card alone, so the challenge is built for a
+                # one-card machine carrying this card's UUID and model: only that card can answer it.
+                challenge = self.prepare_matmul_challenge(
+                    {
+                        "gpu": {
+                            "count": 1,
+                            "details": [
+                                {
+                                    "name": card.get("name", "") or "",
+                                    "uuid": gpu_uuid,
+                                    "capacity": sized_vram_mb[index],
+                                }
+                            ],
+                        }
+                    },
+                    {**default_extra, "all_cards_probe": True, "card_index": index},
+                )
+                challenges[index] = challenge
+                # A native error yields an empty cipher, which would go out as a bare
+                # `--cipher_text ` and read as a failed work-proof on every card. Our own fault, not
+                # the host's: skip the probe and let the caller's single-card path decide, as the
+                # legacy path does.
+                if not challenge.params.cipher_text:
+                    logger.warning(
+                        _m(
+                            "All-cards matmul skipped: cipher text generation failed (native error)",
+                            extra=get_extra_info(default_extra),
+                        )
                     )
-                )
-                return None
-            challenges.append(params)
+                    return None
 
-        # One SSH channel per card on a single connection, so the fan-out has to stay under the
-        # executor's sshd MaxSessions (OpenSSH defaults to 10). A 12-14 card host would otherwise
-        # push the tail channels into the ssh_error branch and read as a failed work-proof.
-        gate = asyncio.Semaphore(MATMUL_ALLCARDS_MAX_CONCURRENT_CARDS)
+            # One SSH channel per card on a single connection, so the fan-out has to stay under the
+            # executor's sshd MaxSessions (OpenSSH defaults to 10). A 12-14 card host would otherwise
+            # push the tail channels into the ssh_error branch and read as a failed work-proof.
+            gate = asyncio.Semaphore(MATMUL_ALLCARDS_MAX_CONCURRENT_CARDS)
 
-        async def run_gated(index: int, params: VerifierParams) -> dict:
-            async with gate:
-                return await self._run_one_card(
-                    ssh_client, executor_info, script_path, index, params
-                )
+            async def run_gated(index: int, challenge: MatmulChallenge) -> dict:
+                async with gate:
+                    return await self._run_one_card(
+                        ssh_client,
+                        executor_info,
+                        script_path,
+                        index,
+                        reported_uuids[index],
+                        challenge,
+                    )
 
-        start = time.perf_counter()
-        per_card = await asyncio.gather(
-            *(run_gated(index, params) for index, params in enumerate(challenges))
-        )
-        elapsed = time.perf_counter() - start
+            start = time.perf_counter()
+            outcomes = await asyncio.gather(
+                *(run_gated(index, challenge) for index, challenge in challenges.items())
+            )
+            elapsed = time.perf_counter() - start
+        finally:
+            for challenge in challenges.values():
+                challenge.close()
 
-        failed_cards = [outcome for outcome in per_card if not outcome["ok"]]
+        for outcome in outcomes:
+            per_card[outcome["card_index"]].update(outcome)
+
+        verified_count = sum(1 for outcome in per_card if outcome["ok"])
         over_wall_clock = elapsed > MATMUL_ALLCARDS_WALL_CLOCK_SECONDS
-        passed = not failed_cards and not over_wall_clock
-        if failed_cards:
-            failure_reason = f"{len(failed_cards)}/{gpu_count} card(s) failed device work-proof"
+        passed = verified_count == gpu_count and not over_wall_clock
+        if verified_count != gpu_count:
+            failure_reason = (
+                f"{gpu_count - verified_count}/{gpu_count} card(s) failed device work-proof"
+            )
         elif over_wall_clock:
             failure_reason = (
                 f"aggregate wall-clock {elapsed:.1f}s over {MATMUL_ALLCARDS_WALL_CLOCK_SECONDS}s "
@@ -348,7 +397,8 @@ class ValidationService:
         log_extra = {
             **default_extra,
             "gpu_count_claimed": gpu_count,
-            "gpu_model": gpu_model,
+            "gpu_count_verified": verified_count,
+            "gpu_models": sorted({card.get("name", "") or "" for card in cards}),
             "sized_vram_mb": sized_vram_mb,
             "elapsed_seconds": round(elapsed, 3),
             "wall_clock_threshold_seconds": MATMUL_ALLCARDS_WALL_CLOCK_SECONDS,
@@ -372,6 +422,7 @@ class ValidationService:
             elapsed_seconds=elapsed,
             over_wall_clock=over_wall_clock,
             per_card=per_card,
+            verified_count=verified_count,
         )
 
     @staticmethod
@@ -381,33 +432,23 @@ class ValidationService:
         reason = outcome.get("reason") or ""
         return reason == "timeout" or reason.startswith("ssh_error")
 
-    def _generate_card_cipher(self, machine_info: str, params: "VerifierParams") -> str:
-        # generate one card's challenge on a dedicated object; no per-card seal is verified (a
-        # follow-on ticket), so the key is not retained past cipher generation.
-        gen_ptr = None
-        try:
-            gen_ptr = self.wrapper.DMCompVerify_new(10, 10)
-            self.wrapper.setDimension(gen_ptr, params.dim_n, params.dim_k)
-            self.wrapper.generateChallenge(gen_ptr, params.seed, machine_info, params.uuid)
-            return self.wrapper.getCipherText(gen_ptr) or ""
-        except Exception as e:
-            logger.error("Failed encrypt challenge request (all-cards): %s", str(e))
-            return ""
-        finally:
-            if gen_ptr is not None:
-                try:
-                    self.wrapper.free(gen_ptr)
-                except Exception:
-                    pass
-
     async def _run_one_card(
-        self, ssh_client, executor_info, script_path: str, index: int, params: "VerifierParams"
+        self,
+        ssh_client,
+        executor_info,
+        script_path: str,
+        index: int,
+        gpu_uuid: str,
+        challenge: "MatmulChallenge",
     ) -> dict:
-        # run the challenge pinned to one CUDA device index; a count lie fails device selection here
-        # (invalid ordinal) or serialises onto the one real card, caught by the aggregate wall-clock.
-        # The command sent to the executor is unchanged except the CUDA_VISIBLE_DEVICES env prefix,
-        # and never reveals which card/signal disagreed (anti-treadmill).
-        command = f"CUDA_VISIBLE_DEVICES={index} {executor_info.python_path} {script_path} {params}"
+        # run one card's challenge pinned to that card's reported UUID and judge the answer with
+        # this challenge's own key. The command sent to the executor is the single-card command with
+        # a CUDA_VISIBLE_DEVICES prefix, and never reveals which card/signal disagreed
+        # (anti-treadmill).
+        command = (
+            f"CUDA_VISIBLE_DEVICES={shlex.quote(gpu_uuid)} "
+            f"{executor_info.python_path} {script_path} {challenge.params}"
+        )
         try:
             result = await ssh_client.run(command, timeout=MATRIX_VERIFY_TIMEOUT_SECONDS)
         except (TimeoutError, asyncssh.TimeoutError):
@@ -417,12 +458,15 @@ class ValidationService:
 
         exit_status = getattr(result, "exit_status", 0)
         stdout = getattr(result, "stdout", "") or ""
+        stderr = getattr(result, "stderr", "") or ""
         if exit_status != 0:
             return {"card_index": index, "ok": False, "reason": f"exit_status={exit_status}"}
         if not stdout.strip():
             return {"card_index": index, "ok": False, "reason": "empty_output"}
-        # No per-card cryptographic seal yet (follow-on ticket): the .so's AES key diverges under
-        # CUDA_VISIBLE_DEVICES, so per-card crypto cannot gate today.
+        # Output alone proves nothing: the answer has to carry this card's nonce.
+        verdict = self.evaluate_matmul_output(challenge, stdout=stdout, stderr=stderr)
+        if not verdict.success:
+            return {"card_index": index, "ok": False, "reason": "unverified"}
         return {"card_index": index, "ok": True, "reason": ""}
 
     def prepare_matmul_challenge(
@@ -650,10 +694,11 @@ class ValidationService:
         # `decrypt_challenge.py` run → evaluate_matmul_output. The local transport (checks/
         # local_verify.py) calls the same two functions around `POST /verify`.
         # DAH-2671 item 3: all-claimed-cards work-proof. Shadow (MATMUL_ALLCARDS_CHECK_ENABLED
-        # without enforcement) logs timing + per-card outcome and NEVER changes the returned result;
-        # enforcement fails a count lie (device-selection error / OOM / serialised aggregate
-        # wall-clock). Single-card / unknown-model hosts skip it (probe returns None), which also
-        # keeps a not-yet-relevant fleet — and the legacy single-card path below — unchanged.
+        # without enforcement, the default) logs timing + per-card verdict and NEVER changes the
+        # returned result; MATMUL_ALLCARDS_ENFORCEMENT_ENABLED fails the validation when fewer cards
+        # are verified than reported or the aggregate wall-clock is over. Single-card /
+        # unknown-model hosts skip it (probe returns None), which also keeps the legacy single-card
+        # path below unchanged.
         if settings.MATMUL_ALLCARDS_CHECK_ENABLED:
             all_cards = await self._probe_all_claimed_cards(
                 ssh_client, executor_info, default_extra, machine_spec
