@@ -97,7 +97,7 @@ class RentedExecutorsResponse(pydantic.BaseModel):
     filler_revenue_by_gpu_config: list[FillerRevenueByGpuConfig] = []
     # executor_id → the miner hotkey of its MinerExecutor row, for every listed executor; the
     # validator's verified record treats a write by any other hotkey as foreign
-    executor_owner_hotkey: dict[str, str] = {}
+    executor_owner_hotkeys: dict[str, str] = {}
 
 
 class PodRentalActiveResponse(pydantic.BaseModel):

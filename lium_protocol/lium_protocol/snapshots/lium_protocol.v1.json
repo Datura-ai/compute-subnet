@@ -4613,12 +4613,12 @@
           "title": "Default Job Owner By Executor",
           "type": "object"
         },
-        "executor_owner_hotkey": {
+        "executor_owner_hotkeys": {
           "additionalProperties": {
             "type": "string"
           },
           "default": {},
-          "title": "Executor Owner Hotkey",
+          "title": "Executor Owner Hotkeys",
           "type": "object"
         },
         "executors": {

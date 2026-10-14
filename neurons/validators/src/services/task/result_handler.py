@@ -335,7 +335,7 @@ class ResultHandler:
         backend does send is logged: the backend creates the row on the node's first report, so
         a new node has none for a cycle or so."""
         rented_data = context.state.rented_data
-        owners = rented_data.executor_owner_hotkey if rented_data else {}
+        owners = rented_data.executor_owner_hotkeys if rented_data else {}
         owner = owners.get(str(context.executor.uuid).lower())
         if owners and not owner:
             logger.info(

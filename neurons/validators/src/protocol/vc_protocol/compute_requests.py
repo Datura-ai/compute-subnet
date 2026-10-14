@@ -179,7 +179,7 @@ class RentedExecutorsResponse(BaseModel):
     # owns it), for every listed executor. A write to the verified-job record by another hotkey is
     # foreign (ResultHandler). Defaults to empty: an older backend names no owner and every write
     # is let through.
-    executor_owner_hotkey: dict[str, str] = {}
+    executor_owner_hotkeys: dict[str, str] = {}
 
     def get_filler_revenue_per_gpu_hour(
         self, base_model: str | None, gpu_count: int, min_gpu_hours: float

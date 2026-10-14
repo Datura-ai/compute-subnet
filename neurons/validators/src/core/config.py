@@ -452,7 +452,7 @@ class Settings(BaseSettings):
     # Flip after reading a week of the warn-mode rows.
     GPU_ANCHOR_HARD_ENABLED: bool = Field(env="GPU_ANCHOR_HARD_ENABLED", default=False)
     # The verified record (count, spec, GPU anchor) is keyed by executor id alone. Its owner is
-    # the backend's (RentedExecutorsResponse.executor_owner_hotkey, the MinerExecutor row): a
+    # the backend's (RentedExecutorsResponse.executor_owner_hotkeys, the MinerExecutor row): a
     # write or reset by another hotkey is always logged (VERIFIED_RECORD_FOREIGN_WRITER); with
     # this on it is refused, so listing someone else's executor id no longer resets their record.
     # A provider moves a node to a new hotkey in the portal. No owner from the backend lets the

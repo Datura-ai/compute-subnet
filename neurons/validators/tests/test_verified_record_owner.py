@@ -10,7 +10,7 @@ from neurons.validators.src.services.task.result_handler import ResultHandler
 from protocol.vc_protocol.compute_requests import RentedExecutorsResponse
 from tests.helpers import build_state
 
-RECORD = {"count": 7, "failed": 0, "spec": "s", "uuids": "GPU-a"}
+VERIFIED_RECORD = {"count": 7, "failed": 0, "spec": "s", "uuids": "GPU-a"}
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def enforced(monkeypatch):
     monkeypatch.setattr(redis_service.settings, "VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", True)
 
 
-def _written(service) -> dict:
+def _written_verified_record(service) -> dict:
     return json.loads(service.hset.await_args.args[2])
 
 
@@ -38,21 +38,21 @@ def _logs(caplog, key: str) -> int:
 async def test_a_foreign_reset_is_logged_and_still_written_by_default(service, caplog):
     with caplog.at_level(logging.WARNING, logger=redis_service.logger.name):
         await service.clear_verified_job_info(
-            "other-hotkey", "exec-1", prev_info=RECORD, record_owner="owner-hotkey"
+            "other-hotkey", "exec-1", prev_info=VERIFIED_RECORD, record_owner="owner-hotkey"
         )
 
     assert _logs(caplog, "VERIFIED_RECORD_FOREIGN_WRITER") == 1
-    assert _written(service) == {**RECORD, "count": 0}
+    assert _written_verified_record(service) == {**VERIFIED_RECORD, "count": 0}
     service.publish.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_a_foreign_write_or_reset_is_refused_under_enforcement(service, enforced):
     await service.clear_verified_job_info(
-        "other-hotkey", "exec-1", prev_info=RECORD, record_owner="owner-hotkey"
+        "other-hotkey", "exec-1", prev_info=VERIFIED_RECORD, record_owner="owner-hotkey"
     )
     await service.set_verified_job_info(
-        "other-hotkey", "exec-1", prev_info=RECORD, record_owner="owner-hotkey"
+        "other-hotkey", "exec-1", prev_info=VERIFIED_RECORD, record_owner="owner-hotkey"
     )
 
     service.hset.assert_not_awaited()
@@ -63,10 +63,10 @@ async def test_a_foreign_write_or_reset_is_refused_under_enforcement(service, en
 async def test_the_backend_owner_still_writes_under_enforcement(service, enforced, caplog):
     with caplog.at_level(logging.WARNING, logger=redis_service.logger.name):
         await service.set_verified_job_info(
-            "owner-hotkey", "exec-1", prev_info=RECORD, record_owner="owner-hotkey"
+            "owner-hotkey", "exec-1", prev_info=VERIFIED_RECORD, record_owner="owner-hotkey"
         )
 
-    assert _written(service)["count"] == 8
+    assert _written_verified_record(service)["count"] == 8
     assert _logs(caplog, "VERIFIED_RECORD_FOREIGN_WRITER") == 0
 
 
@@ -74,7 +74,7 @@ async def test_the_backend_owner_still_writes_under_enforcement(service, enforce
 async def test_no_backend_owner_lets_every_write_through_under_enforcement(service, enforced):
     # a new node: the backend creates its owner row on the first report
     await service.set_verified_job_info("any-hotkey", "exec-1", prev_info={}, spec="s")
-    await service.clear_verified_job_info("any-hotkey", "exec-1", prev_info=RECORD)
+    await service.clear_verified_job_info("any-hotkey", "exec-1", prev_info=VERIFIED_RECORD)
 
     assert service.hset.await_count == 2
     service.publish.assert_awaited_once()
@@ -88,7 +88,7 @@ def test_owner_enforcement_is_off_by_default():
 def _context(context_factory, owners: dict | None):
     rented = None
     if owners is not None:
-        rented = RentedExecutorsResponse(executors={}, executor_owner_hotkey=owners)
+        rented = RentedExecutorsResponse(executors={}, executor_owner_hotkeys=owners)
     ctx = context_factory(state=build_state(rented_data=rented))
     return ctx.model_copy(update={"clear_verified_job_info": True})
 
@@ -107,7 +107,11 @@ async def test_the_result_handler_passes_the_backend_owner(context_factory, owne
     redis = AsyncMock()
 
     await ResultHandler(redis_service=redis, dry_run=False)._persist_verification_data(
-        "miner-hotkey", "executor-123", RECORD, _context(context_factory, owners), success=False
+        "miner-hotkey",
+        "executor-123",
+        VERIFIED_RECORD,
+        _context(context_factory, owners),
+        success=False,
     )
 
     assert redis.clear_verified_job_info.await_args.kwargs["record_owner"] == expected

@@ -645,7 +645,7 @@ class RedisService:
         self, miner_hotkey: str, executor_id: str, record_owner: str | None
     ) -> bool:
         """`record_owner` is the backend's owner of the executor (its MinerExecutor row's miner
-        hotkey, RentedExecutorsResponse.executor_owner_hotkey). A write by any other hotkey is
+        hotkey, RentedExecutorsResponse.executor_owner_hotkeys). A write by any other hotkey is
         always logged and is refused only under VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED. No
         owner (an executor the backend has not listed yet, or a backend that does not send the
         map) lets the write through: a new node must still be verified."""
