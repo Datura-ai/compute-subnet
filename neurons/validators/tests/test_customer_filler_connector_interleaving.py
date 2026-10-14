@@ -16,7 +16,7 @@ from services.rental_docker_sdk import GpuDockerConfig, RentalDockerSdkClient
 @pytest.mark.parametrize("customer_at", ["before_filler_create", "after_filler_snapshot"])
 async def test_separate_connectors_cannot_start_filler_beside_customer(customer_at):
     # Arrange: independent services share only the external Docker host, without a Redis lock.
-    customer = DockerService(ssh_service=Mock(), redis_service=Mock(), attestation_service=Mock())
+    customer = DockerService(ssh_service=Mock(), redis_service=Mock(get=AsyncMock(return_value=None)), attestation_service=Mock())
     filler_connector = DockerService(ssh_service=Mock(), redis_service=Mock(), attestation_service=Mock())
     filler = _payload(workload_kind=WorkloadKind.FILLER)
     host = {}

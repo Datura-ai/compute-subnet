@@ -9,6 +9,7 @@ import pytest
 from neurons.validators.src.payload_models.payloads import GpuPowerLimit
 from neurons.validators.src.services.gpu_power_limit import (
     POWER_LIMIT_SET_CONCURRENCY,
+    POWER_STATE_CMD,
     GpuPowerReadback,
     GpuPowerRestoreRecord,
     GpuPowerState,
@@ -944,3 +945,44 @@ async def test_a_refused_pm_session_does_not_reject_the_filler_before_pl(caplog:
         if "enabling persistence mode for GPU-b failed" in record.getMessage()
     ]
     assert len(pm_warnings) == 1 and "open failed" in pm_warnings[0].getMessage()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, "timeout", "nonzero", "partial", "redis", "record_redis", "record", "index", "absent"])
+async def test_strict_pod_restore_requires_every_record_to_be_restored(failure):
+    # Arrange: real restore records and setters; keep one GPU's failure distinct from a partial restore.
+    redis = FakeRedis({_pod_index_key(POD_ID): '["GPU-a", "GPU-b"]',
+                       _restore_key("GPU-a"): _record("GPU-a", 400),
+                       _restore_key("GPU-b"): _record("GPU-b", 250)})
+    if failure == "absent":
+        redis.store.clear()
+    if failure in ("record", "index"):
+        redis.store[_restore_key("GPU-a") if failure == "record" else _pod_index_key(POD_ID)] = "broken"
+    if failure == "redis":
+        redis.get = AsyncMock(side_effect=ConnectionError("unreadable"))
+    if failure == "record_redis":
+        async def get(key):
+            if key.startswith("gpu_power_restore:"):
+                raise ConnectionError("unreadable record")
+            return redis.store.get(key)
+        redis.get = get
+    async def run(command, **kwargs):
+        if command == POWER_STATE_CMD:
+            return FakeRun(stdout=STATE_CSV)
+        if " -pl " in command and failure in ("timeout", "nonzero", "partial"):
+            if failure == "timeout":
+                raise TimeoutError("hung")
+            if failure != "partial" or "GPU-b" in command:
+                return FakeRun(exit_status=1)
+        return FakeRun(stdout="400, Enabled\n" if "GPU-a" in command else "250, Enabled\n")
+    ssh = AsyncMock(run=AsyncMock(side_effect=run))
+    # Act: strict caller cannot succeed with an unknown or remaining cap.
+    if failure not in (None, "absent"):
+        with pytest.raises(RuntimeError):
+            await restore_filler_pod_gpu_power_limits(ssh, redis, POD_ID, require_complete=True)
+        # Assert: failed records and the index survive for a later retry.
+        assert _pod_index_key(POD_ID) in redis.store
+        assert _restore_key("GPU-b") in redis.store
+    else:
+        assert await restore_filler_pod_gpu_power_limits(ssh, redis, POD_ID, require_complete=True) == (0 if failure else 2)
+        assert not redis.store

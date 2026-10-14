@@ -44,7 +44,7 @@ from services.docker_service import (
 def svc():
     # local fixtures rather than imports, which pyflakes reads as names every parameter below
     # redefines (F811); same services test_deploy_optimizations / test_docker_service build
-    return DockerService(ssh_service=Mock(), redis_service=Mock(), attestation_service=Mock())
+    return DockerService(ssh_service=Mock(), redis_service=Mock(get=AsyncMock(return_value=None)), attestation_service=Mock())
 
 
 @pytest.fixture
@@ -897,4 +897,21 @@ async def test_a_running_check_that_never_answers_fails_the_customer_create(svc,
 
     assert isinstance(result, FailedContainerRequest)
     assert result.failure_step == "container_cleanup"
+    assert f"/usr/bin/docker rm -fv {_CUSTOMER_CONTAINER_ID} 2>/dev/null || true" in _commands(ssh_client)
+
+
+@pytest.mark.asyncio
+async def test_failed_late_filler_power_restore_fails_and_cleans_customer(svc, monkeypatch):
+    # Arrange: removal succeeded, but a GPU remains capped.
+    ssh_client = _customer_create_host(svc, monkeypatch,
+        listing_at_running_check=f"NAME\tfiller_late {_FILLER_ID}\nPS\t0\n",
+        listing_after_rm="RM\t0\nPS\t0\n")
+    restore = AsyncMock(side_effect=RuntimeError("GPU power restoration incomplete"))
+    monkeypatch.setattr(ds_module, "restore_filler_pod_gpu_power_limits", restore)
+    # Act: the real create path must not publish RUNNING.
+    result = await _run(svc, _payload(workload_kind=WorkloadKind.CUSTOMER_RENTAL))
+    # Assert: use the cleanup failure and remove the customer's own container.
+    assert isinstance(result, FailedContainerRequest)
+    assert result.failure_step == "container_cleanup"
+    assert restore.await_args.kwargs["require_complete"] is True
     assert f"/usr/bin/docker rm -fv {_CUSTOMER_CONTAINER_ID} 2>/dev/null || true" in _commands(ssh_client)

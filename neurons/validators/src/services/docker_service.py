@@ -3504,12 +3504,18 @@ class DockerService:
         # DAH-2356: a PEARL filler caps its GPUs before its `docker run`, possibly after this create's
         # last power restore; lifted only now that it is confirmed gone
         for name in fillers:
-            await restore_filler_pod_gpu_power_limits(
-                ssh_client,
-                self.redis_service,
-                name.removeprefix(FILLER_CONTAINER_PREFIX),
-                log_extra=default_extra,
-            )
+            try:
+                await restore_filler_pod_gpu_power_limits(
+                    ssh_client,
+                    self.redis_service,
+                    name.removeprefix(FILLER_CONTAINER_PREFIX),
+                    log_extra=default_extra,
+                    require_complete=True,
+                )
+            except RuntimeError as exc:
+                raise _FillerBesideCustomerContainer(
+                    f"GPU power restoration after removing {name} could not be confirmed"
+                ) from exc
 
     async def wait_for_port_check_containers(
         self,
