@@ -1537,9 +1537,8 @@ async def test_unnamed_pod_whose_container_is_not_up_yet_is_not_penalised(contex
 async def test_unnamed_pod_still_not_up_after_the_grace_is_not_running(context_factory):
     created_at = datetime.now(UTC) - timedelta(minutes=POD_CONTAINER_NAME_GRACE_MINUTES + 1)
     pods = {"containers": [{"name": "", "pod_id": "53a68595", "created_at": created_at}]}
-    ctx = _unnamed_pod_ctx(
-        context_factory, DummySSHClient(pod_running=False), [], DummyBackendClient(active=True), pods
-    )
+    ssh = DummySSHClient(pod_running=False)
+    ctx = _unnamed_pod_ctx(context_factory, ssh, [], DummyBackendClient(active=True), pods)
 
     result = await TenantEnforcementCheck().run(ctx)
 
