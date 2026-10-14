@@ -566,9 +566,9 @@ class RedisService:
         success: bool = True,
         spec: str = '',
         uuids: str = '',
-        record_owner: str | None = None,
+        login_hotkey: str | None = None,
     ):
-        if self._log_foreign_writer_and_should_refuse(miner_hotkey, executor_id, record_owner):
+        if self._refuse_write_without_login(miner_hotkey, executor_id, login_hotkey):
             return
         count = prev_info.get('count', 0)
         failed = prev_info.get('failed', 0)
@@ -607,9 +607,9 @@ class RedisService:
         reason: ResetVerifiedJobReason = ResetVerifiedJobReason.DEFAULT,
         evidence: dict | None = None,
         anchor_broken: bool = False,
-        record_owner: str | None = None,
+        login_hotkey: str | None = None,
     ):
-        if self._log_foreign_writer_and_should_refuse(miner_hotkey, executor_id, record_owner):
+        if self._refuse_write_without_login(miner_hotkey, executor_id, login_hotkey):
             return
         spec = prev_info.get('spec', '')
         uuids = prev_info.get(GPU_ANCHOR_KEY, '')
@@ -641,24 +641,25 @@ class RedisService:
             },
         )
 
-    def _log_foreign_writer_and_should_refuse(
-        self, miner_hotkey: str, executor_id: str, record_owner: str | None
+    def _refuse_write_without_login(
+        self, miner_hotkey: str, executor_id: str, login_hotkey: str | None
     ) -> bool:
-        """`record_owner` is the backend's owner of the executor (its MinerExecutor row's miner
-        hotkey, RentedExecutorsResponse.executor_owner_hotkeys). A write by any other hotkey is
-        always logged and is refused only under VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED. No
-        owner (an executor the backend has not listed yet, or a backend that does not send the
-        map) lets the write through: a new node must still be verified."""
-        if not record_owner or record_owner == miner_hotkey:
+        """DAH-4272: the record is keyed by executor id alone, so a write must come from the hotkey
+        the node accepted this cycle (`login_hotkey`, set when the validator's SSH login succeeded).
+        A hotkey whose login the node refused never reaches a write, and nothing here asks the
+        portal who owns the node: one provider can run a node under one hotkey while the portal
+        lists it under another. Any other write is logged, and refused only under
+        VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED."""
+        if login_hotkey is not None and login_hotkey == miner_hotkey:
             return False
         enforced = settings.VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED
         logger.warning(
             _m(
-                "VERIFIED_RECORD_FOREIGN_WRITER",
+                "VERIFIED_RECORD_WRITE_WITHOUT_LOGIN",
                 extra={
                     "executor_uuid": executor_id,
                     "miner_hotkey": miner_hotkey,
-                    "record_hotkey": record_owner,
+                    "login_hotkey": login_hotkey,
                     "enforced": enforced,
                 },
             )

@@ -464,12 +464,9 @@ class Settings(BaseSettings):
     # re-registers the node to list a different set. Off again = the mark stays in the record but is ignored.
     # Flip after reading a week of the warn-mode rows.
     GPU_ANCHOR_HARD_ENABLED: bool = Field(env="GPU_ANCHOR_HARD_ENABLED", default=False)
-    # The verified record (count, spec, GPU anchor) is keyed by executor id alone. Its owner is
-    # the backend's (RentedExecutorsResponse.executor_owner_hotkeys, the MinerExecutor row): a
-    # write or reset by another hotkey is always logged (VERIFIED_RECORD_FOREIGN_WRITER); with
-    # this on it is refused, so listing someone else's executor id no longer resets their record.
-    # A provider moves a node to a new hotkey in the portal. No owner from the backend lets the
-    # write through, so this stays off until the backend sends the map.
+    # The verified record (count, spec, GPU anchor) is keyed by executor id alone. DAH-4272: only
+    # the hotkey whose SSH login the node accepted this cycle may write or reset it; any other
+    # write is logged (VERIFIED_RECORD_WRITE_WITHOUT_LOGIN) and, with this on, refused.
     VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED: bool = Field(
         env="VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", default=False
     )

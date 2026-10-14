@@ -200,6 +200,8 @@ class PipelineFactory:
             pipeline_id=pipeline_id,
             executor=executor_info,
             miner_hotkey=miner_info.miner_hotkey,
+            # the shell passed in is open: the node accepted this hotkey's key
+            ssh_login_hotkey=miner_info.miner_hotkey,
             miner_coldkey=miner_info.miner_coldkey,
             miner_address=miner_info.miner_address,
             miner_port=miner_info.miner_port,
