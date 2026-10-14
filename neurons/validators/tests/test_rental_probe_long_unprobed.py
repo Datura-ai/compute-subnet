@@ -7,7 +7,12 @@ from neurons.validators.src.services.task.checks import rental_probe as module
 from neurons.validators.src.services.task.checks.rental_probe import RentalProbeCheck
 from neurons.validators.src.services.task.messages import RentalProbeMessages as Msg
 
-from tests.test_rental_probe_check import FakeRedis, make_probe_context, probe_settings
+from tests.test_rental_probe_check import (
+    STEP_SSHD_LISTEN,
+    FakeRedis,
+    make_probe_context,
+    probe_settings,
+)
 
 HOUR = 3600
 
@@ -22,7 +27,9 @@ async def _count_unprobed_logs_and_reason(caplog, ctx, docker) -> tuple[int, str
     with probe_settings(), caplog.at_level(logging.WARNING, logger=module.logger.name):
         result = await RentalProbeCheck().run(ctx)
     assert docker.create_calls == []
-    unprobed_log_count = sum("RENTAL_PROBE_LONG_UNPROBED" in record.getMessage() for record in caplog.records)
+    unprobed_log_count = sum(
+        "RENTAL_PROBE_LONG_UNPROBED" in record.getMessage() for record in caplog.records
+    )
     return unprobed_log_count, result.event.reason_code
 
 
@@ -53,3 +60,24 @@ async def test_an_unreadable_image_list_on_a_never_probed_node_is_logged(caplog)
     result = await _count_unprobed_logs_and_reason(caplog, ctx, docker)
 
     assert result == (1, Msg.INCONCLUSIVE.reason)
+
+
+@pytest.mark.asyncio
+async def test_a_node_with_a_standing_failure_is_not_logged(caplog):
+    # it already fails on this path, so the log would only repeat that verdict
+    redis = FakeRedis(failed_step=STEP_SSHD_LISTEN)
+
+    assert await _unprobed_logs(caplog, image_present=False, redis=redis) == (
+        0,
+        Msg.PROBE_FAILED.reason,
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_image_list_with_a_standing_failure_is_not_logged(caplog):
+    ctx, docker, _ = make_probe_context(redis=FakeRedis(failed_step=STEP_SSHD_LISTEN))
+    ctx.ssh.run.side_effect = asyncssh.ConnectionLost("lost")
+
+    result = await _count_unprobed_logs_and_reason(caplog, ctx, docker)
+
+    assert result == (0, Msg.PROBE_FAILED.reason)
