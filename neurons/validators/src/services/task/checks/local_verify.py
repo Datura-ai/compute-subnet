@@ -17,7 +17,7 @@ that step to the SSH path, so the new transport can only save time, never change
 own. The matmul is not asked for
 at all while `MATMUL_ALLCARDS_CHECK_ENABLED` is on (the all-cards work-proof runs inside the SSH
 matmul path and a consumed local pass must not skip it), nor when VerifyX runs full size and in
-series with it (`ctx.config.first_pass` off, VerifyX on): the round trip then measures both steps
+series with it (`ctx.config.first_pass` off): the round trip then measures both steps
 and is no bound on the matmul alone, see `_matmul_ssh_reason`. Every outcome is one
 `[local_verify] outcome` log line with `outcome`, `step` and `reason` (the per-outcome metric).
 Off by default (VALIDATOR_LOCAL_VERIFY_ENABLED).
@@ -99,11 +99,11 @@ def _matmul_ssh_reason(ctx: Context) -> str | None:
     then holds the whole VerifyX run (80 s p50, 149 s p90 in SWEEP_provider_verify) on top of the
     matmul, so `ROUND_TRIP_CAP_MS_BY_STEP["matmul"]` (120 s) fails a passing matmul on a large
     share of hosts and measures it on none. The matmul is not asked for; the executor does not run
-    it twice. With VerifyX off the call carries the matmul alone and the bound is fair.
+    it twice.
     """
     if settings.MATMUL_ALLCARDS_CHECK_ENABLED:
         return "allcards_ssh"
-    if ctx.config.verifyx_enabled and not ctx.config.first_pass:
+    if not ctx.config.first_pass:
         return "scored_ssh"
     return None
 
@@ -156,11 +156,6 @@ class LocalVerifyCheck:
             )
 
         matmul_ssh_reason = _matmul_ssh_reason(ctx)
-        if matmul_ssh_reason is not None and not ctx.config.verifyx_enabled:
-            return self._fallback(
-                ctx, "call", matmul_ssh_reason, "matmul on SSH and VerifyX off: nothing to run"
-            )
-
         client = self._client_factory(ctx)
         advertised = await client.advertised(ctx.executor)
         if CAPABILITY not in advertised.capabilities:
@@ -202,12 +197,11 @@ class LocalVerifyCheck:
 
     def _prepare_challenges(
         self, ctx: Context, specs: dict, *, matmul_on_ssh: bool
-    ) -> tuple[MatmulChallenge | None, VerifyXChallenge | None]:
+    ) -> tuple[MatmulChallenge | None, VerifyXChallenge]:
         """The same challenges the SSH checks would build, sized the same way (DAH-3011 first pass).
         Raises _NothingToSend when they cannot be built; a matmul challenge built by then is closed."""
         first_pass = ctx.config.first_pass
         matmul_challenge = None
-        verifyx_challenge = None
         try:
             if not matmul_on_ssh:
                 matmul_challenge = ctx.services.validation.prepare_matmul_challenge(
@@ -215,14 +209,11 @@ class LocalVerifyCheck:
                     ctx.default_extra,
                     vram_budget_mb=settings.FIRST_PASS_MATMUL_VRAM_MB if first_pass else None,
                 )
-            if ctx.config.verifyx_enabled:
-                verifyx_challenge = ctx.services.verifyx.prepare_verifyx_challenge(
-                    specs,
-                    ctx.default_extra,
-                    challenge_config_overrides=(
-                        _first_pass_challenge_config() if first_pass else None
-                    ),
-                )
+            verifyx_challenge = ctx.services.verifyx.prepare_verifyx_challenge(
+                specs,
+                ctx.default_extra,
+                challenge_config_overrides=(_first_pass_challenge_config() if first_pass else None),
+            )
         except Exception as exc:  # a native library error is ours, not the node's
             if matmul_challenge is not None:
                 matmul_challenge.close()
@@ -239,7 +230,7 @@ class LocalVerifyCheck:
         client: LocalVerifyClient,
         local_verify_port: int,
         matmul_challenge: MatmulChallenge | None,
-        verifyx_challenge: VerifyXChallenge | None,
+        verifyx_challenge: VerifyXChallenge,
         *,
         matmul_ssh_reason: str | None,
     ) -> CheckResult:
@@ -257,10 +248,8 @@ class LocalVerifyCheck:
             executor_uuid=ctx.executor.uuid,
             miner_hotkey=ctx.miner_hotkey,
             matmul=matmul_step,
-            verifyx=(
-                VerifyXStep(seed=verifyx_challenge.seed, cipher_text=verifyx_challenge.cipher_text)
-                if verifyx_challenge is not None
-                else None
+            verifyx=VerifyXStep(
+                seed=verifyx_challenge.seed, cipher_text=verifyx_challenge.cipher_text
             ),
             # Side by side only at first-pass sizes: a full-size VerifyX beside the matmul OOMs
             # 64–128 GB hosts (SWEEP_provider_verify §3 #6).
@@ -303,7 +292,7 @@ class LocalVerifyCheck:
         ctx: Context,
         answer: LocalVerifyAnswer,
         matmul_challenge: MatmulChallenge | None,
-        verifyx_challenge: VerifyXChallenge | None,
+        verifyx_challenge: VerifyXChallenge,
         *,
         matmul_ssh_reason: str | None,
     ) -> LocalVerifyOutcome:
@@ -344,8 +333,6 @@ class LocalVerifyCheck:
                     ctx, "fallback", "matmul", "local_failed", detail=result.error_message, **common
                 )
 
-        if verifyx_challenge is None:
-            return outcome
         step = answer.step("verifyx")
         if step.status != "ok" or step.stdout is None:
             reason = _step_reason(step)
