@@ -40,6 +40,7 @@ from .checks import (
     FinalizeCheck,
     GpuCountCheck,
     GpuFaultProbeCheck,
+    GpuMemoryHealthCheck,
     GpuFingerprintCheck,
     GpuModelValidCheck,
     GpuPowerLimitCheck,
@@ -304,6 +305,9 @@ class PipelineFactory:
                 # short-circuit so a rented host that has just lost its disk is reported too. The
                 # score is not changed until the reading is proven on live executors.
                 DiskHealthCheck(),
+                # one NVML read, no CUDA, flag only: a card with uncorrected ECC or a pending row
+                # remap is reported on rented nodes too, so it sits before the rented short-circuit
+                GpuMemoryHealthCheck(),
                 # DAH-2671 item 2a: non-fatal, observe-only CPU-count corroboration. Placed right
                 # after the GPU spec-check group (and before the rented short-circuit) so it reads
                 # advertised specs already populated by the scrape; it only reads over SSH, mutates
@@ -430,6 +434,7 @@ class PipelineFactory:
                 GpuModelValidCheck(),
                 GpuVramPrecheck(),
                 DiskHealthCheck(),
+                GpuMemoryHealthCheck(),
                 CpuTruthCheck(),
                 GpuPowerLimitCheck(),
                 NvmlDigestCheck(),
@@ -498,6 +503,8 @@ class PipelineFactory:
                 GpuVramPrecheck(),
                 # DAH-2928: pure-data report on specs.disk_health, same place as in build_checks.
                 DiskHealthCheck(),
+                # one NVML read, no CUDA: safe in dry run
+                GpuMemoryHealthCheck(),
                 # DAH-2671 item 2a: read-only SSH corroboration, safe in dry run (mutates nothing).
                 CpuTruthCheck(),
                 # DAH-2734: specs arithmetic plus a read-only SSH reading — safe in dry run.
