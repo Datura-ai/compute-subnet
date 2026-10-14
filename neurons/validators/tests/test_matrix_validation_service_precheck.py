@@ -263,3 +263,37 @@ async def test_ssh_timeout_kill_failure_still_returns_timed_out(service_with_moc
     )
     assert result.success is False
     assert result.timed_out is True
+
+
+# --- a cancelled lane kills the remote matmul too (DAH-4366) ----------------
+@pytest.mark.asyncio
+async def test_cancelling_the_lane_mid_matmul_kills_the_remote_process(service_with_mock_wrapper):
+    """The fast path cancels the GPU lane when the host lane fails first; the remote matmul must
+    not keep the GPU busy into the next cycle's retry."""
+    svc, _ = service_with_mock_wrapper
+    matmul_started = asyncio.Event()
+    commands: list[str] = []
+
+    async def run(command, **_kwargs):
+        commands.append(command)
+        if "pkill" in command:
+            return SimpleNamespace(stdout="", stderr="")
+        matmul_started.set()
+        await asyncio.Event().wait()
+
+    lane = asyncio.create_task(
+        svc.validate_gpu_model_and_process_job(
+            ssh_client=SimpleNamespace(run=run),
+            executor_info=_executor_info(),
+            default_extra={},
+            machine_spec=_machine_spec(),
+        )
+    )
+    await matmul_started.wait()
+    lane.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await lane
+    assert len(commands) == 2
+    assert "pkill -9 -f" in commands[1]
+    assert "decrypt_challenge.py" in commands[1]
