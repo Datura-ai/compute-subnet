@@ -134,6 +134,22 @@ class TenantEnforcementCheck:
         # Get rented executor from context instead of Redis
         rented_data = ctx.state.rented_data
         rented_executor = rented_data.executors.get(ctx.executor.uuid) if rented_data else None
+        if rented_executor and rented_executor.miner_hotkey != ctx.miner_hotkey:
+            logger.warning(
+                _m(
+                    "RENTED_OWNER_MISMATCH",
+                    extra=get_extra_info(
+                        {
+                            **ctx.default_extra,
+                            "executor_uuid": ctx.executor.uuid,
+                            "rental_miner_hotkey": rented_executor.miner_hotkey,
+                            "enforced": settings.RENTED_OWNER_MISMATCH_ENFORCEMENT_ENABLED,
+                        }
+                    ),
+                )
+            )
+            if settings.RENTED_OWNER_MISMATCH_ENFORCEMENT_ENABLED:
+                rented_executor = None
         # EVERY filler on the node: a partially rented split node keeps one filler per free VRAM
         # bundle running beside the renter (DAH-2465/DAH-2467), and allowlisting only the first
         # makes its siblings' GPU processes read as usage outside the tenant.
