@@ -511,8 +511,8 @@ async def read_gpu_power_restore_records(
 ) -> GpuPowerRestoreReadResult:
     """Read the frozen restore records for these GPUs. Pure read: a corrupt record is logged and
     skipped (it can't grant a check pass and can't be restored; cleanup is manual); a failed Redis
-    read is logged and reported via ``read_failed``. ``require_complete`` instead raises on unreadable
-    or corrupt records when a customer cannot safely proceed with an unknown cap."""
+    read is logged and reported via ``read_failed``. ``require_complete`` instead raises on unreadable,
+    missing, or corrupt records when a customer cannot safely proceed with an unknown cap."""
     records: list[GpuPowerRestoreRecord] = []
     read_failed = False
     for gpu_uuid in gpu_uuids:
@@ -526,6 +526,8 @@ async def read_gpu_power_restore_records(
             read_failed = True
             continue
         if not raw:
+            if require_complete:
+                raise GpuPowerRestoreStateError("GPU power restore record is missing")
             continue
         try:
             records.append(GpuPowerRestoreRecord.model_validate_json(raw))

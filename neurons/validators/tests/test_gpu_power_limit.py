@@ -949,7 +949,7 @@ async def test_a_refused_pm_session_does_not_reject_the_filler_before_pl(caplog:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", [None, "timeout", "nonzero", "partial", "redis", "record_redis", "record", "index", "delete", "absent"])
+@pytest.mark.parametrize("failure", [None, "timeout", "nonzero", "partial", "redis", "record_redis", "record", "missing_record", "index", "delete", "absent"])
 async def test_strict_pod_restore_requires_every_record_to_be_restored(failure):
     # Arrange: real restore records and setters; keep one GPU's failure distinct from a partial restore.
     redis = FakeRedis({_pod_index_key(POD_ID): '["GPU-a", "GPU-b"]',
@@ -957,6 +957,8 @@ async def test_strict_pod_restore_requires_every_record_to_be_restored(failure):
                        _restore_key("GPU-b"): _record("GPU-b", 250)})
     if failure == "absent":
         redis.store.clear()
+    if failure == "missing_record":
+        del redis.store[_restore_key("GPU-a")]
     if failure in ("record", "index"):
         redis.store[_restore_key("GPU-a") if failure == "record" else _pod_index_key(POD_ID)] = "broken"
     if failure == "redis":
