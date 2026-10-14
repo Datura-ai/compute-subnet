@@ -3,7 +3,7 @@ import re
 import shlex
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
 
 import asyncssh
@@ -21,6 +21,7 @@ from protocol.vc_protocol.validator_requests import (
 from ...const import (
     GPU_MEMORY_UTILIZATION_LIMIT,
     GPU_UTILIZATION_LIMIT,
+    POD_CONTAINER_NAME_GRACE_MINUTES,
 )
 from core.config import settings
 
@@ -94,6 +95,17 @@ def _gpu_usage_violation_details(
         "vram_utilization": memory_display,
         "process_count": len(processes),
     }
+
+
+def _within_container_name_grace(pod: RentedPod) -> bool:
+    """An unnamed pod is waited for only this long after it was created; a pod with no
+    created_at (backend predates the field) is waited for as before."""
+    if pod.created_at is None:
+        return True
+    created_at = pod.created_at
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=UTC)
+    return datetime.now(UTC) - created_at < timedelta(minutes=POD_CONTAINER_NAME_GRACE_MINUTES)
 
 
 @dataclass
@@ -202,7 +214,7 @@ class TenantEnforcementCheck:
                 )
             if pod_running:
                 state_by_pod_id[pod_id] = ContainerState.RUNNING
-            elif pod.container_name_pending:
+            elif pod.container_name_pending and _within_container_name_grace(pod):
                 # DAH-4315: the backend lists a pod before it records the container's name, so
                 # its container may still be being created. Judged next cycle, not penalised.
                 state_by_pod_id[pod_id] = ContainerState.UNKNOWN

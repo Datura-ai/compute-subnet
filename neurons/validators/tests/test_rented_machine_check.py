@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, Mock
 
 import asyncssh
@@ -9,6 +10,7 @@ from neurons.validators.src.services.task.checks.rented_machine import (
     TenantEnforcementCheck,
     _collect_pod_diagnostics,
 )
+from neurons.validators.src.services.const import POD_CONTAINER_NAME_GRACE_MINUTES
 from neurons.validators.src.services.task.messages import TenantEnforcementMessages as Msg
 from neurons.validators.src.services.task.pipeline import Context
 from neurons.validators.src.services.task.pipeline_factory import PipelineFactory
@@ -79,6 +81,7 @@ def build_rented_data(
             pod_id=c.get("pod_id", "pod-123"),
             container_name=c.get("name", "container"),
             rented_ports=[],
+            created_at=c.get("created_at"),
         )
         for c in containers
     ]
@@ -1443,7 +1446,7 @@ async def test_pod_states_is_untouched_when_the_executor_is_not_rented(context_f
 UNNAMED_POD = {"containers": [{"name": "", "pod_id": "53a68595"}]}
 
 
-def _unnamed_pod_ctx(context_factory, ssh_client, gpu_processes, backend=None):
+def _unnamed_pod_ctx(context_factory, ssh_client, gpu_processes, backend=None, pods=UNNAMED_POD):
     services = build_services(
         score_calculator=DummyScoreCalculator(actual_score=1.0, job_score=1.0, warning=""),
         container_cleanup=MockContainerCleanup(),
@@ -1453,7 +1456,7 @@ def _unnamed_pod_ctx(context_factory, ssh_client, gpu_processes, backend=None):
         gpu_processes=gpu_processes,
         gpu_details=[{"gpu_utilization": 95, "memory_utilization": 80}],
         gpu_model="NVIDIA RTX 4090",
-        rented_data=build_rented_data("executor-123", UNNAMED_POD),
+        rented_data=build_rented_data("executor-123", pods),
     )
     return context_factory(
         services=services,
@@ -1528,3 +1531,17 @@ async def test_unnamed_pod_whose_container_is_not_up_yet_is_not_penalised(contex
     assert "clear_verified_job_reason" not in result.updates
     assert _pod_states(result) == {"53a68595": "unknown"}
     assert backend.called_with == []
+
+
+@pytest.mark.asyncio
+async def test_unnamed_pod_still_not_up_after_the_grace_is_not_running(context_factory):
+    created_at = datetime.now(UTC) - timedelta(minutes=POD_CONTAINER_NAME_GRACE_MINUTES + 1)
+    pods = {"containers": [{"name": "", "pod_id": "53a68595", "created_at": created_at}]}
+    ctx = _unnamed_pod_ctx(
+        context_factory, DummySSHClient(pod_running=False), [], DummyBackendClient(active=True), pods
+    )
+
+    result = await TenantEnforcementCheck().run(ctx)
+
+    assert not result.passed
+    assert result.event.reason_code == Msg.POD_NOT_RUNNING.reason
