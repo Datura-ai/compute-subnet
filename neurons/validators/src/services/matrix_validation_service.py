@@ -170,6 +170,11 @@ class VerifierParams:
 # authentication, a stdout that could not be parsed) are not the probe's answer.
 UUID_MISMATCH_ERROR_PREFIX = "UUID mismatch"
 
+# Whose clock `ValidationResult.elapsed_seconds` is: the validator's around the SSH run, or the
+# executor's own word for the step when the answer came through the local transport.
+ELAPSED_SOURCE_VALIDATOR = "validator_wall_clock"
+ELAPSED_SOURCE_EXECUTOR = "executor_reported"
+
 
 @dataclass
 class ValidationResult:
@@ -182,6 +187,15 @@ class ValidationResult:
     error_message: str = ""
     metrics: dict | None = None
     timed_out: bool = False
+    # What the run measured, for the speed log only; no verdict reads these. `sealed` is True when
+    # uuid and metrics came out of an authenticated sealed blob, False when they are the executor's
+    # plaintext, None when no answer was judged. `elapsed_seconds` is the wall-clock of the run and
+    # `elapsed_source` says whose clock it is.
+    sealed: bool | None = None
+    elapsed_seconds: float | None = None
+    elapsed_source: str | None = None
+    dim_n: int | None = None
+    dim_k: int | None = None
 
     def __bool__(self) -> bool:
         """Allow using ValidationResult in boolean context for backward compatibility."""
@@ -673,7 +687,10 @@ class ValidationService:
                     returned_uuid=uuid,
                     stdout=stdout,
                     stderr=stderr,
-                    metrics=metrics
+                    metrics=metrics,
+                    sealed=self._answer_was_sealed(sealed_blob),
+                    dim_n=verifier_params.dim_n,
+                    dim_k=verifier_params.dim_k,
                 )
             else:
                 error_msg = (
@@ -688,7 +705,10 @@ class ValidationService:
                     stdout=stdout,
                     stderr=stderr,
                     error_message=error_msg,
-                    metrics=metrics
+                    metrics=metrics,
+                    sealed=self._answer_was_sealed(sealed_blob),
+                    dim_n=verifier_params.dim_n,
+                    dim_k=verifier_params.dim_k,
                 )
         except Exception as e:
             error_msg = f"Error during UUID verification: {str(e)}"
@@ -701,6 +721,11 @@ class ValidationService:
                 stderr=stderr,
                 error_message=error_msg
             )
+
+    def _answer_was_sealed(self, sealed_blob: str) -> bool:
+        """True when the judged uuid and metrics came out of the sealed blob. A blob that fails
+        authentication never gets this far: `evaluate_matmul_output` rejects it first."""
+        return bool(sealed_blob) and bool(getattr(self.wrapper, "_has_sealed", False))
 
     async def validate_gpu_model_and_process_job(
         self,
@@ -760,6 +785,7 @@ class ValidationService:
             logger.info(_m("Matrix Multiplication Python Script Command", extra=get_extra_info(log_extra)))
 
             # Run the script
+            run_started = time.perf_counter()
             try:
                 result = await ssh_client.run(command, timeout=MATRIX_VERIFY_TIMEOUT_SECONDS)
             except (TimeoutError, asyncssh.TimeoutError):
@@ -808,7 +834,13 @@ class ValidationService:
                     error_message=error_msg
                 )
 
-            return self.evaluate_matmul_output(challenge, stdout=stdout, stderr=stderr)
+            run_seconds = time.perf_counter() - run_started
+            judged = self.evaluate_matmul_output(challenge, stdout=stdout, stderr=stderr)
+            # The validator's own clock around the remote run: SSH round trip, process start,
+            # allocation, the challenge and the node's benchmark together.
+            judged.elapsed_seconds = run_seconds
+            judged.elapsed_source = ELAPSED_SOURCE_VALIDATOR
+            return judged
 
         except Exception as e:
             error_msg = f"Unexpected error in validate_gpu_model_and_process_job: {str(e)}"
