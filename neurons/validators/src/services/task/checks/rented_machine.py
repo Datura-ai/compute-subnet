@@ -185,7 +185,7 @@ class TenantEnforcementCheck:
             return _with_pod_states(result, ctx, rented_pods, state_by_pod_id)
 
         for pod_index, pod in enumerate(rented_pods):
-            pod_container_name = pod.container_name
+            pod_container_name = pod.docker_container_name
             pod_id = pod.pod_id
             try:
                 pod_running, ssh_pub_keys = await _check_pod_running_and_read_authorized_keys(ctx.ssh, pod_container_name)
@@ -202,6 +202,13 @@ class TenantEnforcementCheck:
                 )
             if pod_running:
                 state_by_pod_id[pod_id] = ContainerState.RUNNING
+            elif pod.container_name_pending:
+                # DAH-4315: the backend lists a pod before it records the container's name, so
+                # its container may still be being created. Judged next cycle, not penalised.
+                state_by_pod_id[pod_id] = ContainerState.UNKNOWN
+                extra.setdefault("pods_awaiting_container", []).append(pod_id)
+                ssh_pub_keys = []
+                continue
             else:
                 diagnostics = await _collect_pod_diagnostics(ctx.ssh, pod_container_name)
                 state_by_pod_id[pod_id] = _container_state_from_diagnostics(diagnostics)
@@ -290,7 +297,7 @@ class TenantEnforcementCheck:
                 # dockerd refused the keys read
                 ssh_pub_keys = []
 
-        container_names = [pod.container_name for pod in rented_pods]
+        container_names = [pod.docker_container_name for pod in rented_pods]
         container_names.extend(filler_containers)
         gpu_processes = list(ctx.state.gpu_processes)
         gpu_running_outside = _has_gpu_process_outside_container(container_names, gpu_processes)
@@ -707,7 +714,9 @@ async def _every_listed_pod_stale(ctx: Context, rented_pods: list[RentedPod], st
         return False
     for other in rented_pods[1:]:
         try:
-            other_state = await _check_pod_running_and_read_authorized_keys(ctx.ssh, other.container_name)
+            other_state = await _check_pod_running_and_read_authorized_keys(
+                ctx.ssh, other.docker_container_name
+            )
         except (asyncssh.Error, OSError):
             return False
         if other_state.running:

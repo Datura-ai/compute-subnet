@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, RootModel, ValidationError, field_validator
 
-from services.const import FILLER_CONTAINER_PREFIX
+from services.const import FILLER_CONTAINER_PREFIX, POD_CONTAINER_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,23 @@ class RentedPod(BaseModel):
     # pod with an ssh_port whatever its status, and counts only RUNNING (or None = backend predates
     # the field) pods towards the our-own-outage share.
     status: str | None = None
+
+    @field_validator("container_name", mode="before")
+    @classmethod
+    def _container_name_not_null(cls, value: Any) -> Any:
+        # DAH-4315: the backend lists a new pod before it records the container's name.
+        return "" if value is None else value
+
+    @property
+    def container_name_pending(self) -> bool:
+        """True while the backend has not recorded the pod's container name yet."""
+        return not self.container_name.strip()
+
+    @property
+    def docker_container_name(self) -> str:
+        """The pod's container on the node: the recorded name, else the `pod_<pod_id>` it is
+        created as (DAH-4315). Never empty, so it is safe in a `docker ps -f name=` filter."""
+        return self.container_name.strip() or f"{POD_CONTAINER_PREFIX}{self.pod_id}"
 
     @field_validator("ssh_port")
     @classmethod
