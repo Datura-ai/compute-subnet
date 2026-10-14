@@ -487,6 +487,12 @@ class Settings(BaseSettings):
     # default off: the probe is new GPU work on every idle node per cycle, so it starts as an opt-in shadow.
     GPU_FAULT_PROBE_CHECK_ENABLED: bool = Field(env="GPU_FAULT_PROBE_CHECK_ENABLED", default=False)
     GPU_FAULT_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="GPU_FAULT_PROBE_ENFORCEMENT_ENABLED", default=False)
+    # A fault probe with no verdict passes. Five such cycles in a row on one node are logged
+    # (GPU_FAULT_PROBE_UNKNOWN_STREAK); with this on they are judged like a fault, which fails the
+    # node only while GPU_FAULT_PROBE_ENFORCEMENT_ENABLED is on too. Off by default.
+    GPU_FAULT_PROBE_UNKNOWN_STREAK_ENFORCEMENT_ENABLED: bool = Field(
+        env="GPU_FAULT_PROBE_UNKNOWN_STREAK_ENFORCEMENT_ENABLED", default=False
+    )
     # DAH-3436: the synthetic rental probe. On an idle node (no renter pod, no filler) the validator
     # rents the node from itself once per RENTAL_PROBE_INTERVAL_HOURS: it starts the default renter
     # image through the same create_container path a renter's pod takes, with a probe-owned SSH key
