@@ -389,9 +389,11 @@ class Settings(BaseSettings):
     # logs a verdict every validation (check_id gpu.validate.kernel_count) without changing the
     # result. ENFORCEMENT_ENABLED makes a kernel list that is present and shorter than the
     # reported GPU count fail the validation (GPU_KERNEL_COUNT_MISMATCH); a missing kernel list
-    # never fails. Enforcement stays off until the logged verdicts have been reviewed.
+    # never fails. Enforcement is on by default, the exception to the rule above (owner 14 Oct: a
+    # listed node that reports cards it does not have fails validation, it is not only logged);
+    # GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED=false is the kill switch.
     GPU_KERNEL_COUNT_CHECK_ENABLED: bool = Field(env="GPU_KERNEL_COUNT_CHECK_ENABLED", default=True)
-    GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED: bool = Field(env="GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED", default=False)
+    GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED: bool = Field(env="GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED", default=True)
     # Item 2a — corroborate the advertised CPU(s) count against sources the lscpu wrapper does not
     # author (/proc/cpuinfo, /sys present population, docker NCPU).
     CPU_TRUTH_CHECK_ENABLED: bool = Field(env="CPU_TRUTH_CHECK_ENABLED", default=True)
