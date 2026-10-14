@@ -34,8 +34,8 @@ GPU_ANCHOR_KEY = "uuids"
 # DAH-3457: field of a verified-job record, set once by GpuFingerprintCheck under GPU_ANCHOR_HARD_ENABLED and kept by
 # every later write; read back by the same check, which then fails the node without comparing the sets.
 GPU_ANCHOR_BROKEN_KEY = "anchor_broken"
-# The hotkey whose cycle first wrote the record. The record is keyed by executor id alone, so without it any hotkey
-# that lists the same id writes (and resets) another provider's verified count and anchor.
+# The hotkey whose cycle first wrote the record. The record is keyed by executor id alone, so without it
+# any hotkey that lists the same id sends the reset for it and sets its broken-anchor mark.
 VERIFIED_OWNER_KEY = "hotkey"
 EXECUTORS_UPTIME_PREFIX = "executors_uptime"
 NORMALIZED_SCORE_CHANNEL = "normalized_score_channel"
