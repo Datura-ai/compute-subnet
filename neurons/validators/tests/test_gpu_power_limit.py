@@ -12,6 +12,7 @@ from neurons.validators.src.services.gpu_power_limit import (
     POWER_STATE_CMD,
     GpuPowerReadback,
     GpuPowerRestoreRecord,
+    GpuPowerRestoreStateError,
     GpuPowerState,
     _clamp_watts,
     _parse_power_readback_csv,
@@ -948,7 +949,7 @@ async def test_a_refused_pm_session_does_not_reject_the_filler_before_pl(caplog:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", [None, "timeout", "nonzero", "partial", "redis", "record_redis", "record", "index", "absent"])
+@pytest.mark.parametrize("failure", [None, "timeout", "nonzero", "partial", "redis", "record_redis", "record", "index", "delete", "absent"])
 async def test_strict_pod_restore_requires_every_record_to_be_restored(failure):
     # Arrange: real restore records and setters; keep one GPU's failure distinct from a partial restore.
     redis = FakeRedis({_pod_index_key(POD_ID): '["GPU-a", "GPU-b"]',
@@ -966,6 +967,8 @@ async def test_strict_pod_restore_requires_every_record_to_be_restored(failure):
                 raise ConnectionError("unreadable record")
             return redis.store.get(key)
         redis.get = get
+    if failure == "delete":
+        redis.delete = AsyncMock(side_effect=ConnectionError("cannot clear record"))
     async def run(command, **kwargs):
         if command == POWER_STATE_CMD:
             return FakeRun(stdout=STATE_CSV)
@@ -978,8 +981,10 @@ async def test_strict_pod_restore_requires_every_record_to_be_restored(failure):
     ssh = AsyncMock(run=AsyncMock(side_effect=run))
     # Act: strict caller cannot succeed with an unknown or remaining cap.
     if failure not in (None, "absent"):
-        with pytest.raises(RuntimeError):
+        error_type = RuntimeError if failure in ("timeout", "nonzero", "partial") else GpuPowerRestoreStateError
+        with pytest.raises(error_type) as caught:
             await restore_filler_pod_gpu_power_limits(ssh, redis, POD_ID, require_complete=True)
+        assert type(caught.value) is error_type
         # Assert: failed records and the index survive for a later retry.
         assert _pod_index_key(POD_ID) in redis.store
         assert _restore_key("GPU-b") in redis.store

@@ -103,6 +103,10 @@ MIN_POWER_LIMIT_RATIO = 0.9
 POWER_LIMIT_SET_CONCURRENCY = 8
 
 
+class GpuPowerRestoreStateError(RuntimeError):
+    """Platform restore state could not be read or cleared; this is not a host fault."""
+
+
 class GpuPowerRestoreRecord(BaseModel):
     """One GPU's pre-cap power limit, frozen in Redis until successfully restored."""
 
@@ -518,7 +522,7 @@ async def read_gpu_power_restore_records(
         except Exception as exc:
             _log(logging.ERROR, f"gpu power restore: redis read failed for {key}: {exc}", {"gpu_uuid": gpu_uuid}, log_extra)
             if require_complete:
-                raise RuntimeError("GPU power restore records could not be read") from exc
+                raise GpuPowerRestoreStateError("GPU power restore records could not be read") from exc
             read_failed = True
             continue
         if not raw:
@@ -527,7 +531,7 @@ async def read_gpu_power_restore_records(
             records.append(GpuPowerRestoreRecord.model_validate_json(raw))
         except (ValidationError, TypeError, ValueError) as exc:
             if require_complete:
-                raise RuntimeError("GPU power restore record is corrupt") from exc
+                raise GpuPowerRestoreStateError("GPU power restore record is corrupt") from exc
             _log(logging.ERROR, f"gpu power restore: ignoring corrupt record {raw!r} for {gpu_uuid}", {"gpu_uuid": gpu_uuid}, log_extra)
     return GpuPowerRestoreReadResult(records=records, read_failed=read_failed)
 
@@ -546,6 +550,8 @@ async def _restore_records(
     state_by_uuid: dict[str, GpuPowerState],
     log_extra: dict[str, object] | None,
     concurrency: int = POWER_LIMIT_SET_CONCURRENCY,
+    *,
+    require_complete: bool = False,
 ) -> int:
     """Apply each record with ``nvidia-smi -pl``; delete a record ONLY after its restore succeeded
     (a failed restore keeps it for the safety nets to retry). Returns the restored count.
@@ -554,7 +560,10 @@ async def _restore_records(
     session the host refused is retried alone): each GPU is its own device, and the delete that
     calls this holds the customer's rent until it answers."""
 
+    clear_failed = False
+
     async def restore_one(record: GpuPowerRestoreRecord, setter: _Setter) -> bool:
+        nonlocal clear_failed
         state = state_by_uuid.get(record.gpu_uuid)
         watts_before = state.current_watts if state else None
         changed = await setter(
@@ -566,6 +575,7 @@ async def _restore_records(
             await redis.delete(_restore_key(record.gpu_uuid))
             return True
         except Exception as exc:
+            clear_failed = True
             _log(
                 logging.ERROR,
                 f"gpu power restore: restored {record.gpu_uuid} but could not clear its record: {exc}; "
@@ -575,7 +585,10 @@ async def _restore_records(
             )
             return False
 
-    return await _set_side_by_side("restore", records, restore_one, log_extra, concurrency=concurrency)
+    restored = await _set_side_by_side("restore", records, restore_one, log_extra, concurrency=concurrency)
+    if require_complete and clear_failed:
+        raise GpuPowerRestoreStateError("GPU power restore records could not be cleared")
+    return restored
 
 
 async def restore_tracked_gpu_power_limits(
@@ -604,7 +617,10 @@ async def restore_tracked_gpu_power_limits(
     except Exception as exc:
         _log(logging.WARNING, f"gpu power restore: state query failed: {exc}; restoring without before-values", {}, log_extra)
         state_by_uuid = {}
-    restored = await _restore_records(ssh, redis, read_result.records, state_by_uuid, log_extra, concurrency)
+    restored = await _restore_records(
+        ssh, redis, read_result.records, state_by_uuid, log_extra, concurrency,
+        require_complete=require_complete,
+    )
     if require_complete and restored != len(read_result.records):
         raise RuntimeError("GPU power restoration incomplete")
     return restored
@@ -713,7 +729,7 @@ async def restore_filler_pod_gpu_power_limits(
         raw_index: str | bytes | None = await redis.get(index_key)
     except Exception as exc:
         if require_complete:
-            raise RuntimeError("GPU power restore index could not be read") from exc
+            raise GpuPowerRestoreStateError("GPU power restore index could not be read") from exc
         _log(logging.ERROR, f"gpu power restore: redis read failed for {index_key}: {exc}; will retry later", {}, log_extra)
         return 0
     if not raw_index:
@@ -728,7 +744,7 @@ async def restore_filler_pod_gpu_power_limits(
         capped_uuids: list[str] = [str(uuid) for uuid in decoded_index]
     except (ValueError, TypeError) as exc:
         if require_complete:
-            raise RuntimeError("GPU power restore index is corrupt") from exc
+            raise GpuPowerRestoreStateError("GPU power restore index is corrupt") from exc
         _log(logging.ERROR, f"gpu power restore: dropping corrupt pod index {raw_index!r} for {pod_id}", {}, log_extra)
         await _delete_pod_index(redis, pod_id, log_extra)
         return 0

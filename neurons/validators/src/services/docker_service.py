@@ -83,6 +83,7 @@ from services.default_docker_image_digest_service import fetch_docker_hub_digest
 from services.gpu_power_limit import (
     NVIDIA_SMI_TIMEOUT_SECONDS,
     POWER_LIMIT_SET_CONCURRENCY,
+    GpuPowerRestoreStateError,
     apply_filler_gpu_power_limits,
     raise_low_power_limits_to_default,
     restore_all_host_gpu_power_limits,
@@ -1004,6 +1005,10 @@ class _FillerRefusedForCustomerCreate(ContainerCreateRefused):
 class _FillerBesideCustomerContainer(Exception):
     """Raised by a customer create's running check: a `filler_*` on the host survived its removal, the host
     could not be listed to confirm there is none, or the removed filler's GPU power restore did not finish."""
+
+
+class _FillerRestoreStateUnavailable(Exception):
+    """A customer final check could not confirm platform GPU power restore state."""
 
 
 class _FillerRefusedBesideUnlistedPod(_FillerRefusedForCustomerCreate):
@@ -3512,6 +3517,10 @@ class DockerService:
                     log_extra=default_extra,
                     require_complete=True,
                 )
+            except GpuPowerRestoreStateError as exc:
+                raise _FillerRestoreStateUnavailable(
+                    f"GPU power restore state after removing {name} could not be confirmed"
+                ) from exc
             except RuntimeError as exc:
                 raise _FillerBesideCustomerContainer(
                     f"GPU power restoration after removing {name} could not be confirmed"
@@ -8334,6 +8343,9 @@ class DockerService:
                             remove_every_filler=payload.workload_kind == WorkloadKind.CUSTOMER_RENTAL,
                             default_extra=default_extra,
                         )
+                    except _FillerRestoreStateUnavailable:
+                        current_step = "gpu_power_restore_state"
+                        raise
                     except _FillerBesideCustomerContainer:
                         # the sweep's own rm and listing, failed after `docker run`: the backend counts this
                         # step as the node's failure (creation-failure run), as it does before it
