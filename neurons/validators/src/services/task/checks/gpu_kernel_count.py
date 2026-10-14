@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from core.config import settings
+from services.nvidia_devices import read_kernel_gpu_view
 
 from ..messages import GpuKernelCountMessages as Msg
 from ..messages import MessageTemplate, render_message
@@ -27,6 +28,8 @@ HOST_SHAPE_MIN_RAM_GB_PER_GPU = 8.0
 KB_PER_GB = 1024 * 1024
 
 SHADOW_ONLY_IMPACT = "Shadow observation only: the validation result was NOT changed"
+KERNEL_VIEW_SOURCE_CONTAINER = "container"
+KERNEL_VIEW_SOURCE_HOST = "host_pid1_root"
 
 
 def _normalized(uuids: list[str] | None) -> list[str]:
@@ -124,6 +127,44 @@ def evaluate_kernel_view(
     return {**result, "kernel_verdict": verdict}
 
 
+async def host_view_verdict(
+    ctx: Context, *, reported_count: int, reported_uuids: list[str]
+) -> dict[str, Any]:
+    """Second reading, taken only when the container's list is shorter than the reported count.
+
+    A container that was handed a subset of the host's cards has only those under its own /proc,
+    while the scrape can still list every card. The host's list, read through PID 1's root, is
+    the full one. It is used only when it is the host's real procfs (read_kernel_gpu_view's
+    rules) and lists at least the reported number of cards. A host that itself has fewer cards
+    than reported is short there too, and the first verdict stands. Never raises.
+    """
+    seen: dict[str, Any] = {"host_kernel_gpu_count": None, "host_kernel_gpu_foreign_mounts": []}
+    if ctx.ssh is None:
+        return seen
+    try:
+        host_uuids, host_foreign_mounts = await read_kernel_gpu_view(ctx.ssh, host_view=True)
+    except Exception as exc:
+        return {**seen, "host_kernel_view_error": repr(exc)[:300]}
+    seen["host_kernel_gpu_foreign_mounts"] = host_foreign_mounts
+    if not host_uuids:
+        return seen
+    judged = evaluate_kernel_view(
+        reported_count=reported_count, reported_uuids=reported_uuids, kernel_uuids=host_uuids
+    )
+    seen["host_kernel_gpu_count"] = judged["kernel_gpu_count"]
+    if judged["kernel_verdict"] not in ("match", "uuid_mismatch"):
+        return seen
+    return {
+        **seen,
+        "kernel_verdict": "match_host_view"
+        if judged["kernel_verdict"] == "match"
+        else "uuid_mismatch",
+        "kernel_view_source": KERNEL_VIEW_SOURCE_HOST,
+        "host_kernel_gpu_uuids": host_uuids,
+        "reported_uuids_not_in_host_kernel": judged["reported_uuids_not_in_kernel"],
+    }
+
+
 class GpuKernelCountCheck:
     """Cross-check the reported GPU list against the kernel's view of the cards.
 
@@ -132,6 +173,10 @@ class GpuKernelCountCheck:
     list is present and shorter than its reported GPU count gets GPU_KERNEL_COUNT_MISMATCH. That
     verdict fails the validation only under GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED; without it the
     check always passes and the verdict is only logged.
+
+    The container the check reads in may have been handed only some of the host's cards. So a
+    short list is checked once more against the host's own list (host_view_verdict): if that one
+    covers the reported cards the verdict is match_host_view and nothing fails.
 
     A kernel list that is missing (unreadable, empty, read failed, withheld behind a foreign
     mount) is never a failure: the verdict is GPU_KERNEL_COUNT_NOT_EVALUATED.
@@ -172,6 +217,14 @@ class GpuKernelCountCheck:
             reported_uuids=reported_uuids,
             kernel_uuids=kernel_uuids,
         )
+        what["kernel_view_source"] = KERNEL_VIEW_SOURCE_CONTAINER
+        if what["kernel_verdict"] == "count_lower":
+            what["container_kernel_gpu_count"] = what["kernel_gpu_count"]
+            what.update(
+                await host_view_verdict(
+                    ctx, reported_count=reported_count, reported_uuids=reported_uuids
+                )
+            )
         verdict = what["kernel_verdict"]
         if verdict == "not_evaluated":
             what["not_evaluated_reason"] = (

@@ -8,11 +8,22 @@ A missing kernel list is never a failure.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from core.config import settings
+from services import nvidia_devices
+from services.nvidia_devices import (
+    HOST_KERNEL_GPU_VIEW_CMD,
+    HOST_PID1_ROOT,
+    KERNEL_GPU_FS_SEPARATOR,
+    KERNEL_GPU_VIEW_CMD,
+    KERNEL_GPU_VIEW_SEPARATOR,
+)
+
 from neurons.validators.src.services.task.checks.gpu_kernel_count import (
     GPU_UUID_V4_SHAPE_FLAG_MIN,
     HOST_SHAPE_MIN_RAM_GB_PER_GPU,
@@ -39,9 +50,39 @@ class _Sink:
         pass
 
 
+def _host_stdout(uuids, *, mounts=(), fstype="proc", kind="regular empty file"):
+    """What HOST_KERNEL_GPU_VIEW_CMD prints: PID 1's mounts, the stat rows, then the UUID rows."""
+    files = [
+        f"{HOST_PID1_ROOT}/proc/driver/nvidia/gpus/0000:00:{i + 7:02x}.0/information"
+        for i in range(len(uuids))
+    ]
+    return "\n".join(
+        [
+            *mounts,
+            KERNEL_GPU_FS_SEPARATOR,
+            *(f"{path} {fstype}" for path in files),
+            *(f"{path}|{kind}" for path in files),
+            KERNEL_GPU_VIEW_SEPARATOR,
+            *(f"{gpu_uuid}, {i}" for i, gpu_uuid in enumerate(uuids)),
+        ]
+    )
+
+
+NO_HOST_VIEW = _host_stdout([])
+
+
 def _ctx(
-    context_factory, *, reported, kernel, read_attempted=True, cpu=64, ram_gb=512.0, count=None
+    context_factory,
+    *,
+    reported,
+    kernel,
+    read_attempted=True,
+    cpu=64,
+    ram_gb=512.0,
+    count=None,
+    host=NO_HOST_VIEW,
 ):
+    """`host` is the stdout of the host-view read, or an exception that read raises."""
     specs = {
         "gpu": {"count": len(reported) if count is None else count},
         "cpu": {"count": cpu},
@@ -51,8 +92,16 @@ def _ctx(
         specs.pop("cpu")
     if ram_gb is None:
         specs.pop("ram")
+
+    async def run(command, *args, **kwargs):
+        if command != HOST_KERNEL_GPU_VIEW_CMD:
+            raise AssertionError("the kernel list is read once per cycle")
+        if isinstance(host, BaseException):
+            raise host
+        return SimpleNamespace(exit_status=0, stdout=host, stderr="")
+
     ssh = MagicMock()
-    ssh.run = AsyncMock(side_effect=AssertionError("the kernel list is read once per cycle"))
+    ssh.run = AsyncMock(side_effect=run)
     return context_factory(
         state=build_state(
             specs=specs,
@@ -147,6 +196,253 @@ async def test_reported_count_above_the_listed_cards_is_judged_on_the_count(
 
     assert result.event.reason_code == Msg.COUNT_MISMATCH.reason
     assert result.event.what_we_saw["reported_gpu_count"] == 8
+
+
+# ---------------------------- container given a subset of the host's cards ----------------------------
+
+CONTAINER_MOUNTS_OF_ONE_CARD = (
+    "504 494 0:63 / /proc/driver/nvidia rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,mode=555",
+    "546 504 0:23 /driver/nvidia/gpus/0000:00:07.0 /proc/driver/nvidia/gpus/0000:00:07.0 "
+    "ro,nosuid,nodev,noexec,relatime master:12 - proc proc rw",
+)
+
+
+def test_container_read_is_the_same_command_and_the_host_read_goes_through_pid_1():
+    assert "/proc/1/" not in KERNEL_GPU_VIEW_CMD
+    assert "/proc/self/mountinfo" in KERNEL_GPU_VIEW_CMD
+    assert HOST_KERNEL_GPU_VIEW_CMD == KERNEL_GPU_VIEW_CMD.replace(
+        "/proc/self/mountinfo", "/proc/1/mountinfo"
+    ).replace("/proc/driver/nvidia/gpus/*", "/proc/1/root/proc/driver/nvidia/gpus/*")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enforcement", [False, True])
+async def test_container_one_host_four_reported_four_matches_on_the_host_view(
+    context_factory, monkeypatch, enforcement
+):
+    monkeypatch.setattr(settings, "GPU_KERNEL_COUNT_CHECK_ENABLED", True)
+    monkeypatch.setattr(settings, "GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED", enforcement)
+    ctx = _ctx(context_factory, reported=REAL[:4], kernel=[REAL[0]], host=_host_stdout(REAL[:4]))
+
+    result = await GpuKernelCountCheck().run(ctx)
+    ok, events, _ = await Pipeline([GpuKernelCountCheck()], _Sink()).run(ctx)
+
+    assert result.passed is True
+    assert ok is True
+    assert result.event.reason_code == Msg.COUNT_OK.reason
+    assert result.event.severity == "info"
+    what = result.event.what_we_saw
+    assert what["kernel_verdict"] == "match_host_view"
+    assert what["kernel_view_source"] == "host_pid1_root"
+    assert what["container_kernel_gpu_count"] == 1
+    assert what["host_kernel_gpu_count"] == 4
+    assert what["reported_uuids_not_in_host_kernel"] == []
+    assert what["would_fail"] is False
+    assert [call.args[0] for call in ctx.ssh.run.await_args_list] == [HOST_KERNEL_GPU_VIEW_CMD] * 2
+
+
+@pytest.mark.asyncio
+async def test_host_listing_more_cards_than_reported_matches_on_the_host_view(
+    context_factory, enforcing
+):
+    ctx = _ctx(context_factory, reported=REAL[:4], kernel=[REAL[0]], host=_host_stdout(REAL))
+
+    result = await GpuKernelCountCheck().run(ctx)
+
+    assert result.passed is True
+    assert result.event.what_we_saw["kernel_verdict"] == "match_host_view"
+    assert result.event.what_we_saw["host_kernel_gpu_count"] == 8
+
+
+@pytest.mark.asyncio
+async def test_container_one_host_one_reported_eight_still_fails_under_enforcement(
+    context_factory, enforcing
+):
+    ctx = _ctx(
+        context_factory,
+        reported=[REAL[0], *V4_SHAPED],
+        kernel=[REAL[0]],
+        host=_host_stdout([REAL[0]]),
+    )
+
+    result = await GpuKernelCountCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.event.reason_code == Msg.COUNT_MISMATCH.reason
+    what = result.event.what_we_saw
+    assert what["kernel_verdict"] == "count_lower"
+    assert what["kernel_view_source"] == "container"
+    assert what["container_kernel_gpu_count"] == 1
+    assert what["host_kernel_gpu_count"] == 1
+    assert ctx.ssh.run.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_host_with_fewer_cards_than_reported_still_fails_under_enforcement(
+    context_factory, enforcing
+):
+    ctx = _ctx(context_factory, reported=REAL, kernel=[REAL[0]], host=_host_stdout(REAL[:4]))
+
+    result = await GpuKernelCountCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.event.what_we_saw["kernel_verdict"] == "count_lower"
+    assert result.event.what_we_saw["host_kernel_gpu_count"] == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "host",
+    [
+        # PID 1 is the container's own init: its mount table is the container's again
+        _host_stdout(REAL[:4], mounts=CONTAINER_MOUNTS_OF_ONE_CARD),
+        # a tmpfs laid over the gpus path on the host
+        _host_stdout(
+            REAL[:4], mounts=("90 25 0:70 / /proc/driver/nvidia/gpus rw - tmpfs tmpfs rw",)
+        ),
+        # an overlay one level up, with nothing but the stat rows to show it
+        _host_stdout(REAL[:4], mounts=("90 25 0:70 / /proc/driver/nvidia rw - overlay o rw",)),
+        _host_stdout(REAL[:4], fstype="tmpfs"),
+        _host_stdout(REAL[:4], kind="symbolic link"),
+    ],
+)
+async def test_host_view_behind_a_foreign_mount_is_ignored(context_factory, enforcing, host):
+    ctx = _ctx(context_factory, reported=REAL[:4], kernel=[REAL[0]], host=host)
+
+    result = await GpuKernelCountCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.event.reason_code == Msg.COUNT_MISMATCH.reason
+    what = result.event.what_we_saw
+    assert what["kernel_verdict"] == "count_lower"
+    assert what["kernel_view_source"] == "container"
+    assert what["host_kernel_gpu_count"] is None
+    assert what["host_kernel_gpu_foreign_mounts"]
+
+
+@pytest.mark.asyncio
+async def test_host_uuid_rows_without_procfs_evidence_are_ignored(context_factory, enforcing):
+    uuid_rows_only = "\n".join(
+        [
+            KERNEL_GPU_FS_SEPARATOR,
+            KERNEL_GPU_VIEW_SEPARATOR,
+            *(f"{u}, {i}" for i, u in enumerate(REAL[:4])),
+        ]
+    )
+    ctx = _ctx(context_factory, reported=REAL[:4], kernel=[REAL[0]], host=uuid_rows_only)
+
+    result = await GpuKernelCountCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.event.what_we_saw["kernel_verdict"] == "count_lower"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "host", [OSError("connection lost"), NO_HOST_VIEW, "", "not the expected output"]
+)
+async def test_host_read_error_or_empty_host_view_is_a_mismatch_and_never_raises(
+    context_factory, enforcing, host
+):
+    ctx = _ctx(context_factory, reported=REAL[:4], kernel=[REAL[0]], host=host)
+
+    result = await GpuKernelCountCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.event.reason_code == Msg.COUNT_MISMATCH.reason
+    assert result.event.what_we_saw["kernel_verdict"] == "count_lower"
+    assert result.event.what_we_saw["host_kernel_gpu_count"] is None
+
+
+@pytest.mark.asyncio
+async def test_host_read_non_zero_exit_is_a_mismatch(context_factory, enforcing):
+    ctx = _ctx(context_factory, reported=REAL[:4], kernel=[REAL[0]])
+    ctx.ssh.run = AsyncMock(
+        return_value=SimpleNamespace(exit_status=1, stdout=_host_stdout(REAL[:4]), stderr="")
+    )
+
+    result = await GpuKernelCountCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.event.what_we_saw["kernel_verdict"] == "count_lower"
+
+
+@pytest.mark.asyncio
+async def test_host_read_timeout_is_a_mismatch_and_never_raises(
+    context_factory, enforcing, monkeypatch
+):
+    monkeypatch.setattr(nvidia_devices, "KERNEL_GPU_UUID_READ_TIMEOUT_SECONDS", 0.01)
+    ctx = _ctx(context_factory, reported=REAL[:4], kernel=[REAL[0]])
+
+    async def hang(command, *args, **kwargs):
+        await asyncio.sleep(30)
+
+    ctx.ssh.run = AsyncMock(side_effect=hang)
+
+    result = await GpuKernelCountCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.event.reason_code == Msg.COUNT_MISMATCH.reason
+    assert result.event.what_we_saw["kernel_verdict"] == "count_lower"
+
+
+@pytest.mark.asyncio
+async def test_no_ssh_connection_leaves_the_mismatch_as_it_was(context_factory, enforcing):
+    with_ssh = _ctx(context_factory, reported=REAL[:4], kernel=[REAL[0]])
+    ctx = context_factory(state=with_ssh.state, ssh=None)
+    assert ctx.ssh is None
+
+    result = await GpuKernelCountCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.event.what_we_saw["kernel_verdict"] == "count_lower"
+
+
+@pytest.mark.asyncio
+async def test_host_has_the_count_but_not_a_reported_uuid_is_not_a_match(
+    context_factory, enforcing
+):
+    reported = [*REAL[:3], V4_SHAPED[0]]
+    ctx = _ctx(context_factory, reported=reported, kernel=[REAL[0]], host=_host_stdout(REAL[:4]))
+
+    result = await GpuKernelCountCheck().run(ctx)
+
+    # as for a container that has every card: the count holds, the UUID difference is logged
+    assert result.passed is True
+    assert result.event.reason_code == Msg.UUID_MISMATCH.reason
+    what = result.event.what_we_saw
+    assert what["kernel_verdict"] == "uuid_mismatch"
+    assert what["kernel_view_source"] == "host_pid1_root"
+    assert what["reported_uuids_not_in_host_kernel"] == [V4_SHAPED[0].lower()]
+    assert what["would_fail"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reported", "kernel"),
+    [(REAL[:4], REAL[:4]), (REAL[:2], REAL[:4]), ([*REAL[:3], V4_SHAPED[0]], REAL[:4])],
+)
+async def test_host_view_is_not_read_when_the_container_list_is_long_enough(
+    context_factory, enforcing, reported, kernel
+):
+    ctx = _ctx(context_factory, reported=reported, kernel=kernel, host=_host_stdout(REAL))
+
+    result = await GpuKernelCountCheck().run(ctx)
+
+    assert result.passed is True
+    assert result.event.what_we_saw["kernel_view_source"] == "container"
+    assert "host_kernel_gpu_count" not in result.event.what_we_saw
+    assert ctx.ssh.run.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_host_view_is_not_read_when_the_container_list_is_missing(context_factory, enforcing):
+    ctx = _ctx(context_factory, reported=REAL[:4], kernel=None, host=_host_stdout(REAL))
+
+    result = await GpuKernelCountCheck().run(ctx)
+
+    assert result.event.reason_code == Msg.NOT_EVALUATED.reason
+    assert ctx.ssh.run.await_count == 0
 
 
 # ---------------------------- kernel 8 vs reported 8 ----------------------------
