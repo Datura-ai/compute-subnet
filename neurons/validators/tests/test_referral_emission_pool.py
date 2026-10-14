@@ -47,7 +47,6 @@ class _StubReferralFeed:
 def burn_env(monkeypatch):
     """Pins burn logic to a single, known burner hotkey (`BURN_HOTKEY`)."""
     monkeypatch.setattr(settings, "NEW_BURNERS", [BURN_UID])
-    monkeypatch.setattr(settings, "ENABLE_NEW_BURN_LOGIC", True)
     monkeypatch.setattr(settings, "BURNER_COLDKEYS", {})
 
 
