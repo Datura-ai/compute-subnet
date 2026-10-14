@@ -515,11 +515,9 @@ check_sysbox() {
 }
 
 # ── vloopback: size-limited volumes ─────────────────────
-# ticket-0331 (22 Sep 2026): pods failed at start on a host whose vloopback volumes reported a relative
-# Mountpoint ('206/fs'; runc: "setting up ID-mapped mount on path 206/fs … lstat 206: no such file or
-# directory"), while the validators' storage check passed. Install mode sets the plugin up the way the
-# validators' rental path installs it and then mounts a real volume into a sysbox container; --check only
-# reports. VLOOPBACK_REASON carries the cause of the last failure, VLOOPBACK_CHANGED what install mode changed.
+# ticket-0331 (22 Sep 2026): pods with a vloopback volume failed at start while the validators' storage check
+# passed. Install mode sets the plugin up the way the validators' rental path installs it and then mounts a
+# real volume into a sysbox container; --check only reports. VLOOPBACK_REASON carries the cause of the last failure, VLOOPBACK_CHANGED what install mode changed.
 
 vloopback_plugin_state() {
     # true / false / absent; a missing plugin makes `docker plugin inspect` print a blank line before it fails
@@ -685,7 +683,7 @@ check_vloopback() {
     data_dir=$(vloopback_plugin_data_dir)
     case "$data_dir" in
         /*) ;;
-        *) pf_fix "The $VLOOPBACK_PLUGIN plugin's DATA_DIR is '${data_dir}', not an absolute path — its volumes cannot be mounted." \
+        *) pf_fix "The $VLOOPBACK_PLUGIN plugin's DATA_DIR is '${data_dir}', not an absolute path — the plugin refuses to start with it." \
                "$(self_cmd)   # sets DATA_DIR=<Docker data-root>/loopback and tests a volume in a sysbox container; stop rentals first"
            return 1 ;;
     esac

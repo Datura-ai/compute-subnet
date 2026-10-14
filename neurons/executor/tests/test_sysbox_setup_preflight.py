@@ -36,8 +36,8 @@ STUBS = {
     ),
     # The vloopback plugin and its volumes are state in $SYSBOX_SETUP_HOST_ROOT/.stub-docker: `plugin` holds
     # "<enabled> <DATA_DIR>" (seeded once from STUB_VLOOPBACK: ok / absent / relative / disabled), `calls` every
-    # docker command line, `volumes` / `removed` the volumes created and removed. A plugin whose DATA_DIR is
-    # not absolute hands out the relative Mountpoint of ticket-0331.
+    # docker command line, `volumes` / `removed` the volumes created and removed. Mountpoints are <MOUNT_DIR>/<name>
+    # as upstream builds them; STUB_RELATIVE_MOUNTPOINT forces a malformed one.
     "docker": textwrap.dedent(
         """\
         #!/bin/bash
@@ -95,7 +95,7 @@ STUBS = {
                 # the daemon finished creating it after `timeout` killed the CLI
                 [ -z "${STUB_VOLUME_CREATE_HANGS:-}" ] || exit 124
                 echo "${!#}" ;;
-            "volume inspect") case "${STUB_RELATIVE_MOUNTPOINT:+relative}$data_dir" in /*) echo "/mnt/${!#}" ;; *) echo "206/fs" ;; esac ;;
+            "volume inspect") if [ -n "${STUB_RELATIVE_MOUNTPOINT:-}" ]; then echo "${!#}"; else echo "/mnt/${!#}"; fi ;;
             "volume rm")
                 [ -z "${STUB_VOLUME_RM_FAILS:-}" ] || { echo "Error response from daemon: remove ${!#}: VolumeDriver.Unmount: context deadline exceeded" >&2; exit 1; }
                 if [ -s "$st/containers" ]; then echo "Error response from daemon: remove ${!#}: volume is in use - [$(head -1 "$st/containers")]" >&2; exit 1; fi
@@ -725,7 +725,7 @@ LOOPBACK_DIR = "{root}/var/lib/docker/loopback"
             [f"plugin install {PINNED_PLUGIN} --alias vloopback --grant-all-permissions DATA_DIR={LOOPBACK_DIR}"],
             f"vloopback: installed the vloopback plugin with DATA_DIR={LOOPBACK_DIR}.",
         ),
-        # the ticket-0331 shape: the volume reports '206/fs' until DATA_DIR is absolute
+        # a plugin with a relative DATA_DIR (upstream refuses to start with one) gets the absolute one
         (
             "relative",
             ["plugin disable vloopback", f"plugin set vloopback DATA_DIR={LOOPBACK_DIR}", "plugin enable vloopback"],
@@ -764,8 +764,8 @@ def test_vloopback_fix_is_idempotent(tmp_path, seed, changes, message):
         ({"STUB_VOLUME_CREATE_FAILS": "1"}, "docker volume create -d vloopback -o size=1G failed: Error response from daemon: create lium_vloopback_check_"),
         ({"STUB_VOLUME_RM_FAILS": "1"}, "the test volume lium_vloopback_check_"),
         ({"STUB_DOCKER_ROOT": "docker"}, "Docker reports the data-root 'docker', not an absolute path"),
-        # what `docker volume inspect t` showed on the ticket-0331 host: no container starts
-        ({"STUB_RELATIVE_MOUNTPOINT": "1"}, "the vloopback plugin reports the Mountpoint '206/fs', not an absolute path"),
+        # a malformed Mountpoint is caught before a container tries to mount it
+        ({"STUB_RELATIVE_MOUNTPOINT": "1"}, "the vloopback plugin reports the Mountpoint 'lium_vloopback_check_"),
         # a rental that appeared after the installer's first check, or a docker that hangs: no exit, the caller restarts the executor
         ({"STUB_VLOOPBACK": "relative", "STUB_PODS": "pod_4f1c"}, "rentals found (pod_4f1c); the vloopback plugin's DATA_DIR 'loopback' is not changed under them."),
         ({"STUB_VLOOPBACK": "relative", "STUB_PS_A_HANGS": "1"}, "could not check for rentals before changing the vloopback plugin: timed out after 30s"),
