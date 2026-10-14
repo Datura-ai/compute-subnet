@@ -233,14 +233,6 @@ def test_failed_run_is_logged_without_a_computed_figure(caplog):
     assert record["computed_matmul_tflops"] is None
 
 
-def test_flag_off_writes_no_line(monkeypatch, caplog):
-    monkeypatch.setattr(settings, "MATMUL_SPEED_SHADOW_LOG_ENABLED", False)
-    with caplog.at_level(logging.DEBUG, logger=speed_log.logger.name):
-        speed_log.log_matmul_speed(EIGHT_CARD_SPECS, _result(), transport="ssh")
-
-    assert _speed_records(caplog) == []
-
-
 def test_no_result_writes_no_line(caplog):
     with caplog.at_level(logging.DEBUG, logger=speed_log.logger.name):
         speed_log.log_matmul_speed(EIGHT_CARD_SPECS, None, transport="ssh")
@@ -257,10 +249,6 @@ def test_a_failure_while_building_the_line_is_swallowed(monkeypatch, caplog):
         speed_log.log_matmul_speed(SPECS, _result(), transport="ssh")
 
     assert _speed_records(caplog) == []
-
-
-def test_flag_defaults_on():
-    assert type(settings).model_fields["MATMUL_SPEED_SHADOW_LOG_ENABLED"].default is True
 
 
 # --- the service fills the measurement fields ---------------------------------------------------
@@ -396,12 +384,8 @@ async def _run_check(context_factory, result, *, specs=EIGHT_CARD_SPECS):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("enabled", [True, False])
 @pytest.mark.parametrize("success", [True, False])
-async def test_check_verdict_is_the_same_with_the_line_on_or_off(
-    monkeypatch, caplog, context_factory, enabled, success
-):
-    monkeypatch.setattr(settings, "MATMUL_SPEED_SHADOW_LOG_ENABLED", enabled)
+async def test_check_verdict_is_unchanged_by_the_line(caplog, context_factory, success):
     result = _result(success=success, error_message="" if success else "UUID mismatch: x")
 
     with caplog.at_level(logging.INFO, logger=speed_log.logger.name):
@@ -410,11 +394,10 @@ async def test_check_verdict_is_the_same_with_the_line_on_or_off(
     assert outcome.passed is success
     assert outcome.event.reason_code == (Msg.VERIFY_OK if success else Msg.VERIFY_FAILED).reason
     records = _speed_records(caplog)
-    assert len(records) == (1 if enabled else 0)
-    if enabled:
-        assert records[0]["executor_uuid"] == "node-1"
-        assert records[0]["reported_gpu_count"] == 8
-        assert records[0]["success"] is success
+    assert len(records) == 1
+    assert records[0]["executor_uuid"] == "node-1"
+    assert records[0]["reported_gpu_count"] == 8
+    assert records[0]["success"] is success
 
 
 @pytest.mark.asyncio

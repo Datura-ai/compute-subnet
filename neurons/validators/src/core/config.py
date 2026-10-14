@@ -432,10 +432,6 @@ class Settings(BaseSettings):
     RENTED_GPU_DROP_CHECK_ENABLED: bool = Field(env="RENTED_GPU_DROP_CHECK_ENABLED", default=False)
     # The per-pod incident mark expires this long after the last cycle that saw the fault.
     RENTED_GPU_DROP_STATE_TTL_SECONDS: int = Field(env="RENTED_GPU_DROP_STATE_TTL_SECONDS", default=86400, gt=0)
-    # One MATMUL_SPEED_SHADOW log line per validation that ran the capability matmul: the reported GPU model
-    # and count next to the elapsed time, challenge size and the node's benchmark figures. Log only; no
-    # verdict, score or published spec reads it. On by default; false stops the line.
-    MATMUL_SPEED_SHADOW_LOG_ENABLED: bool = Field(env="MATMUL_SPEED_SHADOW_LOG_ENABLED", default=True)
     # DAH-2735 — judge an idle node's GPU by WHO holds it, not by utilization: a competitor's
     # rental idling on the card (Nodexo/SN106) passes every percentage gate. CHECK_ENABLED
     # observes and logs the verdict; ENFORCEMENT additionally zeroes the score. Enforcement

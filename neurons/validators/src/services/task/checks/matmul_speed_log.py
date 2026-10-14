@@ -13,7 +13,6 @@ import math
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
-from core.config import settings
 from core.utils import _m, get_extra_info
 
 if TYPE_CHECKING:
@@ -156,7 +155,7 @@ def log_matmul_speed(
     default_extra: dict | None = None,
 ) -> None:
     """Write the speed line for one matmul run. Never raises and never changes the result."""
-    if result is None or not settings.MATMUL_SPEED_SHADOW_LOG_ENABLED:
+    if result is None:
         return
     try:
         record = build_matmul_speed_record(machine_spec, result, transport=transport)
