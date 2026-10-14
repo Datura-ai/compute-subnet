@@ -116,6 +116,7 @@ def no_kept_upload_probes_carried_between_tests():
         module = sys.modules.get(name)
         if module is not None:
             module._kept_upload_probes.clear()
+            module._package_fallback_probes.clear()
 
 
 @pytest.fixture(scope="session", autouse=True)
