@@ -108,8 +108,16 @@ def make_ctx(context_factory, runner, *, rented_data=None):
     )
 
 
+def test_shadow_by_default_runs_the_probe_but_never_enforces():
+    # DAH-4257: the probe runs on every idle node and logs its verdict; a fault zeroes nothing until
+    # the owner turns enforcement on
+    fields = type(module.settings).model_fields
+    assert fields["GPU_FAULT_PROBE_CHECK_ENABLED"].default is True
+    assert fields["GPU_FAULT_PROBE_ENFORCEMENT_ENABLED"].default is False
+
+
 @pytest.mark.asyncio
-async def test_disabled_by_default_runs_nothing(context_factory):
+async def test_disabled_runs_nothing(context_factory):
     runner = FakeRunner()
     ctx = make_ctx(context_factory, runner)
 

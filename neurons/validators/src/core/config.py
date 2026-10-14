@@ -466,9 +466,11 @@ class Settings(BaseSettings):
     # chase and a pinned-memory copy round-trip over a ~2 GB working set, plus NVML before/after: a rise in
     # uncorrected ECC or remapped rows, a pending or failed remap, or a required recovery action is a fault.
     # A card that faults under indexed access (Blender "Illegal address in CUDA queue", 6 Sep) passes the
-    # sequential matmul. CHECK runs it and logs the verdict; ENFORCEMENT lets a fault zero the score. Both
-    # default off: the probe is new GPU work on every idle node per cycle, so it starts as an opt-in shadow.
-    GPU_FAULT_PROBE_CHECK_ENABLED: bool = Field(env="GPU_FAULT_PROBE_CHECK_ENABLED", default=False)
+    # sequential matmul. CHECK runs it and logs the verdict; ENFORCEMENT lets a fault zero the score.
+    # DAH-4257: CHECK defaults on (shadow). GPU faults mid-rental are the largest renter-reported class
+    # (30 days to 14 Oct), and the probe sat dark in prod. ENFORCEMENT stays off until the shadow counts
+    # are read and the owner decides.
+    GPU_FAULT_PROBE_CHECK_ENABLED: bool = Field(env="GPU_FAULT_PROBE_CHECK_ENABLED", default=True)
     GPU_FAULT_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="GPU_FAULT_PROBE_ENFORCEMENT_ENABLED", default=False)
     # DAH-3436: the synthetic rental probe. On an idle node (no renter pod, no filler) the validator
     # rents the node from itself once per RENTAL_PROBE_INTERVAL_HOURS: it starts the default renter
