@@ -6,6 +6,7 @@ from typing import Any
 import asyncssh
 from asyncssh import SSHClientConnection, SSHKey
 
+from core.config import settings
 from core.docker_utils import DockerCommand
 from core.utils import _m, get_extra_info
 from services.executor_connectivity.models import (
@@ -272,10 +273,33 @@ class DindVerifier:
         else:
             if result.exit_status == 0:
                 logger.info(_m("Sysbox check ok", extra=get_extra_info(log_ctx)))
-                return True
+                return await self._runs_in_a_user_namespace(ssh, log_ctx)
             error_msg = result.stderr.strip() if result.stderr and isinstance(result.stderr, str) else "unknown error"
         logger.warning(_m("Sysbox check failed", extra=get_extra_info({**log_ctx, "error": error_msg})))
         return False
+
+    async def _runs_in_a_user_namespace(self, ssh: SSHClientConnection, log_ctx: dict[str, Any]) -> bool:
+        """Sysbox always runs a container in a user namespace; runc, privileged or not, keeps the host's
+        identity map (`0 0 4294967295`). The `docker` that started this container is the node's own binary,
+        so hello-world passing does not show sysbox ran it. An identity map is logged as SYSBOX_IDENTITY_UID_MAP
+        and refuses sysbox only under SYSBOX_USERNS_ENFORCEMENT_ENABLED; an unreadable map decides nothing.
+        """
+        try:
+            result = await asyncio.wait_for(ssh.run("cat /proc/self/uid_map"), timeout=10)
+        except (asyncio.TimeoutError, asyncssh.Error, OSError):
+            return True
+        fields = (result.stdout or "").split() if isinstance(result.stdout, str) else []
+        if result.exit_status != 0 or len(fields) < 3:
+            return True
+        if fields[:3] != ["0", "0", "4294967295"]:
+            return True
+        logger.warning(
+            _m(
+                "SYSBOX_IDENTITY_UID_MAP",
+                extra=get_extra_info({**log_ctx, "enforced": settings.SYSBOX_USERNS_ENFORCEMENT_ENABLED}),
+            )
+        )
+        return not settings.SYSBOX_USERNS_ENFORCEMENT_ENABLED
 
     async def _diagnose_unanswered_container(
         self,

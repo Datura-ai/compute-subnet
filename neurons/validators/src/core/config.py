@@ -390,6 +390,10 @@ class Settings(BaseSettings):
     # (NVML_DRIVER_MISSING) and with this on it fails the check. Off by default.
     NVML_DRIVER_MISSING_ENFORCEMENT_ENABLED: bool = Field(
         env="NVML_DRIVER_MISSING_ENFORCEMENT_ENABLED", default=False
+    # The sysbox probe container must run in a user namespace (sysbox always uses one); an identity uid map
+    # is logged as SYSBOX_IDENTITY_UID_MAP and, with this on, the node is not counted as running sysbox.
+    SYSBOX_USERNS_ENFORCEMENT_ENABLED: bool = Field(
+        env="SYSBOX_USERNS_ENFORCEMENT_ENABLED", default=False
     )
     MATMUL_ALLCARDS_ENFORCEMENT_ENABLED: bool = Field(env="MATMUL_ALLCARDS_ENFORCEMENT_ENABLED", default=False)
     # Item 2b — send the advertised CPU-core count in the rental-verification health check so the
