@@ -1,5 +1,9 @@
+import logging
+from unittest.mock import patch
+
 import pytest
 
+from neurons.validators.src.services.task.checks import nvml_digest
 from neurons.validators.src.services.task.checks.nvml_digest import NvmlDigestCheck
 from neurons.validators.src.services.task.messages import NvmlDigestMessages as Msg
 
@@ -194,3 +198,34 @@ async def test_nvml_digest_check_allows_driver_610_43_02(context_factory):
     assert result.passed is True
     assert result.event.reason_code == Msg.DIGEST_OK.reason
     assert "clear_verified_job_info" not in result.updates
+
+
+@pytest.mark.asyncio
+async def test_a_missing_driver_is_logged_and_passes_by_default(context_factory, caplog):
+    specs = {"gpu": {"driver": ""}, "md5_checksums": {"libnvidia_ml": "abc123"}}
+    ctx = context_factory(state=build_state(specs=specs))
+
+    with caplog.at_level(logging.WARNING, logger=nvml_digest.logger.name):
+        result = await NvmlDigestCheck().run(ctx)
+
+    assert result.passed is True
+    assert any("NVML_DRIVER_MISSING" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_missing_driver_fails_under_enforcement(context_factory):
+    specs = {"gpu": {}, "md5_checksums": {"libnvidia_ml": "abc123"}}
+    ctx = context_factory(state=build_state(specs=specs))
+
+    with patch.object(nvml_digest.settings, "NVML_DRIVER_MISSING_ENFORCEMENT_ENABLED", True):
+        result = await NvmlDigestCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.event.reason_code == Msg.DRIVER_MISSING.reason
+
+
+def test_missing_driver_enforcement_is_off_by_default():
+    assert (
+        type(nvml_digest.settings).model_fields["NVML_DRIVER_MISSING_ENFORCEMENT_ENABLED"].default
+        is False
+    )

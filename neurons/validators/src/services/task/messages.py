@@ -494,6 +494,14 @@ class NvmlDigestMessages:
         impact="Score set to 0 for this cycle",
         remediation="Update to a supported NVIDIA driver version. Your current driver version is not recognized.",
     )
+    DRIVER_MISSING = MessageTemplate(
+        event="NVIDIA driver version not reported",
+        reason="NVML_DRIVER_MISSING",
+        severity="error",
+        category="env",
+        impact="Score set to 0 for this cycle",
+        remediation="Make sure `nvidia-smi` reports the driver version on the host.",
+    )
     DIGEST_OK = MessageTemplate(
         event="NVML library digest verified",
         reason="NVML_DIGEST_OK",
