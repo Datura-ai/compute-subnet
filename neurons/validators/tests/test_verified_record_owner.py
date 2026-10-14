@@ -127,3 +127,15 @@ async def test_an_executor_missing_from_a_sent_map_is_logged(
         ResultHandler._get_record_owner(_context(context_factory, owners))
 
     assert _logs(caplog, "VERIFIED_RECORD_OWNER_UNKNOWN") == logged
+
+
+@pytest.mark.parametrize(
+    "sent_id",
+    [
+        "0b6f8a2e-1c3d-4e5f-8a9b-0c1d2e3f4a5b",
+        "0B6F8A2E1C3D4E5F8A9B0C1D2E3F4A5B",
+        "{0b6f8a2e-1c3d-4e5f-8a9b-0c1d2e3f4a5b}",
+    ],
+)
+def test_every_form_of_an_executor_id_finds_the_same_owner(sent_id):
+    assert result_handler._executor_key(sent_id) == "0b6f8a2e-1c3d-4e5f-8a9b-0c1d2e3f4a5b"

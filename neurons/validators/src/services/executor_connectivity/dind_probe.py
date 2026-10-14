@@ -16,6 +16,7 @@ from services.executor_connectivity.models import (
     PortPair,
 )
 from services.ssh_service import SSHService
+from services.node_host import public_host_sock
 
 logger = logging.getLogger(__name__)
 
@@ -350,6 +351,7 @@ class DindVerifier:
                 connection = await asyncssh.connect(
                     host=host,
                     port=port.external,
+                    **await public_host_sock(host, port.external, attempt_timeout_seconds),
                     username="root",
                     client_keys=[pkey],
                     known_hosts=None,

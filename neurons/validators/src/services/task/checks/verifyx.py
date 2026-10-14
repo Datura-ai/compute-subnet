@@ -31,6 +31,12 @@ _EMA_KEYS = ("ema_verifyx_download_speed", "ema_verifyx_upload_speed")
 # Keyed by (miner hotkey, executor uuid): two miners can list the same executor uuid.
 MAX_KEPT_UPLOAD_PROBES = 8
 _kept_upload_probes: dict[tuple[str, str], int] = {}
+# The same host can make the Cloudflare download fail too (block speed.cloudflare.com), and then
+# the gated number is the package download, a fixed file a LAN cache can serve. Probes in a row
+# gated on the package reading are counted the same way; past this many each one is logged, and
+# under VERIFYX_PACKAGE_FALLBACK_CAP_ENABLED the missing capacity reading is fed as the 0 it is.
+MAX_PACKAGE_FALLBACK_PROBES = 8
+_package_fallback_probes: dict[tuple[str, str], int] = {}
 
 
 @dataclass(frozen=True)
@@ -194,6 +200,10 @@ class VerifyXCheck:
                 updated_specs["network"] = {}
             download_speed = verifyx_network.get("download_speed")
             cloudflare_fallback = bool(verifyx_network.get("cloudflare_fallback"))
+            package_gated = _is_package_reading_gated(ctx, cloudflare_fallback)
+            if cloudflare_fallback and not package_gated:
+                capacity = verifyx_network.get("capacity_download_speed")
+                download_speed = capacity if _is_positive_number(capacity) else 0.0
             upload_blocked = _upload_kept_within_cap(
                 ctx, bool(verifyx_network.get("cloudflare_upload_fallback"))
             )
@@ -205,7 +215,7 @@ class VerifyXCheck:
                 download_speed,
                 prev_ema.ema_verifyx_download_speed if prev_ema else None,
                 unavailable_readings,
-                keep_previous_on_none=cloudflare_fallback,
+                keep_previous_on_none=package_gated,
             )
             _feed_ema(
                 ctx,
@@ -417,6 +427,30 @@ def _upload_kept_within_cap(ctx: Context, upload_blocked: bool) -> bool:
         )
     )
     return False
+
+
+def _is_package_reading_gated(ctx: Context, cloudflare_fallback: bool) -> bool:
+    """Whether this probe's package reading is the gated one: `cloudflare_fallback`, except past
+    MAX_PACKAGE_FALLBACK_PROBES in a row under VERIFYX_PACKAGE_FALLBACK_CAP_ENABLED. A probe
+    Cloudflare answered starts the count again."""
+    key = (ctx.miner_hotkey, ctx.executor.uuid)
+    if not cloudflare_fallback:
+        _package_fallback_probes.pop(key, None)
+        return False
+    probes = _package_fallback_probes.get(key, 0) + 1
+    _package_fallback_probes[key] = probes
+    if probes <= MAX_PACKAGE_FALLBACK_PROBES:
+        return True
+    capped = settings.VERIFYX_PACKAGE_FALLBACK_CAP_ENABLED
+    logger.warning(
+        _m(
+            "VERIFYX_PACKAGE_FALLBACK_STREAK",
+            extra=get_extra_info(
+                {**ctx.default_extra, "package_fallback_probes": probes, "capped": capped}
+            ),
+        )
+    )
+    return not capped
 
 
 def _fallback_upload_reading(reading: object, upload_blocked: bool) -> object:
