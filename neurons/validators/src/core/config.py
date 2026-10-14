@@ -616,14 +616,6 @@ class Settings(BaseSettings):
     # earns 0 as before. Pays nobody until the backend sends provider_spot_executor_ids.
     # False: every spot node earns 0, as before.
     ENABLE_SPOT_NODE_PAY: bool = Field(env="ENABLE_SPOT_NODE_PAY", default=False)
-    # DAH-4299: whether an idle provider-chosen spot node is paid is decided as for a secure node
-    # (its GPU model is in the unrented program and every idle-pool gate passes), not by whether a
-    # Lium filler runs on it: a filler Lium did not start is Lium's doing (Fish). Provider-caused
-    # cases stay excluded by the shared rules. The amount is unchanged. False: paid only while a
-    # Lium filler runs on it, as before.
-    SPOT_IDLE_PAY_SECURE_DECISION_ENABLED: bool = Field(
-        env="SPOT_IDLE_PAY_SECURE_DECISION_ENABLED", default=False
-    )
     # Secure-node floor, independent of the flag above. True: an idle secure node's rate after
     # bucket-cap dilution is raised to 0.95 x its configuration's average filler revenue, even above
     # its listed rate (0.95 = SECURE_FILLER_REVENUE_FLOOR_FACTOR, set apart from the spot factor).

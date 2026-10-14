@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from core.config import settings, shared_client
+from core.config import settings
 from datura.requests.miner_requests import ExecutorSSHInfo
 from incentive.config import DEFAULT_PRICE, IncentiveConfig
 from incentive import rental_price
@@ -186,7 +186,6 @@ def floor_on(monkeypatch):
 @pytest.fixture(autouse=True)
 def flags_default_off(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_SPOT_NODE_PAY", False)
-    monkeypatch.setattr(settings, "SPOT_IDLE_PAY_SECURE_DECISION_ENABLED", False)
     monkeypatch.setattr(settings, "SPOT_FILLER_REVENUE_MODEL_FALLBACK_ENABLED", False)
     monkeypatch.setattr(settings, "ENABLE_SECURE_FILLER_REVENUE_FLOOR", False)
 
@@ -365,83 +364,6 @@ async def test_a_rented_spot_node_is_told_it_earns_its_renters_payment(spot_pay_
 
 
 # ── DAH-4299: the secure decision on whether a spot node is paid ─────────────
-
-
-@pytest.fixture
-def secure_decision_on(spot_pay_on, monkeypatch):
-    monkeypatch.setattr(settings, "SPOT_IDLE_PAY_SECURE_DECISION_ENABLED", True)
-
-
-@pytest.mark.asyncio
-async def test_secure_decision_pays_an_idle_spot_node_no_lium_filler_runs_on(secure_decision_on):
-    spot = _spot(has_lium_filler=False, filler_revenue_per_gpu_hour=2.0)
-
-    incentive = await _run([spot, _node("secure-1")])
-
-    assert spot.effective_rate == pytest.approx(SPOT_FACTOR * 2.0)
-    assert spot.incentive > 0
-    assert _codes(spot) == []
-    _assert_pool_pays_exactly(incentive)
-
-
-@pytest.mark.asyncio
-async def test_secure_decision_keeps_the_spot_amount_and_its_missing_average(secure_decision_on):
-    spot = _spot(filler_revenue_per_gpu_hour=None)
-
-    await _run([spot])
-
-    assert spot.incentive == 0
-    assert _codes(spot) == [ZeroIncentiveReason.SPOT_NO_FILLER_REVENUE_FOR_GPU_CONFIG]
-
-
-@pytest.mark.asyncio
-async def test_secure_decision_refuses_a_spot_node_an_idle_pool_gate_refuses(
-    secure_decision_on, monkeypatch
-):
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_SOFT_PRICE_LIMIT", True)
-    p90_config = shared_client.config.model_copy(update={"machine_prices_p90": {H100: 1.0}})
-    monkeypatch.setattr(shared_client, "_config", p90_config)
-    spot = _spot(filler_revenue_per_gpu_hour=2.0)
-    spot.executor_info.price_per_gpu = 5.0
-
-    await _run([spot])
-
-    assert spot.incentive == 0
-    assert spot.spot_pay_candidate is False
-    assert _codes(spot) == [ZeroIncentiveReason.PRICE_ABOVE_MARKET_P90_SOFT_LIMIT]
-
-
-@pytest.mark.asyncio
-async def test_secure_decision_refuses_a_spot_gpu_model_outside_the_program(secure_decision_on):
-    spot = _spot(filler_revenue_per_gpu_hour=2.0)
-    config = _config()
-    config.rental_incentive_gpu_types = []
-
-    await _run([spot], config)
-
-    assert spot.incentive == 0
-    assert _codes(spot) == [ZeroIncentiveReason.GPU_MODEL_NOT_ELIGIBLE_FOR_UNRENTED_INCENTIVE]
-
-
-@pytest.mark.asyncio
-async def test_secure_decision_leaves_a_rented_spot_node_out_of_both_pools(secure_decision_on):
-    spot = _spot(is_rented=True, has_lium_filler=False, filler_revenue_per_gpu_hour=2.0)
-
-    await _run([spot])
-
-    assert spot.incentive == 0
-    assert _codes(spot) == [ZeroIncentiveReason.SPOT_TIER]
-
-
-@pytest.mark.asyncio
-async def test_secure_decision_flag_alone_pays_no_spot_node(monkeypatch):
-    monkeypatch.setattr(settings, "SPOT_IDLE_PAY_SECURE_DECISION_ENABLED", True)
-    spot = _spot(has_lium_filler=False, filler_revenue_per_gpu_hour=2.0)
-
-    await _run([spot])
-
-    assert spot.incentive == 0
-    assert _codes(spot) == [ZeroIncentiveReason.SPOT_TIER]
 
 
 @pytest.mark.asyncio
