@@ -101,10 +101,13 @@ def probe_stdout(status: str, **extra) -> str:
     return "some driver noise\n" + PROBE_JSON_MARKER + " " + json.dumps(report) + "\n"
 
 
-def make_ctx(context_factory, runner, *, rented_data=None):
+def make_ctx(context_factory, runner, *, rented_data=None, first_pass=False):
     state = build_state(specs={"gpu": {"count": 1}}, rented_data=rented_data)
     return context_factory(
-        services=build_services(), config=build_context_config(), state=state, runner=runner
+        services=build_services(),
+        config=build_context_config(first_pass=first_pass),
+        state=state,
+        runner=runner,
     )
 
 
@@ -127,6 +130,31 @@ async def test_disabled_runs_nothing(context_factory):
     assert result.passed is True
     assert result.event.reason_code == Msg.DISABLED.reason
     assert runner.calls == []
+
+
+@pytest.mark.asyncio
+async def test_first_pass_in_shadow_skips_the_probe(context_factory):
+    runner = FakeRunner(probe_stdout("ok"))
+    ctx = make_ctx(context_factory, runner, first_pass=True)
+
+    with probe_gate(enforce=False):
+        result = await GpuFaultProbeCheck().run(ctx)
+
+    assert result.passed is True
+    assert result.event.reason_code == Msg.FIRST_PASS_SKIPPED.reason
+    assert runner.calls == []
+
+
+@pytest.mark.asyncio
+async def test_first_pass_under_enforcement_runs_the_probe(context_factory):
+    runner = FakeRunner(probe_stdout("ok"))
+    ctx = make_ctx(context_factory, runner, first_pass=True)
+
+    with probe_gate(enforce=True):
+        result = await GpuFaultProbeCheck().run(ctx)
+
+    assert result.event.reason_code == Msg.PROBE_OK.reason
+    assert len(runner.calls) == 1
 
 
 @pytest.mark.asyncio
