@@ -254,6 +254,7 @@ def make_probe_context(
     image_present: bool = True,
     images=(IMAGE,),
     rented_now=None,
+    first_pass: bool = False,
 ):
     docker = docker or FakeDocker()
     redis = redis or FakeRedis()
@@ -287,7 +288,7 @@ def make_probe_context(
     ctx = make_context(
         services=services,
         state=state,
-        config=build_context_config(validator_keypair=object()),
+        config=build_context_config(validator_keypair=object(), first_pass=first_pass),
         ssh=ssh,
         executor_ssh_private_key_encrypted="gAAAAA-encrypted-executor-key",
         miner_hotkey=MINER,
@@ -431,6 +432,24 @@ async def test_never_rents_beside_a_renter_or_a_filler(rented, expected_reason):
     assert result.passed and result.event.reason_code == Msg.SKIPPED.reason
     assert result.event.what_we_saw["reason"] == expected_reason
     assert docker.create_calls == []
+
+
+@pytest.mark.asyncio
+async def test_first_pass_in_shadow_creates_nothing():
+    ctx, docker, _ = make_probe_context(first_pass=True)
+    with probe_settings(enforced=False):
+        result = await RentalProbeCheck().run(ctx)
+    assert result.passed and result.event.reason_code == Msg.SKIPPED.reason
+    assert result.event.what_we_saw["reason"] == "first pass"
+    assert docker.create_calls == []
+
+
+@pytest.mark.asyncio
+async def test_first_pass_under_enforcement_probes():
+    ctx, docker, _ = make_probe_context(first_pass=True)
+    with probe_settings(enforced=True), renter_path():
+        result = await RentalProbeCheck().run(ctx)
+    assert result.event.reason_code == Msg.PROBE_OK.reason
 
 
 @pytest.mark.asyncio

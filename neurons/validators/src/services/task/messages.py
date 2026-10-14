@@ -1535,6 +1535,13 @@ class GpuFaultProbeMessages:
         category="policy",
         impact="Active filler runtime preserved; the probe would compete for VRAM.",
     )
+    FIRST_PASS_SKIPPED = MessageTemplate(
+        event="GPU kernel-fault probe skipped on the first pass",
+        reason="GPU_FAULT_PROBE_SKIPPED_FIRST_PASS",
+        severity="info",
+        category="policy",
+        impact="Proceed; in shadow the verdict changes nothing, so the probe waits for the next cycle.",
+    )
     PROBE_OK = MessageTemplate(
         event="GPU kernel-fault probe passed",
         reason="GPU_FAULT_PROBE_OK",
