@@ -106,6 +106,8 @@ STUBS = {
                     *" -v "*)
                         # `timeout` killed the CLI; the container keeps running with the volume attached
                         [ -z "${STUB_VLOOPBACK_RUN_HANGS:-}" ] || { echo "$4" >> "$st/containers"; exit 124; }
+                        # the probe printed its token, then docker run failed (exit) or hung (124) before completing
+                        [ -z "${STUB_VLOOPBACK_RUN_EXIT:-}" ] || { echo lium-vloopback-ok; [ "$STUB_VLOOPBACK_RUN_EXIT" != 124 ] || echo "$4" >> "$st/containers"; exit "$STUB_VLOOPBACK_RUN_EXIT"; }
                         [ -z "${STUB_VLOOPBACK_MOUNT_FAILS:-}" ] && echo lium-vloopback-ok || {
                             echo "docker: Error response from daemon: failed to create task for container: OCI runtime create failed: error during container init: error setting up ID-mapped mount on path 206/fs (likely means idmapped mounts are not supported on the filesystem at this path): lstat 206: no such file or directory: unknown." >&2
                             exit 125; } ;;
@@ -750,6 +752,8 @@ def test_vloopback_fix_is_idempotent(tmp_path, seed, changes, message):
         ({"STUB_VLOOPBACK_MOUNT_FAILS": "1"}, "a vloopback volume does not mount into a sysbox container: docker: Error response from daemon: failed to create task for container: OCI runtime create failed: error during container init: error setting up ID-mapped mount on path 206/fs"),
         ({"STUB_VLOOPBACK": "absent", "STUB_PLUGIN_INSTALL_FAILS": "1"}, f"docker plugin install {PINNED_PLUGIN} failed: Error response from daemon: Head https://registry-1.docker.io"),
         ({"STUB_VLOOPBACK_RUN_HANGS": "1"}, "a vloopback volume does not mount into a sysbox container: the container did not finish within 120s"),
+        ({"STUB_VLOOPBACK_RUN_EXIT": "124"}, "a vloopback volume does not mount into a sysbox container: the container did not finish within 120s"),
+        ({"STUB_VLOOPBACK_RUN_EXIT": "1"}, "a vloopback volume does not mount into a sysbox container: the container exited with status 1"),
         ({"STUB_VOLUME_CREATE_HANGS": "1"}, "docker volume create -d vloopback -o size=1G failed: timed out after 30s"),
         ({"STUB_VLOOPBACK": "relative", "STUB_PLUGIN_IN_USE": "1"}, "the vloopback plugin has DATA_DIR 'loopback' and cannot be disabled to change it: Error response from daemon: plugin vloopback:latest is in use"),
         ({"STUB_VOLUME_CREATE_FAILS": "1"}, "docker volume create -d vloopback -o size=1G failed: Error response from daemon: create lium_vloopback_check_"),

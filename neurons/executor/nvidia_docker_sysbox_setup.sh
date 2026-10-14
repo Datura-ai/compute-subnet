@@ -615,7 +615,7 @@ vloopback_mount_test() {
     # what a rental with a disk limit does: create a volume, mount it into a sysbox container, write and read
     # a file, unmount (the container exits), remove the volume. Container and volume share one name; they are
     # removed whatever step failed, and by the EXIT trap when the script is interrupted.
-    local mountpoint out rc=0 remove_error
+    local mountpoint out rc=0 run_rc remove_error
     VLOOPBACK_REASON=""
     VLOOPBACK_TEST_NAME="lium_vloopback_check_$$"
     out=$(timeout "$VLOOPBACK_CLEANUP_TIMEOUT" docker volume create -d "$VLOOPBACK_PLUGIN" -o size=1G "$VLOOPBACK_TEST_NAME" 2>&1) || {
@@ -634,9 +634,12 @@ vloopback_mount_test() {
     if [ "$rc" -eq 0 ]; then
         out=$(timeout "$VLOOPBACK_RUN_TIMEOUT" docker run --rm --name "$VLOOPBACK_TEST_NAME" --runtime=sysbox-runc \
             -v "$VLOOPBACK_TEST_NAME:/lium-vol" "$VERIFY_IMAGE" \
-            sh -c 'echo lium-vloopback-ok > /lium-vol/probe && cat /lium-vol/probe' 2>&1) || true
-        if ! echo "$out" | grep -qx 'lium-vloopback-ok'; then
-            [ -n "$out" ] || out="the container did not finish within ${VLOOPBACK_RUN_TIMEOUT}s"
+            sh -c 'echo lium-vloopback-ok > /lium-vol/probe && cat /lium-vol/probe' 2>&1) && run_rc=0 || run_rc=$?
+        if [ "$run_rc" -ne 0 ] || ! echo "$out" | grep -qx 'lium-vloopback-ok'; then
+            # the token alone is not a pass: the container must also exit cleanly, as the validator's scrape requires
+            if [ "$run_rc" -eq 124 ]; then out="the container did not finish within ${VLOOPBACK_RUN_TIMEOUT}s"
+            elif [ "$run_rc" -ne 0 ] && echo "$out" | grep -qx 'lium-vloopback-ok'; then out="the container exited with status $run_rc"
+            fi
             VLOOPBACK_REASON="a $VLOOPBACK_PLUGIN volume does not mount into a sysbox container: $(echo "$out" | vloopback_last_line)"
             rc=1
         fi
