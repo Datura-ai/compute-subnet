@@ -166,6 +166,9 @@ class _ProbeGate:
     create_lock: _CreateLock
     # the last probe's failed step, standing until a probe passes; None when there is none
     standing: _Failure | None
+    # the fillers the backend listed under the lock, which the probe runs beside and leaves alone
+    # (RENTAL_PROBE_BESIDE_FILLERS_ENABLED); empty otherwise
+    fillers: frozenset[str] = frozenset()
 
 
 class RentalProbeCheck:
@@ -192,14 +195,21 @@ class RentalProbeCheck:
     pod is the backend's to judge; the standing failure applies again once the node is idle. It runs
     again when the node is idle and the image is pulled (the interval stamp is written
     on success only). Otherwise the probe runs at most once per RENTAL_PROBE_INTERVAL_HOURS per
-    executor. It never runs on a rented node or beside a filler: the start path sweeps
-    `pod_*`/`filler_*` containers it was not told about and lifts GPU power caps. Before the
-    container starts the probe takes the per-executor create lock a renter's create holds around
+    executor. It never runs on a rented node, nor beside a filler unless told to (below): the
+    start path sweeps `pod_*`/`filler_*` containers it was not told about and lifts GPU power
+    caps. Before the container starts the probe takes the per-executor create lock a renter's
+    create holds around
     `create_container` (RedisService.executor_create_exclusion) without waiting, skips the node when a
     renter holds it, and re-reads the node's idleness from the backend and this validator's pending-pod
     marks under the lock, not from the cycle-start snapshot; the lock is released as soon as the
     create returns. Anything the probe cannot read (backend, Redis) makes it skip or reach no verdict;
     it never penalises on missing data alone. RENTAL_PROBE_ENABLED is off by default.
+
+    With RENTAL_PROBE_BESIDE_FILLERS_ENABLED on, an idle node running a Lium filler is probed too,
+    beside the filler rather than in its place: create_container is told `beside_fillers`, so it
+    removes no `filler_*`, lifts no GPU power cap and reclaims no filler cache. The validator cannot
+    stop a filler run in the backend, so removing the container would read as the provider killing
+    it, and lifting a PEARL filler's cap is DAH-2356's hard-ban case. Off by default.
 
     With RENTAL_PROBE_ENFORCEMENT_ENABLED off (shadow) the probe runs the same way, but a failed step is
     logged as RENTAL_PROBE_FAILED_OBSERVED and the check passes: no score, job score or verified-job
@@ -216,7 +226,9 @@ class RentalProbeCheck:
         standing = gate.standing
         image_ref = gate.image_ref
         try:
-            outcome = await _probe(ctx, image_ref, gate.create_lock)
+            outcome = await _probe(
+                ctx, image_ref, gate.create_lock, beside_fillers=bool(gate.fillers)
+            )
         finally:
             await gate.create_lock.release(ctx)
         # `steps` is the pipeline's own per-check duration summary on the run's last event
@@ -245,7 +257,7 @@ class RentalProbeCheck:
         # A renter may have taken the node while the probe ran: their create sweeps our container
         # away and a real rental is proof the node works. Never punish that race, and never
         # punish when the race cannot be ruled out.
-        rented_meanwhile = await _rented_meanwhile(ctx)
+        rented_meanwhile = await _rented_meanwhile(ctx, gate.fillers)
         if rented_meanwhile is None:
             return self._inconclusive(
                 ctx,
@@ -346,17 +358,22 @@ class RentalProbeCheck:
             return self._skipped(ctx, _RENT_IN_PROGRESS)
 
         try:
-            refusal = await self._idle_under_lock(ctx, standing)
+            idle = await self._idle_under_lock(ctx, standing)
         except BaseException:
             await create_lock.release(ctx)
             raise
-        if refusal is not None:
+        if isinstance(idle, CheckResult):
             await create_lock.release(ctx)
-            return refusal
-        return _ProbeGate(image_ref=image_ref, create_lock=create_lock, standing=standing)
+            return idle
+        return _ProbeGate(
+            image_ref=image_ref, create_lock=create_lock, standing=standing, fillers=idle
+        )
 
-    async def _idle_under_lock(self, ctx: Context, standing: _Failure | None) -> CheckResult | None:
-        """Re-read the node's idleness under the create lock; the result that stops the cycle, or None.
+    async def _idle_under_lock(
+        self, ctx: Context, standing: _Failure | None
+    ) -> CheckResult | frozenset[str]:
+        """Re-read the node's idleness under the create lock; the result that stops the cycle,
+        or the fillers the probe may run beside (empty unless RENTAL_PROBE_BESIDE_FILLERS_ENABLED).
 
         ctx.state.rented_data is the snapshot the cycle started from, minutes ago for the last check
         in the pipeline. create_container sweeps every pod_* container it is not told about, so the
@@ -364,7 +381,7 @@ class RentalProbeCheck:
         it is creating this moment). Unknown counts as busy.
         """
         reread_started = time.monotonic()
-        busy_now = await _busy_now(ctx)
+        busy_now, fillers = await _busy_now(ctx)
         if busy_now is None:
             return self._inconclusive(
                 ctx, "could not confirm the node is idle", steps=[], standing=standing
@@ -378,7 +395,7 @@ class RentalProbeCheck:
             return self._inconclusive(
                 ctx, "the idleness re-read overran its budget", steps=[], standing=standing
             )
-        return None
+        return fillers
 
     def _failed(
         self, ctx: Context, failure: _Failure, *, what: dict[str, Any], ssh_port: int | None
@@ -490,7 +507,7 @@ async def _skip_reason(ctx: Context) -> tuple[str | None, dict[str, Any]]:
     if rented_executor and rented_executor.pods:
         return "rented", {"pods": [pod.pod_id for pod in rented_executor.pods]}
     filler_containers = rented_data.get_filler_containers(ctx.executor.uuid) if rented_data else []
-    if filler_containers:
+    if filler_containers and not settings.RENTAL_PROBE_BESIDE_FILLERS_ENABLED:
         return "filler running", {"filler_containers": filler_containers}
 
     try:
@@ -522,27 +539,30 @@ _RENT_IN_PROGRESS = "a rent is being created on the node"
 _RENTED_NOW = frozenset({_RENTED_SINCE_CYCLE_START, _RENT_IN_PROGRESS})
 
 
-async def _busy_now(ctx: Context) -> str | None:
-    """Why the node is not idle right now, "" when it is, None when that could not be read."""
+async def _busy_now(ctx: Context) -> tuple[str | None, frozenset[str]]:
+    """Why the node is not idle right now, "" when it is, None when that could not be read; and the
+    fillers on it the probe may run beside (only with RENTAL_PROBE_BESIDE_FILLERS_ENABLED)."""
+    no_fillers: frozenset[str] = frozenset()
     try:
         rented = await ctx.services.backend.get_all_rented_executors()
     except Exception:
         _read_failed(ctx, "the backend's rented executors")
-        return None
+        return None, no_fillers
     if rented is None:
-        return None
+        return None, no_fillers
     rented_executor = rented.executors.get(ctx.executor.uuid)
     if rented_executor and rented_executor.pods:
-        return _RENTED_SINCE_CYCLE_START
-    if rented.get_filler_containers(ctx.executor.uuid):
-        return "filler started since the cycle started"
+        return _RENTED_SINCE_CYCLE_START, no_fillers
+    fillers = frozenset(rented.get_filler_containers(ctx.executor.uuid))
+    if fillers and not settings.RENTAL_PROBE_BESIDE_FILLERS_ENABLED:
+        return "filler started since the cycle started", no_fillers
     try:
         if await ctx.services.redis.renting_in_progress(ctx.miner_hotkey, ctx.executor.uuid):
-            return _RENT_IN_PROGRESS
+            return _RENT_IN_PROGRESS, no_fillers
     except Exception:
         _read_failed(ctx, "its pending-pod marks in Redis")
-        return None
-    return ""
+        return None, no_fillers
+    return "", fillers
 
 
 def _missing_inputs(ctx: Context) -> str | None:
@@ -730,14 +750,15 @@ async def _take_create_lock(ctx: Context) -> _CreateLock | None:
     return _CreateLock(lock, held)
 
 
-async def _rented_meanwhile(ctx: Context) -> str | None:
+async def _rented_meanwhile(ctx: Context, fillers_beside: frozenset[str]) -> str | None:
     """How the node was taken while the probe ran, "" when it was not, None when that could not be read.
 
     "rented": the backend lists a pod on it now, or this validator holds a pending-pod mark for it (a
     renter's create it is running at this moment; the probe's own mark is already cleared when this
     runs). "given a filler": the backend lists a filler on it now; a filler's create sent meanwhile
     refuses beside `pod_<probe>` (not on its active_container_names) and removes nothing, and its
-    pending mark is gone by the time this runs.
+    pending mark is gone by the time this runs. A filler the probe ran beside (`fillers_beside`) was
+    there before it and is not one given meanwhile.
     """
     try:
         rented = await ctx.services.backend.get_all_rented_executors()
@@ -749,7 +770,7 @@ async def _rented_meanwhile(ctx: Context) -> str | None:
     rented_executor = rented.executors.get(ctx.executor.uuid)
     if rented_executor and rented_executor.pods:
         return "rented"
-    if rented.get_filler_containers(ctx.executor.uuid):
+    if set(rented.get_filler_containers(ctx.executor.uuid)) - fillers_beside:
         return "given a filler"
     try:
         if await ctx.services.redis.renting_in_progress(ctx.miner_hotkey, ctx.executor.uuid):
@@ -782,13 +803,16 @@ def _probe_payload(
             for internal, external in ctx.state.verified_port_pairs
         ],
         pod_mapping=[],
-        # nothing to protect: the probe runs only when the backend lists no pod and no filler here
+        # nothing to protect: the backend lists no pod here, and create_container's `beside_fillers`
+        # keeps every filler_* on the node, not only the ones listed at this moment
         active_container_names=[],
         active_volume_names=[],
     )
 
 
-async def _probe(ctx: Context, image_ref: str, create_lock: _CreateLock) -> _ProbeOutcome:
+async def _probe(
+    ctx: Context, image_ref: str, create_lock: _CreateLock, *, beside_fillers: bool = False
+) -> _ProbeOutcome:
     """Run the six steps in order; whatever happens, the node and this validator's Redis are left as found.
 
     1. `_step_container_start`: create the container the way a renter's create does.
@@ -817,6 +841,7 @@ async def _probe(ctx: Context, image_ref: str, create_lock: _CreateLock) -> _Pro
             image_ref=image_ref,
             public_key=public_key,
             create_lock=create_lock,
+            beside_fillers=beside_fillers,
         )
         if created is None:
             return outcome
@@ -843,6 +868,7 @@ async def _step_container_start(
     image_ref: str,
     public_key: str,
     create_lock: _CreateLock,
+    beside_fillers: bool = False,
 ) -> ContainerCreated | None:
     """Step 1: start the container through create_container, the path a renter's pod takes.
 
@@ -856,6 +882,8 @@ async def _step_container_start(
     when the probe ends here.
     """
     docker = ctx.services.pod_recovery
+    # passed only beside a filler, so a probe on an empty node calls create_container as before
+    beside = {"beside_fillers": True} if beside_fillers else {}
     started = time.perf_counter()
     try:
         result = await asyncio.wait_for(
@@ -864,6 +892,7 @@ async def _step_container_start(
                 ctx.executor,
                 ctx.config.validator_keypair,
                 ctx.executor_ssh_private_key_encrypted,
+                **beside,
             ),
             timeout=_CREATE_DEADLINE_SECONDS,
         )
