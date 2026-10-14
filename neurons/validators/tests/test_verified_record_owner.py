@@ -1,90 +1,83 @@
-import asyncio
 import json
 import logging
 from unittest.mock import AsyncMock
 
 import pytest
-from fakeredis import FakeServer
-from fakeredis.aioredis import FakeRedis
 from neurons.validators.src.services import redis_service
 from neurons.validators.src.services.redis_service import RedisService
-from tests.helpers import default_executor
+from neurons.validators.src.services.task import result_handler
+from neurons.validators.src.services.task.result_handler import ResultHandler
+from protocol.vc_protocol.compute_requests import RentedExecutorsResponse
+from tests.helpers import build_state
 
-OWNED = {"count": 7, "failed": 0, "spec": "s", "uuids": "GPU-a", "hotkey": "owner-hotkey"}
+RECORD = {"count": 7, "failed": 0, "spec": "s", "uuids": "GPU-a"}
 
 
 @pytest.fixture
 def service():
     service = RedisService.__new__(RedisService)
-    service.redis = FakeRedis(server=FakeServer())
-    service.lock = redis_service._PassThroughLock()
     service.hset = AsyncMock()
     service.publish = AsyncMock()
     return service
 
 
 @pytest.fixture
-def stored():
-    """The real record writes on a fakeredis server, with no command lock: writers interleave."""
-    service = RedisService.__new__(RedisService)
-    service.redis = FakeRedis(server=FakeServer())
-    service.lock = redis_service._PassThroughLock()
-    service.publish = AsyncMock()
-    return service
+def enforced(monkeypatch):
+    monkeypatch.setattr(redis_service.settings, "VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", True)
 
 
 def _written(service) -> dict:
     return json.loads(service.hset.await_args.args[2])
 
 
-def _foreign_writer_logs(caplog) -> int:
-    return sum("VERIFIED_RECORD_FOREIGN_WRITER" in record.getMessage() for record in caplog.records)
-
-
-@pytest.mark.asyncio
-async def test_the_first_writer_becomes_the_record_owner(service):
-    await service.set_verified_job_info("owner-hotkey", "exec-1", prev_info={}, spec="s")
-
-    assert _written(service)["hotkey"] == "owner-hotkey"
-
-
-@pytest.mark.asyncio
-async def test_a_reset_keeps_the_record_owner(service):
-    await service.clear_verified_job_info("owner-hotkey", "exec-1", prev_info=OWNED)
-
-    assert _written(service)["hotkey"] == "owner-hotkey"
+def _logs(caplog, key: str) -> int:
+    return sum(key in record.getMessage() for record in caplog.records)
 
 
 @pytest.mark.asyncio
 async def test_a_foreign_reset_is_logged_and_still_written_by_default(service, caplog):
     with caplog.at_level(logging.WARNING, logger=redis_service.logger.name):
-        await service.clear_verified_job_info("other-hotkey", "exec-1", prev_info=OWNED)
+        await service.clear_verified_job_info(
+            "other-hotkey", "exec-1", prev_info=RECORD, record_owner="owner-hotkey"
+        )
 
-    assert _foreign_writer_logs(caplog) == 1
-    assert _written(service) == {**OWNED, "count": 0}
+    assert _logs(caplog, "VERIFIED_RECORD_FOREIGN_WRITER") == 1
+    assert _written(service) == {**RECORD, "count": 0}
     service.publish.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_a_foreign_reset_is_refused_under_enforcement(service, monkeypatch):
-    monkeypatch.setattr(redis_service.settings, "VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", True)
-
-    await service.clear_verified_job_info("other-hotkey", "exec-1", prev_info=OWNED)
-    await service.set_verified_job_info("other-hotkey", "exec-1", prev_info=OWNED)
+async def test_a_foreign_write_or_reset_is_refused_under_enforcement(service, enforced):
+    await service.clear_verified_job_info(
+        "other-hotkey", "exec-1", prev_info=RECORD, record_owner="owner-hotkey"
+    )
+    await service.set_verified_job_info(
+        "other-hotkey", "exec-1", prev_info=RECORD, record_owner="owner-hotkey"
+    )
 
     service.hset.assert_not_awaited()
     service.publish.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_the_owner_still_writes_under_enforcement(service, monkeypatch, caplog):
-    monkeypatch.setattr(redis_service.settings, "VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", True)
-
+async def test_the_backend_owner_still_writes_under_enforcement(service, enforced, caplog):
     with caplog.at_level(logging.WARNING, logger=redis_service.logger.name):
-        await service.set_verified_job_info("owner-hotkey", "exec-1", prev_info=OWNED)
+        await service.set_verified_job_info(
+            "owner-hotkey", "exec-1", prev_info=RECORD, record_owner="owner-hotkey"
+        )
 
     assert _written(service)["count"] == 8
-    assert _foreign_writer_logs(caplog) == 0
+    assert _logs(caplog, "VERIFIED_RECORD_FOREIGN_WRITER") == 0
+
+
+@pytest.mark.asyncio
+async def test_no_backend_owner_lets_every_write_through_under_enforcement(service, enforced):
+    # a new node: the backend creates its owner row on the first report
+    await service.set_verified_job_info("any-hotkey", "exec-1", prev_info={}, spec="s")
+    await service.clear_verified_job_info("any-hotkey", "exec-1", prev_info=RECORD)
+
+    assert service.hset.await_count == 2
+    service.publish.assert_awaited_once()
 
 
 def test_owner_enforcement_is_off_by_default():
@@ -92,142 +85,41 @@ def test_owner_enforcement_is_off_by_default():
     assert fields["VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED"].default is False
 
 
-ENDPOINT = "203.0.113.7:2200"
-OWNED_AT = {**OWNED, "ssh_endpoint": ENDPOINT}
+def _context(context_factory, owners: dict | None):
+    rented = None
+    if owners is not None:
+        rented = RentedExecutorsResponse(executors={}, executor_owner_hotkey=owners)
+    ctx = context_factory(state=build_state(rented_data=rented))
+    return ctx.model_copy(update={"clear_verified_job_info": True})
 
 
 @pytest.mark.asyncio
-async def test_the_owner_records_its_ssh_endpoint(service):
-    await service.set_verified_job_info(
-        "owner-hotkey", "exec-1", prev_info=OWNED, endpoint=ENDPOINT
-    )
-
-    assert _written(service)["ssh_endpoint"] == ENDPOINT
-
-
-@pytest.mark.asyncio
-async def test_a_reset_from_the_recorded_endpoint_takes_over(service, monkeypatch):
-    # the node moved to a new hotkey: same machine, same endpoint, new hotkey
-    monkeypatch.setattr(redis_service.settings, "VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", True)
-
-    await service.clear_verified_job_info(
-        "new-hotkey", "exec-1", prev_info=OWNED_AT, endpoint=ENDPOINT
-    )
-
-    written = _written(service)
-    assert written["hotkey"] == "new-hotkey"
-    assert written["ssh_endpoint"] == ENDPOINT
-    assert written["count"] == 0
-    service.publish.assert_awaited_once()
-    assert service.publish.await_args.args[1]["miner_hotkey"] == "new-hotkey"
-
-
-@pytest.mark.asyncio
-async def test_a_reset_from_another_endpoint_is_refused_under_enforcement(service, monkeypatch):
-    monkeypatch.setattr(redis_service.settings, "VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", True)
-
-    await service.clear_verified_job_info(
-        "other-hotkey", "exec-1", prev_info=OWNED_AT, endpoint="198.51.100.9:2200"
-    )
-
-    service.hset.assert_not_awaited()
-    service.publish.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_a_record_without_an_endpoint_cannot_be_taken_over(service, monkeypatch):
-    monkeypatch.setattr(redis_service.settings, "VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", True)
-
-    await service.clear_verified_job_info(
-        "new-hotkey", "exec-1", prev_info=OWNED, endpoint=ENDPOINT
-    )
-
-    service.hset.assert_not_awaited()
-    service.publish.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_a_plain_write_from_the_recorded_endpoint_is_still_refused(service, monkeypatch):
-    # only a reset takes over; the moved node's successful writes wait for that reset
-    monkeypatch.setattr(redis_service.settings, "VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", True)
-
-    await service.set_verified_job_info(
-        "new-hotkey", "exec-1", prev_info=OWNED_AT, endpoint=ENDPOINT
-    )
-
-    service.hset.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_a_foreign_write_let_through_keeps_owner_and_endpoint(service):
-    await service.clear_verified_job_info(
-        "other-hotkey", "exec-1", prev_info=OWNED_AT, endpoint="198.51.100.9:2200"
-    )
-
-    written = _written(service)
-    assert written["hotkey"] == "owner-hotkey"
-    assert written["ssh_endpoint"] == ENDPOINT
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("ssh_port, expected", [(2200, "203.0.113.7:2200"), (0, "")])
-async def test_the_result_handler_passes_the_endpoint_it_logged_in_on(
-    context_factory, ssh_port, expected
-):
-    # a forced pass (ssh_port 0) logged in nowhere and proves no endpoint
-    from neurons.validators.src.services.task.result_handler import ResultHandler
-
-    executor = default_executor().model_copy(
-        update={"address": " 203.0.113.7 ", "ssh_port": ssh_port}
-    )
-    ctx = context_factory(executor=executor).model_copy(update={"clear_verified_job_info": True})
+@pytest.mark.parametrize(
+    "owners, expected",
+    [
+        ({"executor-123": "owner-hotkey"}, "owner-hotkey"),
+        ({"other-executor": "someone"}, None),
+        ({}, None),
+        (None, None),
+    ],
+)
+async def test_the_result_handler_passes_the_backend_owner(context_factory, owners, expected):
     redis = AsyncMock()
 
     await ResultHandler(redis_service=redis, dry_run=False)._persist_verification_data(
-        "owner-hotkey", "exec-1", OWNED_AT, ctx, success=False
+        "miner-hotkey", "executor-123", RECORD, _context(context_factory, owners), success=False
     )
 
-    assert redis.clear_verified_job_info.await_args.kwargs["endpoint"] == expected
+    assert redis.clear_verified_job_info.await_args.kwargs["record_owner"] == expected
 
 
 @pytest.mark.asyncio
-async def test_two_first_writers_in_one_round_leave_one_owner(stored, monkeypatch):
-    monkeypatch.setattr(redis_service.settings, "VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", True)
+@pytest.mark.parametrize("owners, logged", [({"other-executor": "someone"}, 1), ({}, 0)])
+async def test_an_executor_missing_from_a_sent_map_is_logged(
+    context_factory, caplog, owners, logged
+):
+    # an older backend sends no map: nothing to log on every node of every cycle
+    with caplog.at_level(logging.INFO, logger=result_handler.logger.name):
+        ResultHandler._get_record_owner(_context(context_factory, owners))
 
-    await asyncio.gather(
-        stored.set_verified_job_info("hotkey-a", "exec-1", prev_info={}, endpoint=ENDPOINT),
-        stored.set_verified_job_info("hotkey-b", "exec-1", prev_info={}, endpoint=ENDPOINT),
-    )
-
-    record = await stored.get_verified_job_info("exec-1")
-    assert record["hotkey"] in ("hotkey-a", "hotkey-b")
-    assert record["count"] == 1  # the loser was refused
-    claim = await stored.redis.get("verified_record_owner:exec-1")
-    assert claim.decode() == record["hotkey"]
-
-
-@pytest.mark.asyncio
-async def test_a_first_writer_that_lost_the_claim_keeps_the_winner_as_owner(stored):
-    await stored.set_verified_job_info("hotkey-a", "exec-1", prev_info={})
-    # hotkey-b read the record before hotkey-a wrote it
-    await stored.set_verified_job_info("hotkey-b", "exec-1", prev_info={})
-
-    record = await stored.get_verified_job_info("exec-1")
-    assert record["hotkey"] == "hotkey-a"
-    assert record["count"] == 2  # let through by default, built on the record hotkey-a wrote
-
-
-@pytest.mark.asyncio
-async def test_two_concurrent_takeovers_leave_one_owner(stored, monkeypatch):
-    monkeypatch.setattr(redis_service.settings, "VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", True)
-    await stored.redis.hset("verified_job_counts", "exec-1", json.dumps(OWNED_AT))
-
-    await asyncio.gather(
-        stored.clear_verified_job_info("new-a", "exec-1", prev_info=OWNED_AT, endpoint=ENDPOINT),
-        stored.clear_verified_job_info("new-b", "exec-1", prev_info=OWNED_AT, endpoint=ENDPOINT),
-    )
-
-    record = await stored.get_verified_job_info("exec-1")
-    assert record["hotkey"] in ("new-a", "new-b")
-    stored.publish.assert_awaited_once()
-    assert stored.publish.await_args.args[1]["miner_hotkey"] == record["hotkey"]
+    assert _logs(caplog, "VERIFIED_RECORD_OWNER_UNKNOWN") == logged
