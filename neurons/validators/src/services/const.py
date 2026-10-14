@@ -278,6 +278,9 @@ BROKEN_POD_CONTAINER_GRACE_MINUTES = 2 * FILLER_CONTAINER_GRACE_MINUTES
 # shorter than this, so a rental that ends while the run is inside it always lands here. It must stay
 # short for the same reason as the grace above: the pod's name must not shield a workload for long.
 RENTAL_TEARDOWN_GRACE_MINUTES = 15
+# DAH-4315: how long after a pod is created the validator waits for the backend to record its
+# container name before judging the unnamed, not-running pod as POD_NOT_RUNNING.
+POD_CONTAINER_NAME_GRACE_MINUTES = 15
 # How far ahead of the validator's clock a rental's close time may sit and still read as a rental
 # that just ended. A close time further ahead is not trusted, so the container stays an orphan.
 RENTAL_CLOSE_CLOCK_SKEW_MINUTES = 5

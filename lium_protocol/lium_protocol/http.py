@@ -84,8 +84,8 @@ class RentedExecutorsResponse(pydantic.BaseModel):
     gpu_splitting_config: dict[str, int] = {}  # executor_id → min_gpu_count_for_rental
     network_ema: dict[str, NetworkEMA] = {}
     spot_executor_ids: list[str] = []
-    # the subset of spot_executor_ids whose provider chose the Spot tier (not demoted, force-spot,
-    # pinned or in a no-incentive rental); only these may take spot-node pay
+    # the subset of spot_executor_ids that may take spot-node pay: set to Spot by the provider, or
+    # demoted for penalties; never a banned hotkey, pin or no-incentive rental
     provider_spot_executor_ids: list[str] = []
     new_rentals_paused_executor_ids: list[str] = []
     # DAH-2703: executor_ids whose filler container was destroyed during create
@@ -95,6 +95,9 @@ class RentedExecutorsResponse(pydantic.BaseModel):
     manual_rental_executors: dict[str, ManualRentalInfo] = {}
     # average filler revenue per GPU configuration, read by the spot-node pay and the secure floor
     filler_revenue_by_gpu_config: list[FillerRevenueByGpuConfig] = []
+    # executor_id → the hotkey its node is listed under (pool hotkey for a custodied account), for
+    # every listed executor; the validator's verified record treats a write by any other hotkey as foreign
+    executor_owner_hotkeys: dict[str, str] = {}
 
 
 class PodRentalActiveResponse(pydantic.BaseModel):
