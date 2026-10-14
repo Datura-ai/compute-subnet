@@ -211,6 +211,8 @@ class Settings(BaseSettings):
     # Read version from version.txt
     VERSION: str = (pathlib.Path(__file__).parent / ".." / ".." / "version.txt").read_text().strip()
 
+    # Pre-DAH-2274 burner uids. They receive no burn (burn goes to NEW_BURNERS); they are only kept
+    # in the miner list even when not serving (subtensor_client._build_serving_miners_with_opted_in_routing).
     BURNERS: list[int] = [4, 206, 207, 208]
     # All burn emission slots route to UID 47 (Datura payout key).
     NEW_BURNERS: list[int] = [47, 47, 47, 47, 47, 47, 47, 47, 47, 47]
@@ -218,7 +220,6 @@ class Settings(BaseSettings):
     BURNER_COLDKEYS: dict[int, str] = {
         47: "5G694c15wAu1LKi9rpSQqJjpBfg4K1oiBxEm5QSVdVZAfp9f",
     }
-    ENABLE_NEW_BURN_LOGIC: bool = True
 
     # DAH-2251 — referral incentive paid via emission, to referrer hotkeys weighted by
     # the backend's epoch-stable EMA feed. There is no funding wallet, so unlike the

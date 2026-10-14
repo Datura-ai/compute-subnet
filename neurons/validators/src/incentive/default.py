@@ -278,7 +278,8 @@ class DefaultIncentive(BaseIncentive):
 
         Args:
             miners: List of miner neuron information
-            last_mechanism_step_block: Last mechanism step block number
+            last_mechanism_step_block: Unused since the old burner selection was removed (DAH-4326);
+                kept so callers of the incentive interface do not change
 
         Returns:
             dict[str, float]: Scores with burning applied for each miner
@@ -287,7 +288,6 @@ class DefaultIncentive(BaseIncentive):
         burn_scores = self.burn_service.calculate_burn_scores(
             miners=miners,
             burn_share=self.burn_share,  # burn-emission share sourced from shared config (DAH-2274)
-            last_mechanism_step_block=last_mechanism_step_block,
         )
         cycle_scores = dict(burn_scores)
         for miner in miners:

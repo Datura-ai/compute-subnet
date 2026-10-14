@@ -890,7 +890,7 @@ class SubtensorClient:
             active_hotkeys or set(),
             # only the uids that actually receive burn, mirroring BurnService.is_burner —
             # a retired burner slot is an ordinary miner uid and must be able to take the floor
-            set(settings.NEW_BURNERS if settings.ENABLE_NEW_BURN_LOGIC else settings.BURNERS),
+            set(settings.NEW_BURNERS),
         )
 
         logger.info(
