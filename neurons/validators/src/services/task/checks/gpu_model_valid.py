@@ -51,10 +51,7 @@ class GpuModelValidCheck:
             card_models = [detail.get("name", None) for detail in gpu_details]
         gpu_model = card_models[0] if card_models else None
 
-        # Every card, not only the first: a second card of another model used to pass unread.
-        unsupported = [
-            model for model in card_models or [gpu_model] if model not in gpu_model_rates_map
-        ]
+        unsupported = [model for model in card_models or [None] if model not in gpu_model_rates_map]
         if unsupported:
             gpu_model = unsupported[0]
             supported_models = list(gpu_model_rates_map.keys())
