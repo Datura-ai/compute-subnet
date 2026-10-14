@@ -52,7 +52,7 @@ async def test_anchor_survives_reset_failure_and_success_writes():
 
     await service.clear_verified_job_info("hk", EXECUTOR, prev_info=info)
     info = await _record(service)
-    assert info == {"count": 0, "failed": 0, "spec": "A100:1", "uuids": "gpu-001"}
+    assert info == {"count": 0, "failed": 0, "spec": "A100:1", "uuids": "gpu-001", "hotkey": "hk"}
 
     await service.set_verified_job_info("hk", EXECUTOR, prev_info=info, success=False)
     info = await _record(service)
