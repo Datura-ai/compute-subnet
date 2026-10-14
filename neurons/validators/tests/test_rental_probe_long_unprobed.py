@@ -14,10 +14,10 @@ HOUR = 3600
 
 async def _unprobed_logs(caplog, **context) -> tuple[int, str]:
     ctx, docker, _ = make_probe_context(**context)
-    return await _run(caplog, ctx, docker)
+    return await _count_unprobed_logs_and_reason(caplog, ctx, docker)
 
 
-async def _run(caplog, ctx, docker) -> tuple[int, str]:
+async def _count_unprobed_logs_and_reason(caplog, ctx, docker) -> tuple[int, str]:
     caplog.clear()
     with probe_settings(), caplog.at_level(logging.WARNING, logger=module.logger.name):
         result = await RentalProbeCheck().run(ctx)
@@ -50,4 +50,6 @@ async def test_an_unreadable_image_list_on_a_never_probed_node_is_logged(caplog)
     ctx, docker, _ = make_probe_context()
     ctx.ssh.run.side_effect = asyncssh.ConnectionLost("lost")
 
-    assert await _run(caplog, ctx, docker) == (1, Msg.INCONCLUSIVE.reason)
+    result = await _count_unprobed_logs_and_reason(caplog, ctx, docker)
+
+    assert result == (1, Msg.INCONCLUSIVE.reason)

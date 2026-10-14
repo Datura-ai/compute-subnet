@@ -617,7 +617,7 @@ async def _log_if_long_unprobed(ctx: Context, reason: str) -> None:
                 {
                     **ctx.default_extra,
                     "reason": reason,
-                    "hours_since_last_passed_probe": None if hours is None else round(hours, 1),
+                    "hours_since_last_probe_stamp": None if hours is None else round(hours, 1),
                 }
             ),
         )
