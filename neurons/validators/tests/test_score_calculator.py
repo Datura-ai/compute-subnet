@@ -4,6 +4,7 @@ via integration in test_score_check.py and test_pipeline_default_scenarios.py.
 """
 import pytest
 
+from neurons.validators.src.services.task import score_calculator
 from neurons.validators.src.services.task.score_calculator import calculate_scores
 from neurons.validators.src.services.task.checks.verifyx import MIN_VERIFYX_EMA_DOWNLOAD_SPEED_MBPS
 from helpers import build_context_config, build_services, build_state, default_executor, make_context
@@ -115,3 +116,54 @@ def test_executor_without_deposit_scores_in_full(gpu_model):
     assert actual_score == 1.0
     assert job_score == 1.0
     assert warning == ""
+
+
+def _attestation_ctx(*, tdx_passed: bool, gpu_passed: bool | None, gpu_model: str = "NVIDIA H200"):
+    return make_context(
+        executor=default_executor().model_copy(update={"price_per_gpu": None}),
+        state=build_state(gpu_model=gpu_model, specs={"network": {"ema_verifyx_download_speed": 500.0}}),
+        services=build_services(),
+        config=build_context_config(),
+        collateral_deposited=True,
+        is_rental_succeed=True,
+        tdx_attestation_passed=tdx_passed,
+        gpu_attestation_passed=gpu_passed,
+    )
+
+
+def test_an_unattested_node_scores_in_full_by_default():
+    actual_score, job_score, warning = calculate_scores(_attestation_ctx(tdx_passed=False, gpu_passed=None))
+
+    assert (actual_score, job_score, warning) == (1.0, 1.0, "")
+
+
+@pytest.mark.parametrize(
+    "tdx_passed, gpu_passed, expected_score",
+    [(True, True, 1.0), (True, None, 0.0), (True, False, 0.0), (False, None, 0.0), (False, True, 0.0)],
+)
+def test_the_requirement_pays_only_a_verified_quote_with_gpu_attestation(
+    monkeypatch, tdx_passed, gpu_passed, expected_score
+):
+    monkeypatch.setattr(score_calculator.settings, "ATTESTED_HARDWARE_REQUIRED_ENABLED", True)
+
+    actual_score, job_score, warning = calculate_scores(
+        _attestation_ctx(tdx_passed=tdx_passed, gpu_passed=gpu_passed)
+    )
+
+    assert (actual_score, job_score) == (expected_score, expected_score)
+    assert ("Attested hardware required" in warning) is (expected_score == 0.0)
+
+
+def test_the_requirement_can_be_limited_to_listed_gpu_models(monkeypatch):
+    monkeypatch.setattr(score_calculator.settings, "ATTESTED_HARDWARE_REQUIRED_ENABLED", True)
+    monkeypatch.setattr(score_calculator.settings, "ATTESTED_HARDWARE_REQUIRED_GPU_MODELS", "NVIDIA H200, NVIDIA B200")
+
+    listed = calculate_scores(_attestation_ctx(tdx_passed=False, gpu_passed=None, gpu_model="NVIDIA H200"))
+    unlisted = calculate_scores(_attestation_ctx(tdx_passed=False, gpu_passed=None, gpu_model="NVIDIA RTX 4090"))
+
+    assert listed[0] == 0.0
+    assert unlisted[0] == 1.0
+
+
+def test_the_attested_hardware_requirement_is_off_by_default():
+    assert type(score_calculator.settings).model_fields["ATTESTED_HARDWARE_REQUIRED_ENABLED"].default is False
