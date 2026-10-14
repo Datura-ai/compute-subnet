@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from core.config import settings
@@ -8,8 +9,9 @@ from services.nvidia_devices import read_kernel_gpu_view
 
 from ..messages import GpuKernelCountMessages as Msg
 from ..messages import MessageTemplate, render_message
+from ..models import ValidationEvent
 from ..pipeline import CheckResult, Context
-from .banned_provider import kernel_gpu_view, reported_gpu_uuids
+from .banned_provider import has_live_rental, kernel_gpu_view, reported_gpu_uuids
 from .cpu_truth import advertised_cpu_count
 
 # A reported GPU UUID shaped like a random (RFC 4122 version 4) UUID: version nibble 4 and variant
@@ -72,10 +74,36 @@ def reported_ram_gb(specs: dict[str, Any] | None) -> float | None:
     return total_kb / KB_PER_GB if total_kb > 0 else None
 
 
+@dataclass(frozen=True)
+class HostShapeHint:
+    """CPU and RAM per reported card, and which of the two floors (if any) the host is below."""
+
+    cpu_count: int | None
+    ram_gb: float | None
+    vcpu_per_gpu: float | None
+    ram_gb_per_gpu: float | None
+    host_shape_reasons: list[str]
+
+    @property
+    def host_shape_flag(self) -> bool:
+        return bool(self.host_shape_reasons)
+
+    def as_fields(self) -> dict[str, Any]:
+        return {
+            "cpu_count": self.cpu_count,
+            "ram_gb": self.ram_gb,
+            "vcpu_per_gpu": self.vcpu_per_gpu,
+            "ram_gb_per_gpu": self.ram_gb_per_gpu,
+            "min_vcpu_per_gpu": HOST_SHAPE_MIN_VCPU_PER_GPU,
+            "min_ram_gb_per_gpu": HOST_SHAPE_MIN_RAM_GB_PER_GPU,
+            "host_shape_reasons": self.host_shape_reasons,
+            "host_shape_flag": self.host_shape_flag,
+        }
+
+
 def host_shape_hint(
     *, gpu_count: int, cpu_count: int | None, ram_gb: float | None
-) -> dict[str, Any]:
-    """CPU and RAM per reported card, and which of the two floors (if any) the host is below."""
+) -> HostShapeHint:
     reasons: list[str] = []
     vcpu_per_gpu = ram_gb_per_gpu = None
     if gpu_count >= HOST_SHAPE_MIN_GPU_COUNT:
@@ -87,49 +115,98 @@ def host_shape_hint(
             ram_gb_per_gpu = round(ram_gb / gpu_count, 2)
             if ram_gb_per_gpu < HOST_SHAPE_MIN_RAM_GB_PER_GPU:
                 reasons.append("ram_gb_per_gpu_below_floor")
-    return {
-        "cpu_count": cpu_count,
-        "ram_gb": round(ram_gb, 1) if ram_gb is not None else None,
-        "vcpu_per_gpu": vcpu_per_gpu,
-        "ram_gb_per_gpu": ram_gb_per_gpu,
-        "min_vcpu_per_gpu": HOST_SHAPE_MIN_VCPU_PER_GPU,
-        "min_ram_gb_per_gpu": HOST_SHAPE_MIN_RAM_GB_PER_GPU,
-        "host_shape_reasons": reasons,
-        "host_shape_flag": bool(reasons),
-    }
+    return HostShapeHint(
+        cpu_count=cpu_count,
+        ram_gb=round(ram_gb, 1) if ram_gb is not None else None,
+        vcpu_per_gpu=vcpu_per_gpu,
+        ram_gb_per_gpu=ram_gb_per_gpu,
+        host_shape_reasons=reasons,
+    )
+
+
+@dataclass(frozen=True)
+class KernelViewResult:
+    """The reported cards compared with one kernel list. `kernel_verdict` is one of
+    not_evaluated, match, count_lower, uuid_mismatch."""
+
+    reported_gpu_count: int
+    reported_uuid_count: int
+    kernel_gpu_count: int | None
+    reported_uuids_not_in_kernel: list[str]
+    kernel_uuids_not_reported: list[str]
+    kernel_verdict: str
+
+    def as_fields(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def evaluate_kernel_view(
     *, reported_count: int, reported_uuids: list[str], kernel_uuids: list[str] | None
-) -> dict[str, Any]:
-    """Compare the reported cards with the kernel's list. `kernel_verdict` is one of
-    not_evaluated, match, count_lower, uuid_mismatch."""
+) -> KernelViewResult:
     reported = _normalized(reported_uuids)
     kernel = _normalized(kernel_uuids)
-    result: dict[str, Any] = {
-        "reported_gpu_count": reported_count,
-        "reported_uuid_count": len(reported),
-        "kernel_gpu_count": len(kernel) if kernel else None,
-        "reported_uuids_not_in_kernel": [],
-        "kernel_uuids_not_reported": [],
-    }
     if not kernel:
-        return {**result, "kernel_verdict": "not_evaluated"}
+        return KernelViewResult(
+            reported_gpu_count=reported_count,
+            reported_uuid_count=len(reported),
+            kernel_gpu_count=None,
+            reported_uuids_not_in_kernel=[],
+            kernel_uuids_not_reported=[],
+            kernel_verdict="not_evaluated",
+        )
     kernel_set, reported_set = set(kernel), set(reported)
-    result["reported_uuids_not_in_kernel"] = [u for u in reported if u not in kernel_set]
-    result["kernel_uuids_not_reported"] = [u for u in kernel if u not in reported_set]
+    not_in_kernel = [u for u in reported if u not in kernel_set]
     if len(kernel) < reported_count:
         verdict = "count_lower"
-    elif result["reported_uuids_not_in_kernel"]:
+    elif not_in_kernel:
         verdict = "uuid_mismatch"
     else:
         verdict = "match"
-    return {**result, "kernel_verdict": verdict}
+    return KernelViewResult(
+        reported_gpu_count=reported_count,
+        reported_uuid_count=len(reported),
+        kernel_gpu_count=len(kernel),
+        reported_uuids_not_in_kernel=not_in_kernel,
+        kernel_uuids_not_reported=[u for u in kernel if u not in reported_set],
+        kernel_verdict=verdict,
+    )
+
+
+@dataclass(frozen=True)
+class HostViewResult:
+    """What the host-view reading saw. `kernel_verdict` is set only when the host's list
+    replaces the container's verdict (match_host_view or uuid_mismatch); otherwise the first
+    verdict stands."""
+
+    host_kernel_gpu_count: int | None = None
+    host_kernel_gpu_foreign_mounts: list[str] = field(default_factory=list)
+    host_kernel_view_error: str | None = None
+    kernel_verdict: str | None = None
+    host_kernel_gpu_uuids: list[str] | None = None
+    reported_uuids_not_in_host_kernel: list[str] | None = None
+
+    def as_fields(self) -> dict[str, Any]:
+        fields: dict[str, Any] = {
+            "host_kernel_gpu_count": self.host_kernel_gpu_count,
+            "host_kernel_gpu_foreign_mounts": self.host_kernel_gpu_foreign_mounts,
+        }
+        if self.host_kernel_view_error is not None:
+            fields["host_kernel_view_error"] = self.host_kernel_view_error
+        if self.kernel_verdict is not None:
+            fields.update(
+                {
+                    "kernel_verdict": self.kernel_verdict,
+                    "kernel_view_source": KERNEL_VIEW_SOURCE_HOST,
+                    "host_kernel_gpu_uuids": self.host_kernel_gpu_uuids,
+                    "reported_uuids_not_in_host_kernel": self.reported_uuids_not_in_host_kernel,
+                }
+            )
+        return fields
 
 
 async def host_view_verdict(
     ctx: Context, *, reported_count: int, reported_uuids: list[str]
-) -> dict[str, Any]:
+) -> HostViewResult:
     """Second reading, taken only when the container's list is shorter than the reported count.
 
     A container that was handed a subset of the host's cards has only those under its own /proc,
@@ -138,31 +215,29 @@ async def host_view_verdict(
     rules) and lists at least the reported number of cards. A host that itself has fewer cards
     than reported is short there too, and the first verdict stands. Never raises.
     """
-    seen: dict[str, Any] = {"host_kernel_gpu_count": None, "host_kernel_gpu_foreign_mounts": []}
     if ctx.ssh is None:
-        return seen
+        return HostViewResult()
     try:
         host_uuids, host_foreign_mounts = await read_kernel_gpu_view(ctx.ssh, host_view=True)
     except Exception as exc:
-        return {**seen, "host_kernel_view_error": repr(exc)[:300]}
-    seen["host_kernel_gpu_foreign_mounts"] = host_foreign_mounts
+        return HostViewResult(host_kernel_view_error=repr(exc)[:300])
     if not host_uuids:
-        return seen
+        return HostViewResult(host_kernel_gpu_foreign_mounts=host_foreign_mounts)
     judged = evaluate_kernel_view(
         reported_count=reported_count, reported_uuids=reported_uuids, kernel_uuids=host_uuids
     )
-    seen["host_kernel_gpu_count"] = judged["kernel_gpu_count"]
-    if judged["kernel_verdict"] not in ("match", "uuid_mismatch"):
-        return seen
-    return {
-        **seen,
-        "kernel_verdict": "match_host_view"
-        if judged["kernel_verdict"] == "match"
-        else "uuid_mismatch",
-        "kernel_view_source": KERNEL_VIEW_SOURCE_HOST,
-        "host_kernel_gpu_uuids": host_uuids,
-        "reported_uuids_not_in_host_kernel": judged["reported_uuids_not_in_kernel"],
-    }
+    if judged.kernel_verdict not in ("match", "uuid_mismatch"):
+        return HostViewResult(
+            host_kernel_gpu_count=judged.kernel_gpu_count,
+            host_kernel_gpu_foreign_mounts=host_foreign_mounts,
+        )
+    return HostViewResult(
+        host_kernel_gpu_count=judged.kernel_gpu_count,
+        host_kernel_gpu_foreign_mounts=host_foreign_mounts,
+        kernel_verdict="match_host_view" if judged.kernel_verdict == "match" else "uuid_mismatch",
+        host_kernel_gpu_uuids=host_uuids,
+        reported_uuids_not_in_host_kernel=judged.reported_uuids_not_in_kernel,
+    )
 
 
 class GpuKernelCountCheck:
@@ -172,7 +247,8 @@ class GpuKernelCountCheck:
     /proc/driver/nvidia/gpus as BannedProviderCheck reads it once per cycle. A node whose kernel
     list is present and shorter than its reported GPU count gets GPU_KERNEL_COUNT_MISMATCH. That
     verdict fails the validation only under GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED; without it the
-    check always passes and the verdict is only logged.
+    check always passes and the verdict is only logged. As with the ban checks, a failure stops
+    the run only when the node has no live rental.
 
     The container the check reads in may have been handed only some of the host's cards. So a
     short list is checked once more against the host's own list (host_view_verdict): if that one
@@ -212,22 +288,23 @@ class GpuKernelCountCheck:
         reported_count = reported_gpu_count(ctx, reported_uuids)
         kernel_uuids, foreign_mounts = await kernel_gpu_view(ctx)
 
-        what = evaluate_kernel_view(
+        kernel_check_fields = evaluate_kernel_view(
             reported_count=reported_count,
             reported_uuids=reported_uuids,
             kernel_uuids=kernel_uuids,
-        )
-        what["kernel_view_source"] = KERNEL_VIEW_SOURCE_CONTAINER
-        if what["kernel_verdict"] == "count_lower":
-            what["container_kernel_gpu_count"] = what["kernel_gpu_count"]
-            what.update(
-                await host_view_verdict(
-                    ctx, reported_count=reported_count, reported_uuids=reported_uuids
-                )
+        ).as_fields()
+        kernel_check_fields["kernel_view_source"] = KERNEL_VIEW_SOURCE_CONTAINER
+        if kernel_check_fields["kernel_verdict"] == "count_lower":
+            kernel_check_fields["container_kernel_gpu_count"] = kernel_check_fields[
+                "kernel_gpu_count"
+            ]
+            host_view = await host_view_verdict(
+                ctx, reported_count=reported_count, reported_uuids=reported_uuids
             )
-        verdict = what["kernel_verdict"]
+            kernel_check_fields.update(host_view.as_fields())
+        verdict = kernel_check_fields["kernel_verdict"]
         if verdict == "not_evaluated":
-            what["not_evaluated_reason"] = (
+            kernel_check_fields["not_evaluated_reason"] = (
                 "kernel_list_behind_foreign_mount" if foreign_mounts else "kernel_list_unavailable"
             )
         v4_count = count_v4_shaped_uuids(reported_uuids)
@@ -238,40 +315,56 @@ class GpuKernelCountCheck:
         )
         enforce = bool(settings.GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED)
         would_fail = verdict == "count_lower"
-        what.update(
+        kernel_check_fields.update(
             {
                 "reported_uuids": reported_uuids,
                 "kernel_gpu_uuids": kernel_uuids,
                 "kernel_gpu_foreign_mounts": foreign_mounts,
                 "v4_shaped_uuid_count": v4_count,
                 "v4_shape_flag": v4_count >= GPU_UUID_V4_SHAPE_FLAG_MIN,
-                **shape,
+                **shape.as_fields(),
                 "would_fail": would_fail,
                 "enforced": enforce,
             }
         )
-        shadow_flags = [name for name in ("v4_shape_flag", "host_shape_flag") if what[name]]
-        what["shadow_flags"] = shadow_flags
+        kernel_check_fields["shadow_flags"] = [
+            name for name in ("v4_shape_flag", "host_shape_flag") if kernel_check_fields[name]
+        ]
 
-        if would_fail:
-            event = render_message(
+        event = self._render_event(ctx, kernel_check_fields)
+        if would_fail and enforce:
+            # Like the ban checks: a node with a renter's pod on it keeps being verified, so the
+            # failure stops the run only when there is no live rental.
+            return CheckResult(passed=False, event=event, fatal=not has_live_rental(ctx))
+        return CheckResult(passed=True, event=event)
+
+    def _render_event(self, ctx: Context, kernel_check_fields: dict[str, Any]) -> ValidationEvent:
+        """The event for a finished evaluation: which template, and for a count mismatch in
+        shadow, a warning that says the result was not changed."""
+        if kernel_check_fields["would_fail"]:
+            enforce = kernel_check_fields["enforced"]
+            return render_message(
                 Msg.COUNT_MISMATCH,
                 ctx=ctx,
                 check_id=self.check_id,
                 severity=None if enforce else "warning",
                 impact=None if enforce else SHADOW_ONLY_IMPACT,
-                what=what,
+                what=kernel_check_fields,
             )
-            return CheckResult(passed=not enforce, event=event)
+        return render_message(
+            self._template_for(kernel_check_fields),
+            ctx=ctx,
+            check_id=self.check_id,
+            what=kernel_check_fields,
+        )
 
-        template: MessageTemplate
+    @staticmethod
+    def _template_for(kernel_check_fields: dict[str, Any]) -> MessageTemplate:
+        verdict = kernel_check_fields["kernel_verdict"]
         if verdict == "uuid_mismatch":
-            template = Msg.UUID_MISMATCH
-        elif shadow_flags:
-            template = Msg.SHADOW_SIGNAL
-        elif verdict == "not_evaluated":
-            template = Msg.NOT_EVALUATED
-        else:
-            template = Msg.COUNT_OK
-        event = render_message(template, ctx=ctx, check_id=self.check_id, what=what)
-        return CheckResult(passed=True, event=event)
+            return Msg.UUID_MISMATCH
+        if kernel_check_fields["shadow_flags"]:
+            return Msg.SHADOW_SIGNAL
+        if verdict == "not_evaluated":
+            return Msg.NOT_EVALUATED
+        return Msg.COUNT_OK

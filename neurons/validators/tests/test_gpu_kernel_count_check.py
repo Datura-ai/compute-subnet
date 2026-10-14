@@ -36,6 +36,11 @@ from neurons.validators.src.services.task.checks.gpu_kernel_count import (
 )
 from neurons.validators.src.services.task.messages import GpuKernelCountMessages as Msg
 from neurons.validators.src.services.task.pipeline import Pipeline
+from protocol.vc_protocol.compute_requests import (
+    RentedExecutor,
+    RentedExecutorsResponse,
+    RentedPod,
+)
 
 from tests.helpers import build_state
 
@@ -183,6 +188,65 @@ async def test_kernel_one_reported_eight_fails_the_validation_under_enforcement(
     assert result.event.what_we_saw["enforced"] is True
     assert ok is False
     assert events[-1].what_we_saw["steps_failed"] == GpuKernelCountCheck.check_id
+
+
+@pytest.mark.asyncio
+async def test_mismatch_on_a_rented_node_fails_but_does_not_stop_the_run_under_enforcement(
+    context_factory, enforcing
+):
+    # same rule as the ban checks: a node with a renter's pod on it keeps being verified
+    ctx = _ctx(context_factory, reported=[REAL[0], *V4_SHAPED], kernel=[REAL[0]])
+    rented = RentedExecutorsResponse(
+        executors={
+            ctx.executor.uuid: RentedExecutor(
+                miner_hotkey="miner-hotkey",
+                executor_ip_address=ctx.executor.address,
+                executor_ip_port=str(ctx.executor.port),
+                pods=[RentedPod(pod_id="pod-1", container_name="pod_p1")],
+            )
+        }
+    )
+    ctx = ctx.model_copy(update={"state": replace(ctx.state, rented_data=rented)})
+
+    result = await GpuKernelCountCheck().run(ctx)
+    ok, _, _ = await Pipeline([GpuKernelCountCheck()], _Sink()).run(ctx)
+
+    assert result.passed is False
+    assert result.fatal is False
+    assert result.event.reason_code == Msg.COUNT_MISMATCH.reason
+    assert ok is True
+
+
+@pytest.mark.asyncio
+async def test_mismatch_on_an_idle_node_is_fatal_under_enforcement(context_factory, enforcing):
+    ctx = _ctx(context_factory, reported=[REAL[0], *V4_SHAPED], kernel=[REAL[0]])
+
+    result = await GpuKernelCountCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.fatal is True
+
+
+@pytest.mark.asyncio
+async def test_mismatch_on_a_rented_node_still_passes_in_shadow(context_factory, shadow):
+    ctx = _ctx(context_factory, reported=[REAL[0], *V4_SHAPED], kernel=[REAL[0]])
+    rented = RentedExecutorsResponse(
+        executors={
+            ctx.executor.uuid: RentedExecutor(
+                miner_hotkey="miner-hotkey",
+                executor_ip_address=ctx.executor.address,
+                executor_ip_port=str(ctx.executor.port),
+                pods=[RentedPod(pod_id="pod-1", container_name="pod_p1")],
+            )
+        }
+    )
+    ctx = ctx.model_copy(update={"state": replace(ctx.state, rented_data=rented)})
+
+    result = await GpuKernelCountCheck().run(ctx)
+
+    assert result.passed is True
+    assert result.event.reason_code == Msg.COUNT_MISMATCH.reason
+    assert result.event.severity == "warning"
 
 
 @pytest.mark.asyncio
@@ -579,27 +643,27 @@ async def test_reported_uuid_absent_from_kernel_list_is_flagged_not_failed(
 
 def test_evaluate_kernel_view_verdicts():
     assert (
-        evaluate_kernel_view(reported_count=8, reported_uuids=REAL, kernel_uuids=REAL[:1])[
-            "kernel_verdict"
-        ]
+        evaluate_kernel_view(
+            reported_count=8, reported_uuids=REAL, kernel_uuids=REAL[:1]
+        ).kernel_verdict
         == "count_lower"
     )
     assert (
-        evaluate_kernel_view(reported_count=8, reported_uuids=REAL, kernel_uuids=REAL)[
-            "kernel_verdict"
-        ]
+        evaluate_kernel_view(
+            reported_count=8, reported_uuids=REAL, kernel_uuids=REAL
+        ).kernel_verdict
         == "match"
     )
     assert (
-        evaluate_kernel_view(reported_count=8, reported_uuids=REAL, kernel_uuids=None)[
-            "kernel_verdict"
-        ]
+        evaluate_kernel_view(
+            reported_count=8, reported_uuids=REAL, kernel_uuids=None
+        ).kernel_verdict
         == "not_evaluated"
     )
     assert (
-        evaluate_kernel_view(reported_count=0, reported_uuids=[], kernel_uuids=REAL[:1])[
-            "kernel_verdict"
-        ]
+        evaluate_kernel_view(
+            reported_count=0, reported_uuids=[], kernel_uuids=REAL[:1]
+        ).kernel_verdict
         == "match"
     )
 
@@ -665,21 +729,21 @@ async def test_shadow_signals_are_logged_when_the_kernel_list_is_missing(
 
 def test_host_shape_floors():
     small = host_shape_hint(gpu_count=8, cpu_count=12, ram_gb=62.0)
-    assert small["host_shape_flag"] is True
-    assert small["host_shape_reasons"] == ["vcpu_per_gpu_below_floor", "ram_gb_per_gpu_below_floor"]
-    assert small["vcpu_per_gpu"] == 1.5
-    assert small["ram_gb_per_gpu"] == 7.75
+    assert small.host_shape_flag is True
+    assert small.host_shape_reasons == ["vcpu_per_gpu_below_floor", "ram_gb_per_gpu_below_floor"]
+    assert small.vcpu_per_gpu == 1.5
+    assert small.ram_gb_per_gpu == 7.75
 
     at_floor = host_shape_hint(
         gpu_count=8,
         cpu_count=int(8 * HOST_SHAPE_MIN_VCPU_PER_GPU),
         ram_gb=8 * HOST_SHAPE_MIN_RAM_GB_PER_GPU,
     )
-    assert at_floor["host_shape_flag"] is False
+    assert at_floor.host_shape_flag is False
 
     # one card is never a host-shape finding, and a missing reading is not a finding either
-    assert host_shape_hint(gpu_count=1, cpu_count=1, ram_gb=2.0)["host_shape_flag"] is False
-    assert host_shape_hint(gpu_count=8, cpu_count=None, ram_gb=None)["host_shape_flag"] is False
+    assert host_shape_hint(gpu_count=1, cpu_count=1, ram_gb=2.0).host_shape_flag is False
+    assert host_shape_hint(gpu_count=8, cpu_count=None, ram_gb=None).host_shape_flag is False
 
 
 @pytest.mark.asyncio
