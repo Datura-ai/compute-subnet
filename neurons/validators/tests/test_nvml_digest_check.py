@@ -205,7 +205,10 @@ async def test_a_missing_driver_is_logged_and_passes_by_default(context_factory,
     specs = {"gpu": {"driver": ""}, "md5_checksums": {"libnvidia_ml": "abc123"}}
     ctx = context_factory(state=build_state(specs=specs))
 
-    with caplog.at_level(logging.WARNING, logger=nvml_digest.logger.name):
+    with (
+        patch.object(nvml_digest.settings, "NVML_DRIVER_MISSING_ENFORCEMENT_ENABLED", False),
+        caplog.at_level(logging.WARNING, logger=nvml_digest.logger.name),
+    ):
         result = await NvmlDigestCheck().run(ctx)
 
     assert result.passed is True

@@ -65,6 +65,7 @@ from protocol.vc_protocol.validator_requests import bound_pod_states, chunk_pod_
 from services.attestation_service import AttestationService
 from services.docker_service import DockerService, create_steps_after_reply, customer_creates, inflight_creates
 from services.executor_image_policy import ExpectedImageSnapshot
+from services.node_host import public_host_sock
 from services.redis_service import MACHINE_SPEC_CHANNEL, POD_STATES_CHANNEL, RedisService
 from services.roce_link_probe import measure_and_attach
 from services.ssh_service import SSHService
@@ -2035,6 +2036,7 @@ class MinerService:
         async with asyncssh.connect(
             host=executor_info.address,
             port=executor_info.ssh_port,
+            **await public_host_sock(executor_info.address, executor_info.ssh_port),
             username=executor_info.ssh_username,
             client_keys=[pkey],
             known_hosts=None,
@@ -2092,6 +2094,7 @@ class MinerService:
         async with asyncssh.connect(
             host=executor_info.address,
             port=executor_info.ssh_port,
+            **await public_host_sock(executor_info.address, executor_info.ssh_port),
             username=executor_info.ssh_username,
             client_keys=[pkey],
             known_hosts=None,
@@ -2153,6 +2156,7 @@ class MinerService:
         async with asyncssh.connect(
             host=executor_info.address,
             port=executor_info.ssh_port,
+            **await public_host_sock(executor_info.address, executor_info.ssh_port),
             username=executor_info.ssh_username,
             client_keys=[pkey],
             known_hosts=None,
