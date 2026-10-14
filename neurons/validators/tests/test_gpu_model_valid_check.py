@@ -1,7 +1,10 @@
+from collections.abc import Callable
+
 import pytest
 
 from neurons.validators.src.services.task.checks.gpu_model_valid import GpuModelValidCheck
 from neurons.validators.src.services.task.messages import GpuModelMessages as Msg
+from neurons.validators.src.services.task.pipeline import CheckResult, Context
 from protocol.vc_protocol.compute_requests import RentedExecutor, RentedExecutorsResponse, RentedPod
 
 from tests.helpers import build_context_config, build_services, build_state, default_executor
@@ -106,10 +109,15 @@ async def test_a_rented_node_that_lists_fewer_gpus_than_it_reports_loses_its_ver
 
 
 async def _run_gpu_model_check_on_cards(
-    context_factory, names, rates, *, has_live_rental=False, gpu_count=None
-):
+    context_factory: Callable[..., Context],
+    card_names: list[str],
+    gpu_model_rates: dict[str, float],
+    *,
+    has_live_rental: bool = False,
+    gpu_count: int | None = None,
+) -> CheckResult:
     executor = default_executor()
-    details = [{"name": name, "uuid": f"GPU-{i}"} for i, name in enumerate(names)]
+    details = [{"name": name, "uuid": f"GPU-{i}"} for i, name in enumerate(card_names)]
     rented = RentedExecutorsResponse(
         executors={
             executor.uuid: RentedExecutor(
@@ -127,7 +135,7 @@ async def _run_gpu_model_check_on_cards(
     )
     ctx = context_factory(
         services=build_services(),
-        config=build_context_config(gpu_model_rates=rates),
+        config=build_context_config(gpu_model_rates=gpu_model_rates),
         state=state,
         executor=executor,
     )
@@ -137,10 +145,10 @@ async def _run_gpu_model_check_on_cards(
 @pytest.mark.asyncio
 async def test_a_node_with_two_supported_gpu_models_fails_as_mixed(context_factory):
     """DAH-4304: the owner ruled one executor may not carry more than one GPU model."""
-    rates = {"NVIDIA GeForce RTX 4090": 0.1, "NVIDIA GeForce RTX 5060 Ti": 0.1}
+    gpu_model_rates = {"NVIDIA GeForce RTX 4090": 0.1, "NVIDIA GeForce RTX 5060 Ti": 0.1}
     names = ["NVIDIA GeForce RTX 4090", "NVIDIA GeForce RTX 5060 Ti"]
 
-    result = await _run_gpu_model_check_on_cards(context_factory, names, rates)
+    result = await _run_gpu_model_check_on_cards(context_factory, names, gpu_model_rates)
 
     assert result.passed is False
     assert result.event.reason_code == Msg.MODEL_MIXED.reason
@@ -154,10 +162,12 @@ async def test_a_node_with_two_supported_gpu_models_fails_as_mixed(context_facto
 @pytest.mark.asyncio
 async def test_a_mixed_node_with_a_live_rental_fails_without_stopping_the_pipeline(context_factory):
     """A rental already on a mixed node is not cut: a fatal stop would let the node go stale mid-rental."""
-    rates = {"NVIDIA GeForce RTX 4090": 0.1, "NVIDIA GeForce RTX 5060 Ti": 0.1}
+    gpu_model_rates = {"NVIDIA GeForce RTX 4090": 0.1, "NVIDIA GeForce RTX 5060 Ti": 0.1}
     names = ["NVIDIA GeForce RTX 4090", "NVIDIA GeForce RTX 5060 Ti"]
 
-    result = await _run_gpu_model_check_on_cards(context_factory, names, rates, has_live_rental=True)
+    result = await _run_gpu_model_check_on_cards(
+        context_factory, names, gpu_model_rates, has_live_rental=True
+    )
 
     assert result.passed is False
     assert result.event.reason_code == Msg.MODEL_MIXED.reason
@@ -179,10 +189,12 @@ async def test_an_unsupported_second_card_with_a_live_rental_does_not_stop_the_p
 @pytest.mark.asyncio
 async def test_a_short_detail_list_of_mixed_cards_still_clears_the_verified_job(context_factory):
     """A scrape that lost a card reads as DETAILS_MISMATCH even when the cards it kept differ."""
-    rates = {"NVIDIA GeForce RTX 4090": 0.1, "NVIDIA GeForce RTX 5060 Ti": 0.1}
+    gpu_model_rates = {"NVIDIA GeForce RTX 4090": 0.1, "NVIDIA GeForce RTX 5060 Ti": 0.1}
     names = ["NVIDIA GeForce RTX 4090", "NVIDIA GeForce RTX 5060 Ti"]
 
-    result = await _run_gpu_model_check_on_cards(context_factory, names, rates, gpu_count=3)
+    result = await _run_gpu_model_check_on_cards(
+        context_factory, names, gpu_model_rates, gpu_count=3
+    )
 
     assert result.event.reason_code == Msg.DETAILS_MISMATCH.reason
     assert result.updates == {"clear_verified_job_info": True}

@@ -73,28 +73,9 @@ class GpuModelValidCheck:
             )
             return CheckResult(passed=False, event=event, updates={"clear_verified_job_info": True})
 
-        # DAH-4304: a node is listed, priced and rented as one model, so every GPU on it must be
-        # the same supported model. A live rental is not cut, as with a GPU ban.
-        unsupported = [model for model in card_models if model not in gpu_model_rates_map]
-        if unsupported:
-            return self._unsupported_model_result(
-                ctx, unsupported[0], gpu_count, fatal=not has_live_rental(ctx)
-            )
-
-        model_counts = dict(Counter(card_models))
-        if len(model_counts) > 1:
-            models_found = ", ".join(f"{count}x {model}" for model, count in model_counts.items())
-            event = render_message(
-                Msg.MODEL_MIXED,
-                ctx=ctx,
-                check_id=self.check_id,
-                what={"gpu_models": model_counts, "gpu_count": gpu_count},
-                remediation=(
-                    "Every GPU on a node must be the same model. Models found on this node: "
-                    f"{models_found}."
-                ),
-            )
-            return CheckResult(passed=False, event=event, fatal=not has_live_rental(ctx))
+        card_mismatch = self._mixed_or_unsupported_card_result(ctx, card_models, gpu_count)
+        if card_mismatch is not None:
+            return card_mismatch
 
         event = render_message(
             Msg.MODEL_OK,
@@ -103,6 +84,32 @@ class GpuModelValidCheck:
             what={"gpu_model": gpu_model, "gpu_count": gpu_count},
         )
         return CheckResult(passed=True, event=event)
+
+    def _mixed_or_unsupported_card_result(
+        self, ctx: Context, card_models: list[str | None], gpu_count: int
+    ) -> CheckResult | None:
+        """DAH-4304: a node is listed, priced and rented as one model, so every GPU on it must be
+        the same supported model. A live rental is not cut, as with a GPU ban."""
+        fatal = not has_live_rental(ctx)
+        unsupported = [model for model in card_models if model not in ctx.config.gpu_model_rates]
+        if unsupported:
+            return self._unsupported_model_result(ctx, unsupported[0], gpu_count, fatal=fatal)
+
+        model_counts = dict(Counter(card_models))
+        if len(model_counts) == 1:
+            return None
+        models_found = ", ".join(f"{count}x {model}" for model, count in model_counts.items())
+        event = render_message(
+            Msg.MODEL_MIXED,
+            ctx=ctx,
+            check_id=self.check_id,
+            what={"gpu_models": model_counts, "gpu_count": gpu_count},
+            remediation=(
+                "Every GPU on a node must be the same model. Models found on this node: "
+                f"{models_found}."
+            ),
+        )
+        return CheckResult(passed=False, event=event, fatal=fatal)
 
     def _unsupported_model_result(
         self, ctx: Context, gpu_model: str | None, gpu_count: int, *, fatal: bool
