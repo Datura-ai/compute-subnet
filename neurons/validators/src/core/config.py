@@ -268,6 +268,14 @@ class Settings(BaseSettings):
         env="INSPECTOR_ENSURE_COLLECTOR_ON_RENTED_CHECK",
         default=True,
     )
+    # Rented cycles in a row in which the inspector saw nothing (error, failed canary, stopped or
+    # just-started collector) are counted per node and logged as INSPECTOR_BLIND_STREAK from this
+    # many on.
+    INSPECTOR_BLIND_STREAK_LIMIT: int = Field(env="INSPECTOR_BLIND_STREAK_LIMIT", default=5)
+    # On: the Inspector check fails from that cycle until the sensor reports again. Off by default.
+    INSPECTOR_BLIND_STREAK_ENFORCEMENT_ENABLED: bool = Field(
+        env="INSPECTOR_BLIND_STREAK_ENFORCEMENT_ENABLED", default=False
+    )
     # On a libinspector.so hash mismatch a RENTED executor, during the rental, curls
     # INSPECTOR_LIBRARY_FETCH_URL once into a temp file beside /usr/lib/libinspector.so, and the
     # file replaces the library (one rename) only if its sha256 is the validator's own. This is a
@@ -297,6 +305,11 @@ class Settings(BaseSettings):
     # what the lost first attempt made. Off: the call fails the rent as before. Either way the
     # failure event carries `error_class: transport`.
     DOCKER_TRANSPORT_RETRY_ENABLED: bool = Field(env="DOCKER_TRANSPORT_RETRY_ENABLED", default=False)
+    # A rental container with a memory limit runs with swap off (--memory-swap = --memory) and
+    # RENTAL_CONTAINER_OOM_SCORE_ADJ, so a host-wide OOM picks its processes before the executor. The
+    # memory limit stays the backend's memory_gb. 0 or below would protect the renter over host services, and Docker
+    # refuses anything past 1000, which would fail every rental create.
+    RENTAL_CONTAINER_OOM_SCORE_ADJ: int = Field(env="RENTAL_CONTAINER_OOM_SCORE_ADJ", default=500, ge=1, le=1000)
     # On a rent, when dockerd refuses to bind a host port the backend handed the pod (a stale
     # container or a provider process holds it), the pod moves to the next free pair of the
     # executor's advertised range (≤ 3 candidates, the host's listening sockets read once over the
@@ -375,6 +388,11 @@ class Settings(BaseSettings):
     # author (/proc/cpuinfo, /sys present population, docker NCPU).
     CPU_TRUTH_CHECK_ENABLED: bool = Field(env="CPU_TRUTH_CHECK_ENABLED", default=True)
     CPU_TRUTH_ENFORCEMENT_ENABLED: bool = Field(env="CPU_TRUTH_ENFORCEMENT_ENABLED", default=False)
+    # A seal-aware libdmcompverify that gets an unsealed matmul answer always logs MATMUL_RESULT_UNSEALED;
+    # with this on the answer fails. Off until the log shows which executors still answer unsealed.
+    # Only an answer whose plaintext uuid matches counts; a probe that never answered (out of
+    # memory) keeps the mismatch path and its busy-GPU waiver.
+    MATMUL_SEAL_REQUIRED_ENABLED: bool = Field(env="MATMUL_SEAL_REQUIRED_ENABLED", default=False)
     # Item 3 — run the GPU work-proof on every claimed card concurrently (own challenge per card,
     # sized from the registry SKU) and time the aggregate on the validator, so a count lie either
     # fails device selection or serialises past a wide wall-clock threshold.
@@ -451,6 +469,15 @@ class Settings(BaseSettings):
     # re-registers the node to list a different set. Off again = the mark stays in the record but is ignored.
     # Flip after reading a week of the warn-mode rows.
     GPU_ANCHOR_HARD_ENABLED: bool = Field(env="GPU_ANCHOR_HARD_ENABLED", default=False)
+    # The verified record (count, spec, GPU anchor) is keyed by executor id alone. Its owner is
+    # the backend's (RentedExecutorsResponse.executor_owner_hotkeys, the MinerExecutor row): a
+    # write or reset by another hotkey is always logged (VERIFIED_RECORD_FOREIGN_WRITER); with
+    # this on it is refused, so listing someone else's executor id no longer resets their record.
+    # A provider moves a node to a new hotkey in the portal. No owner from the backend lets the
+    # write through, so this stays off until the backend sends the map.
+    VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED: bool = Field(
+        env="VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", default=False
+    )
     PROVIDER_SIDE_LOAD_CHECK_ENABLED: bool = Field(env="PROVIDER_SIDE_LOAD_CHECK_ENABLED", default=True)
     PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED: bool = Field(
         env="PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED", default=False
@@ -470,6 +497,12 @@ class Settings(BaseSettings):
     # default off: the probe is new GPU work on every idle node per cycle, so it starts as an opt-in shadow.
     GPU_FAULT_PROBE_CHECK_ENABLED: bool = Field(env="GPU_FAULT_PROBE_CHECK_ENABLED", default=False)
     GPU_FAULT_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="GPU_FAULT_PROBE_ENFORCEMENT_ENABLED", default=False)
+    # A fault probe with no verdict passes. Five such cycles in a row on one node are logged
+    # (GPU_FAULT_PROBE_UNKNOWN_STREAK); with this on they are judged like a fault, which fails the
+    # node only while GPU_FAULT_PROBE_ENFORCEMENT_ENABLED is on too. Off by default.
+    GPU_FAULT_PROBE_UNKNOWN_STREAK_ENFORCEMENT_ENABLED: bool = Field(
+        env="GPU_FAULT_PROBE_UNKNOWN_STREAK_ENFORCEMENT_ENABLED", default=False
+    )
     # DAH-3436: the synthetic rental probe. On an idle node (no renter pod, no filler) the validator
     # rents the node from itself once per RENTAL_PROBE_INTERVAL_HOURS: it starts the default renter
     # image through the same create_container path a renter's pod takes, with a probe-owned SSH key
@@ -515,14 +548,6 @@ class Settings(BaseSettings):
     )
     REGISTRY_PULL_PROBE_RETRY_MINUTES: float = Field(
         env="REGISTRY_PULL_PROBE_RETRY_MINUTES", default=30.0, gt=0
-    )
-    # DAH-3558: a rented node missing from the miner's answer to the wave gets no pipeline, so the
-    # wave writes nothing about it: no report row, no availability error, no evidence for the
-    # backend's staleness sweep. On, the wave writes one failed result per rented executor of that
-    # miner that the backend lists and the miner did not return (RENTED_EXECUTOR_NOT_LISTED,
-    # score 0, availability error). Manual rentals keep their forced pass. Off = today's behaviour.
-    RENTED_EXECUTOR_NOT_LISTED_REPORT_ENABLED: bool = Field(
-        env="RENTED_EXECUTOR_NOT_LISTED_REPORT_ENABLED", default=False
     )
     SKIP_COLLATERAL_PENALTY: bool = Field(env="SKIP_COLLATERAL_PENALTY", default=True)
     DRY_RUN: bool = Field(env="DRY_RUN", default=False, description="Run validation without publishing scores/weights")

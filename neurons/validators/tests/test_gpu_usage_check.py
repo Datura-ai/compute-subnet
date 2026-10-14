@@ -1632,3 +1632,23 @@ async def test_a_close_time_that_arrives_with_a_timezone_is_still_read(context_f
 
     assert result.passed is True
     assert result.event.reason_code == Msg.USAGE_OK.reason
+
+
+def test_lium_workload_containers_counts_the_pod_container_of_an_unnamed_pod():
+    # DAH-4315: the backend lists a new pod before it records the container name
+    rented_data = RentedExecutorsResponse(
+        executors={
+            "executor-123": RentedExecutor(
+                miner_hotkey="miner-hotkey",
+                executor_ip_address="127.0.0.1",
+                executor_ip_port="8080",
+                pods=[RentedPod(pod_id="53a68595", container_name="")],
+            )
+        },
+        banned_guids=[],
+    )
+    ctx = MagicMock()
+    ctx.executor = default_executor()
+    ctx.state.rented_data = rented_data
+
+    assert gpu_usage.lium_workload_containers(ctx) == {f"{POD_CONTAINER_PREFIX}53a68595"}

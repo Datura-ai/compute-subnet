@@ -4613,6 +4613,14 @@
           "title": "Default Job Owner By Executor",
           "type": "object"
         },
+        "executor_owner_hotkeys": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Executor Owner Hotkeys",
+          "type": "object"
+        },
         "executors": {
           "additionalProperties": {
             "$ref": "#/$defs/RentedExecutor"
@@ -5733,7 +5741,7 @@
       "$ref": "#/$defs/RentedExecutorsResponse"
     }
   },
-  "protocol_version": "1.5.0",
+  "protocol_version": "1.6.0",
   "socket_replies": {
     "RentedMachineResponse": {
       "$ref": "#/$defs/RentedMachineResponse"
