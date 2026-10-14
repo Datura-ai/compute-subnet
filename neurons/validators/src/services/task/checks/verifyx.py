@@ -200,7 +200,7 @@ class VerifyXCheck:
                 updated_specs["network"] = {}
             download_speed = verifyx_network.get("download_speed")
             cloudflare_fallback = bool(verifyx_network.get("cloudflare_fallback"))
-            package_gated = _package_fallback_within_cap(ctx, cloudflare_fallback)
+            package_gated = _is_package_reading_gated(ctx, cloudflare_fallback)
             if cloudflare_fallback and not package_gated:
                 capacity = verifyx_network.get("capacity_download_speed")
                 download_speed = capacity if _is_positive_number(capacity) else 0.0
@@ -429,7 +429,7 @@ def _upload_kept_within_cap(ctx: Context, upload_blocked: bool) -> bool:
     return False
 
 
-def _package_fallback_within_cap(ctx: Context, cloudflare_fallback: bool) -> bool:
+def _is_package_reading_gated(ctx: Context, cloudflare_fallback: bool) -> bool:
     """Whether this probe's package reading is the gated one: `cloudflare_fallback`, except past
     MAX_PACKAGE_FALLBACK_PROBES in a row under VERIFYX_PACKAGE_FALLBACK_CAP_ENABLED. A probe
     Cloudflare answered starts the count again."""
