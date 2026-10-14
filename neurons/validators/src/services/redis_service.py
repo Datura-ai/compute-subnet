@@ -40,6 +40,9 @@ VERIFIED_OWNER_KEY = "hotkey"
 # The SSH endpoint (address:ssh_port) the owner was last verified on. A reset by another hotkey that
 # logged in on this same endpoint is the node moving to that hotkey, so it takes over the record.
 VERIFIED_ENDPOINT_KEY = "ssh_endpoint"
+# Per executor id: the record's owner, claimed by compare-and-set so two hotkeys that read the same
+# owner (or none) in one round cannot both take the record.
+VERIFIED_OWNER_CLAIM_PREFIX = "verified_record_owner"
 EXECUTORS_UPTIME_PREFIX = "executors_uptime"
 NORMALIZED_SCORE_CHANNEL = "normalized_score_channel"
 REVENUE_PER_GPU_TYPE_SET = "revenue_per_gpu_type"
@@ -594,7 +597,10 @@ class RedisService:
         uuids: str = '',
         endpoint: str = '',
     ):
-        if self._is_refused_foreign_writer(miner_hotkey, executor_id, prev_info, endpoint):
+        prev_info, _ = await self._owner_checked_prev_info(
+            miner_hotkey, executor_id, prev_info, endpoint, takeover=False
+        )
+        if prev_info is None:
             return
         count = prev_info.get('count', 0)
         failed = prev_info.get('failed', 0)
@@ -636,10 +642,11 @@ class RedisService:
         anchor_broken: bool = False,
         endpoint: str = '',
     ):
-        takeover = _same_endpoint(prev_info, endpoint)
-        if self._is_refused_foreign_writer(
-            miner_hotkey, executor_id, prev_info, endpoint, takeover=takeover
-        ):
+        prev_info, takeover = await self._owner_checked_prev_info(
+            miner_hotkey, executor_id, prev_info, endpoint,
+            takeover=_same_endpoint(prev_info, endpoint),
+        )
+        if prev_info is None:
             return
         spec = prev_info.get('spec', '')
         uuids = prev_info.get(GPU_ANCHOR_KEY, '')
@@ -672,7 +679,54 @@ class RedisService:
             },
         )
 
-    def _is_refused_foreign_writer(
+    async def _owner_checked_prev_info(
+        self, miner_hotkey: str, executor_id: str, prev_info: dict, endpoint: str, takeover: bool
+    ) -> tuple[dict | None, bool]:
+        """The record to build this write on and whether it is a takeover; None when refused.
+
+        A write that makes `miner_hotkey` the owner (first writer, the owner itself, a takeover)
+        claims the owner by compare-and-set against the owner it read. Losing to a concurrent
+        writer makes this a foreign write on the record that writer owns: never a takeover, so
+        refused under enforcement, otherwise written with the winner kept as owner."""
+        if self._log_foreign_writer_and_should_refuse(
+            miner_hotkey, executor_id, prev_info, endpoint, takeover=takeover
+        ):
+            return None, takeover
+        owner = prev_info.get(VERIFIED_OWNER_KEY)
+        if not (takeover or not owner or owner == miner_hotkey):
+            return prev_info, takeover
+        claimed = await self._claim_record_owner(executor_id, miner_hotkey, owner)
+        if claimed == miner_hotkey:
+            return prev_info, takeover
+        fresh = {**await self.get_verified_job_info(executor_id), VERIFIED_OWNER_KEY: claimed}
+        if self._log_foreign_writer_and_should_refuse(miner_hotkey, executor_id, fresh, endpoint):
+            return None, False
+        return fresh, False
+
+    async def _claim_record_owner(
+        self, executor_id: str, miner_hotkey: str, expected: str | None
+    ) -> str:
+        """Make `miner_hotkey` the owner if the stored owner is still `expected` (or none) and
+        return the owner after the attempt: another hotkey's when a concurrent claim won."""
+        key = f"{VERIFIED_OWNER_CLAIM_PREFIX}:{executor_id}"
+        async with self.lock:
+            async with self.redis.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(key)
+                    current = await pipe.get(key)
+                    current = current.decode() if isinstance(current, bytes) else current
+                    if current == miner_hotkey or current not in (None, expected):
+                        return current
+                    pipe.multi()
+                    pipe.set(key, miner_hotkey)
+                    await pipe.execute()
+                    return miner_hotkey
+                except redis.exceptions.WatchError:
+                    pass
+            current = await self.redis.get(key)
+        return current.decode() if isinstance(current, bytes) else current
+
+    def _log_foreign_writer_and_should_refuse(
         self,
         miner_hotkey: str,
         executor_id: str,

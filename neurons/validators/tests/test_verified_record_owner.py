@@ -1,8 +1,11 @@
+import asyncio
 import json
 import logging
 from unittest.mock import AsyncMock
 
 import pytest
+from fakeredis import FakeServer
+from fakeredis.aioredis import FakeRedis
 from neurons.validators.src.services import redis_service
 from neurons.validators.src.services.redis_service import RedisService
 from tests.helpers import default_executor
@@ -13,7 +16,19 @@ OWNED = {"count": 7, "failed": 0, "spec": "s", "uuids": "GPU-a", "hotkey": "owne
 @pytest.fixture
 def service():
     service = RedisService.__new__(RedisService)
+    service.redis = FakeRedis(server=FakeServer())
+    service.lock = redis_service._PassThroughLock()
     service.hset = AsyncMock()
+    service.publish = AsyncMock()
+    return service
+
+
+@pytest.fixture
+def stored():
+    """The real record writes on a fakeredis server, with no command lock: writers interleave."""
+    service = RedisService.__new__(RedisService)
+    service.redis = FakeRedis(server=FakeServer())
+    service.lock = redis_service._PassThroughLock()
     service.publish = AsyncMock()
     return service
 
@@ -173,3 +188,46 @@ async def test_the_result_handler_passes_the_endpoint_it_logged_in_on(
     )
 
     assert redis.clear_verified_job_info.await_args.kwargs["endpoint"] == expected
+
+
+@pytest.mark.asyncio
+async def test_two_first_writers_in_one_round_leave_one_owner(stored, monkeypatch):
+    monkeypatch.setattr(redis_service.settings, "VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", True)
+
+    await asyncio.gather(
+        stored.set_verified_job_info("hotkey-a", "exec-1", prev_info={}, endpoint=ENDPOINT),
+        stored.set_verified_job_info("hotkey-b", "exec-1", prev_info={}, endpoint=ENDPOINT),
+    )
+
+    record = await stored.get_verified_job_info("exec-1")
+    assert record["hotkey"] in ("hotkey-a", "hotkey-b")
+    assert record["count"] == 1  # the loser was refused
+    claim = await stored.redis.get("verified_record_owner:exec-1")
+    assert claim.decode() == record["hotkey"]
+
+
+@pytest.mark.asyncio
+async def test_a_first_writer_that_lost_the_claim_keeps_the_winner_as_owner(stored):
+    await stored.set_verified_job_info("hotkey-a", "exec-1", prev_info={})
+    # hotkey-b read the record before hotkey-a wrote it
+    await stored.set_verified_job_info("hotkey-b", "exec-1", prev_info={})
+
+    record = await stored.get_verified_job_info("exec-1")
+    assert record["hotkey"] == "hotkey-a"
+    assert record["count"] == 2  # let through by default, built on the record hotkey-a wrote
+
+
+@pytest.mark.asyncio
+async def test_two_concurrent_takeovers_leave_one_owner(stored, monkeypatch):
+    monkeypatch.setattr(redis_service.settings, "VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", True)
+    await stored.redis.hset("verified_job_counts", "exec-1", json.dumps(OWNED_AT))
+
+    await asyncio.gather(
+        stored.clear_verified_job_info("new-a", "exec-1", prev_info=OWNED_AT, endpoint=ENDPOINT),
+        stored.clear_verified_job_info("new-b", "exec-1", prev_info=OWNED_AT, endpoint=ENDPOINT),
+    )
+
+    record = await stored.get_verified_job_info("exec-1")
+    assert record["hotkey"] in ("new-a", "new-b")
+    stored.publish.assert_awaited_once()
+    assert stored.publish.await_args.args[1]["miner_hotkey"] == record["hotkey"]
