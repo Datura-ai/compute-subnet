@@ -868,3 +868,18 @@ async def test_two_rounds_still_fail_when_serialised(svc, lib, monkeypatch):
     assert probe.over_wall_clock is True
     assert probe.passed is False
     assert "over 0.2s" in probe.failure_reason
+
+
+@pytest.mark.asyncio
+async def test_each_run_card_logs_its_own_run_time(svc, lib):
+    # Each card that ran carries its own run time on the validator's clock (log only); a card
+    # that failed after running carries one too, and the verdict is unchanged by it.
+    uuids = _uuids(4)
+    host = FakeHost(lib, uuids, real=uuids[:3])
+    probe = await svc._probe_all_claimed_cards(host, _executor(), {}, _spec(4))
+    assert probe is not None
+    assert probe.passed is False
+    assert probe.verified_count == 3
+    for card in probe.per_card:
+        assert isinstance(card["elapsed_seconds"], float)
+        assert 0 <= card["elapsed_seconds"] <= probe.elapsed_seconds + 0.001

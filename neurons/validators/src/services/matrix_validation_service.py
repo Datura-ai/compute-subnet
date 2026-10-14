@@ -556,27 +556,50 @@ class ValidationService:
             f"CUDA_VISIBLE_DEVICES={shlex.quote(gpu_uuid)} "
             f"{executor_info.python_path} {script_path} {challenge.params}"
         )
+        run_started = time.perf_counter()
         try:
             result = await ssh_client.run(command, timeout=MATRIX_VERIFY_TIMEOUT_SECONDS)
         except (TimeoutError, asyncssh.TimeoutError):
             return {"card_index": index, "ok": False, "reason": "timeout"}, None
         except Exception as e:
             return {"card_index": index, "ok": False, "reason": f"ssh_error: {e}"}, None
+        # This card's own run time on the validator's clock, for the logs only; no verdict reads it.
+        elapsed_seconds = round(time.perf_counter() - run_started, 3)
 
         exit_status = getattr(result, "exit_status", 0)
         stdout = getattr(result, "stdout", "") or ""
         stderr = getattr(result, "stderr", "") or ""
         if exit_status != 0:
-            return {"card_index": index, "ok": False, "reason": f"exit_status={exit_status}"}, None
+            return {
+                "card_index": index,
+                "ok": False,
+                "reason": f"exit_status={exit_status}",
+                "elapsed_seconds": elapsed_seconds,
+            }, None
         if not stdout.strip():
-            return {"card_index": index, "ok": False, "reason": "empty_output"}, None
+            return {
+                "card_index": index,
+                "ok": False,
+                "reason": "empty_output",
+                "elapsed_seconds": elapsed_seconds,
+            }, None
         # Output alone proves nothing: the answer has to carry this card's nonce.
         verdict = self.evaluate_matmul_output(
             challenge, stdout=stdout.strip(), stderr=stderr.strip()
         )
         if not verdict.success:
-            return {"card_index": index, "ok": False, "reason": "unverified"}, None
-        return {"card_index": index, "ok": True, "reason": ""}, verdict
+            return {
+                "card_index": index,
+                "ok": False,
+                "reason": "unverified",
+                "elapsed_seconds": elapsed_seconds,
+            }, None
+        return {
+            "card_index": index,
+            "ok": True,
+            "reason": "",
+            "elapsed_seconds": elapsed_seconds,
+        }, verdict
 
     def prepare_matmul_challenge(
         self,
