@@ -97,7 +97,7 @@ def test_sealed_run_logs_one_line_with_the_node_figures(caplog):
     assert record["elapsed_source"] == "validator_wall_clock"
     assert record["dim_n"] == 2000
     assert record["dim_k"] == 2_500_000
-    assert record["matrix_bytes"] == 2 * 8 * 2000 * 2_500_000
+    assert "matrix_bytes" not in record
     assert record["node_metrics_present"] is True
     assert record["node_fp32_tflops"] == 51.2
     assert record["node_fp32_median_tflops"] == 50.9
@@ -139,7 +139,6 @@ def test_missing_measurements_are_null(caplog):
         "elapsed_source",
         "dim_n",
         "dim_k",
-        "matrix_bytes",
         "node_fp32_tflops",
         "node_fp32_median_tflops",
         "node_fp32_cov_pct",
@@ -152,6 +151,33 @@ def test_missing_measurements_are_null(caplog):
         "computed_matmul_tflops",
     ):
         assert record[field] is None, field
+
+
+def test_passing_run_without_an_elapsed_time_still_logs(caplog):
+    # A passing result that carries no elapsed time (e.g. one returned by a path that did not time
+    # the run) still writes the line; only the time and the figure computed from it are null.
+    untimed = _result(elapsed_seconds=None)
+    with caplog.at_level(logging.INFO, logger=speed_log.logger.name):
+        speed_log.log_matmul_speed(EIGHT_CARD_SPECS, untimed, transport="ssh")
+
+    (record,) = _speed_records(caplog)
+    assert record["success"] is True
+    assert record["sealed"] is True
+    assert record["dim_n"] == 2000
+    assert record["node_fp32_tflops"] == 51.2
+    assert record["elapsed_seconds"] is None
+    assert record["elapsed_source"] is None
+    assert record["computed_matmul_tflops"] is None
+
+
+def test_record_and_reported_gpu_are_dataclasses():
+    record = speed_log.build_matmul_speed_record(EIGHT_CARD_SPECS, _result(), transport="ssh")
+    assert isinstance(record, speed_log.MatmulSpeedRecord)
+    assert record.reported_gpu_model == "NVIDIA H100 80GB HBM3"
+    assert speed_log._reported_gpu(EIGHT_CARD_SPECS) == speed_log.ReportedGpu(
+        model="NVIDIA H100 80GB HBM3", count=8
+    )
+    assert speed_log._reported_gpu(None) == speed_log.ReportedGpu()
 
 
 @pytest.mark.parametrize(
