@@ -487,6 +487,11 @@ class Settings(BaseSettings):
     # on it is refused, so listing someone else's executor id no longer resets their record. Off by default.
     VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED: bool = Field(
         env="VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", default=False
+    # A card whose current or default power limit the scrape could not read passes the power-limit
+    # check (GPU_POWER_LIMIT_BASELINE_INCOMPLETE). On: it fails with score 0, like a limit below the
+    # threshold. Off by default: some hypervisors expose no power management to the guest.
+    GPU_POWER_LIMIT_INCOMPLETE_ENFORCEMENT_ENABLED: bool = Field(
+        env="GPU_POWER_LIMIT_INCOMPLETE_ENFORCEMENT_ENABLED", default=False
     )
     PROVIDER_SIDE_LOAD_CHECK_ENABLED: bool = Field(env="PROVIDER_SIDE_LOAD_CHECK_ENABLED", default=True)
     PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED: bool = Field(

@@ -446,6 +446,14 @@ class GpuPowerLimitMessages:
         impact="Proceed without power-limit penalty",
         remediation="Ensure NVML exposes the current and default power limits for every GPU.",
     )
+    DATA_INCOMPLETE_REJECTED = MessageTemplate(
+        event="GPU power limit could not be read",
+        reason="GPU_POWER_LIMIT_UNREADABLE",
+        severity="warning",
+        category="policy",
+        impact="Job skipped; score set to 0",
+        remediation="Ensure NVML exposes the current and default power limits for every GPU.",
+    )
     LIMIT_OK = MessageTemplate(
         event="GPU power limit check passed",
         reason="GPU_POWER_LIMIT_OK",
