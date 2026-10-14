@@ -451,6 +451,12 @@ class Settings(BaseSettings):
     # re-registers the node to list a different set. Off again = the mark stays in the record but is ignored.
     # Flip after reading a week of the warn-mode rows.
     GPU_ANCHOR_HARD_ENABLED: bool = Field(env="GPU_ANCHOR_HARD_ENABLED", default=False)
+    # The verified record (count, spec, GPU anchor) is keyed by executor id alone and now carries the hotkey that
+    # first wrote it. A write or reset by another hotkey is always logged (VERIFIED_RECORD_FOREIGN_WRITER); with this
+    # on it is refused, so listing someone else's executor id no longer resets their record. Off by default.
+    VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED: bool = Field(
+        env="VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", default=False
+    )
     PROVIDER_SIDE_LOAD_CHECK_ENABLED: bool = Field(env="PROVIDER_SIDE_LOAD_CHECK_ENABLED", default=True)
     PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED: bool = Field(
         env="PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED", default=False

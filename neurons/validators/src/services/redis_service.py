@@ -34,6 +34,9 @@ GPU_ANCHOR_KEY = "uuids"
 # DAH-3457: field of a verified-job record, set once by GpuFingerprintCheck under GPU_ANCHOR_HARD_ENABLED and kept by
 # every later write; read back by the same check, which then fails the node without comparing the sets.
 GPU_ANCHOR_BROKEN_KEY = "anchor_broken"
+# The hotkey whose cycle first wrote the record. The record is keyed by executor id alone, so without it any hotkey
+# that lists the same id writes (and resets) another provider's verified count and anchor.
+VERIFIED_OWNER_KEY = "hotkey"
 EXECUTORS_UPTIME_PREFIX = "executors_uptime"
 NORMALIZED_SCORE_CHANNEL = "normalized_score_channel"
 REVENUE_PER_GPU_TYPE_SET = "revenue_per_gpu_type"
@@ -567,6 +570,8 @@ class RedisService:
         spec: str = '',
         uuids: str = '',
     ):
+        if self._is_refused_foreign_writer(miner_hotkey, executor_id, prev_info):
+            return
         count = prev_info.get('count', 0)
         failed = prev_info.get('failed', 0)
         prev_spec = prev_info.get('spec', '')
@@ -589,6 +594,7 @@ class RedisService:
             "failed": failed,
             "spec": prev_spec if prev_spec else spec,
             GPU_ANCHOR_KEY: prev_uuids if prev_uuids else uuids,
+            VERIFIED_OWNER_KEY: prev_info.get(VERIFIED_OWNER_KEY) or miner_hotkey,
         }
         # DAH-3457: the anchor and its broken mark outlive every write to the record; only a new executor id starts clean.
         if prev_info.get(GPU_ANCHOR_BROKEN_KEY):
@@ -605,6 +611,8 @@ class RedisService:
         evidence: dict | None = None,
         anchor_broken: bool = False,
     ):
+        if self._is_refused_foreign_writer(miner_hotkey, executor_id, prev_info):
+            return
         spec = prev_info.get('spec', '')
         uuids = prev_info.get(GPU_ANCHOR_KEY, '')
 
@@ -613,6 +621,7 @@ class RedisService:
             "failed": 0,
             "spec": spec,
             GPU_ANCHOR_KEY: uuids,
+            VERIFIED_OWNER_KEY: prev_info.get(VERIFIED_OWNER_KEY) or miner_hotkey,
         }
         if anchor_broken or prev_info.get(GPU_ANCHOR_BROKEN_KEY):
             data[GPU_ANCHOR_BROKEN_KEY] = True
@@ -634,6 +643,27 @@ class RedisService:
                 "evidence": evidence or None,
             },
         )
+
+    def _is_refused_foreign_writer(self, miner_hotkey: str, executor_id: str, prev_info: dict) -> bool:
+        """A write to a verified record by a hotkey other than the one that first wrote it is always logged; it is
+        refused only under VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED. A record from before the owner field has none
+        and is claimed by its next writer."""
+        owner = prev_info.get(VERIFIED_OWNER_KEY)
+        if not owner or owner == miner_hotkey:
+            return False
+        enforced = settings.VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED
+        logger.warning(
+            _m(
+                "VERIFIED_RECORD_FOREIGN_WRITER",
+                extra={
+                    "executor_uuid": executor_id,
+                    "miner_hotkey": miner_hotkey,
+                    "record_hotkey": owner,
+                    "enforced": enforced,
+                },
+            )
+        )
+        return enforced
 
     async def get_verified_job_info(self, executor_id: str):
         data = await self.hget(VERIFIED_JOB_COUNT_KEY, executor_id)
