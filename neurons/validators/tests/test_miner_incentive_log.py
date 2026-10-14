@@ -44,6 +44,7 @@ def test_reason_enum_pins_the_stable_code_contract():
         "spot_no_filler_revenue_for_gpu_config",
         "spot_no_headroom_at_burn_cap",
         "validation_failed",
+        "rented_sysbox_not_confirmed",
     }
 
 
@@ -143,6 +144,11 @@ def _job(**overrides) -> JobResult:
             lambda job: MinerLogLine.no_payout_because_sysbox_not_enabled(job),
             "sysbox_not_enabled",
             "sysbox",
+        ),
+        (
+            lambda job: MinerLogLine.no_payout_because_rented_sysbox_not_confirmed(job),
+            "rented_sysbox_not_confirmed",
+            "rented node",
         ),
         (
             lambda job: MinerLogLine.no_payout_because_flagship_without_ncu_or_split(
