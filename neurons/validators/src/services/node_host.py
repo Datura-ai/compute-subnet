@@ -8,6 +8,7 @@ import asyncio
 import ipaddress
 import logging
 import socket
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
@@ -67,10 +68,53 @@ def _log_dialed(infos: list, sockaddr: tuple) -> None:
 # A hostname node's DNS is the miner's: a zone that never answers holds each lookup until the system
 # resolver gives up, and the thread cannot be cancelled. These lookups run in their own pool, never the
 # loop's default executor, where the validator's Redis/WebSocket DNS and other blocking calls run, and
-# each waits at most NODE_DNS_TIMEOUT_SECONDS. A stalled zone then delays other hostname nodes only.
-NODE_DNS_MAX_WORKERS = 8
+# each waits at most NODE_DNS_TIMEOUT_SECONDS. Within the pool, one DNS zone (the name's last two
+# labels) holds at most NODE_DNS_PER_ZONE threads, counted until the thread really finishes: a miner
+# whose zone stalls delays only names in that zone, never another miner's (review of #1609: eight
+# hostile names would otherwise fill the pool and get honest hostname nodes hidden).
+NODE_DNS_MAX_WORKERS = 32
+NODE_DNS_PER_ZONE = 2
 NODE_DNS_TIMEOUT_SECONDS = 15.0
 NODE_DNS_EXECUTOR = ThreadPoolExecutor(max_workers=NODE_DNS_MAX_WORKERS, thread_name_prefix="node-dns")
+_zone_lock = threading.Lock()
+_zone_busy: dict[str, int] = {}
+
+
+def dns_zone(host: str) -> str:
+    """The share key: the name's last two labels (``a.b.evil.example`` → ``evil.example``)."""
+    return ".".join(host.rstrip(".").lower().split(".")[-2:])
+
+
+def _take_zone_slot(zone: str) -> bool:
+    with _zone_lock:
+        if _zone_busy.get(zone, 0) >= NODE_DNS_PER_ZONE:
+            return False
+        _zone_busy[zone] = _zone_busy.get(zone, 0) + 1
+        return True
+
+
+def _give_zone_slot(zone: str) -> None:
+    with _zone_lock:
+        left = _zone_busy.get(zone, 0) - 1
+        if left > 0:
+            _zone_busy[zone] = left
+        else:
+            _zone_busy.pop(zone, None)
+
+
+class _ZoneSlotExecutor:
+    """Runs one lookup in NODE_DNS_EXECUTOR and frees its zone slot when the thread finishes (not when
+    the caller stops waiting: an abandoned lookup still occupies its thread)."""
+
+    def __init__(self, zone: str):
+        self.zone = zone
+        self.submitted = False
+
+    def submit(self, fn, *args, **kwargs):
+        future = NODE_DNS_EXECUTOR.submit(fn, *args, **kwargs)
+        self.submitted = True
+        future.add_done_callback(lambda _: _give_zone_slot(self.zone))
+        return future
 
 
 async def resolve_public_host(host: str, port: int = 22, executor=None) -> list:
@@ -106,9 +150,19 @@ async def resolve_public_host(host: str, port: int = 22, executor=None) -> list:
 async def resolve_node_host(host: str, port: int) -> list:
     """``resolve_public_host`` in NODE_DNS_EXECUTOR, refused (NodeHostError) when the miner's DNS has
     not answered within NODE_DNS_TIMEOUT_SECONDS. A caller's own, shorter deadline still applies."""
+    if is_ip_literal(host):
+        return []
+    zone = dns_zone(host)
     try:
         async with asyncio.timeout(NODE_DNS_TIMEOUT_SECONDS):
-            return await resolve_public_host(host, port, executor=NODE_DNS_EXECUTOR)
+            while not _take_zone_slot(zone):  # this zone's lookups are all still running
+                await asyncio.sleep(0.02)
+            slot = _ZoneSlotExecutor(zone)
+            try:
+                return await resolve_public_host(host, port, executor=slot)
+            finally:
+                if not slot.submitted:
+                    _give_zone_slot(zone)
     except TimeoutError as exc:
         raise _refused(host, port, f"did not resolve within {NODE_DNS_TIMEOUT_SECONDS:g} s") from exc
 

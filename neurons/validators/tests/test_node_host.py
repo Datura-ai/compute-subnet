@@ -354,3 +354,39 @@ async def test_stalled_node_lookups_never_occupy_the_default_executor(stalled_dn
 
     assert default_pool_used == []
     assert stalled_dns and all(name.startswith("node-dns") for name in stalled_dns)
+
+
+@pytest.mark.asyncio
+async def test_a_miner_whose_dns_stalls_cannot_stop_another_miners_name_resolving(monkeypatch):
+    # review of #1609: eight hostile hostname executors behind a deliberately slow zone filled the shared
+    # pool, and every other miner's hostname node then hit the deadline and was hidden
+    monkeypatch.setattr(node_host, "NODE_DNS_TIMEOUT_SECONDS", 0.3)
+    release = threading.Event()
+
+    def lookup(host, port, *args, **kwargs):
+        if host.endswith("evil.example"):
+            release.wait(5)
+            raise socket.gaierror(-3, "Temporary failure in name resolution")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", port))]
+
+    monkeypatch.setattr("socket.getaddrinfo", lookup)
+    try:
+        hostile = [
+            asyncio.create_task(PublicHostResolver().resolve(f"gpu{i}.evil.example", 8080))
+            for i in range(node_host.NODE_DNS_MAX_WORKERS + 8)
+        ]
+        await asyncio.sleep(0.05)
+
+        [honest] = await PublicHostResolver().resolve("gpu-node1.good.example", 8080)
+
+        assert honest["host"] == "1.1.1.1"
+        results = await asyncio.gather(*hostile, return_exceptions=True)
+        assert all(isinstance(r, NodeHostError) for r in results)
+        assert node_host._zone_busy.get("evil.example", 0) <= node_host.NODE_DNS_PER_ZONE
+    finally:
+        release.set()
+
+
+def test_names_share_a_zone_by_their_last_two_labels():
+    assert node_host.dns_zone("a.b.Evil.Example.") == "evil.example"
+    assert node_host.dns_zone("gpu1.duckdns.org") == "duckdns.org"
