@@ -83,7 +83,6 @@ def _fall_back_to_the_model_filler_average(job_result: JobResult) -> None:
         job_result.filler_revenue_per_gpu_hour = model_average
         job_result.filler_revenue_from_model_average = True
 
-
 class InsufficientDisk(BaseModel):
     """Measured totals of a machine whose disk is below the required margin over its GPU VRAM."""
 
@@ -1115,6 +1114,31 @@ class RentalPriceIncentive(DefaultIncentive):
         job_result.spot_pay_candidate = True
         return job_result
 
+    def _qualify_spot_node_by_the_secure_decision(
+        self, job_result: JobResult, paid_if_secure: bool, base_model: str
+    ) -> JobResult:
+        """DAH-4299: a spot node is paid when a secure node in its place would be, whether or not a
+        Lium filler runs on it; only the amount differs (_price_spot_node). Every reason it is not
+        paid was recorded on the way here."""
+        job_result.eligible_for_rental_share = False
+        job_result.mining_score = 0
+        if not paid_if_secure:
+            if base_model not in self.config.rental_incentive_gpu_types and (
+                job_result.score > 0 or job_result.job_score > 0
+            ):
+                job_result.record_incentive_log(
+                    MinerLogLine.no_payout_because_gpu_model_not_in_unrented_program(job_result)
+                )
+            return job_result
+        _fall_back_to_the_model_filler_average(job_result)
+        if job_result.filler_revenue_per_gpu_hour is None:
+            job_result.record_incentive_log(
+                MinerLogLine.no_payout_because_spot_no_filler_revenue_for_gpu_config(job_result)
+            )
+            return job_result
+        job_result.spot_pay_candidate = True
+        return job_result
+
     def _price_spot_node(self, result: JobResult) -> None:
         """Spot rate per GPU = min(FILLER_REVENUE_PAY_FACTOR x filler average, the secure rate for this node).
 
@@ -1232,7 +1256,8 @@ class RentalPriceIncentive(DefaultIncentive):
             logger.info(exclusion.to_internal_log())
             job_result.record_incentive_log(exclusion)
         excluded_from_both_pools: bool = excluded_for_outdated_image or bool(exclusions)
-        if self._on_spot_pay_path(job_result):
+        on_spot_pay_path: bool = self._on_spot_pay_path(job_result)
+        if on_spot_pay_path and not settings.SPOT_IDLE_PAY_SECURE_DECISION_ENABLED:
             return self._qualify_spot_node(job_result, excluded_from_both_pools)
         if excluded_from_both_pools and job_result.gpu_model not in BASE_GPU_MAP:
             # get_base_model_for_gpu raises on a model it does not know, and nothing above this
@@ -1354,6 +1379,10 @@ class RentalPriceIncentive(DefaultIncentive):
                 1.0 if job_result.sysbox_runtime else 1 - settings.PORTION_FOR_SYSBOX_UNRENTED,
             )
 
+        if on_spot_pay_path:
+            return self._qualify_spot_node_by_the_secure_decision(
+                job_result, eligible_for_rental_share, base_model
+            )
         job_result.eligible_for_rental_share = eligible_for_rental_share
         if job_result.eligible_for_rental_share:
             # NOT a penalty: an unrented executor of an eligible GPU model is intentionally
