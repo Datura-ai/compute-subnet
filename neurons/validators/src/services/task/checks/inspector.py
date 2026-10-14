@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 # Outcomes in which the sensor saw nothing of the rental: an error, a failed canary, a stopped collector.
 BLIND_OUTCOMES = frozenset({"ERROR", "CANARY_FAILED", "COLLECTOR_NOT_RUNNING"})
+# The collector is restarted every cycle, so a host that stops it reads as just started: that
+# outcome keeps the streak where it is instead of ending it.
+STREAK_KEPT_OUTCOMES = frozenset({"COLLECTOR_RECENTLY_STARTED"})
 BLIND_STREAK_KEY_PREFIX = "inspector:blind_streak"
 BLIND_STREAK_TTL_SECONDS = 24 * 60 * 60
 
@@ -84,12 +87,14 @@ class InspectorRentedCheck:
             inspector_event = _build_inspector_event(
                 ctx, event, rented_pods, result, outcome="ERROR"
             )
+            passed = await _record_blind_streak_and_decide_pass(ctx, "ERROR")
             return CheckResult(
-                passed=await _sensor_may_stay_blind(ctx, "ERROR"),
+                passed=passed,
                 event=event,
                 updates={
                     "default_extra": extra,
                     "state": replace(ctx.state, inspector_event=inspector_event),
+                    **_blind_streak_flag(passed),
                 },
             )
 
@@ -112,10 +117,15 @@ class InspectorRentedCheck:
             inspector_event = _build_inspector_event(
                 ctx, event, rented_pods, result, outcome="ERROR", report=report
             )
+            passed = await _record_blind_streak_and_decide_pass(ctx, "ERROR")
             return CheckResult(
-                passed=await _sensor_may_stay_blind(ctx, "ERROR"),
+                passed=passed,
                 event=event,
-                updates={"default_extra": extra, "state": replace(ctx.state, inspector_event=inspector_event)},
+                updates={
+                    "default_extra": extra,
+                    "state": replace(ctx.state, inspector_event=inspector_event),
+                    **_blind_streak_flag(passed),
+                },
             )
         warnings = _collector_start_warnings(report)
         verdict = build_verdict(
@@ -125,7 +135,7 @@ class InspectorRentedCheck:
             sensor_attested=sensor_attested,
         )
         if verdict.provider_origin:
-            await _sensor_may_stay_blind(ctx, "MALICIOUS")
+            await _record_blind_streak_and_decide_pass(ctx, "MALICIOUS")
             return self._record_provider_origin(
                 ctx,
                 verdict=verdict,
@@ -200,12 +210,14 @@ class InspectorRentedCheck:
         inspector_event = _build_inspector_event(
             ctx, event, rented_pods, result, outcome=outcome, report=report, verdict=verdict
         )
+        passed = await _record_blind_streak_and_decide_pass(ctx, outcome)
         return CheckResult(
-            passed=await _sensor_may_stay_blind(ctx, outcome),
+            passed=passed,
             event=event,
             updates={
                 "default_extra": extra,
                 "state": replace(ctx.state, inspector_event=inspector_event),
+                **_blind_streak_flag(passed),
             },
         )
 
@@ -257,13 +269,18 @@ class InspectorRentedCheck:
         )
 
 
-async def _sensor_may_stay_blind(ctx: Context, outcome: str) -> bool:
+async def _record_blind_streak_and_decide_pass(ctx: Context, outcome: str) -> bool:
     """Counts the rented cycles in a row whose inspector outcome saw nothing of the rental.
 
     Each of those outcomes passes on its own (a sensor can break honestly), so a host that keeps
     the sensor dead for a whole rental is never looked at. The streak is logged from
     INSPECTOR_BLIND_STREAK_LIMIT on; it fails the check only under
-    INSPECTOR_BLIND_STREAK_ENFORCEMENT_ENABLED. A Redis outage decides nothing."""
+    INSPECTOR_BLIND_STREAK_ENFORCEMENT_ENABLED. The check is non-fatal, so the caller also sets
+    `inspector_blind_streak_passed` (`_blind_streak_flag`), which calculate_scores zeroes on.
+    A collector that only just started neither counts nor ends the streak. A Redis outage
+    decides nothing."""
+    if outcome in STREAK_KEPT_OUTCOMES:
+        return True
     key = f"{BLIND_STREAK_KEY_PREFIX}:{ctx.miner_hotkey}:{ctx.executor.uuid}"
     try:
         if outcome not in BLIND_OUTCOMES:
@@ -289,6 +306,11 @@ async def _sensor_may_stay_blind(ctx: Context, outcome: str) -> bool:
         )
     )
     return not enforced
+
+
+def _blind_streak_flag(passed: bool) -> dict[str, bool]:
+    """The context flag calculate_scores zeroes the score on; set only when the streak failed."""
+    return {} if passed else {"inspector_blind_streak_passed": False}
 
 
 def _build_inspector_event(
