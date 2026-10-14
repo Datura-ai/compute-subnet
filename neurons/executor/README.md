@@ -204,9 +204,9 @@ sudo systemctl restart docker
 
 ### Volume plugin (vloopback)
 
-A rental with a disk limit gets its volume from the `vloopback` Docker volume plugin ([`ashald/docker-volume-loopback`](https://github.com/ashald/docker-volume-loopback)), mounted into the pod's Sysbox container. Once Sysbox runs a GPU container, `nvidia_docker_sysbox_setup.sh` does this itself, and re-running it on a working host changes nothing:
+A rental with a disk limit gets its volume from the `vloopback` Docker volume plugin ([`ashald/docker-volume-loopback`](https://github.com/ashald/docker-volume-loopback)), mounted into the pod's Sysbox container. Once Sysbox runs a GPU container, `nvidia_docker_sysbox_setup.sh` does this itself, and re-running it on a working host changes nothing. On a node whose Docker does not accept `--storage-opt`, rentals run without a disk limit and never use the plugin, so the installer and `--check` skip all three steps:
 
-1. installs the plugin when it is missing, with `DATA_DIR=<Docker data-root>/loopback` (the data-root is `docker info --format '{{.DockerRootDir}}'`). It installs by digest, `ashald/docker-volume-loopback@sha256:caafc80c60c3630812433c6e5ebb4df5ca514333cbec4af6a3a5164c150fd170`: the `:latest` image the validators install on the first rental, pushed 2019-02-13;
+1. installs the plugin when it is missing, with `DATA_DIR=<Docker data-root>/loopback` (the data-root is `docker info --format '{{.DockerRootDir}}'`). It installs by digest `ashald/docker-volume-loopback@sha256:caafc80c60c3630812433c6e5ebb4df5ca514333cbec4af6a3a5164c150fd170`, the plugin the validators' rental path installs today;
 2. on a plugin whose `DATA_DIR` is not an absolute path, stops if a rental is running, then sets `DATA_DIR=<Docker data-root>/loopback` and enables the plugin;
 3. creates a 1 GB test volume, checks that `docker volume inspect` shows a `Mountpoint` starting with `/`, mounts the volume into a Sysbox container (`daturaai/compute-subnet-executor:latest`), writes a file and reads it back, lets the container exit (which unmounts the volume) and removes the container and the volume.
 

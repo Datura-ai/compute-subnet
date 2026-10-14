@@ -25,7 +25,7 @@ DOWNLOADED_DEB=""
 # the validators' _LOOPBACK_PLUGIN_ALIAS / _LOOPBACK_PLUGIN_IMAGE (neurons/validators/src/services/docker_service.py):
 # a rental with a disk limit gets a volume from this plugin, mounted into its sysbox container. The plugin runs
 # as root with the host's / mounted, so setup installs it by digest: the manifest of :latest (pushed 2019-02-13),
-# the image the validators install by tag.
+# the image the validators' rental path installs by tag today.
 VLOOPBACK_PLUGIN="vloopback"
 VLOOPBACK_PLUGIN_IMAGE="ashald/docker-volume-loopback@sha256:caafc80c60c3630812433c6e5ebb4df5ca514333cbec4af6a3a5164c150fd170"
 VLOOPBACK_DOC_URL="https://github.com/Datura-ai/lium-io/blob/main/neurons/executor/README.md#volume-plugin-vloopback"
@@ -545,7 +545,7 @@ ensure_vloopback_plugin() {
         *) VLOOPBACK_REASON="Docker reports the data-root '${root}', not an absolute path (docker info --format '{{.DockerRootDir}}')."
            return 1 ;;
     esac
-    # <DockerRootDir>/loopback: the DATA_DIR the validators pass to `docker plugin install` (create_local_volume)
+    # <DockerRootDir>/loopback: the DATA_DIR the validators' rental path passes today (create_local_volume)
     wanted="${root%/}/loopback"
     state=$(vloopback_plugin_state)
     if [ "$state" = "absent" ]; then
@@ -652,6 +652,14 @@ vloopback_mount_test() {
     return "$rc"
 }
 
+vloopback_storage_opt_supported() {
+    # the scrape's CHECK_STORAGE_LIMIT_ABILITY without the GPU: a node whose Docker refuses --storage-opt is rented
+    # without a disk limit, so no rental there ever gets a vloopback volume
+    timeout "$VLOOPBACK_CLEANUP_TIMEOUT" docker run --rm --storage-opt size=1g "$VERIFY_IMAGE" true &>/dev/null
+}
+
+VLOOPBACK_NOT_USED="Docker here does not accept --storage-opt, so rentals run without a disk limit and never use the plugin."
+
 check_vloopback() {
     # --check: report the plugin, change nothing but the test volume the mount test creates and removes
     local state data_dir
@@ -660,6 +668,11 @@ check_vloopback() {
         pf_skip "vloopback volumes — the test mounts one into a sysbox container, and sysbox-runc is not registered yet."
         return 0
     fi
+    if ! docker image inspect "$VERIFY_IMAGE" &>/dev/null; then
+        pf_skip "vloopback volumes — the test runs $VERIFY_IMAGE, which is not on this host yet (install mode pulls it)."
+        return 0
+    fi
+    vloopback_storage_opt_supported || { pf_skip "vloopback volumes — $VLOOPBACK_NOT_USED"; return 0; }
     state=$(vloopback_plugin_state)
     if [ "$state" = "absent" ]; then
         pf_fix "The $VLOOPBACK_PLUGIN volume plugin is not installed; the mount test cannot run until it is." \
@@ -678,10 +691,6 @@ check_vloopback() {
             "docker plugin enable $VLOOPBACK_PLUGIN"
         return 1
     fi
-    if ! docker image inspect "$VERIFY_IMAGE" &>/dev/null; then
-        pf_skip "vloopback volumes — the test runs $VERIFY_IMAGE, which is not on this host yet (install mode pulls it)."
-        return 0
-    fi
     if ! vloopback_mount_test; then
         pf_fix "vloopback volumes fail on this host: $VLOOPBACK_REASON" "See $VLOOPBACK_DOC_URL"
         return 1
@@ -696,6 +705,7 @@ fail_vloopback() {
 
 setup_vloopback() {
     # install mode: the plugin fix, then the mount test; on a failure the caller prints fail_vloopback
+    vloopback_storage_opt_supported || { ok "vloopback: skipped. $VLOOPBACK_NOT_USED"; return 0; }
     ensure_vloopback_plugin || return 1
     [ -z "$VLOOPBACK_CHANGED" ] || ok "vloopback: $VLOOPBACK_CHANGED."
     vloopback_mount_test || return 1

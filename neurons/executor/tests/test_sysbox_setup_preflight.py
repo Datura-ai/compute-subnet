@@ -111,6 +111,7 @@ STUBS = {
                         [ -z "${STUB_VLOOPBACK_MOUNT_FAILS:-}" ] && echo lium-vloopback-ok || {
                             echo "docker: Error response from daemon: failed to create task for container: OCI runtime create failed: error during container init: error setting up ID-mapped mount on path 206/fs (likely means idmapped mounts are not supported on the filesystem at this path): lstat 206: no such file or directory: unknown." >&2
                             exit 125; } ;;
+                    *" --storage-opt "*) [ -z "${STUB_STORAGE_OPT_UNSUPPORTED:-}" ] || { echo "docker: Error response from daemon: --storage-opt is supported only for overlay over xfs with 'pquota' mount option." >&2; exit 125; } ;;
                     *) [ -z "${STUB_SYSBOX_RUN_FAILS:-}" ] && echo ok || { echo "OCI runtime create failed" >&2; exit 125; } ;;
                 esac ;;
         esac
@@ -696,12 +697,13 @@ def test_vloopback_already_fixed_changes_nothing_and_mounts_a_volume(tmp_path):
     assert _plugin_changes(tmp_path) == []
     assert "vloopback: a size-limited volume mounts, takes a write and unmounts in a sysbox container." in out
     runs = [call for call in _docker_calls(tmp_path) if call.startswith("run --rm ")]
-    assert len(runs) == 1
+    assert len(runs) == 2
+    assert runs[0] == "run --rm --storage-opt size=1g daturaai/compute-subnet-executor:latest true"
     assert re.fullmatch(
         r"run --rm --name (lium_vloopback_check_\d+) --runtime=sysbox-runc -v \1:/lium-vol "
         r"daturaai/compute-subnet-executor:latest sh -c echo lium-vloopback-ok > /lium-vol/probe && cat /lium-vol/probe",
-        runs[0],
-    ), runs[0]
+        runs[1],
+    ), runs[1]
     assert _test_volumes_left(tmp_path) == set()
 
 
@@ -874,6 +876,28 @@ def test_check_vloopback_is_skipped_until_the_test_image_is_pulled(tmp_path):
     rc, out, fix = run_check(tmp_path, "check_vloopback", env={"STUB_NO_VERIFY_IMAGE": "1"})
     assert rc == 0 and fix == 0
     assert "SKIP vloopback volumes — the test runs daturaai/compute-subnet-executor:latest, which is not on this host yet" in out
+    assert not [call for call in _docker_calls(tmp_path) if call.startswith("volume ")]
+
+
+@pytest.mark.parametrize("seed", ["absent", "relative"])
+def test_check_vloopback_is_skipped_where_rentals_get_no_disk_limit(tmp_path, seed):
+    rc, out, fix = run_check(
+        tmp_path, "check_vloopback", env={"STUB_VLOOPBACK": seed, "STUB_STORAGE_OPT_UNSUPPORTED": "1"}
+    )
+    assert rc == 0 and fix == 0
+    assert "SKIP vloopback volumes — Docker here does not accept --storage-opt" in out
+    assert not [call for call in _docker_calls(tmp_path) if call.startswith(("volume ", "plugin "))]
+
+
+@pytest.mark.parametrize("seed", ["absent", "relative"])
+def test_install_mode_leaves_the_plugin_alone_where_rentals_get_no_disk_limit(tmp_path, seed):
+    # main printed SUCCESS here; installing a root plugin no rental uses, or failing on it, is a regression
+    proc = run_script(
+        tmp_path, env={"STUB_VLOOPBACK": seed, "STUB_VLOOPBACK_MOUNT_FAILS": "1", "STUB_STORAGE_OPT_UNSUPPORTED": "1"}
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "vloopback: skipped. Docker here does not accept --storage-opt" in proc.stdout
+    assert _plugin_changes(tmp_path) == []
     assert not [call for call in _docker_calls(tmp_path) if call.startswith("volume ")]
 
 
