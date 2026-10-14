@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import replace
 from typing import Any
 
+from core.utils import _m, get_extra_info
 from services.const import SECONDS_PER_BLOCK
 from services.inspector_validation_service import InspectorValidationResponse
 
@@ -15,6 +17,13 @@ from ..messages import render_message
 from ..pipeline import CheckResult, Context
 from ..models import ValidationEvent
 from protocol.vc_protocol.compute_requests import RentedPod
+
+logger = logging.getLogger(__name__)
+
+# Outcomes in which the sensor saw nothing of the rental: an error, a failed canary, a stopped collector.
+BLIND_OUTCOMES = frozenset({"ERROR", "CANARY_FAILED", "COLLECTOR_NOT_RUNNING"})
+BLIND_STREAK_KEY_PREFIX = "inspector:blind_streak"
+BLIND_STREAK_TTL_SECONDS = 24 * 60 * 60
 
 
 class InspectorRentedCheck:
@@ -76,7 +85,7 @@ class InspectorRentedCheck:
                 ctx, event, rented_pods, result, outcome="ERROR"
             )
             return CheckResult(
-                passed=True,
+                passed=await _sensor_may_stay_blind(ctx, "ERROR"),
                 event=event,
                 updates={
                     "default_extra": extra,
@@ -104,7 +113,7 @@ class InspectorRentedCheck:
                 ctx, event, rented_pods, result, outcome="ERROR", report=report
             )
             return CheckResult(
-                passed=True,
+                passed=await _sensor_may_stay_blind(ctx, "ERROR"),
                 event=event,
                 updates={"default_extra": extra, "state": replace(ctx.state, inspector_event=inspector_event)},
             )
@@ -116,6 +125,7 @@ class InspectorRentedCheck:
             sensor_attested=sensor_attested,
         )
         if verdict.provider_origin:
+            await _sensor_may_stay_blind(ctx, "MALICIOUS")
             return self._record_provider_origin(
                 ctx,
                 verdict=verdict,
@@ -191,7 +201,7 @@ class InspectorRentedCheck:
             ctx, event, rented_pods, result, outcome=outcome, report=report, verdict=verdict
         )
         return CheckResult(
-            passed=True,
+            passed=await _sensor_may_stay_blind(ctx, outcome),
             event=event,
             updates={
                 "default_extra": extra,
@@ -245,6 +255,40 @@ class InspectorRentedCheck:
                 "state": replace(ctx.state, inspector_event=inspector_event),
             },
         )
+
+
+async def _sensor_may_stay_blind(ctx: Context, outcome: str) -> bool:
+    """Counts the rented cycles in a row whose inspector outcome saw nothing of the rental.
+
+    Each of those outcomes passes on its own (a sensor can break honestly), so a host that keeps
+    the sensor dead for a whole rental is never looked at. The streak is logged from
+    INSPECTOR_BLIND_STREAK_LIMIT on; it fails the check only under
+    INSPECTOR_BLIND_STREAK_ENFORCEMENT_ENABLED. A Redis outage decides nothing."""
+    key = f"{BLIND_STREAK_KEY_PREFIX}:{ctx.miner_hotkey}:{ctx.executor.uuid}"
+    try:
+        if outcome not in BLIND_OUTCOMES:
+            await ctx.services.redis.delete(key)
+            return True
+        streak = int(await ctx.services.redis.get(key) or 0) + 1
+        await ctx.services.redis.set(key, str(streak), ex=BLIND_STREAK_TTL_SECONDS)
+    except Exception:
+        logger.warning(
+            _m("INSPECTOR_BLIND_STREAK_UNAVAILABLE", extra=get_extra_info(ctx.default_extra)),
+            exc_info=True,
+        )
+        return True
+    if streak < settings.INSPECTOR_BLIND_STREAK_LIMIT:
+        return True
+    enforced = settings.INSPECTOR_BLIND_STREAK_ENFORCEMENT_ENABLED
+    logger.warning(
+        _m(
+            "INSPECTOR_BLIND_STREAK",
+            extra=get_extra_info(
+                {**ctx.default_extra, "streak": streak, "outcome": outcome, "enforced": enforced}
+            ),
+        )
+    )
+    return not enforced
 
 
 def _build_inspector_event(
