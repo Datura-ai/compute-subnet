@@ -375,6 +375,11 @@ class Settings(BaseSettings):
     # author (/proc/cpuinfo, /sys present population, docker NCPU).
     CPU_TRUTH_CHECK_ENABLED: bool = Field(env="CPU_TRUTH_CHECK_ENABLED", default=True)
     CPU_TRUTH_ENFORCEMENT_ENABLED: bool = Field(env="CPU_TRUTH_ENFORCEMENT_ENABLED", default=False)
+    # A seal-aware libdmcompverify that gets an unsealed matmul answer always logs MATMUL_RESULT_UNSEALED;
+    # with this on the answer fails. Off until the log shows which executors still answer unsealed.
+    # Only an answer whose plaintext uuid matches counts; a probe that never answered (out of
+    # memory) keeps the mismatch path and its busy-GPU waiver.
+    MATMUL_SEAL_REQUIRED_ENABLED: bool = Field(env="MATMUL_SEAL_REQUIRED_ENABLED", default=False)
     # Item 3 — run the GPU work-proof on every claimed card concurrently (own challenge per card,
     # sized from the registry SKU) and time the aggregate on the validator, so a count lie either
     # fails device selection or serialises past a wide wall-clock threshold.
