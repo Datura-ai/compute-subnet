@@ -1020,8 +1020,11 @@ class MinerService:
         """Whether an empty answer from the miner still has rented executors to report (DAH-3558).
 
         A miner whose only executors are rented and down answers with zero executors; that used to
-        end as one miner-level failure row and nothing about the nodes. With the report flag off,
-        the iteration also writes the shadow log for the first node it finds.
+        end as one miner-level failure row and nothing about the nodes. With the report flag off
+        this probe returns False and also writes the RENTED_EXECUTOR_NOT_LISTED_SHADOW log for
+        every missing node. Both callers keep it last in their ``and`` chain, so it runs only on
+        the zero-executor path that then returns early and never reaches
+        ``_build_not_listed_rented_results``; that order is what keeps the log at one per node.
         """
         return any(
             self._iter_not_listed_rented(
