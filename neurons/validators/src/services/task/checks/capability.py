@@ -52,7 +52,8 @@ class CapabilityCheck:
 
         # DAH-3011: a first, unscored verification sizes the matmul from a VRAM budget instead of
         # the whole card (same challenge/seal/UUID check). The keyword is only passed on that path
-        # so the scored call is byte-for-byte today's.
+        # so the scored call is byte-for-byte today's. `first_pass` itself is always passed: the
+        # service decides from it, never from the budget, whether the all-cards proof runs.
         sizing = {"vram_budget_mb": settings.FIRST_PASS_MATMUL_VRAM_MB} if ctx.config.first_pass else {}
 
         result = None
@@ -72,6 +73,7 @@ class CapabilityCheck:
                     executor_info=ctx.executor,
                     default_extra=ctx.default_extra,
                     machine_spec=specs,
+                    first_pass=ctx.config.first_pass,
                     **sizing,
                 )
             except Exception as exc:

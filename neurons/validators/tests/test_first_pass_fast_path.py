@@ -119,7 +119,8 @@ async def test_scored_capability_call_passes_no_sizing(fast_path_on, context_fac
     result = await CapabilityCheck().run(ctx)
 
     assert result.passed is True
-    assert service.sizing_kwargs == {}
+    # first_pass goes to the service explicitly, never inferred from a budget
+    assert service.sizing_kwargs == {"first_pass": False}
     assert "first_pass_vram_budget_mb" not in result.event.what_we_saw
 
 
@@ -136,7 +137,10 @@ async def test_first_pass_capability_call_sizes_the_matmul_from_the_budget(fast_
 
     assert result.passed is True
     assert result.event.reason_code == CapMsg.VERIFY_OK.reason
-    assert service.sizing_kwargs == {"vram_budget_mb": settings.FIRST_PASS_MATMUL_VRAM_MB}
+    assert service.sizing_kwargs == {
+        "vram_budget_mb": settings.FIRST_PASS_MATMUL_VRAM_MB,
+        "first_pass": True,
+    }
     assert result.event.what_we_saw["first_pass_vram_budget_mb"] == 8192
     # A failed matmul still fails the first pass: the check itself is not skipped.
     failing = _SizingAwareValidationService(success=False)
@@ -345,7 +349,7 @@ async def test_flag_off_first_pass_is_todays_behaviour(monkeypatch, context_fact
         state=build_state(specs={"gpu": {"count": 1}}),
     )
     await CapabilityCheck().run(ctx)
-    assert matmul.sizing_kwargs == {}
+    assert matmul.sizing_kwargs == {"first_pass": False}
 
 
 @pytest.mark.asyncio

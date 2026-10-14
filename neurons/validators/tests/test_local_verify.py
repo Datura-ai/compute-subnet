@@ -1146,14 +1146,22 @@ async def test_intent_carries_the_shortened_deadline(
     assert executor.intents[0]["deadline_s"] == 100 - EXECUTOR_DEADLINE_MARGIN_SECONDS
 
 
+# The all-cards proof runs on a scored cycle, and on a first pass only once it is enforced.
+ALLCARDS_RUNS = pytest.mark.parametrize(
+    "first_pass, enforce", [(False, False), (False, True), (True, True)]
+)
+
+
 @pytest.mark.asyncio
+@ALLCARDS_RUNS
 async def test_all_cards_check_keeps_the_matmul_on_ssh(
-    keypair, monkeypatch, local_verify_on, verifyx_service
+    keypair, monkeypatch, local_verify_on, verifyx_service, first_pass, enforce
 ):
-    """DAH-2671 item 3: `_probe_all_claimed_cards` runs inside the SSH matmul path only. With the
-    check on, the intent carries no matmul, CapabilityCheck runs the SSH path (probe included) and
+    """DAH-2671 item 3: `_probe_all_claimed_cards` runs inside the SSH matmul path only. Whenever
+    it runs, the intent carries no matmul, CapabilityCheck runs the SSH path (probe included) and
     VerifyX is still consumed locally."""
     monkeypatch.setattr(settings, "MATMUL_ALLCARDS_CHECK_ENABLED", True)
+    monkeypatch.setattr(settings, "MATMUL_ALLCARDS_ENFORCEMENT_ENABLED", enforce)
     validation = matmul_service(monkeypatch)
     ssh_matmul = AsyncMock(return_value=mvs.ValidationResult(success=True, metrics={"from": "ssh"}))
     validation.validate_gpu_model_and_process_job = ssh_matmul
@@ -1162,7 +1170,11 @@ async def test_all_cards_check_keeps_the_matmul_on_ssh(
     )
     async with FakeExecutor(keypair) as executor:
         ctx = context(
-            keypair, executor.executor_info, validation=validation, verifyx=verifyx_service
+            keypair,
+            executor.executor_info,
+            validation=validation,
+            verifyx=verifyx_service,
+            first_pass=first_pass,
         )
         local, verifyx, capability = await run_local_then_consumers(
             ctx, LocalVerifyCheck(client_factory=client_factory(keypair))
@@ -1174,14 +1186,47 @@ async def test_all_cards_check_keeps_the_matmul_on_ssh(
     assert capability.event.what_we_saw["transport"] == "ssh"
     assert capability.updates["state"].gpu_metrics == {"from": "ssh"}
     ssh_matmul.assert_awaited_once()
+    assert ssh_matmul.await_args.kwargs["first_pass"] is first_pass
     assert verifyx.event.what_we_saw["transport"] == "local_verify"
 
 
 @pytest.mark.asyncio
-async def test_all_cards_check_with_verifyx_off_makes_no_call(
+async def test_all_cards_check_in_shadow_leaves_the_first_pass_matmul_in_the_one_call(
     keypair, monkeypatch, local_verify_on, verifyx_service
 ):
+    """A first pass does not run the all-cards proof while it is not enforced, so the check being
+    on must not move the first-pass matmul off the one call: both steps are consumed locally and
+    no SSH matmul runs."""
     monkeypatch.setattr(settings, "MATMUL_ALLCARDS_CHECK_ENABLED", True)
+    monkeypatch.setattr(settings, "MATMUL_ALLCARDS_ENFORCEMENT_ENABLED", False)
+    validation = matmul_service(monkeypatch)
+    validation.validate_gpu_model_and_process_job = AsyncMock(
+        side_effect=AssertionError("SSH matmul must not run")
+    )
+    async with FakeExecutor(keypair) as executor:
+        ctx = context(
+            keypair,
+            executor.executor_info,
+            validation=validation,
+            verifyx=verifyx_service,
+            first_pass=True,
+        )
+        local, _verifyx, capability = await run_local_then_consumers(
+            ctx, LocalVerifyCheck(client_factory=client_factory(keypair))
+        )
+    assert executor.intents[0]["steps"]["matmul"] is not None
+    assert local.event.what_we_saw["consumed"] == ["matmul", "verifyx"]
+    assert local.event.what_we_saw["fallbacks"] == {}
+    assert capability.passed and capability.event.what_we_saw["transport"] == "local_verify"
+
+
+@pytest.mark.asyncio
+@ALLCARDS_RUNS
+async def test_all_cards_check_with_verifyx_off_makes_no_call(
+    keypair, monkeypatch, local_verify_on, verifyx_service, first_pass, enforce
+):
+    monkeypatch.setattr(settings, "MATMUL_ALLCARDS_CHECK_ENABLED", True)
+    monkeypatch.setattr(settings, "MATMUL_ALLCARDS_ENFORCEMENT_ENABLED", enforce)
     validation = matmul_service(monkeypatch)
     async with FakeExecutor(keypair) as executor:
         ctx = context(
@@ -1190,6 +1235,7 @@ async def test_all_cards_check_with_verifyx_off_makes_no_call(
             validation=validation,
             verifyx=verifyx_service,
             verifyx_enabled=False,
+            first_pass=first_pass,
         )
         factory = MagicMock(side_effect=AssertionError("nothing to run: no client, no /version"))
         result = await LocalVerifyCheck(client_factory=factory).run(ctx)
