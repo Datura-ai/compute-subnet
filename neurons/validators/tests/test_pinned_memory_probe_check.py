@@ -1,5 +1,6 @@
 import ast
 import json
+import logging
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -97,10 +98,10 @@ def make_ctx(context_factory, runner):
     )
 
 
-def test_on_and_enforcing_by_default():
-    # the renter's ask (F-1599): a node whose GPUs cannot copy pinned memory must not stay rentable
-    assert settings.PINNED_MEMORY_PROBE_CHECK_ENABLED is True
-    assert settings.PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED is True
+def test_on_and_in_shadow_by_default():
+    # a fault is logged from the first cycle; failing the node waits for a clean shadow window on real GPUs
+    assert type(settings).model_fields["PINNED_MEMORY_PROBE_CHECK_ENABLED"].default is True
+    assert type(settings).model_fields["PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED"].default is False
     assert PinnedMemoryProbeCheck.fatal is True
 
 
@@ -158,11 +159,11 @@ async def test_a_tdx_guest_whose_gpu_cannot_see_pinned_memory_fails_the_node(con
 
 
 @pytest.mark.asyncio
-async def test_without_enforcement_a_fault_warns_and_passes(context_factory):
+async def test_without_enforcement_a_fault_warns_and_passes(context_factory, caplog):
     stdout = probe_stdout(
         "fault", faults=["gpu 0: cuStreamSynchronize -> CUDA_ERROR_ILLEGAL_ADDRESS (700)"]
     )
-    with probe_gate(enforce=False):
+    with probe_gate(enforce=False), caplog.at_level(logging.WARNING):
         result = await PinnedMemoryProbeCheck().run(
             make_ctx(context_factory, FakeRunner(stdout, exit_code=1))
         )
@@ -171,6 +172,7 @@ async def test_without_enforcement_a_fault_warns_and_passes(context_factory):
     assert result.event.reason_code == "PINNED_MEMORY_PROBE_FAILED"
     assert result.event.severity == "warning"
     assert "NOT changed" in result.event.impact
+    assert any("PINNED_MEMORY_PROBE_FAILED" in record.getMessage() for record in caplog.records)
 
 
 @pytest.mark.parametrize(

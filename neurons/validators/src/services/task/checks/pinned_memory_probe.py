@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import json
+import logging
 import shlex
 from pathlib import Path
 from typing import Any
 
 from core.config import settings
+from core.utils import _m, get_extra_info
 
 from ..messages import PinnedMemoryProbeMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
+
+logger = logging.getLogger(__name__)
 
 # Stdlib-only, shipped over stdin like the kernel-fault probe (DAH-3035): nothing to upload or update.
 PROBE_SOURCE_PATH = Path(__file__).resolve().parents[3] / "miner_jobs" / "pinned_memory_probe.py"
@@ -95,6 +99,15 @@ class PinnedMemoryProbeCheck:
             )
             enforce = settings.PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED
             what["error"] = (error or "fault")[: MAX_FAULT_LINES * MAX_FAULT_CHARS]
+            # logged directly: a passing check's event is not the cycle's log line, and the shadow count needs one
+            logger.warning(
+                _m(
+                    "PINNED_MEMORY_PROBE_FAILED",
+                    extra=get_extra_info(
+                        {**ctx.default_extra, "enforced": enforce, "error": what["error"]}
+                    ),
+                )
+            )
             event = render_message(
                 Msg.PROBE_FAILED,
                 ctx=ctx,
