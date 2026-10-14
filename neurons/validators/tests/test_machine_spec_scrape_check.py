@@ -377,7 +377,7 @@ async def test_machine_spec_scrape_uploads_the_binary_when_the_source_will_not_r
     assert "psutil" in result.event.what_we_saw["fallback_from"]["stderr_tail"]
 
 
-@pytest.mark.parametrize("duration_ms", [60_001, 240_000])
+@pytest.mark.parametrize("duration_ms", [120_001, 240_000])
 @pytest.mark.asyncio
 async def test_machine_spec_scrape_keeps_the_stdin_verdict_when_the_failure_was_slow(
     duration_ms, context_factory
@@ -442,9 +442,11 @@ async def test_machine_spec_scrape_finds_the_payload_among_other_stdout_lines(
     assert result.updates["state"].gpu_count == 1
 
 
+# a full scrape, and ones slowed by the vloopback mount test and its cleanup
+@pytest.mark.parametrize("duration_ms", [15_000, 75_000, 105_000])
 @pytest.mark.asyncio
 async def test_machine_spec_scrape_falls_back_when_the_stdin_payload_will_not_decrypt(
-    context_factory,
+    context_factory, duration_ms
 ):
     # The failure mode a probe cannot see: the modules import, the scrape runs, and the token it
     # produces is not one this validator can read.
@@ -454,7 +456,7 @@ async def test_machine_spec_scrape_falls_back_when_the_stdin_payload_will_not_de
     )
     runner = DummySSHCommandRunner(
         results=[
-            make_command_result(success=True, stdout=UNREADABLE_TOKEN, duration_ms=15_000),
+            make_command_result(success=True, stdout=UNREADABLE_TOKEN, duration_ms=duration_ms),
             make_command_result(success=True, stdout=FERNET_TOKEN),
         ]
     )

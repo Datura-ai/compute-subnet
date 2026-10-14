@@ -21,12 +21,12 @@ from .upload_files import UploadFailed, upload_validation_files_to_fresh_remote_
 
 logger = logging.getLogger(__name__)
 
-# DAH-2794: how long a failed stdin attempt may have taken and still be worth retrying with the
-# binary. Above a full scrape (~15 s on a real box, so a payload that will not decrypt is only
-# knowable around then), below the point where the retry stops fitting: 60 s here + 300 s upload
-# + 300 s scrape = 660 s against the 780 s per-executor timeout. The upload gets one attempt for
-# exactly that reason.
-STDIN_FAILURE_RETRY_WINDOW_MS = 60_000
+# How long a failed stdin attempt may have taken and still be worth retrying with the binary.
+# Above a full scrape (~15 s on a real box, plus up to ~90 s for the vloopback mount test and its
+# cleanup, so a payload that will not decrypt is only knowable around then), below the point where
+# the retry stops fitting: 120 s here + 300 s upload + 300 s scrape = 720 s against the 780 s
+# per-executor timeout. The upload gets one attempt for exactly that reason.
+STDIN_FAILURE_RETRY_WINDOW_MS = 120_000
 FALLBACK_UPLOAD_ATTEMPTS = 1
 
 # The scrape says only two things on stdout: a Fernet token when it worked, and a JSON object
