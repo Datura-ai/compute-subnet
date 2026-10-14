@@ -376,16 +376,19 @@ class Settings(BaseSettings):
     CPU_TRUTH_CHECK_ENABLED: bool = Field(env="CPU_TRUTH_CHECK_ENABLED", default=True)
     CPU_TRUTH_ENFORCEMENT_ENABLED: bool = Field(env="CPU_TRUTH_ENFORCEMENT_ENABLED", default=False)
     # Item 3 — run the GPU work-proof on every claimed card concurrently (own challenge per card,
-    # sized from the registry SKU) and time the aggregate on the validator, so a count lie either
-    # fails device selection or serialises past a wide wall-clock threshold.
+    # sized from that card's own reported capacity, so a card that over-reports its memory cannot
+    # complete it) and time the aggregate on the validator against a limit scaled by the number of
+    # concurrent rounds, so a count lie either fails device selection or serialises past it.
     # A card counts only when its own answer carries its own nonce under a key derived from that
     # card's reported UUID and model; the verdict passes when every reported card is verified.
-    # The check runs by default and logs its verdict ("All-cards GPU work-proof") without changing
-    # the validation result. "Shadow" only means the verdict is not scored — the GPU work itself is
-    # real: an N-card host runs N near-full-VRAM matmuls on top of the single-card one every cycle.
+    # The check runs by default and logs its verdict ("All-cards GPU work-proof"). A passing verdict
+    # replaces the single-card run (card 0's own result is returned, card 0 is not run twice); a
+    # failing one in shadow leaves the result to the single-card run, as before.
+    # A node's first pass skips the proof while enforcement is off (its verdict could not change
+    # anything), so the first verification stays as fast as the single-card run.
     # Set MATMUL_ALLCARDS_CHECK_ENABLED=false to turn the run off.
-    # MATMUL_ALLCARDS_ENFORCEMENT_ENABLED=true makes a failed verdict fail the validation; it stays
-    # off until the logged verdicts have been reviewed.
+    # MATMUL_ALLCARDS_ENFORCEMENT_ENABLED=true makes a failed verdict fail the validation and runs
+    # the proof on the first pass as well; it stays off until the logged verdicts have been reviewed.
     MATMUL_ALLCARDS_CHECK_ENABLED: bool = Field(env="MATMUL_ALLCARDS_CHECK_ENABLED", default=True)
     MATMUL_ALLCARDS_ENFORCEMENT_ENABLED: bool = Field(env="MATMUL_ALLCARDS_ENFORCEMENT_ENABLED", default=False)
     # Item 2b — send the advertised CPU-core count in the rental-verification health check so the

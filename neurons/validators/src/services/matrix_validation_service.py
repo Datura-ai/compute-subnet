@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -36,11 +37,23 @@ MATMUL_ALLCARDS_WALL_CLOCK_SECONDS = 90
 # serialises) and stays clear of that ceiling on the widest honest hosts.
 MATMUL_ALLCARDS_MAX_CONCURRENT_CARDS = 8
 
+def allcards_wall_clock_limit_seconds(cards_run: int) -> int:
+    """The aggregate wall-clock limit for `cards_run` concurrent per-card runs.
+
+    The cards run MATMUL_ALLCARDS_MAX_CONCURRENT_CARDS at a time, so a node with more cards than
+    that runs in rounds and an honest one takes about one card's time per round. The limit is the
+    one-round threshold times the number of rounds, so a wide honest node is not failed on time
+    alone while a count lie still serialises past it.
+    """
+    rounds = max(1, math.ceil(cards_run / MATMUL_ALLCARDS_MAX_CONCURRENT_CARDS))
+    return MATMUL_ALLCARDS_WALL_CLOCK_SECONDS * rounds
+
+
 # The shape a reported GPU UUID must have before it is placed on the per-card command line.
 GPU_UUID_PATTERN = re.compile(r"^GPU-[0-9a-fA-F-]{1,64}$")
 
 
-def allcards_probe_runs(first_pass: bool) -> bool:
+def should_run_allcards_probe(first_pass: bool) -> bool:
     """Whether the all-cards work-proof runs on this validation.
 
     While its verdict is only logged (enforcement off) it cannot fail the node, so a node's first
@@ -221,6 +234,24 @@ class AllCardsProbe:
     card_results: dict[int, "ValidationResult"] = field(default_factory=dict)
 
 
+@dataclass
+class CardChallenges:
+    """The per-card challenges of one all-cards work-proof, built before any card runs.
+
+    `per_card` holds every claimed card's outcome so far: the cards decided without a run (no
+    detail, an invalid or duplicated UUID) already carry their failure reason. `challenges` holds
+    one challenge per card that runs, keyed by card index; `close()` releases their keys.
+    """
+
+    per_card: list[dict]
+    challenges: dict[int, "MatmulChallenge"]
+    reported_uuids: list[str]
+
+    def close(self) -> None:
+        for challenge in self.challenges.values():
+            challenge.close()
+
+
 class ValidationService:
     def __init__(self):
         """
@@ -292,55 +323,56 @@ class ValidationService:
                 )
             )
 
-    async def _probe_all_claimed_cards(
+    @staticmethod
+    def _card_probe_vram_mb(card: dict) -> int | None:
+        """VRAM (MB) one card's challenge is sized from: the card's own reported capacity.
+
+        The challenge fills the memory the card reports (less the usual reserve), so a card that
+        reports more memory than it has cannot complete it, exactly as the single-card run sizes
+        card 0. The registry floor for the model (smallest known variant) is a lower bound only,
+        so a card that under-reports still gets at least the challenge its model must hold.
+        None for a model with no registry size: the probe is then skipped.
+        """
+        registry_floor_mb = matmul_probe_vram_mb(card.get("name", "") or "")
+        if not registry_floor_mb:
+            return None
+        try:
+            reported_mb = int(card.get("capacity", 0) or 0)
+        except (TypeError, ValueError):
+            reported_mb = 0
+        return max(reported_mb, registry_floor_mb)
+
+    def _prepare_card_challenges(
         self,
-        ssh_client,
-        executor_info,
+        cards: list[dict],
+        gpu_count: int,
+        sized_vram_mb: list[int],
         default_extra: dict,
-        machine_spec: dict,
-        vram_budget_mb: int | None = None,
-    ) -> AllCardsProbe | None:
-        # concurrent per-card work-proof: one independent challenge per claimed card (own seed + own
-        # nonce + own key), each run pinned to that card's reported UUID, sized from the registry
-        # SKU (not host self-report), aggregate timed on the validator. A card is verified only when
-        # its answer passes `evaluate_matmul_output`, the judgement the single-card run gets.
-        # The cards run at the same time, one process per card, so an honest host answers in about
-        # one card's time. `vram_budget_mb` caps each card's size as it caps the single-card run.
-        # Returns None when it does not apply — a single claimed card (legacy/whole-single-GPU path)
-        # or a model with no known registry VRAM size (cannot size safely) — so the caller's
-        # single-card path stays authoritative.
-        gpu = machine_spec.get("gpu", {}) or {}
-        gpu_count = gpu.get("count", 0) or 0
-        details = gpu.get("details", []) or []
-        if gpu_count <= 1 or not details:
-            return None
+    ) -> CardChallenges | None:
+        """Decide the cards that cannot be verified and build one challenge per remaining card.
 
-        cards = details[:gpu_count]
-        sized_vram_mb = [matmul_probe_vram_mb(card.get("name", "") or "") for card in cards]
-        if not all(sized_vram_mb):
-            return None
-        if vram_budget_mb:
-            sized_vram_mb = [min(sized, vram_budget_mb) for sized in sized_vram_mb]
-
-        script_path = f"{executor_info.root_dir}/src/decrypt_challenge.py"
+        A claimed card with no reported detail, a UUID that is not a GPU UUID, or a UUID reported
+        for more than one card gets no run. Returns None (every built challenge released) when the
+        native library fails to produce a cipher: our own fault, not the host's.
+        """
         reported_uuids = [str(card.get("uuid", "") or "") for card in cards]
-
-        # Cards that cannot be verified are decided here and get no run: a claimed card with no
-        # reported detail, a UUID that is not a GPU UUID, or a UUID reported for more than one card.
-        per_card: list[dict] = [
-            {"card_index": index, "gpu_uuid": "", "ok": False, "reason": "not_reported"}
-            for index in range(gpu_count)
-        ]
-        challenges: dict[int, MatmulChallenge] = {}
+        prepared = CardChallenges(
+            per_card=[
+                {"card_index": index, "gpu_uuid": "", "ok": False, "reason": "not_reported"}
+                for index in range(gpu_count)
+            ],
+            challenges={},
+            reported_uuids=reported_uuids,
+        )
         try:
             for index, card in enumerate(cards):
                 gpu_uuid = reported_uuids[index]
-                per_card[index]["gpu_uuid"] = gpu_uuid
+                prepared.per_card[index]["gpu_uuid"] = gpu_uuid
                 if not GPU_UUID_PATTERN.match(gpu_uuid):
-                    per_card[index]["reason"] = "uuid_invalid"
+                    prepared.per_card[index]["reason"] = "uuid_invalid"
                     continue
                 if reported_uuids.count(gpu_uuid) > 1:
-                    per_card[index]["reason"] = "uuid_duplicate"
+                    prepared.per_card[index]["reason"] = "uuid_duplicate"
                     continue
                 # The executor's library derives the challenge key from the devices its process can
                 # see. Pinned to one card that is this card alone, so the challenge is built for a
@@ -360,7 +392,7 @@ class ValidationService:
                     },
                     {**default_extra, "all_cards_probe": True, "card_index": index},
                 )
-                challenges[index] = challenge
+                prepared.challenges[index] = challenge
                 # A native error yields an empty cipher, which would go out as a bare
                 # `--cipher_text ` and read as a failed work-proof on every card. Our own fault, not
                 # the host's: skip the probe and let the caller's single-card path decide, as the
@@ -372,8 +404,53 @@ class ValidationService:
                             extra=get_extra_info(default_extra),
                         )
                     )
+                    prepared.close()
                     return None
+        except BaseException:
+            prepared.close()
+            raise
+        return prepared
 
+    async def _probe_all_claimed_cards(
+        self,
+        ssh_client,
+        executor_info,
+        default_extra: dict,
+        machine_spec: dict,
+        vram_budget_mb: int | None = None,
+    ) -> AllCardsProbe | None:
+        # concurrent per-card work-proof: one independent challenge per claimed card (own seed + own
+        # nonce + own key), each run pinned to that card's reported UUID, sized from that card's own
+        # reported capacity (`_card_probe_vram_mb`), aggregate timed on the validator against a
+        # limit scaled by the number of rounds. A card is verified only when
+        # its answer passes `evaluate_matmul_output`, the judgement the single-card run gets.
+        # The cards run at the same time, one process per card, so an honest host answers in about
+        # one card's time per round. `vram_budget_mb` caps each card's size as it caps the
+        # single-card run.
+        # Returns None when it does not apply — a single claimed card (legacy/whole-single-GPU path)
+        # or a model with no known registry VRAM size (cannot size safely) — so the caller's
+        # single-card path stays authoritative.
+        gpu = machine_spec.get("gpu", {}) or {}
+        gpu_count = gpu.get("count", 0) or 0
+        details = gpu.get("details", []) or []
+        if gpu_count <= 1 or not details:
+            return None
+
+        cards = details[:gpu_count]
+        sized_vram_mb = [self._card_probe_vram_mb(card) for card in cards]
+        if not all(sized_vram_mb):
+            return None
+        if vram_budget_mb:
+            sized_vram_mb = [min(sized, vram_budget_mb) for sized in sized_vram_mb]
+
+        script_path = f"{executor_info.root_dir}/src/decrypt_challenge.py"
+        prepared = self._prepare_card_challenges(cards, gpu_count, sized_vram_mb, default_extra)
+        if prepared is None:
+            return None
+        per_card = prepared.per_card
+        challenges = prepared.challenges
+        reported_uuids = prepared.reported_uuids
+        try:
             # One SSH channel per card on a single connection, so the fan-out has to stay under the
             # executor's sshd MaxSessions (OpenSSH defaults to 10). A 12-14 card host would otherwise
             # push the tail channels into the ssh_error branch and read as a failed work-proof.
@@ -396,8 +473,7 @@ class ValidationService:
             )
             elapsed = time.perf_counter() - start
         finally:
-            for challenge in challenges.values():
-                challenge.close()
+            prepared.close()
 
         # Each run returns its own card's outcome and judged result; nothing is shared between runs.
         card_results: dict[int, ValidationResult] = {}
@@ -407,7 +483,8 @@ class ValidationService:
                 card_results[outcome["card_index"]] = card_result
 
         verified_count = sum(1 for outcome in per_card if outcome["ok"])
-        over_wall_clock = elapsed > MATMUL_ALLCARDS_WALL_CLOCK_SECONDS
+        wall_clock_limit = allcards_wall_clock_limit_seconds(len(challenges))
+        over_wall_clock = elapsed > wall_clock_limit
         passed = verified_count == gpu_count and not over_wall_clock
         if verified_count != gpu_count:
             failure_reason = (
@@ -415,7 +492,7 @@ class ValidationService:
             )
         elif over_wall_clock:
             failure_reason = (
-                f"aggregate wall-clock {elapsed:.1f}s over {MATMUL_ALLCARDS_WALL_CLOCK_SECONDS}s "
+                f"aggregate wall-clock {elapsed:.1f}s over {wall_clock_limit}s "
                 f"(serialisation on fewer real cards than claimed)"
             )
         else:
@@ -428,7 +505,7 @@ class ValidationService:
             "gpu_models": sorted({card.get("name", "") or "" for card in cards}),
             "sized_vram_mb": sized_vram_mb,
             "elapsed_seconds": round(elapsed, 3),
-            "wall_clock_threshold_seconds": MATMUL_ALLCARDS_WALL_CLOCK_SECONDS,
+            "wall_clock_threshold_seconds": wall_clock_limit,
             "over_wall_clock": over_wall_clock,
             "per_card": per_card,
             "passed": passed,
@@ -732,11 +809,12 @@ class ValidationService:
         # are verified than reported or the aggregate wall-clock is over. Single-card /
         # unknown-model hosts skip it (probe returns None), which also keeps the legacy single-card
         # path below unchanged. `first_pass` is the caller's word that this is a node's first,
-        # unscored verification: see `allcards_probe_runs`.
+        # unscored verification: see `should_run_allcards_probe`.
         # A passing verdict replaces the single-card run: card 0 was just verified with a challenge
-        # of its own, so its result is returned and card 0 is not run a second time. A failing
+        # of its own, sized from its reported capacity as the single-card run sizes it, so its
+        # result is returned and card 0 is not run a second time. A failing
         # verdict in shadow leaves the result to the single-card run below, as before.
-        if allcards_probe_runs(first_pass):
+        if should_run_allcards_probe(first_pass):
             all_cards = await self._probe_all_claimed_cards(
                 ssh_client, executor_info, default_extra, machine_spec, vram_budget_mb
             )

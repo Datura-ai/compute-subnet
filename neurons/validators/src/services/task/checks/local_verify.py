@@ -15,7 +15,7 @@ that arrived later than the SSH
 path's own cap for that step (`ROUND_TRIP_CAP_MS_BY_STEP`, measured on the validator's clock) — leaves
 that step to the SSH path, so the new transport can only save time, never change a verdict on its
 own. The matmul is not asked for
-at all while the all-cards work-proof runs on this cycle (`allcards_probe_runs`: it runs inside the
+at all while the all-cards work-proof runs on this cycle (`should_run_allcards_probe`: it runs inside the
 SSH matmul path and a consumed local pass must not skip it; a first pass skips it while its verdict
 is not enforced, so the one call keeps the first-pass matmul), nor when VerifyX runs full size and in
 series with it (`ctx.config.first_pass` off, VerifyX on): the round trip then measures both steps
@@ -44,7 +44,7 @@ from services.local_verify_client import (
 from services.matrix_validation_service import (
     MATRIX_VERIFY_TIMEOUT_SECONDS,
     MatmulChallenge,
-    allcards_probe_runs,
+    should_run_allcards_probe,
 )
 from services.verifyx_validation_service import (
     VERIFYX_COMMAND_TIMEOUT_SECONDS,
@@ -92,7 +92,7 @@ def _matmul_ssh_reason(ctx: Context) -> str | None:
 
     `allcards_ssh` (DAH-2671 item 3): the all-cards work-proof (`_probe_all_claimed_cards`, one
     pinned run per card) lives inside the SSH matmul path only. Whenever it runs on this cycle
-    (`allcards_probe_runs`), the matmul stays on SSH so a consumed local pass can never skip the
+    (`should_run_allcards_probe`), the matmul stays on SSH so a consumed local pass can never skip the
     probe or its enforcement; phase 2 carries `devices` in the intent and judges the per-card
     output here. A first pass skips the probe while its verdict is not enforced, so the matmul is
     asked for in the one call there as it was before the check existed.
@@ -105,7 +105,7 @@ def _matmul_ssh_reason(ctx: Context) -> str | None:
     share of hosts and measures it on none. The matmul is not asked for; the executor does not run
     it twice. With VerifyX off the call carries the matmul alone and the bound is fair.
     """
-    if allcards_probe_runs(ctx.config.first_pass):
+    if should_run_allcards_probe(ctx.config.first_pass):
         return "allcards_ssh"
     if ctx.config.verifyx_enabled and not ctx.config.first_pass:
         return "scored_ssh"

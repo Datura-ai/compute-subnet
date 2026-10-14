@@ -12,7 +12,10 @@ CUDA_VISIBLE_DEVICES, judged like the single-card run and timed in aggregate on 
   - the cards run at the same time, and a passing verdict replaces the single-card run (card 0's
     own result is returned, card 0 is not run twice); a failing verdict in shadow leaves the result
     to the single-card run;
-  - a node's first pass skips the proof while it is not enforced and runs it once it is.
+  - a node's first pass skips the proof while it is not enforced and runs it once it is;
+  - each card's challenge is sized from that card's own reported capacity, so a card that reports
+    more memory than it has cannot complete it;
+  - the wall-clock limit scales with the number of concurrent rounds a wide node needs.
 """
 import asyncio
 import json
@@ -101,6 +104,13 @@ def _cipher(cmd: str) -> str:
     return cmd.split("--cipher_text ")[1].strip()
 
 
+def _needed_mb(cmd: str) -> float:
+    # The two double-precision operands the challenge allocates (see get_max_matrix_dimensions).
+    dim_n = int(cmd.split("--dim_n ")[1].split(" ")[0])
+    dim_k = int(cmd.split("--dim_k ")[1].split(" ")[0])
+    return 8 * 2 * dim_n * (dim_k + dim_n) / 1024**2
+
+
 def _answer(cipher: str, nonce: str) -> SimpleNamespace:
     line = "RESULT_JSON: " + json.dumps({"uuid": nonce, "metrics": None, "sealed": f"{cipher}:{nonce}"})
     return SimpleNamespace(exit_status=0, stdout=f"UUID:  {nonce}\n{line}", stderr="")
@@ -110,10 +120,12 @@ class FakeHost:
     """An executor host. `reported` is what an unpinned run enumerates (the single-card path);
     `real` are the cards a pinned run can actually open. A run recovers the nonce only when the
     devices it sees are the ones the challenge was built for, as the library's key derivation does.
-    `overrides` maps a pinned UUID to a canned reply or exception."""
+    `overrides` maps a pinned UUID to a canned reply or exception. `memory_mb` maps a UUID to the
+    memory the card really has: a run whose challenge needs more exits as out of memory."""
 
-    def __init__(self, lib, reported, real=None, model=MODEL, overrides=None):
+    def __init__(self, lib, reported, real=None, model=MODEL, overrides=None, memory_mb=None):
         self.lib = lib
+        self.memory_mb = memory_mb or {}
         self.reported = list(reported)
         self.real = list(reported if real is None else real)
         self.model = model
@@ -136,6 +148,9 @@ class FakeHost:
             visible = [pinned] if pinned in self.real else []
         if not visible:
             return SimpleNamespace(exit_status=1, stdout="", stderr="no CUDA-capable device")
+        card_memory_mb = self.memory_mb.get(visible[0])
+        if card_memory_mb is not None and _needed_mb(cmd) > card_memory_mb:
+            return SimpleNamespace(exit_status=1, stdout="", stderr="CUDA error: out of memory")
         cipher = _cipher(cmd)
         challenge = self.lib.challenges[cipher]
         sees = {"uuids": ",".join(visible), "gpu_count": len(visible), "gpu_model": self.model}
@@ -502,10 +517,10 @@ def _unpinned_runs(host) -> int:
         (True, True, True, True),
     ],
 )
-def test_allcards_probe_runs(monkeypatch, check, enforce, first_pass, runs):
+def test_should_run_allcards_probe(monkeypatch, check, enforce, first_pass, runs):
     monkeypatch.setattr(mvs.settings, "MATMUL_ALLCARDS_CHECK_ENABLED", check, raising=False)
     monkeypatch.setattr(mvs.settings, "MATMUL_ALLCARDS_ENFORCEMENT_ENABLED", enforce, raising=False)
-    assert mvs.allcards_probe_runs(first_pass) is runs
+    assert mvs.should_run_allcards_probe(first_pass) is runs
 
 
 @pytest.mark.asyncio
@@ -722,3 +737,134 @@ async def test_one_card_timing_out(svc, lib, monkeypatch, enforce):
         # the orphan was swept before the single-card run that now decides
         assert result.success is True
         assert _unpinned_runs(host) == 1
+
+
+# --- sizing from the reported capacity -------------------------------------------------------------
+
+V100 = "NVIDIA Tesla V100 Tensor Core GPU"  # registry: 16 GB and 32 GB variants
+
+
+def _v100_spec(capacities):
+    uuids = _uuids(len(capacities))
+    return uuids, {
+        "gpu": {
+            "count": len(capacities),
+            "details": [
+                {"name": V100, "uuid": uuid, "capacity": capacity}
+                for uuid, capacity in zip(uuids, capacities)
+            ],
+        }
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enforce", [False, True])
+async def test_16gb_card_reporting_32gb_fails(svc, lib, monkeypatch, enforce):
+    # Card 0 is a 16 GB V100 that reports 32 GB. Its challenge needs the 32 GB it reported, so it
+    # cannot answer; the verdict fails and its result never stands in for the single-card run.
+    _flags(monkeypatch, enforce=enforce)
+    uuids, spec = _v100_spec([32768, 32768])
+    memory = {uuids[0]: 16384, uuids[1]: 32768}
+
+    probe = await svc._probe_all_claimed_cards(
+        FakeHost(lib, uuids, model=V100, memory_mb=memory), _executor(), {}, spec
+    )
+    assert probe.passed is False
+    assert _reasons(probe) == ["exit_status=1", ""]
+    assert 0 not in probe.card_results
+
+    host = FakeHost(lib, uuids, model=V100, memory_mb=memory)
+    result = await svc.validate_gpu_model_and_process_job(
+        ssh_client=host, executor_info=_executor(), default_extra={}, machine_spec=spec
+    )
+    assert result.success is False
+    # shadow leaves the result to the single-card run, which fails on the same card
+    assert _unpinned_runs(host) == (0 if enforce else 1)
+
+
+@pytest.mark.asyncio
+async def test_honest_32gb_cards_pass(svc, lib, monkeypatch):
+    _flags(monkeypatch, enforce=True)
+    uuids, spec = _v100_spec([32768, 32768])
+    host = FakeHost(lib, uuids, model=V100, memory_mb={uuid: 32768 for uuid in uuids})
+    result = await svc.validate_gpu_model_and_process_job(
+        ssh_client=host, executor_info=_executor(), default_extra={}, machine_spec=spec
+    )
+    assert result.success is True
+    assert sorted(host.pinned_runs) == sorted(uuids)
+    assert _unpinned_runs(host) == 0
+
+
+@pytest.mark.asyncio
+async def test_each_card_is_sized_from_its_own_reported_capacity(svc, lib, monkeypatch):
+    # Every card follows its own reported capacity (not the smallest registry variant, not card 0's);
+    # the registry floor is only a lower bound for a card that under-reports.
+    floor = matmul_probe_vram_mb(V100)
+    uuids, spec = _v100_spec([32510, 16160, 1000])
+    sized = []
+    real_dims = svc.get_max_matrix_dimensions
+    monkeypatch.setattr(
+        svc, "get_max_matrix_dimensions", lambda mb, n: sized.append(mb) or real_dims(mb, n)
+    )
+    probe = await svc._probe_all_claimed_cards(
+        FakeHost(lib, uuids, model=V100), _executor(), {}, spec
+    )
+    assert probe is not None
+    assert sized == [32510, 16160, floor]
+    assert floor < 16160
+
+
+def test_card_probe_vram_mb_reads_the_cards_own_capacity():
+    floor = matmul_probe_vram_mb(V100)
+    assert mvs.ValidationService._card_probe_vram_mb({"name": V100, "capacity": 32768}) == 32768
+    assert mvs.ValidationService._card_probe_vram_mb({"name": V100, "capacity": None}) == floor
+    assert mvs.ValidationService._card_probe_vram_mb({"name": V100, "capacity": "x"}) == floor
+    assert mvs.ValidationService._card_probe_vram_mb({"name": "NVIDIA MADE-UP 9000", "capacity": 8}) is None
+
+
+# --- wall-clock limit per round ---------------------------------------------------------------------
+
+
+def test_wall_clock_limit_scales_with_rounds():
+    per_round = mvs.MATMUL_ALLCARDS_WALL_CLOCK_SECONDS
+    width = mvs.MATMUL_ALLCARDS_MAX_CONCURRENT_CARDS
+    assert mvs.allcards_wall_clock_limit_seconds(2) == per_round
+    assert mvs.allcards_wall_clock_limit_seconds(width) == per_round
+    assert mvs.allcards_wall_clock_limit_seconds(width + 1) == 2 * per_round
+    assert mvs.allcards_wall_clock_limit_seconds(14) == 2 * per_round
+    assert mvs.allcards_wall_clock_limit_seconds(2 * width + 1) == 3 * per_round
+
+
+@pytest.mark.asyncio
+async def test_honest_node_needing_two_rounds_passes_the_time_limit(svc, lib, monkeypatch):
+    # 10 cards run 8 + 2: an honest node takes about two cards' time, which is over one round's
+    # limit but within the scaled one.
+    monkeypatch.setattr(mvs, "MATMUL_ALLCARDS_WALL_CLOCK_SECONDS", 0.3, raising=False)
+    host = FakeHost(lib, _uuids(10))
+
+    async def run(cmd, *a, **k):
+        await asyncio.sleep(0.2)
+        return await host.run(cmd, *a, **k)
+
+    probe = await svc._probe_all_claimed_cards(SimpleNamespace(run=run), _executor(), {}, _spec(10))
+    assert probe.elapsed_seconds > 0.3
+    assert probe.over_wall_clock is False
+    assert probe.passed is True
+
+
+@pytest.mark.asyncio
+async def test_two_rounds_still_fail_when_serialised(svc, lib, monkeypatch):
+    # The same 10 cards answered one at a time (a count lie on fewer real cards) blow the scaled limit.
+    monkeypatch.setattr(mvs, "MATMUL_ALLCARDS_WALL_CLOCK_SECONDS", 0.1, raising=False)
+    host = FakeHost(lib, _uuids(10))
+    one_card = asyncio.Lock()
+
+    async def run(cmd, *a, **k):
+        async with one_card:
+            await asyncio.sleep(0.05)
+        return await host.run(cmd, *a, **k)
+
+    probe = await svc._probe_all_claimed_cards(SimpleNamespace(run=run), _executor(), {}, _spec(10))
+    assert probe.over_wall_clock is True
+    assert probe.passed is False
+    assert "over 0.2s" in probe.failure_reason
