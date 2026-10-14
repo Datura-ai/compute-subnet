@@ -31,43 +31,23 @@ def _streak_logs(caplog) -> int:
 
 
 @pytest.mark.asyncio
-async def test_a_long_package_fallback_streak_is_logged_and_changes_no_ema_by_default(
+async def test_past_the_cap_the_streak_is_logged_and_the_missing_capacity_reading_is_fed_as_zero(
     context_factory, caplog
 ):
-    blocked = [_cloudflare_unreachable_payload()] * (MAX_PACKAGE_FALLBACK_PROBES + 2)
+    blocked = [_cloudflare_unreachable_payload()] * (MAX_PACKAGE_FALLBACK_PROBES + 1)
 
     with caplog.at_level(logging.WARNING, logger=verifyx.logger.name):
         emas = await _download_emas(context_factory, blocked)
 
-    assert _streak_logs(caplog) == 2
-    # every probe fed the package reading: the EMA settles on it, above the floor, and is never fed a 0
-    assert emas[-1] > emas[-2] / 2
-    assert min(emas) > verifyx.MIN_VERIFYX_EMA_DOWNLOAD_SPEED_MBPS
-
-
-@pytest.mark.asyncio
-async def test_under_the_cap_the_missing_capacity_reading_is_fed_as_zero(
-    context_factory, monkeypatch
-):
-    monkeypatch.setattr(verifyx.settings, "VERIFYX_PACKAGE_FALLBACK_CAP_ENABLED", True)
-    blocked = [_cloudflare_unreachable_payload()] * (MAX_PACKAGE_FALLBACK_PROBES + 1)
-
-    emas = await _download_emas(context_factory, blocked)
-
+    assert _streak_logs(caplog) == 1
     assert emas[-1] == pytest.approx(emas[-2] / 2)
 
 
 @pytest.mark.asyncio
-async def test_a_measured_probe_starts_the_count_again(context_factory, monkeypatch, caplog):
-    monkeypatch.setattr(verifyx.settings, "VERIFYX_PACKAGE_FALLBACK_CAP_ENABLED", True)
+async def test_a_measured_probe_starts_the_count_again(context_factory, caplog):
     blocked = [_cloudflare_unreachable_payload()] * MAX_PACKAGE_FALLBACK_PROBES
 
     with caplog.at_level(logging.WARNING, logger=verifyx.logger.name):
         await _download_emas(context_factory, blocked + [_probe_payload()] + blocked)
 
     assert _streak_logs(caplog) == 0
-
-
-def test_the_package_fallback_cap_is_off_by_default():
-    fields = type(verifyx.settings).model_fields
-    assert fields["VERIFYX_PACKAGE_FALLBACK_CAP_ENABLED"].default is False

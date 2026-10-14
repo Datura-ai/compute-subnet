@@ -147,14 +147,6 @@ async def test_power_limit_rejects_between_old_and_new_floor(context_factory, re
 
 
 @pytest.mark.asyncio
-async def test_power_limit_passes_when_default_limit_missing(context_factory, read_records_mock) -> None:
-    ctx = context_factory(state=_state(current_limit=105, default_limit=None))
-    result = await GpuPowerLimitCheck().run(ctx)
-    assert result.passed is True
-    assert result.event.reason_code == "GPU_POWER_LIMIT_BASELINE_INCOMPLETE"
-
-
-@pytest.mark.asyncio
 async def test_power_limit_skipped_when_lium_default_job_active(context_factory, read_records_mock) -> None:
     # DAH-2356: Lium lowered this node's power for its own idle filler (owner="lium"), so the
     # below-90% limit is expected — skip the penalty; the node keeps its score and stays rentable.
@@ -394,8 +386,7 @@ async def test_power_limit_rescues_when_read_partially_fails_but_records_cover(
 
 
 @pytest.mark.asyncio
-async def test_an_unreadable_power_limit_fails_under_enforcement(context_factory, monkeypatch) -> None:
-    monkeypatch.setattr(check_module.settings, "GPU_POWER_LIMIT_INCOMPLETE_ENFORCEMENT_ENABLED", True)
+async def test_an_unreadable_power_limit_fails(context_factory) -> None:
     ctx = context_factory(state=_state(current_limit=None, default_limit=350))
 
     result = await GpuPowerLimitCheck().run(ctx)
@@ -406,10 +397,7 @@ async def test_an_unreadable_power_limit_fails_under_enforcement(context_factory
 
 
 @pytest.mark.asyncio
-async def test_an_unreadable_power_limit_under_a_lium_filler_passes_under_enforcement(
-    context_factory, monkeypatch
-) -> None:
-    monkeypatch.setattr(check_module.settings, "GPU_POWER_LIMIT_INCOMPLETE_ENFORCEMENT_ENABLED", True)
+async def test_an_unreadable_power_limit_under_a_lium_filler_passes(context_factory) -> None:
     ctx = context_factory(
         state=_state(current_limit=None, default_limit=350, default_job_owner="lium")
     )
@@ -417,8 +405,3 @@ async def test_an_unreadable_power_limit_under_a_lium_filler_passes_under_enforc
     result = await GpuPowerLimitCheck().run(ctx)
 
     assert result.passed is True
-
-
-def test_unreadable_power_limit_enforcement_is_off_by_default() -> None:
-    fields = type(check_module.settings).model_fields
-    assert fields["GPU_POWER_LIMIT_INCOMPLETE_ENFORCEMENT_ENABLED"].default is False
