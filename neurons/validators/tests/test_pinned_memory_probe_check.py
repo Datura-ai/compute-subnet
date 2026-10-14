@@ -284,3 +284,37 @@ def test_mismatches_counts_chunks_and_finds_the_first_wrong_byte():
     got[2 * mb] = 1
     assert namespace["_mismatches"](want, bytes(got)) == (2, [mb + 7, 2 * mb])
     assert namespace["_mismatches"](want, want) == (0, [])
+
+
+def test_a_verdict_already_queued_is_read_after_the_deadline():
+    # one card hung in setup used the whole budget; the next card's fault is in its pipe and must not become "error"
+    namespace: dict = {"time": __import__("time")}
+    kept = [
+        node
+        for node in ast.parse(PROBE_SOURCE).body
+        if isinstance(node, ast.FunctionDef) and node.name == "drain_workers"
+    ]
+    exec(compile(ast.Module(body=kept, type_ignores=[]), "probe", "exec"), namespace)
+    namespace["_reap"] = lambda process: None
+
+    class Pipe:
+        def __init__(self, messages):
+            self.messages = list(messages)
+
+        def poll(self, timeout):
+            return bool(self.messages)
+
+        def recv(self):
+            return self.messages.pop(0)
+
+    class Process:
+        def is_alive(self):
+            return True
+
+    fault = {"index": 1, "status": "fault", "error": "wrong data"}
+    workers = [(0, Process(), Pipe([])), (1, Process(), Pipe([{"phase": "copy"}, fault]))]
+
+    reports = namespace["drain_workers"](workers, deadline=0.0)
+
+    assert reports[0]["status"] == "error"
+    assert reports[1] == fault

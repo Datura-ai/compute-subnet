@@ -254,7 +254,8 @@ def drain_workers(workers: list, deadline: float) -> list[dict]:
         while report is None:
             remaining = deadline - time.perf_counter()
             try:
-                if remaining <= 0 or not conn.poll(remaining):
+                # past the deadline a verdict already in the pipe still counts: poll(0) reads it
+                if not conn.poll(max(remaining, 0)):
                     break
                 message = conn.recv()
             except EOFError:

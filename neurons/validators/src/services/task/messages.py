@@ -1576,8 +1576,10 @@ class PinnedMemoryProbeMessages:
             "A GPU could not copy a page-locked (pinned) host buffer to the device and back: wrong data, a CUDA "
             "error or a copy that never finished. PyTorch pin_memory() / non_blocking copies fail the same way. "
             "On a TDX guest (Intel TDX confidential VM) the GPUs must be in confidential-computing mode "
-            "(`nvidia-smi conf-compute -f` shows CC status: ON) or the VM must run without TDX; also check the "
-            "IOMMU / swiotlb settings and the host `dmesg` for NVRM Xid lines."
+            "(`nvidia-smi conf-compute -f` shows CC status: ON) or the VM must run without TDX. A multi-GPU "
+            "H100/H200 node runs in Protected PCIe mode instead, where CC status stays OFF: check "
+            "`nvidia-smi conf-compute --get-multigpu-mode`. Also check the IOMMU / swiotlb settings and the "
+            "host `dmesg` for NVRM Xid lines."
         ),
     )
     UNKNOWN = MessageTemplate(
