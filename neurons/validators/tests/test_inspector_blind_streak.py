@@ -134,3 +134,33 @@ async def test_a_redis_outage_never_fails_the_check(context_factory, monkeypatch
 def test_blind_streak_enforcement_is_off_by_default():
     fields = type(inspector.settings).model_fields
     assert fields["INSPECTOR_BLIND_STREAK_ENFORCEMENT_ENABLED"].default is False
+
+
+@pytest.mark.asyncio
+async def test_a_provider_finding_with_a_failed_canary_still_counts_as_blind(
+    context_factory, caplog, monkeypatch
+):
+    monkeypatch.setattr(inspector.settings, "INSPECTOR_BLIND_STREAK_LIMIT", 2)
+    finding_no_canary = InspectorValidationResponse(
+        report=_healthy_report(canary_ok=False, findings=[{"kind": "malicious-process"}])
+    )
+
+    with caplog.at_level(logging.WARNING, logger=inspector.logger.name):
+        await _run_cycles(context_factory, FakeRedis(), ERROR, finding_no_canary)
+
+    assert _streak_logs(caplog) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_provider_finding_from_a_seeing_sensor_ends_the_streak(
+    context_factory, monkeypatch
+):
+    monkeypatch.setattr(inspector.settings, "INSPECTOR_BLIND_STREAK_LIMIT", 3)
+    redis = FakeRedis()
+    finding = InspectorValidationResponse(
+        report=_healthy_report(findings=[{"kind": "malicious-process"}])
+    )
+
+    await _run_cycles(context_factory, redis, ERROR, ERROR, finding)
+
+    assert list(redis.store.values()) == []

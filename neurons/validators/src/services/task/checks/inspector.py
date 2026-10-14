@@ -136,7 +136,9 @@ class InspectorRentedCheck:
             sensor_attested=sensor_attested,
         )
         if verdict.provider_origin:
-            await _record_blind_streak_and_decide_pass(ctx, "MALICIOUS")
+            # a finding seen while the canary failed or the collector was down or just started
+            # does not show the sensor saw everything, so that cycle still counts as blind
+            await _record_blind_streak_and_decide_pass(ctx, _sensor_outcome(report, warnings))
             return self._record_provider_origin(
                 ctx,
                 verdict=verdict,
@@ -359,6 +361,17 @@ def _sensor_attested(ctx: Context) -> bool:
     # Elsewhere the checksum was read through the provider's own shell and proves nothing — say
     # so in the verdict.
     return bool(ctx.tdx_attestation_passed) and settings.ENABLE_ATTESTATION_WHITELIST
+
+
+def _sensor_outcome(report: dict[str, Any], warnings: list[dict[str, Any]]) -> str:
+    """The blind-streak outcome of a cycle with a provider-origin finding."""
+    if _canary_failed(report):
+        return "CANARY_FAILED"
+    if _collector_not_running(report):
+        return "COLLECTOR_NOT_RUNNING"
+    if warnings:
+        return "COLLECTOR_RECENTLY_STARTED"
+    return "MALICIOUS"
 
 
 def _canary_failed(report: dict[str, Any]) -> bool:
