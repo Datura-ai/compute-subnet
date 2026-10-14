@@ -59,6 +59,7 @@ STUBS = {
             "ps ") exit 0 ;;
             "ps --format") [ -z "${STUB_RUNNING:-}" ] || echo "$STUB_RUNNING" ;;   # install mode's running-container sort
             "ps -a")   # every container, stopped ones too
+                [ -z "${STUB_PS_A_HANGS:-}" ] || exit 124
                 echo "${STUB_STOPPED_POD:-}"
                 [ "$4" != name=pod_ ] || [ -z "${STUB_PODS:-}" ] || echo "$STUB_PODS" ;;
             "ps --filter")
@@ -756,6 +757,9 @@ def test_vloopback_fix_is_idempotent(tmp_path, seed, changes, message):
         ({"STUB_DOCKER_ROOT": "docker"}, "Docker reports the data-root 'docker', not an absolute path"),
         # what `docker volume inspect t` showed on the ticket-0331 host: no container starts
         ({"STUB_RELATIVE_MOUNTPOINT": "1"}, "the vloopback plugin reports the Mountpoint '206/fs', not an absolute path"),
+        # a rental that appeared after the installer's first check, or a docker that hangs: no exit, the caller restarts the executor
+        ({"STUB_VLOOPBACK": "relative", "STUB_PODS": "pod_4f1c"}, "rentals found (pod_4f1c); the vloopback plugin's DATA_DIR 'loopback' is not changed under them."),
+        ({"STUB_VLOOPBACK": "relative", "STUB_PS_A_HANGS": "1"}, "could not check for rentals before changing the vloopback plugin: timed out after 30s"),
     ],
 )
 def test_vloopback_unfixable_host_fails_with_the_cause(tmp_path, env, reason):
@@ -797,7 +801,10 @@ def test_vloopback_install_and_mount_test_run_under_timeouts(tmp_path, seed, plu
     assert any(call.startswith("30 docker info --format {{.DockerRootDir}}") for call in calls)
     assert any(call.startswith("30 docker plugin inspect") for call in calls)
     limits = {" ".join(line.split()[1:3]): line.split()[0] for line in calls if "plugin" not in line}
-    assert limits == {"docker info": "30", "docker volume": "30", "docker run": "120", "docker rm": "30"}
+    expected = {"docker info": "30", "docker volume": "30", "docker run": "120", "docker rm": "30"}
+    if seed == "relative":
+        expected["docker ps"] = "30"  # the rental check before DATA_DIR changes
+    assert limits == expected
 
 
 def test_interrupted_mount_test_is_cleaned_up_by_the_exit_trap(tmp_path):
@@ -893,7 +900,7 @@ def test_install_mode_exits_one_with_one_message_when_the_host_cannot_mount_a_vo
 def test_install_mode_does_not_change_the_plugin_under_a_rental(tmp_path):
     proc = run_script(tmp_path, env={"STUB_VLOOPBACK": "relative", "STUB_PODS": "pod_4f1c"})
     assert proc.returncode == 1
-    assert "Rentals found (pod_* containers, running or stopped). Cannot proceed." in proc.stdout
+    assert "do not work on this host: rentals found (pod_4f1c)" in proc.stdout
     assert _plugin_changes(tmp_path) == []
 
 # ── fuse3 ───────────────────────────────────────────────────────────────────

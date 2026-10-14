@@ -562,8 +562,18 @@ ensure_vloopback_plugin() {
     case "$data_dir" in
         /*) ;;
         *)
-            # changing the plugin under a running pod would pull its disk away
-            abort_on_active_rentals
+            # changing the plugin under a running pod would pull its disk away; the executor is stopped
+            # by now, so a hung docker or a rental returns through the caller's restart, never exits
+            out=$(timeout "$VLOOPBACK_CLEANUP_TIMEOUT" docker ps -a --filter "name=pod_" --format '{{.Names}}' 2>&1) || {
+                [ -n "$out" ] || out="timed out after ${VLOOPBACK_CLEANUP_TIMEOUT}s"
+                VLOOPBACK_REASON="could not check for rentals before changing the $VLOOPBACK_PLUGIN plugin: $(echo "$out" | vloopback_last_line)"
+                return 1
+            }
+            out=$(echo "$out" | grep .)
+            [ -z "$out" ] || {
+                VLOOPBACK_REASON="rentals found (${out//$'\n'/ }); the $VLOOPBACK_PLUGIN plugin's DATA_DIR '${data_dir}' is not changed under them. Run the installer again with no rental on the node."
+                return 1
+            }
             if [ "$state" = "true" ]; then
                 out=$(timeout "$VLOOPBACK_CLEANUP_TIMEOUT" docker plugin disable "$VLOOPBACK_PLUGIN" 2>&1) || {
                     [ -n "$out" ] || out="timed out after ${VLOOPBACK_CLEANUP_TIMEOUT}s"
