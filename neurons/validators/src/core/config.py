@@ -410,6 +410,7 @@ class Settings(BaseSettings):
     # (NVML_DRIVER_MISSING) and with this on it fails the check. Off by default.
     NVML_DRIVER_MISSING_ENFORCEMENT_ENABLED: bool = Field(
         env="NVML_DRIVER_MISSING_ENFORCEMENT_ENABLED", default=False
+    )
     # The sysbox probe container must run in a user namespace (sysbox always uses one); an identity uid map
     # is logged as SYSBOX_IDENTITY_UID_MAP and, with this on, the node is not counted as running sysbox.
     SYSBOX_USERNS_ENFORCEMENT_ENABLED: bool = Field(
@@ -494,6 +495,7 @@ class Settings(BaseSettings):
     # on it is refused, so listing someone else's executor id no longer resets their record. Off by default.
     VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED: bool = Field(
         env="VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", default=False
+    )
     # A card whose current or default power limit the scrape could not read passes the power-limit
     # check (GPU_POWER_LIMIT_BASELINE_INCOMPLETE). On: it fails with score 0, like a limit below the
     # threshold. Off by default: some hypervisors expose no power management to the guest.
@@ -537,6 +539,7 @@ class Settings(BaseSettings):
     PINNED_MEMORY_PROBE_CHECK_ENABLED: bool = Field(env="PINNED_MEMORY_PROBE_CHECK_ENABLED", default=True)
     PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED: bool = Field(
         env="PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED", default=True
+    )
     # A fault probe with no verdict passes. Five such cycles in a row on one node are logged
     # (GPU_FAULT_PROBE_UNKNOWN_STREAK); with this on they are judged like a fault, which fails the
     # node only while GPU_FAULT_PROBE_ENFORCEMENT_ENABLED is on too. Off by default.
