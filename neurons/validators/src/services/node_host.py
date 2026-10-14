@@ -84,6 +84,9 @@ NODE_DNS_EXECUTOR = ThreadPoolExecutor(max_workers=NODE_DNS_MAX_WORKERS, thread_
 _NODE_OWNER: contextvars.ContextVar[str | None] = contextvars.ContextVar("node_owner", default=None)
 _dns_slot_lock = threading.Lock()
 _dns_busy: dict[str, int] = {}
+_dns_waiters: dict[str, list[tuple[asyncio.AbstractEventLoop, asyncio.Future]]] = {}
+# one lookup per (loop, quota key, name) at a time: a port check dials up to 300 ports of one host at once
+_dns_inflight: dict[tuple, asyncio.Task] = {}
 
 
 @contextlib.contextmanager
@@ -114,12 +117,31 @@ def dns_quota_key(host: str) -> str:
     return f"miner:{owner}" if owner else f"name:{host.rstrip('.').lower()}"
 
 
-def _take_dns_slot(key: str) -> bool:
-    with _dns_slot_lock:
-        if _dns_busy.get(key, 0) >= NODE_DNS_PER_MINER:
-            return False
-        _dns_busy[key] = _dns_busy.get(key, 0) + 1
-        return True
+async def _take_dns_slot(key: str) -> None:
+    """Wait for one of the key's NODE_DNS_PER_MINER slots. A waiter sleeps until a slot is given back (by a pool
+    thread, hence call_soon_threadsafe), never polls."""
+    loop = asyncio.get_running_loop()
+    while True:
+        with _dns_slot_lock:
+            if _dns_busy.get(key, 0) < NODE_DNS_PER_MINER:
+                _dns_busy[key] = _dns_busy.get(key, 0) + 1
+                return
+            woken = loop.create_future()
+            _dns_waiters.setdefault(key, []).append((loop, woken))
+        try:
+            await woken
+        finally:
+            with _dns_slot_lock:
+                waiters = _dns_waiters.get(key, [])
+                if (loop, woken) in waiters:
+                    waiters.remove((loop, woken))
+                if not waiters:
+                    _dns_waiters.pop(key, None)
+
+
+def _wake(woken: asyncio.Future) -> None:
+    if not woken.done():
+        woken.set_result(None)
 
 
 def _give_dns_slot(key: str) -> None:
@@ -129,6 +151,10 @@ def _give_dns_slot(key: str) -> None:
             _dns_busy[key] = left
         else:
             _dns_busy.pop(key, None)
+        waiters = _dns_waiters.pop(key, [])
+    for loop, woken in waiters:  # every waiter retries; those that lose wait again
+        with contextlib.suppress(RuntimeError):  # its loop is closed
+            loop.call_soon_threadsafe(_wake, woken)
 
 
 class _QuotaSlotExecutor:
@@ -178,14 +204,44 @@ async def resolve_public_host(host: str, port: int = 22, executor=None) -> list:
 
 async def resolve_node_host(host: str, port: int) -> list:
     """``resolve_public_host`` in NODE_DNS_EXECUTOR, refused (NodeHostError) when the miner's DNS has
-    not answered within NODE_DNS_TIMEOUT_SECONDS. A caller's own, shorter deadline still applies."""
+    not answered within NODE_DNS_TIMEOUT_SECONDS. A caller's own, shorter deadline still applies.
+    Concurrent lookups of one name by one miner share a single lookup, whatever port each dials."""
     if is_ip_literal(host):
         return []
+    loop = asyncio.get_running_loop()
     key = dns_quota_key(host)
+    inflight_key = (loop, key, host.rstrip(".").lower())
+    lookup = _dns_inflight.get(inflight_key)
+    if lookup is None:
+        lookup = loop.create_task(_resolve_in_quota(host, port, key))
+        _dns_inflight[inflight_key] = lookup
+        lookup.add_done_callback(functools.partial(_lookup_done, inflight_key))
+    # shield: a caller that gives up must not cancel the lookup the others wait for (it ends at the deadline)
+    infos = await asyncio.shield(lookup)
+    return _at_port(infos, port)
+
+
+def _lookup_done(inflight_key: tuple, lookup: asyncio.Task) -> None:
+    if _dns_inflight.get(inflight_key) is lookup:
+        del _dns_inflight[inflight_key]
+    if not lookup.cancelled():
+        lookup.exception()  # retrieved: every caller may have given up already
+
+
+def _at_port(infos: list, port: int) -> list:
+    """The shared lookup's results with this caller's port in each address."""
+    checked = _CheckedAddresses(
+        (family, sock_type, proto, canon, (sockaddr[0], port, *sockaddr[2:]))
+        for family, sock_type, proto, canon, sockaddr in infos
+    )
+    checked.host = getattr(infos, "host", "")
+    return checked
+
+
+async def _resolve_in_quota(host: str, port: int, key: str) -> list:
     try:
         async with asyncio.timeout(NODE_DNS_TIMEOUT_SECONDS):
-            while not _take_dns_slot(key):  # this miner's lookups are all still running
-                await asyncio.sleep(0.02)
+            await _take_dns_slot(key)  # returns once this miner has a lookup thread free
             slot = _QuotaSlotExecutor(key)
             try:
                 return await resolve_public_host(host, port, executor=slot)

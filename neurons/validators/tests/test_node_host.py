@@ -1,7 +1,9 @@
 import asyncio
 import logging
 import socket
+import sys
 import threading
+import time
 
 import aiohttp
 import pytest
@@ -441,3 +443,59 @@ async def test_per_miner_handlers_attribute_their_tasks_lookups_to_the_payload_m
 
     assert await Service().handle(Payload(), "gpu.example") == "miner:5Hotkey"
     assert node_host.dns_quota_key("gpu.example") == "name:gpu.example"
+
+
+@pytest.mark.asyncio
+async def test_a_port_check_of_one_host_resolves_it_once_and_dials_each_port(monkeypatch):
+    # review of #1609: the port check dials up to 300 ports of a node at once, each a lookup through 4 slots
+    calls = []
+
+    def lookup(host, port, *args, **kwargs):
+        calls.append(host)
+        time.sleep(0.05)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", port))]
+
+    monkeypatch.setattr("socket.getaddrinfo", lookup)
+    ports = range(20000, 20300)
+
+    results = await asyncio.gather(*(_resolve_port("miner-hotkey", "gpu.node.example", p) for p in ports))
+
+    assert calls == ["gpu.node.example"]
+    assert [result["port"] for [result] in results] == list(ports)
+
+
+async def _resolve_port(miner, host, port):
+    with node_owner(miner):
+        return await PublicHostResolver().resolve(host, port)
+
+
+@pytest.mark.asyncio
+async def test_a_lookup_waiting_for_its_miners_slot_sleeps_until_one_is_given_back(monkeypatch):
+    # review of #1609: waiters polled the loop every 20 ms for as long as the miner's lookups stalled
+    release = _stall_names_containing(monkeypatch, "evil")
+    polls = []
+    real_sleep = asyncio.sleep
+
+    async def sleep(delay, *args, **kwargs):
+        if sys._getframe(1).f_globals.get("__name__", "").endswith("node_host"):
+            polls.append(delay)
+        return await real_sleep(delay, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    try:
+        stalled = [
+            asyncio.create_task(_resolve_as("miner-hotkey", f"gpu{i}.evil.example"))
+            for i in range(node_host.NODE_DNS_PER_MINER)
+        ]
+        await real_sleep(0.05)
+        waiting = asyncio.create_task(_resolve_as("miner-hotkey", "gpu.good.example"))
+        await real_sleep(0.2)
+        assert not waiting.done() and polls == []
+
+        release.set()
+        [resolved] = await asyncio.wait_for(waiting, 1)
+
+        assert resolved["host"] == "1.1.1.1"
+        await asyncio.gather(*stalled, return_exceptions=True)
+    finally:
+        release.set()
