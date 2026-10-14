@@ -985,8 +985,8 @@ def check_sysbox_gpu_compatibility() -> tuple[bool, str]:
 # mount ("setting up ID-mapped mount on path 206/fs"). check_vloopback_volume_ability does what a rental with
 # a disk limit does: a vloopback volume (docker_service.create_local_volume) mounted into a container under
 # the runtime rentals get on this host, written, read back and removed; nvidia_docker_sysbox_setup.sh runs the
-# same test at setup. The verdict goes to specs.vloopback_check and the validator decides what it changes
-# (VLOOPBACK_SCRAPE_CHECK_ENFORCEMENT_ENABLED). The plugin is only read here: the rental path and setup install it.
+# same test at setup. The verdict goes to the validator's SCRAPE_OK event and changes nothing else.
+# The plugin is only read here: the rental path and setup install it.
 VLOOPBACK_PLUGIN = VLOOPBACK_DRIVER_PREFIX
 VLOOPBACK_PROBE_IMAGE = "daturaai/compute-subnet-executor:latest"
 VLOOPBACK_PROBE_TOKEN = "lium-vloopback-ok"
@@ -1182,10 +1182,11 @@ def check_vloopback_volume_ability(runtime):
     plugin_lines = plugin_state.splitlines()
     plugin_id = plugin_lines[0] if plugin_lines else ""
     enabled = plugin_lines[1] if len(plugin_lines) > 1 else ""
+    if enabled == "false":
+        # the first rental with a disk limit enables it (create_local_volume), and so does setup
+        return "skipped", "VLOOPBACK_PLUGIN_DISABLED", "docker plugin inspect says Enabled='false'", False
     if enabled != "true":
-        # the rental path only skips `docker plugin install` for an enabled plugin; on a disabled one
-        # the install fails with "already exists" and so does the rental
-        return "fail", "VLOOPBACK_PLUGIN_DISABLED", f"docker plugin inspect says Enabled={enabled!r}", False
+        return "fail", "VLOOPBACK_PLUGIN_UNREADABLE", f"docker plugin inspect says Enabled={enabled!r}", False
     data_dir = ""
     for env_line in plugin_lines[2:]:
         if env_line.startswith("DATA_DIR="):

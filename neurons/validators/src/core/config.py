@@ -388,24 +388,9 @@ class Settings(BaseSettings):
     # Only an answer whose plaintext uuid matches counts; a probe that never answered (out of
     # memory) keeps the mismatch path and its busy-GPU waiver.
     MATMUL_SEAL_REQUIRED_ENABLED: bool = Field(env="MATMUL_SEAL_REQUIRED_ENABLED", default=False)
-    # ticket-0331 — the scrape mounts a size-limited vloopback volume the way a rental does, so a host
-    # whose rental volumes cannot mount shows up at validation, before a renter's pod fails to start.
-    # CHECK_ENABLED is the kill switch: off, the scrape skips the test (baked in by FileEncryptService).
-    # Report-only while ENFORCEMENT is off: the verdict goes to specs.vloopback_check and the scrape
-    # event, and storage_limit_supported stays the --storage-opt result. ENFORCEMENT on: a failed test
-    # also sets storage_limit_supported=false, which the platform backend reads for, among others: the
-    # disk limit, whether GPU-split rentals are allowed, whether a partly rented node's free GPUs are
-    # listed, filler jobs on those free GPUs, the provider portal's GPU-splitting setting (shown as not
-    # supported, the provider's split minimum refused) and partial-count machine-request matches. A
-    # failing node loses all of them. The validator's own supports_gpu_splitting follows --storage-opt
-    # either way, so incentive/rental_price.py keeps paying the unrented incentive on a partly rented
-    # node's free GPUs that the backend no longer lists, and keeps its split bucket and flagship
-    # exemption. A timeout or check error on one scrape counts as a failure until the next scrape.
-    # Turning it on is an idle-pay and listing decision for a human, not a default.
+    # The scrape mounts a size-limited vloopback volume the way a rental does and reports the verdict in
+    # its SCRAPE_OK event. Kill switch: off, the scrape skips the test (baked in by FileEncryptService).
     VLOOPBACK_SCRAPE_CHECK_ENABLED: bool = Field(env="VLOOPBACK_SCRAPE_CHECK_ENABLED", default=True)
-    VLOOPBACK_SCRAPE_CHECK_ENFORCEMENT_ENABLED: bool = Field(
-        env="VLOOPBACK_SCRAPE_CHECK_ENFORCEMENT_ENABLED", default=False
-    )
     # Item 3 — run the GPU work-proof on every claimed card concurrently (own challenge per card,
     # sized from the registry SKU) and time the aggregate on the validator, so a count lie either
     # fails device selection or serialises past a wide wall-clock threshold.
