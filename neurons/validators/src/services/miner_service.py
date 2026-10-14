@@ -1020,7 +1020,8 @@ class MinerService:
         """Whether an empty answer from the miner still has rented executors to report (DAH-3558).
 
         A miner whose only executors are rented and down answers with zero executors; that used to
-        end as one miner-level failure row and nothing about the nodes.
+        end as one miner-level failure row and nothing about the nodes. With the report flag off,
+        the iteration also writes the shadow log for the first node it finds.
         """
         return any(
             self._iter_not_listed_rented(
