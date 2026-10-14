@@ -118,6 +118,19 @@ def no_kept_upload_probes_carried_between_tests():
             module._kept_upload_probes.clear()
 
 
+@pytest.fixture(autouse=True)
+def no_fault_probe_streak_carried_between_tests():
+    """The fault probe counts no-verdict cycles per (hotkey, uuid) for the process; tests share both."""
+    yield
+    for name in (
+        "services.task.checks.gpu_fault_probe",
+        "neurons.validators.src.services.task.checks.gpu_fault_probe",
+    ):
+        module = sys.modules.get(name)
+        if module is not None:
+            module._unknown_streak.clear()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def setup_sql_logging():
     """Enable SQL query logging for all tests."""
