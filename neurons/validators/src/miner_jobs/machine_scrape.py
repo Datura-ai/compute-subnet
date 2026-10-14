@@ -838,9 +838,14 @@ def get_docker_info(content: bytes):
             result = run_cmd(f'{docker_path} inspect --format "{{{{.Image}}}}" {container_id}')
             image_id = result.strip()
 
-            # Get the image details
-            result = run_cmd(f'{docker_path}  inspect --format "{{{{json .RepoDigests}}}}" {image_id}')
-            repo_digests = json.loads(result.strip())
+            # Get the image details. A running container can outlive its image (removed or pruned
+            # under it); its digest is then unknown, which excuses nothing, instead of failing the
+            # whole scrape and leaving every GPU on the node unverified.
+            try:
+                result = run_cmd(f'{docker_path}  inspect --format "{{{{json .RepoDigests}}}}" {image_id}')
+                repo_digests = json.loads(result.strip())
+            except RuntimeError:
+                repo_digests = []
 
             # Get the container name
             result = run_cmd(f'{docker_path} inspect --format "{{{{.Name}}}}" {container_id}')
@@ -1520,6 +1525,9 @@ TOPO_GPU_LABEL_PATTERN = r"^GPU\d+$"
 TOPO_NVLINK_CELL_PATTERN = r"^NV(\d+)$"
 NVLINK_ACTIVE_LINK_PATTERN = r"Link \d+: [\d.]+ GB/s"
 NVLINK_GPU_HEADER_PATTERN = r"^GPU \d+:"
+# nvidia-smi underlines the topology header with SGR escapes (ESC[4m ... ESC[0m) even when piped, so
+# without stripping them the header's first GPU cell never matches and every table parses empty.
+TERMINAL_ESCAPE_PATTERN = r"\x1b\[[0-9;]*m"
 
 
 def parse_topology_matrix(output):
@@ -1534,6 +1542,7 @@ def parse_topology_matrix(output):
     labels = []
     rows = []
     for line in output.splitlines():
+        line = re.sub(TERMINAL_ESCAPE_PATTERN, "", line)
         cells = [cell.strip() for cell in re.split(r"\t+|\s{2,}", line.rstrip())]
         if header is None:
             if len(cells) > 1 and cells[0] == "" and re.match(TOPO_GPU_LABEL_PATTERN, cells[1]):

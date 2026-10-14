@@ -70,10 +70,11 @@ def listed_container_names(rented_data: Optional[RentedExecutorsResponse]) -> se
         return set()
     names: set[str] = set()
     for executor in rented_data.executors.values():
-        names.update(pod.container_name for pod in executor.pods)
+        # DAH-4315: a pod the backend has not named yet protects the pod_<pod_id> it is created as
+        names.update(pod.docker_container_name for pod in executor.pods)
         # An edit parks the pod's current container under <name>__prev while the replacement
         # is created; it is the customer's only copy until then, whatever its age
-        names.update(f"{pod.container_name}{EDIT_PARKED_SUFFIX}" for pod in executor.pods)
+        names.update(f"{pod.docker_container_name}{EDIT_PARKED_SUFFIX}" for pod in executor.pods)
     # Every filler is protected — a GPU-split node runs one per VRAM bundle, and reaping a
     # sibling kills a live worker mid-cycle. The legacy single map covers an older backend.
     for fillers in rented_data.all_filler_containers_by_executor.values():
@@ -616,16 +617,23 @@ class ContainerCleanup:
             )
             return False
 
-        # Remove associated volume if it's a pod container
-        if container_name.startswith(POD_CONTAINER_PREFIX):
-            pod_id = container_name.removeprefix(POD_CONTAINER_PREFIX)
+        # A create names both the container and its volume after payload.pod_id (the pod id or the
+        # filler run id), so `volume_<id>` is this container's own volume and no one else's.
+        for prefix in (POD_CONTAINER_PREFIX, FILLER_CONTAINER_PREFIX):
+            if not container_name.startswith(prefix):
+                continue
+            volume_name = f"volume_{container_name.removeprefix(prefix)}"
             try:
-                await ssh_client.run(DockerCommand.volume_remove(f"volume_{pod_id}"))
+                result = await ssh_client.run(DockerCommand.volume_remove_strict(volume_name))
+                output = (result.stderr or result.stdout or "").strip()
+                error = "" if result.exit_status == 0 else output or f"exit_status={result.exit_status}"
             except Exception as e:
+                error = str(e) or type(e).__name__
+            if error and "no such volume" not in error.lower():
                 logger.warning(
                     _m(
                         f"Removed container {container_name} but not its volume",
-                        extra={"container_name": container_name, "volume": f"volume_{pod_id}", "error": str(e)},
+                        extra={"container_name": container_name, "volume": volume_name, "error": error},
                     )
                 )
 

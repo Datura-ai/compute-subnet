@@ -30,7 +30,7 @@ class MessageTemplate:
 def render_message(
     template: MessageTemplate,
     *,
-    ctx: Context,
+    ctx: Context | None,
     check_id: str,
     what: dict[str, Any] | None = None,
     severity: str | None = None,
@@ -40,7 +40,9 @@ def render_message(
     help_uri: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> Any:
-    """Render a `MessageTemplate` into a structured message via `build_msg`."""
+    """Render a `MessageTemplate` into a structured message via `build_msg`.
+
+    `ctx` is None for a verdict the cycle reaches after every pipeline has ended."""
     resolved_severity = severity or template.severity
     resolved_help_uri = help_uri or template.help_uri
     if resolved_help_uri is None and resolved_severity in _HELP_URI_SEVERITIES:
@@ -54,8 +56,8 @@ def render_message(
         remediation=(remediation if remediation is not None else template.remediation) or "",
         what=what or {},
         check_id=check_id,
-        pipeline_id=ctx.pipeline_id,
-        ctx={**ctx.default_extra, **(extra or {})},
+        pipeline_id=ctx.pipeline_id if ctx is not None else None,
+        ctx={**(ctx.default_extra if ctx is not None else {}), **(extra or {})},
         help_uri=resolved_help_uri,
     )
 
@@ -305,6 +307,14 @@ class GpuModelMessages:
         category="policy",
         impact="Job skipped; score set to 0",
     )
+    MODEL_MIXED = MessageTemplate(
+        event="Mixed GPU models on one node",
+        reason="GPU_MODEL_MIXED",
+        severity="warning",
+        category="policy",
+        impact="Job skipped; score set to 0",
+        remediation="Every GPU on a node must be the same model.",
+    )
     COUNT_ZERO = MessageTemplate(
         event="No GPUs detected",
         reason="GPU_COUNT_ZERO",
@@ -436,12 +446,12 @@ class GpuPowerLimitMessages:
             "reported by NVML."
         ),
     )
-    DATA_INCOMPLETE = MessageTemplate(
-        event="GPU power limit baseline incomplete",
-        reason="GPU_POWER_LIMIT_BASELINE_INCOMPLETE",
-        severity="info",
-        category="env",
-        impact="Proceed without power-limit penalty",
+    DATA_INCOMPLETE_REJECTED = MessageTemplate(
+        event="GPU power limit could not be read",
+        reason="GPU_POWER_LIMIT_UNREADABLE",
+        severity="warning",
+        category="policy",
+        impact="Job skipped; score set to 0",
         remediation="Ensure NVML exposes the current and default power limits for every GPU.",
     )
     LIMIT_OK = MessageTemplate(
@@ -491,6 +501,14 @@ class NvmlDigestMessages:
         category="env",
         impact="Score set to 0 for this cycle",
         remediation="Update to a supported NVIDIA driver version. Your current driver version is not recognized.",
+    )
+    DRIVER_MISSING = MessageTemplate(
+        event="NVIDIA driver version not reported",
+        reason="NVML_DRIVER_MISSING",
+        severity="error",
+        category="env",
+        impact="Score set to 0 for this cycle",
+        remediation="Make sure `nvidia-smi` reports the driver version on the host.",
     )
     DIGEST_OK = MessageTemplate(
         event="NVML library digest verified",
@@ -727,7 +745,14 @@ class DuplicateExecutorMessages:
         category="policy",
         impact="Proceed",
     )
-
+    ACROSS_MINERS = MessageTemplate(
+        event="Executor also scored under another miner this cycle",
+        reason="EXECUTOR_DUPLICATE_ACROSS_MINERS",
+        severity="warning",
+        category="policy",
+        impact="Score set to 0 for this cycle; the other miner keeps it",
+        remediation="One machine earns under one miner per cycle. Register it under one miner only.",
+    )
 
 class CollateralStatusMessages:
     DEPOSITED = MessageTemplate(
@@ -961,6 +986,28 @@ class TenantEnforcementMessages:
         category="runtime",
         impact="Score set to 0; verification cleared",
         remediation="Start container and ensure it stays healthy.",
+    )
+    REBOOT_FAILED_HOST_FAULT = MessageTemplate(
+        event="Host cannot start a GPU container after a failed pod reboot",
+        reason="REBOOT_FAILED_HOST_FAULT",
+        severity="error",
+        category="runtime",
+        impact="Score set to 0; verification cleared; executor inactive until the host passes again",
+        remediation=(
+            "Run `docker run --rm --gpus all <image> nvidia-smi -L` on the host and fix the Docker daemon or"
+            " the NVIDIA container runtime; check `dmesg` for Xid errors and reboot if a GPU is lost."
+        ),
+    )
+    POD_RESTARTING = MessageTemplate(
+        event="Pod restarting under its own restart policy",
+        reason="POD_RESTARTING",
+        severity="warning",
+        category="runtime",
+        impact="No verdict for this cycle - verification kept",
+        remediation=(
+            "The pod is restarting under its restart policy; the host cannot tell whether the renter's process or "
+            "the host caused the exits."
+        ),
     )
     STALE_POD_NOT_RUNNING = MessageTemplate(
         event="Stale rented pod not running signal skipped",
@@ -1699,6 +1746,14 @@ class RentalProbeMessages:
         severity="error",
         category="runtime",
         impact="Score set to 0 and the verified job cleared until a probe passes; the node is probed again next cycle while it stays idle",
+    )
+    # the same verdict while RENTAL_PROBE_ENFORCEMENT_ENABLED is off: logged, score unchanged
+    PROBE_FAILED_OBSERVED = MessageTemplate(
+        event="Rental probe failed: a renter could not use this node (not enforced)",
+        reason="RENTAL_PROBE_FAILED_OBSERVED",
+        severity="warning",
+        category="runtime",
+        impact="None: RENTAL_PROBE_ENFORCEMENT_ENABLED is off; the node is probed again after the interval",
     )
     INCONCLUSIVE = MessageTemplate(
         event="Rental probe could not reach a verdict",

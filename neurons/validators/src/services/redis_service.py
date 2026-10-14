@@ -26,6 +26,8 @@ PENDING_PODS_PREFIX = "pending_pods_prefix"
 DUPLICATED_MACHINE_SET = "duplicated_machines"
 RENTAL_SUCCEED_MACHINE_SET = "rental_succeed_machines"
 AVAILABLE_PORT_MAPS_PREFIX = "available_port_maps"
+RENTAL_PROBE_OK_PREFIX = "rental_probe_ok"
+RENTAL_PROBE_FAILED_PREFIX = "rental_probe_failed"
 VERIFIED_JOB_COUNT_KEY = "verified_job_counts"
 # The anchor: the GPU UUID set of the executor's first successful verification, kept by every later write.
 GPU_ANCHOR_KEY = "uuids"
@@ -388,6 +390,11 @@ class RedisService:
         """Get all elements from a list in Redis in order."""
         async with self.lock:
             return await self.redis.lrange(key, 0, -1)
+
+    async def llen(self, key: str) -> int:
+        """Number of elements in a list in Redis."""
+        async with self.lock:
+            return await self.redis.llen(key)
 
     async def lrem(self, key: str, element: bytes, count: int = 0):
         """Remove elements from a list in Redis."""
