@@ -398,14 +398,18 @@ class Settings(BaseSettings):
     # Item 3 — run the GPU work-proof on every claimed card concurrently (own challenge per card,
     # sized from the registry SKU) and time the aggregate on the validator, so a count lie either
     # fails device selection or serialises past a wide wall-clock threshold.
-    # Defaults to False like RENTAL_CPU_LIMIT_CHECK_ENABLED: "shadow" here only means the verdict is
-    # not scored — the GPU work itself is real, so an 8-card host would run 8 near-full-VRAM matmuls
-    # on top of the legacy single-card one every cycle. Flip it on once elapsed/VRAM/host-RSS numbers
-    # from a real 8-GPU box show what that costs an honest miner.
+    # A card counts only when its own answer carries its own nonce under a key derived from that
+    # card's reported UUID and model; the verdict passes when every reported card is verified.
+    # The check runs by default and logs its verdict ("All-cards GPU work-proof") without changing
+    # the validation result. "Shadow" only means the verdict is not scored — the GPU work itself is
+    # real: an N-card host runs N near-full-VRAM matmuls on top of the single-card one every cycle.
+    # Set MATMUL_ALLCARDS_CHECK_ENABLED=false to turn the run off.
+    # MATMUL_ALLCARDS_ENFORCEMENT_ENABLED=true makes a failed verdict fail the validation; it stays
+    # off until the logged verdicts have been reviewed.
+    MATMUL_ALLCARDS_CHECK_ENABLED: bool = Field(env="MATMUL_ALLCARDS_CHECK_ENABLED", default=True)
     # A seal-aware libdmcompverify that gets an unsealed matmul answer always logs MATMUL_RESULT_UNSEALED;
     # with this on the answer fails. Off until the log shows which executors still answer unsealed.
     MATMUL_SEAL_REQUIRED_ENABLED: bool = Field(env="MATMUL_SEAL_REQUIRED_ENABLED", default=False)
-    MATMUL_ALLCARDS_CHECK_ENABLED: bool = Field(env="MATMUL_ALLCARDS_CHECK_ENABLED", default=False)
     # A scrape with no NVIDIA driver version skips the libnvidia-ml digest check; it is always logged
     # (NVML_DRIVER_MISSING) and with this on it fails the check. Off by default.
     NVML_DRIVER_MISSING_ENFORCEMENT_ENABLED: bool = Field(

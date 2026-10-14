@@ -76,6 +76,8 @@ def keypair():
 @pytest.fixture
 def local_verify_on(monkeypatch):
     monkeypatch.setattr(settings, "VALIDATOR_LOCAL_VERIFY_ENABLED", True)
+    # the all-cards check keeps the matmul on SSH (`allcards_ssh`); these tests cover the one call
+    monkeypatch.setattr(settings, "MATMUL_ALLCARDS_CHECK_ENABLED", False)
     monkeypatch.setattr(settings, "LOCAL_VERIFY_TIMEOUT_SECONDS", 5)
     monkeypatch.setattr(settings, "LOCAL_VERIFY_CONNECT_TIMEOUT_SECONDS", 2)
 
