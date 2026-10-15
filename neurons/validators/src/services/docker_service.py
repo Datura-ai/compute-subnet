@@ -79,6 +79,7 @@ from services.const import (
     PREFERRED_POD_PORTS,
 )
 from services.cvm_quote_broker import ensure_quote_broker, quote_socket_pod_mount
+from services.node_host import node_owner, public_host_sock
 from services.default_docker_image_digest_service import fetch_docker_hub_digest
 from services.gpu_power_limit import (
     NVIDIA_SMI_TIMEOUT_SECONDS,
@@ -2608,6 +2609,9 @@ class DockerService:
         image_command_fallback: tuple[str, ...] = (),
     ) -> ContainerRunSpec:
         memory_gb = self._rental_memory_gb(payload.memory_gb, host_ram_kib, gpu_share)
+        # Swap off and the renter-first OOM score need a memory limit to hang on (Docker refuses
+        # --memory-swap without --memory).
+        swap_off = bool(memory_gb)
         environment = {
             key: str(value)
             for key, value in (custom_options.environment or {}).items()
@@ -2666,6 +2670,8 @@ class DockerService:
             device_requests=gpu_devices.device_requests,
             cpu_count=cpu_count,
             memory_gb=memory_gb,
+            memory_swap_gb=memory_gb if swap_off else None,
+            oom_score_adj=settings.RENTAL_CONTAINER_OOM_SCORE_ADJ if swap_off else None,
             storage_limit_gb=effective_storage_limit_gb,
             pids_limit=self._rental_pids_limit(cpu_count, host_pid_max),
             shm_size=custom_options.shm_size,
@@ -9325,6 +9331,7 @@ class DockerService:
             async with asyncssh.connect(
                 host=executor_info.address,
                 port=executor_info.ssh_port,
+                **await public_host_sock(executor_info.address, executor_info.ssh_port),
                 username=executor_info.ssh_username,
                 client_keys=[pkey],
                 known_hosts=known_hosts_policy,
@@ -9495,15 +9502,16 @@ class DockerService:
                 log_extra,
             )
             require_rental_docker_ssh_host_key(executor_info)
-            await self.start_existing_container(
-                executor_info=executor_info,
-                private_key=private_key,
-                known_hosts_policy=known_hosts_policy,
-                container_name=container_name,
-                local_volume_path=local_volume_path,
-                pod_id=pod_id,
-                default_extra=log_extra,
-            )
+            with node_owner(miner_hotkey):  # a hostname node's DNS counts against its miner
+                await self.start_existing_container(
+                    executor_info=executor_info,
+                    private_key=private_key,
+                    known_hosts_policy=known_hosts_policy,
+                    container_name=container_name,
+                    local_volume_path=local_volume_path,
+                    pod_id=pod_id,
+                    default_extra=log_extra,
+                )
         except asyncio.CancelledError:
             # the whole check runs under an outer timeout, so a cancellation can land between
             # `docker start` and the gocryptfs remount and leave the container up with its
@@ -10001,6 +10009,7 @@ class DockerService:
                 asyncssh.connect(
                     host=executor_info.address,
                     port=executor_info.ssh_port,
+                    **await public_host_sock(executor_info.address, executor_info.ssh_port),
                     username=executor_info.ssh_username,
                     client_keys=[pkey],
                     known_hosts=known_hosts_policy,
@@ -10199,6 +10208,7 @@ class DockerService:
             async with asyncssh.connect(
                 host=executor_info.address,
                 port=executor_info.ssh_port,
+                **await public_host_sock(executor_info.address, executor_info.ssh_port),
                 username=executor_info.ssh_username,
                 client_keys=[pkey],
                 known_hosts=known_hosts_policy,

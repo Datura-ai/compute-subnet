@@ -21,12 +21,12 @@ from .upload_files import UploadFailed, upload_validation_files_to_fresh_remote_
 
 logger = logging.getLogger(__name__)
 
-# DAH-2794: how long a failed stdin attempt may have taken and still be worth retrying with the
-# binary. Above a full scrape (~15 s on a real box, so a payload that will not decrypt is only
-# knowable around then), below the point where the retry stops fitting: 60 s here + 300 s upload
-# + 300 s scrape = 660 s against the 780 s per-executor timeout. The upload gets one attempt for
-# exactly that reason.
-STDIN_FAILURE_RETRY_WINDOW_MS = 60_000
+# How long a failed stdin attempt may have taken and still be worth retrying with the binary.
+# Above a full scrape (~15 s on a real box, plus up to ~90 s for the vloopback mount test and its
+# cleanup, so a payload that will not decrypt is only knowable around then), below the point where
+# the retry stops fitting: 120 s here + 300 s upload + 300 s scrape = 720 s against the 780 s
+# per-executor timeout. The upload gets one attempt for exactly that reason.
+STDIN_FAILURE_RETRY_WINDOW_MS = 120_000
 FALLBACK_UPLOAD_ATTEMPTS = 1
 
 # The scrape says only two things on stdout: a Fernet token when it worked, and a JSON object
@@ -316,6 +316,32 @@ def _interconnect_summary(specs: dict[str, Any]) -> dict[str, Any] | None:
     return summary
 
 
+VLOOPBACK_TEXT_FIELDS = ("verdict", "reason_code", "detail", "runtime")
+# the host sends these fields; a modified scrape can send any type or length, so the validator keeps
+# only strings, cut to the scrape's own detail cap
+VLOOPBACK_TEXT_CAP = 300
+
+
+def _host_text(value: Any) -> str | None:
+    return value[:VLOOPBACK_TEXT_CAP] if isinstance(value, str) else None
+
+
+def _vloopback_fields(vloopback: dict[str, Any]) -> dict[str, Any]:
+    return {field: _host_text(vloopback.get(field)) for field in VLOOPBACK_TEXT_FIELDS}
+
+
+def _storage_limit_summary(specs: dict[str, Any], vloopback: Any) -> dict[str, Any]:
+    # the storage-limit verdict and the vloopback mount test's own verdict, in the validator's own log
+    supported = bool(specs.get("storage_limit_supported", False))
+    summary: dict[str, Any] = {"supported": supported}
+    scrape_error = specs.get("storage_limit_scrape_error")
+    if not supported and scrape_error:
+        summary["detail"] = str(scrape_error)[:VLOOPBACK_TEXT_CAP]
+    if isinstance(vloopback, dict):
+        summary["vloopback"] = _vloopback_fields(vloopback)
+    return summary
+
+
 def _binary_command(remote_dir: str, script_filename: str) -> str:
     script_path = f"{remote_dir.rstrip('/')}/{script_filename.lstrip('/')}"
     return f"chmod +x {script_path} && {script_path}"
@@ -491,6 +517,8 @@ class MachineSpecScrapeCheck:
             gpu_splitting_config = ctx.state.rented_data.gpu_splitting_config if ctx.state.rented_data else {}
             gpu_splitting_min_count = gpu_splitting_config.get(ctx.executor.uuid)
             supports_gpu_splitting = hardware_supports and gpu_splitting_min_count is not None
+            # the vloopback mount test is reported in this event only; the stored specs do not carry it
+            vloopback = specs.pop("vloopback_check", None)
 
             extra_info = {
                 "sysbox_runtime": sysbox_runtime,
@@ -509,6 +537,8 @@ class MachineSpecScrapeCheck:
                     "network": specs.get("network"),
                     # DAH-2922: the NVLink/P2P verdict per cycle, without the 8x8 matrix
                     "interconnect": _interconnect_summary(specs),
+                    # whether rentals with a disk limit get one here, and the vloopback mount test's verdict
+                    "storage_limit": _storage_limit_summary(specs, vloopback),
                 },
                 extra=extra_info,
             )

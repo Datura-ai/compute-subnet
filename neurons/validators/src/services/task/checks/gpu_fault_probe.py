@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import shlex
 from pathlib import Path
 from typing import Any
 
 from core.config import settings
+from core.utils import _m, get_extra_info
 
 from ..messages import GpuFaultProbeMessages as Msg
 from ..messages import render_message
@@ -37,6 +39,15 @@ MAX_NVML_GPUS = 16
 MAX_XID_LINES = 5
 MAX_XID_CHARS = 200
 
+logger = logging.getLogger(__name__)
+
+# A probe with no verdict passes: the timeout, the missing report and the report that is not ok or
+# fault are each innocent once. They are also all a host can produce at will (kill the interpreter,
+# print another status), so a node could sit on "no verdict" for good. Cycles in a row without a
+# verdict are counted per (miner hotkey, executor uuid), per process, and logged from this many on.
+UNKNOWN_STREAK_LIMIT = 5
+_unknown_streak: dict[tuple[str, str], int] = {}
+
 
 class GpuFaultProbeCheck:
     """Run the kernel-fault probe on the executor's GPUs after the matmul has passed (DAH-3035).
@@ -60,6 +71,13 @@ class GpuFaultProbeCheck:
         if not settings.GPU_FAULT_PROBE_CHECK_ENABLED:
             return CheckResult(
                 passed=True, event=render_message(Msg.DISABLED, ctx=ctx, check_id=self.check_id)
+            )
+
+        if ctx.config.first_pass and not settings.GPU_FAULT_PROBE_ENFORCEMENT_ENABLED:
+            # a shadow verdict cannot fail the node, so it does not delay a new node's first verification
+            return CheckResult(
+                passed=True,
+                event=render_message(Msg.FIRST_PASS_SKIPPED, ctx=ctx, check_id=self.check_id),
             )
 
         filler_container = _get_filler_only_container(ctx)
@@ -91,10 +109,7 @@ class GpuFaultProbeCheck:
                 stdout_tail=run.stdout[-OUTPUT_TAIL_CHARS:],
                 stderr_tail=run.stderr[-OUTPUT_TAIL_CHARS:],
             )
-            return CheckResult(
-                passed=True,
-                event=render_message(Msg.UNKNOWN, ctx=ctx, check_id=self.check_id, what=what),
-            )
+            return self._no_verdict(ctx, what)
         if report is None:
             # the interpreter never printed a verdict: an SSH error, a python that could not run stdlib
             # code, or a crash in the parent process. Not something the GPU is blamed for.
@@ -103,13 +118,12 @@ class GpuFaultProbeCheck:
                 stdout_tail=run.stdout[-OUTPUT_TAIL_CHARS:],
                 stderr_tail=run.stderr[-OUTPUT_TAIL_CHARS:],
             )
-            return CheckResult(
-                passed=True,
-                event=render_message(Msg.UNKNOWN, ctx=ctx, check_id=self.check_id, what=what),
-            )
+            return self._no_verdict(ctx, what)
 
         what["probe"] = _summary(report)
         status = report.get("status")
+        if status in ("ok", "fault"):
+            _unknown_streak.pop((ctx.miner_hotkey, ctx.executor.uuid), None)
         if status == "ok":
             return CheckResult(
                 passed=True,
@@ -124,6 +138,28 @@ class GpuFaultProbeCheck:
             )
             return self._fault_verdict(ctx, what, error=error or "fault", report=report)
         what["error"] = _cap(report.get("error")) or f"probe status {_cap(status)!r}"
+        return self._no_verdict(ctx, what)
+
+    def _no_verdict(self, ctx: Context, what: dict[str, Any]) -> CheckResult:
+        """UNKNOWN, counted. From UNKNOWN_STREAK_LIMIT cycles in a row it is logged, and under
+        GPU_FAULT_PROBE_UNKNOWN_STREAK_ENFORCEMENT_ENABLED it is judged like a fault."""
+        key = (ctx.miner_hotkey, ctx.executor.uuid)
+        streak = _unknown_streak.get(key, 0) + 1
+        _unknown_streak[key] = streak
+        if streak >= UNKNOWN_STREAK_LIMIT:
+            enforced = settings.GPU_FAULT_PROBE_UNKNOWN_STREAK_ENFORCEMENT_ENABLED
+            what["unknown_streak"] = streak
+            logger.warning(
+                _m(
+                    "GPU_FAULT_PROBE_UNKNOWN_STREAK",
+                    extra=get_extra_info(
+                        {**ctx.default_extra, "unknown_streak": streak, "enforced": enforced}
+                    ),
+                )
+            )
+            if enforced:
+                error = f"probe gave no verdict {streak} cycles in a row: {what.get('error')}"
+                return self._fault_verdict(ctx, what, error=error, report=None)
         return CheckResult(
             passed=True,
             event=render_message(Msg.UNKNOWN, ctx=ctx, check_id=self.check_id, what=what),

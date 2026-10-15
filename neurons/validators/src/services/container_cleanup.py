@@ -70,10 +70,11 @@ def listed_container_names(rented_data: Optional[RentedExecutorsResponse]) -> se
         return set()
     names: set[str] = set()
     for executor in rented_data.executors.values():
-        names.update(pod.container_name for pod in executor.pods)
+        # DAH-4315: a pod the backend has not named yet protects the pod_<pod_id> it is created as
+        names.update(pod.docker_container_name for pod in executor.pods)
         # An edit parks the pod's current container under <name>__prev while the replacement
         # is created; it is the customer's only copy until then, whatever its age
-        names.update(f"{pod.container_name}{EDIT_PARKED_SUFFIX}" for pod in executor.pods)
+        names.update(f"{pod.docker_container_name}{EDIT_PARKED_SUFFIX}" for pod in executor.pods)
     # Every filler is protected — a GPU-split node runs one per VRAM bundle, and reaping a
     # sibling kills a live worker mid-cycle. The legacy single map covers an older backend.
     for fillers in rented_data.all_filler_containers_by_executor.values():
