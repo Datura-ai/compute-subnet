@@ -239,6 +239,7 @@ class TaskService:
                 result.attestation_digest = attestation_digest
                 result.tee_type = tee_type
                 result.gpu_attestation_passed = gpu_attestation_passed
+                result.ssh_host_key_verified = known_hosts_policy is not None
                 # DAH-2748: any check that could not reach something hides the node. The whole
                 # event list is read, so a new reachability check needs no change here.
                 result.availability_errors = [
@@ -262,6 +263,7 @@ class TaskService:
                     host=executor_info.address,
                     port=executor_info.ssh_port,
                     error=str(e),
+                    host_key_mismatch=isinstance(e, asyncssh.HostKeyNotVerifiable),
                 )
                 log_text = _m(event.event, extra=event.model_dump())
                 availability_problems = [error.model_dump(mode="json") for error in availability_errors([event])]

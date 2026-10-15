@@ -1,10 +1,13 @@
 import logging
+import re
+import shlex
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
 
 import asyncssh
+from pydantic import BaseModel
 
 from core.docker_utils import DockerCommand, collect_container_death_diagnostics
 from core.utils import _m, get_extra_info
@@ -18,6 +21,7 @@ from protocol.vc_protocol.validator_requests import (
 from ...const import (
     GPU_MEMORY_UTILIZATION_LIMIT,
     GPU_UTILIZATION_LIMIT,
+    POD_CONTAINER_NAME_GRACE_MINUTES,
 )
 from core.config import settings
 
@@ -91,6 +95,17 @@ def _gpu_usage_violation_details(
         "vram_utilization": memory_display,
         "process_count": len(processes),
     }
+
+
+def _within_container_name_grace(pod: RentedPod) -> bool:
+    """An unnamed pod is waited for only this long after it was created; a pod with no
+    created_at (backend predates the field) is waited for as before."""
+    if pod.created_at is None:
+        return True
+    created_at = pod.created_at
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=UTC)
+    return datetime.now(UTC) - created_at < timedelta(minutes=POD_CONTAINER_NAME_GRACE_MINUTES)
 
 
 @dataclass
@@ -182,7 +197,7 @@ class TenantEnforcementCheck:
             return _with_pod_states(result, ctx, rented_pods, state_by_pod_id)
 
         for pod_index, pod in enumerate(rented_pods):
-            pod_container_name = pod.container_name
+            pod_container_name = pod.docker_container_name
             pod_id = pod.pod_id
             try:
                 pod_running, ssh_pub_keys = await _check_pod_running_and_read_authorized_keys(ctx.ssh, pod_container_name)
@@ -199,6 +214,13 @@ class TenantEnforcementCheck:
                 )
             if pod_running:
                 state_by_pod_id[pod_id] = ContainerState.RUNNING
+            elif pod.container_name_pending and _within_container_name_grace(pod):
+                # DAH-4315: the backend lists a pod before it records the container's name, so
+                # its container may still be being created. Judged next cycle, not penalised.
+                state_by_pod_id[pod_id] = ContainerState.UNKNOWN
+                extra.setdefault("pods_awaiting_container", []).append(pod_id)
+                ssh_pub_keys = []
+                continue
             else:
                 diagnostics = await _collect_pod_diagnostics(ctx.ssh, pod_container_name)
                 state_by_pod_id[pod_id] = _container_state_from_diagnostics(diagnostics)
@@ -271,6 +293,7 @@ class TenantEnforcementCheck:
                     ctx=ctx,
                     container_name=pod_container_name,
                     pod_id=pod_id,
+                    pod_status=pod.status,
                     diagnostics=diagnostics,
                     local_volume_path=rental_active.local_volume_path if rental_active else None,
                     extra=extra,
@@ -286,7 +309,7 @@ class TenantEnforcementCheck:
                 # dockerd refused the keys read
                 ssh_pub_keys = []
 
-        container_names = [pod.container_name for pod in rented_pods]
+        container_names = [pod.docker_container_name for pod in rented_pods]
         container_names.extend(filler_containers)
         gpu_processes = list(ctx.state.gpu_processes)
         gpu_running_outside = _has_gpu_process_outside_container(container_names, gpu_processes)
@@ -360,6 +383,7 @@ class TenantEnforcementCheck:
         ctx: Context,
         container_name: str,
         pod_id: str,
+        pod_status: str | None,
         diagnostics: dict[str, object],
         local_volume_path: str | None,
         extra: dict[str, Any],
@@ -403,6 +427,16 @@ class TenantEnforcementCheck:
                 failure=None, ssh_pub_keys=ssh_pub_keys, container_state=ContainerState.RUNNING
             )
 
+        host_fault = await _host_gpu_container_failure(ctx, pod_status)
+        if host_fault is not None:
+            return _DownedPodOutcome(
+                failure=self._reboot_failed_host_fault_result(
+                    ctx, container_name, pod_id, host_fault, extra
+                ),
+                ssh_pub_keys=[],
+                container_state=container_state,
+            )
+
         event = render_message(
             Msg.POD_NOT_RUNNING,
             ctx=ctx,
@@ -438,6 +472,111 @@ class TenantEnforcementCheck:
             ssh_pub_keys=[],
             container_state=container_state,
         )
+
+    def _reboot_failed_host_fault_result(
+        self,
+        ctx: Context,
+        container_name: str,
+        pod_id: str,
+        host_fault: "HostGpuContainerFailure",
+        extra: dict[str, Any],
+    ) -> CheckResult:
+        event = render_message(
+            Msg.REBOOT_FAILED_HOST_FAULT,
+            ctx=ctx,
+            check_id=self.check_id,
+            what={
+                "pod_id": pod_id,
+                "container_name": container_name,
+                "executor_uuid": ctx.executor.uuid,
+                "host_gpu_container": host_fault.model_dump(),
+            },
+            extra=extra,
+        )
+        # No clear_verified_job_reason: POD_NOT_RUNNING is skipped by the backend for a pod in a
+        # platform operation (REBOOT_FAILED), and this verdict is about the host, not the pod.
+        return CheckResult(
+            passed=False,
+            event=event,
+            updates={
+                "default_extra": extra,
+                "clear_verified_job_info": True,
+                "clear_verified_job_evidence": {
+                    "reason_code": event.reason_code,
+                    "check_id": self.check_id,
+                    "pod_id": pod_id,
+                    "container_name": container_name,
+                    "host_gpu_container": host_fault.model_dump(),
+                },
+            },
+        )
+
+
+REBOOT_FAILED_POD_STATUS = "REBOOT_FAILED"
+_HOST_GPU_CONTAINER_TIMEOUT_SECONDS = 60
+_HOST_OUTPUT_TAIL_CHARS = 256
+_IMAGE_ID_RX = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+class HostGpuContainerFailure(BaseModel):
+    """The host's answer to the GPU container it could not start: its exit code and output tails."""
+
+    exit_code: int
+    stderr_tail: str
+    stdout_tail: str
+
+
+async def _host_gpu_container_failure(
+    ctx: Context, pod_status: str | None
+) -> HostGpuContainerFailure | None:
+    """What the host answered when it could not start a GPU container for a pod whose reboot failed.
+
+    The container runs the executor's own image, already on the host, with `nvidia-smi -L`: nothing the
+    renter wrote is in it, so a refusal is the Docker daemon's or the NVIDIA runtime's. None when the
+    check is off, the pod is not REBOOT_FAILED, the rental is another miner's, the image is unknown,
+    the host started the container, or the transport gave no exit status. Only on a node with this
+    one pod: the verdict resets the whole node, and on a split box it would stop billing a healthy
+    neighbour pod too. A negative exit code (asyncssh's -1 when a signal killed the `docker` client)
+    says nothing about the host.
+    """
+    if not settings.REBOOT_FAILED_HOST_CHECK_ENABLED or pod_status != REBOOT_FAILED_POD_STATUS:
+        return None
+    rented_data = ctx.state.rented_data
+    rented_executor = rented_data.executors.get(ctx.executor.uuid) if rented_data else None
+    # The backend resets by executor UUID alone, which is the miner's word.
+    if rented_executor is None or rented_executor.miner_hotkey != ctx.miner_hotkey:
+        return None
+    if len(rented_executor.pods) != 1:
+        return None
+    docker = (ctx.state.specs or {}).get("docker")
+    executor_container_id = docker.get("container_id") if isinstance(docker, dict) else None
+    if not isinstance(executor_container_id, str) or not executor_container_id:
+        return None
+    executor_inspect = await ctx.runner.run(
+        f"/usr/bin/docker inspect --format '{{{{.Image}}}}' {shlex.quote(executor_container_id)}",
+        timeout=_HOST_GPU_CONTAINER_TIMEOUT_SECONDS,
+        retryable=False,
+    )
+    image_id = executor_inspect.stdout.strip()
+    if (
+        executor_inspect.error_type
+        or executor_inspect.exit_code != 0
+        or not _IMAGE_ID_RX.match(image_id)
+    ):
+        return None
+    gpu_container_run = await ctx.runner.run(
+        "/usr/bin/docker run --rm --network none --gpus all -e NVIDIA_DRIVER_CAPABILITIES=utility "
+        f"--entrypoint nvidia-smi {image_id} -L",
+        timeout=_HOST_GPU_CONTAINER_TIMEOUT_SECONDS,
+        retryable=False,
+    )
+    if gpu_container_run.error_type or gpu_container_run.exit_code <= 0:
+        return None
+    return HostGpuContainerFailure(
+        exit_code=gpu_container_run.exit_code,
+        stderr_tail=gpu_container_run.stderr[-_HOST_OUTPUT_TAIL_CHARS:],
+        stdout_tail=gpu_container_run.stdout[-_HOST_OUTPUT_TAIL_CHARS:],
+    )
 
 
 def _container_state_from_diagnostics(diagnostics: dict[str, object]) -> ContainerState:
@@ -587,7 +726,9 @@ async def _every_listed_pod_stale(ctx: Context, rented_pods: list[RentedPod], st
         return False
     for other in rented_pods[1:]:
         try:
-            other_state = await _check_pod_running_and_read_authorized_keys(ctx.ssh, other.container_name)
+            other_state = await _check_pod_running_and_read_authorized_keys(
+                ctx.ssh, other.docker_container_name
+            )
         except (asyncssh.Error, OSError):
             return False
         if other_state.running:

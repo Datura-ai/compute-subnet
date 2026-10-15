@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import os
-import random
+import secrets
 import shlex
 import time
 import uuid as uuid4
@@ -16,6 +16,7 @@ from core.utils import _m, get_extra_info
 from services.gpu_spec_table import matmul_probe_vram_mb
 
 logger = logging.getLogger(__name__)
+_rng = secrets.SystemRandom()
 
 # Hard cap on the remote matmul run. Real runs finish in 4-27s; without a cap a wedged
 # GPU (e.g. VRAM held by an orphaned container, DAH-2364) hangs the whole pipeline until
@@ -150,9 +151,10 @@ class VerifierParams:
 
     def generate(self):
         # You can modify the range for more randomness or based on specific needs
-        self.dim_n = random.randint(1900, 2000)  # Random dim_n between 1900 and 2000
-        self.dim_k = random.randint(2000000, 2586932)  # Random dim_k between 2000000 and 2586932
-        self.seed = int(time.time())
+        self.dim_n = _rng.randint(1900, 2000)  # Random dim_n between 1900 and 2000
+        self.dim_k = _rng.randint(2000000, 2586932)  # Random dim_k between 2000000 and 2586932
+        # Unpredictable, and inside the positive 31-bit range the clock value it replaces had.
+        self.seed = secrets.randbelow(2**31 - 1) + 1
         self.uuid = str(uuid4.uuid4())
 
     def __str__(self) -> str:
@@ -163,6 +165,11 @@ class VerifierParams:
 # only this failure by the probe's output (stderr and stdout): the other empty-uuid results (a sealed blob that failed
 # authentication, a stdout that could not be parsed) are not the probe's answer.
 UUID_MISMATCH_ERROR_PREFIX = "UUID mismatch"
+
+# Whose clock `ValidationResult.elapsed_seconds` is: the validator's around the SSH run, or the
+# executor's own word for the step when the answer came through the local transport.
+ELAPSED_SOURCE_VALIDATOR = "validator_wall_clock"
+ELAPSED_SOURCE_EXECUTOR = "executor_reported"
 
 
 @dataclass
@@ -176,6 +183,15 @@ class ValidationResult:
     error_message: str = ""
     metrics: dict | None = None
     timed_out: bool = False
+    # What the run measured, for the speed log only; no verdict reads these. `sealed` is True when
+    # uuid and metrics came out of an authenticated sealed blob, False when they are the executor's
+    # plaintext, None when no answer was judged. `elapsed_seconds` is the wall-clock of the run and
+    # `elapsed_source` says whose clock it is.
+    sealed: bool | None = None
+    elapsed_seconds: float | None = None
+    elapsed_source: str | None = None
+    dim_n: int | None = None
+    dim_k: int | None = None
 
     def __bool__(self) -> bool:
         """Allow using ValidationResult in boolean context for backward compatibility."""
@@ -574,8 +590,8 @@ class ValidationService:
         # uuid+metrics from inside, so a miner who only edits the (untrusted) Python
         # wrapper cannot forge or inflate the result. If a sealed blob is present but
         # fails authentication, we REJECT — we do not fall back to the miner-controlled
-        # plaintext line. Executors that predate sealing send no blob and keep the
-        # legacy behavior, so independent validator/executor upgrades stay compatible.
+        # plaintext line. An executor that sends no blob fails here when our library can
+        # unseal (below); only a validator library without unseal still reads the plaintext.
         if getattr(self.wrapper, "_has_sealed", False) and sealed_blob:
             inner = self.wrapper.unsealResult(gen_ptr, sealed_blob)
             inner_obj = None
@@ -598,6 +614,24 @@ class ValidationService:
             # Authenticated: these override anything in the plaintext line.
             uuid = inner_obj["uuid"].strip()
             metrics = inner_obj.get("metrics")
+        elif getattr(self.wrapper, "_has_sealed", False) and (
+            uuid in verifier_params.uuid.split(",")
+        ):
+            # A seal-aware library got no sealed blob: the uuid and metrics are the executor's plaintext,
+            # which its own wrapper can edit, and the metrics reach the published specs. Only a
+            # matching plaintext uuid is a real answer that skipped the seal; a probe that never
+            # answered (out of memory, `sealed: null`) falls through to the mismatch below, which
+            # the capability check can still waive for a busy GPU.
+            logger.warning(_m("MATMUL_RESULT_UNSEALED", extra=get_extra_info(log_extra)))
+            return ValidationResult(
+                success=False,
+                expected_uuid=verifier_params.uuid,
+                returned_uuid="",
+                stdout=stdout,
+                stderr=stderr,
+                error_message="Unsealed result from a seal-aware verifier",
+                sealed=False,
+            )
 
         try:
             uuid_array = verifier_params.uuid.split(",")
@@ -609,7 +643,10 @@ class ValidationService:
                     returned_uuid=uuid,
                     stdout=stdout,
                     stderr=stderr,
-                    metrics=metrics
+                    metrics=metrics,
+                    sealed=self._answer_was_sealed(sealed_blob),
+                    dim_n=verifier_params.dim_n,
+                    dim_k=verifier_params.dim_k,
                 )
             else:
                 error_msg = (
@@ -624,7 +661,10 @@ class ValidationService:
                     stdout=stdout,
                     stderr=stderr,
                     error_message=error_msg,
-                    metrics=metrics
+                    metrics=metrics,
+                    sealed=self._answer_was_sealed(sealed_blob),
+                    dim_n=verifier_params.dim_n,
+                    dim_k=verifier_params.dim_k,
                 )
         except Exception as e:
             error_msg = f"Error during UUID verification: {str(e)}"
@@ -637,6 +677,11 @@ class ValidationService:
                 stderr=stderr,
                 error_message=error_msg
             )
+
+    def _answer_was_sealed(self, sealed_blob: str) -> bool:
+        """True when the judged uuid and metrics came out of the sealed blob. A blob that fails
+        authentication never gets this far: `evaluate_matmul_output` rejects it first."""
+        return bool(sealed_blob) and bool(getattr(self.wrapper, "_has_sealed", False))
 
     async def validate_gpu_model_and_process_job(
         self,
@@ -695,6 +740,7 @@ class ValidationService:
             logger.info(_m("Matrix Multiplication Python Script Command", extra=get_extra_info(log_extra)))
 
             # Run the script
+            run_started = time.perf_counter()
             try:
                 result = await ssh_client.run(command, timeout=MATRIX_VERIFY_TIMEOUT_SECONDS)
             except (TimeoutError, asyncssh.TimeoutError):
@@ -711,6 +757,12 @@ class ValidationService:
                     error_message=error_msg,
                     timed_out=True,
                 )
+            except asyncio.CancelledError:
+                # DAH-4366: the fast path cancels this lane when the host lane fails first. The
+                # remote matmul would keep the GPU busy into the next cycle's retry, so kill it
+                # (shielded, a second cancel must not stop the kill) and stay cancelled.
+                await asyncio.shield(self._kill_remote_matmul(ssh_client, script_path, log_extra))
+                raise
             except Exception as e:
                 error_msg = f"Failed to execute SSH command: {str(e)}"
                 logger.error(_m(error_msg, extra=get_extra_info(log_extra)))
@@ -743,7 +795,13 @@ class ValidationService:
                     error_message=error_msg
                 )
 
-            return self.evaluate_matmul_output(challenge, stdout=stdout, stderr=stderr)
+            run_seconds = time.perf_counter() - run_started
+            judged = self.evaluate_matmul_output(challenge, stdout=stdout, stderr=stderr)
+            # The validator's own clock around the remote run: SSH round trip, process start,
+            # allocation, the challenge and the node's benchmark together.
+            judged.elapsed_seconds = run_seconds
+            judged.elapsed_source = ELAPSED_SOURCE_VALIDATOR
+            return judged
 
         except Exception as e:
             error_msg = f"Unexpected error in validate_gpu_model_and_process_job: {str(e)}"
