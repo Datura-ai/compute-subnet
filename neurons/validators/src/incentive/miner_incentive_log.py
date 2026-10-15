@@ -19,7 +19,8 @@ WHAT THIS CATALOG HOLDS — every `MinerLogLine` the miner-facing log block
 1. ZERO-INCENTIVE REASONS — each records the fact "this executor gets NO payout
    because <reason>" (`MinerLogLine.no_payout_because_*` constructors):
    Group A — earns nothing in EITHER pool (built by `_reasons_excluded_from_both_pools`):
-     spot tier, Discord not connected, paused for new rentals, running own default job
+     spot tier, Discord not connected, paused for new rentals, running own default job,
+     hotkey excluded from scoring by the validator's SCORING_EXCLUDED_HOTKEYS setting
    Group B — idle but does not qualify for the unrented pool:
      GPU model not in the unrented program (earns only when rented),
      price above the market soft limit (lower the price to earn),
@@ -95,6 +96,7 @@ class ZeroIncentiveReason(StrEnum):
     PROVIDER_DISCORD_NOT_CONNECTED = "provider_discord_not_connected"
     NEW_RENTALS_PAUSED = "new_rentals_paused"
     MINER_DEFAULT_JOB = "miner_default_job"
+    HOTKEY_EXCLUDED_FROM_SCORING = "hotkey_excluded_from_scoring"
     # Group B: idle but not qualified for the unrented pool
     GPU_MODEL_NOT_ELIGIBLE_FOR_UNRENTED_INCENTIVE = "gpu_model_not_eligible_for_unrented_incentive"
     PRICE_ABOVE_MARKET_P90_SOFT_LIMIT = "price_above_market_p90_soft_limit"
@@ -287,6 +289,18 @@ class MinerLogLine(BaseModel):
                 "expected_ref": expected_ref,
             },
             internal_message="Executor excluded from both pools because a required image is outdated",
+        )
+
+    @staticmethod
+    def no_payout_because_hotkey_excluded_from_scoring(result: JobResult) -> MinerLogLine:
+        return MinerLogLine._no_payout(
+            result,
+            reason=ZeroIncentiveReason.HOTKEY_EXCLUDED_FROM_SCORING,
+            message=(
+                "No subnet incentive: this validator's configuration excludes this hotkey from "
+                "scoring. The executor is still validated and rentable as usual."
+            ),
+            internal_message="Executor excluded from both pools - hotkey excluded from scoring",
         )
 
     # ── Group B: idle but not qualified for the unrented pool ─────────────────
