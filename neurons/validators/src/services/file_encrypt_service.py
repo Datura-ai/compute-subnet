@@ -49,6 +49,9 @@ KEYS_FOR_ENCRYPTION_KEY_GENERATION = [
     "gpu.speed_pcie",
     "gpu.utilization",
     "gpu.memory_utilization",
+    "gpu.temperature",
+    "gpu.max_graphics_speed",
+    "gpu.clocks_event_reasons",
 ]
 
 ORIGINAL_KEYS = {
@@ -67,6 +70,9 @@ ORIGINAL_KEYS = {
     "gpu.utilization": "gpu_utilization",
     "gpu.memory_utilization": "memory_utilization",
     "gpu.memory_used_mb": "memory_used_mb",
+    "gpu.temperature": "temperature",
+    "gpu.max_graphics_speed": "max_graphics_speed",
+    "gpu.clocks_event_reasons": "clocks_event_reasons",
     '<default>': "<default>",
     'c_nvmlMemory_t_total': "total",
     'c_nvmlMemory_t_free': "free",
@@ -275,6 +281,9 @@ class FileEncryptService:
             "gpu.utilization": "",
             "gpu.memory_utilization": "",
             "gpu.memory_used_mb": "",
+            "gpu.temperature": "",
+            "gpu.max_graphics_speed": "",
+            "gpu.clocks_event_reasons": "",
             "gpu_count": "",
             "gpu_driver": "",
             "gpu_cuda_driver": "",

@@ -84,6 +84,9 @@ NVML_CLOCK_COUNT = 4
 
 NVML_VALUE_NOT_AVAILABLE_ulonglong = c_ulonglong(-1)
 
+_nvmlTemperatureSensors_t = c_uint
+NVML_TEMPERATURE_GPU = 0
+
 
 class struct_c_nvmlDevice_t(Structure):
     pass  # opaque handle
@@ -517,6 +520,35 @@ def nvmlDeviceGetClockInfo(handle, type_clock):
     ret = fn(handle, _nvmlClockType_t(type_clock), byref(c_clock))
     _nvmlCheckReturn(ret)
     return c_clock.value
+
+
+def nvmlDeviceGetMaxClockInfo(handle, type_clock):
+    c_clock = c_uint()
+    fn = _nvmlGetFunctionPointer("nvmlDeviceGetMaxClockInfo")
+    ret = fn(handle, _nvmlClockType_t(type_clock), byref(c_clock))
+    _nvmlCheckReturn(ret)
+    return c_clock.value
+
+
+def nvmlDeviceGetTemperature(handle, sensor):
+    c_temp = c_uint()
+    fn = _nvmlGetFunctionPointer("nvmlDeviceGetTemperature")
+    ret = fn(handle, _nvmlTemperatureSensors_t(sensor), byref(c_temp))
+    _nvmlCheckReturn(ret)
+    return c_temp.value
+
+
+def nvmlDeviceGetClocksEventReasons(handle):
+    # The bitmask of why the clocks sit below max (SW/HW thermal slowdown, power cap, ...). Renamed from
+    # "ThrottleReasons" in driver 535; an older driver only exports the old name, same signature and bits.
+    c_reasons = c_ulonglong()
+    try:
+        fn = _nvmlGetFunctionPointer("nvmlDeviceGetCurrentClocksEventReasons")
+    except NVMLError:
+        fn = _nvmlGetFunctionPointer("nvmlDeviceGetCurrentClocksThrottleReasons")
+    ret = fn(handle, byref(c_reasons))
+    _nvmlCheckReturn(ret)
+    return c_reasons.value
 
 
 def nvmlDeviceGetCurrPcieLinkWidth(handle):
@@ -2016,6 +2048,13 @@ def get_machine_specs():
                     "gpu.speed_pcie": nvmlDeviceGetPcieSpeed(handle),
                     "gpu.utilization": utilization.c_nvmlUtilization_t_gpu,
                     "gpu.memory_utilization": utilization.c_nvmlUtilization_t_memory,
+                    # Thermal-throttle readings (GpuThermalThrottleCheck): a card whose cooling failed keeps
+                    # its utilisation high while the clock collapses. None on a driver that lacks the call.
+                    "gpu.temperature": safeNvmlValue(lambda: nvmlDeviceGetTemperature(handle, NVML_TEMPERATURE_GPU)),
+                    "gpu.max_graphics_speed": safeNvmlValue(
+                        lambda: nvmlDeviceGetMaxClockInfo(handle, NVML_CLOCK_GRAPHICS)
+                    ),
+                    "gpu.clocks_event_reasons": safeNvmlValue(lambda: nvmlDeviceGetClocksEventReasons(handle)),
                 }
             )
 
