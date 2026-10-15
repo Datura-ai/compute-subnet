@@ -838,9 +838,14 @@ def get_docker_info(content: bytes):
             result = run_cmd(f'{docker_path} inspect --format "{{{{.Image}}}}" {container_id}')
             image_id = result.strip()
 
-            # Get the image details
-            result = run_cmd(f'{docker_path}  inspect --format "{{{{json .RepoDigests}}}}" {image_id}')
-            repo_digests = json.loads(result.strip())
+            # Get the image details. A running container can outlive its image (removed or pruned
+            # under it); its digest is then unknown, which excuses nothing, instead of failing the
+            # whole scrape and leaving every GPU on the node unverified.
+            try:
+                result = run_cmd(f'{docker_path}  inspect --format "{{{{json .RepoDigests}}}}" {image_id}')
+                repo_digests = json.loads(result.strip())
+            except RuntimeError:
+                repo_digests = []
 
             # Get the container name
             result = run_cmd(f'{docker_path} inspect --format "{{{{.Name}}}}" {container_id}')

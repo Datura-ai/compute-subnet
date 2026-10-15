@@ -7,6 +7,7 @@ and converting the validation context into a JobResult for reporting.
 import logging
 from datetime import datetime
 from typing import Any, Optional
+from uuid import UUID
 
 from datura.requests.miner_requests import ExecutorSSHInfo
 from payload_models.payloads import MinerJobRequestPayload
@@ -45,6 +46,15 @@ def _canonicalize_published_gpu_names(specs: dict) -> dict:
 
     return {**specs, "gpu": {**gpu, "details": canonical_details}}
 
+
+
+def _executor_key(executor_uuid: str) -> str:
+    """The backend's form of an executor id. A miner can send it without dashes or in braces, and
+    the backend still reads it as the same id."""
+    try:
+        return str(UUID(executor_uuid))
+    except ValueError:
+        return executor_uuid.lower()
 
 class ResultHandler:
     """Handles post-pipeline result processing and persistence."""
@@ -135,7 +145,7 @@ class ResultHandler:
             context.state.rented_data
             and executor_info.uuid in context.state.rented_data.spot_executor_ids
         )
-        is_provider_chosen_spot = bool(
+        is_on_spot_pay_list = bool(
             is_spot
             and executor_info.uuid in context.state.rented_data.provider_spot_executor_ids
         )
@@ -235,7 +245,7 @@ class ResultHandler:
             is_rented=context.rented,
             rented_gpu_count=self._get_rented_gpu_count(context),
             is_spot=is_spot,
-            is_provider_chosen_spot=is_provider_chosen_spot,
+            is_on_spot_pay_list=is_on_spot_pay_list,
             is_new_rentals_paused=is_new_rentals_paused,
             is_provider_banned=context.is_provider_banned,
             provider_discord_connected=provider_discord_connected,
@@ -327,6 +337,26 @@ class ResultHandler:
 
         return str(context.executor.uuid) in connected_executor_ids
 
+    @staticmethod
+    def _get_record_owner(context: Context) -> str | None:
+        """The backend's owner of this executor (the hotkey its node is listed under: the pool hotkey
+        for a custodied account, else its miner hotkey), or None.
+
+        None lets every write to the verified record through. An executor missing from a map the
+        backend does send is logged: the backend creates the row on the node's first report, so
+        a new node has none for a cycle or so."""
+        rented_data = context.state.rented_data
+        owners = rented_data.executor_owner_hotkeys if rented_data else {}
+        owner = owners.get(_executor_key(str(context.executor.uuid)))
+        if owners and not owner:
+            logger.info(
+                _m(
+                    "VERIFIED_RECORD_OWNER_UNKNOWN",
+                    extra={"executor_uuid": str(context.executor.uuid)},
+                )
+            )
+        return owner or None
+
     async def _persist_verification_data(
         self,
         miner_hotkey: str,
@@ -344,6 +374,7 @@ class ResultHandler:
             context: Pipeline context with verification state
             success: Whether validation succeeded
         """
+        record_owner = self._get_record_owner(context)
         if success:
             # On success, update verification data if we have GPU info
             gpu_model_count = context.state.gpu_model_count or ""
@@ -357,6 +388,7 @@ class ResultHandler:
                     success=True,
                     spec=gpu_model_count,
                     uuids=gpu_uuids,
+                    record_owner=record_owner,
                 )
         else:
             # On failure, either clear or mark as failed
@@ -369,6 +401,7 @@ class ResultHandler:
                     reason=reason,
                     evidence=context.clear_verified_job_evidence,
                     anchor_broken=context.gpu_anchor_broken,
+                    record_owner=record_owner,
                 )
             else:
                 await self.redis_service.set_verified_job_info(
@@ -376,6 +409,7 @@ class ResultHandler:
                     executor_id=executor_id,
                     prev_info=verified_job_info,
                     success=False,
+                    record_owner=record_owner,
                 )
 
     @staticmethod
