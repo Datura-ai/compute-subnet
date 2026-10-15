@@ -22,7 +22,6 @@ class PortProbeResult:
 class BatchResult:
     successful: list[PortPair]
     failed: list[PortPair]
-    completed: bool
 
 
 @dataclass(frozen=True)

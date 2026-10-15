@@ -64,7 +64,7 @@ class HostNetworkBatch:
 
     async def verify(self, ports, *, ssh_client, host, log_ctx=None):
         self.calls.append(list(ports))
-        return BatchResult(list(ports[: self.reachable]), list(ports[self.reachable :]), completed=True)
+        return BatchResult(list(ports[: self.reachable]), list(ports[self.reachable :]))
 
 
 class PublishedPorts:

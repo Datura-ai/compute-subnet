@@ -1,5 +1,4 @@
 import random
-import logging
 
 from datura.requests.miner_requests import ExecutorSSHInfo
 
@@ -12,8 +11,6 @@ from services.executor_connectivity.port_selector import (
     declared_ports,
     tally_port_ranges,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class ConnectivityOrchestrator:
