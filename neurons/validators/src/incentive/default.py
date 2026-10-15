@@ -275,6 +275,9 @@ class DefaultIncentive(BaseIncentive):
         line: MinerLogLine = MinerLogLine.mining_score_calculated(job_result, is_rented_after_cutoff)
         job_result.record_incentive_log(line)
         logger.info(line.as_internal_log())
+        # a rented node zeroed by the Sysbox portion must say why (the idle path has its own reason)
+        if job_result.is_rented and job_result.sysbox_multiplier == 0:
+            job_result.record_incentive_log(MinerLogLine.no_payout_because_rented_sysbox_not_confirmed(job_result))
         return job_result
 
     async def calculate_final_weights(
