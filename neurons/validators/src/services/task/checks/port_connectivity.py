@@ -5,7 +5,7 @@ from dataclasses import replace
 
 from core.config import settings
 from core.utils import _m, get_extra_info
-from services.executor_connectivity.models import PortVerificationResult, SecondPass
+from services.executor_connectivity.models import PortVerificationResult
 
 from ..messages import PortConnectivityMessages as Msg
 from ..messages import render_message
@@ -77,13 +77,7 @@ class PortConnectivityCheck:
         # event-only: kept out of default_extra so later checks' log lines stay small
         event_extra: dict[str, object] = {
             "port_ranges": [r.as_dict() for r in result.port_ranges],
-            "second_pass": result.second_pass,
         }
-        if result.second_pass == SecondPass.SKIPPED_BATCH_FAILED:
-            event_extra["second_pass_note"] = (
-                "second port pass skipped: the first pass's batch container didn't complete "
-                "(it failed to start, timed out or stopped mid-test), so the forwarding test could not run"
-            )
         updated_state = replace(
             ctx.state,
             specs={
