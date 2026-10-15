@@ -590,8 +590,8 @@ class ValidationService:
         # uuid+metrics from inside, so a miner who only edits the (untrusted) Python
         # wrapper cannot forge or inflate the result. If a sealed blob is present but
         # fails authentication, we REJECT — we do not fall back to the miner-controlled
-        # plaintext line. Executors that predate sealing send no blob and keep the
-        # legacy behavior, so independent validator/executor upgrades stay compatible.
+        # plaintext line. An executor that sends no blob fails here when our library can
+        # unseal (below); only a validator library without unseal still reads the plaintext.
         if getattr(self.wrapper, "_has_sealed", False) and sealed_blob:
             inner = self.wrapper.unsealResult(gen_ptr, sealed_blob)
             inner_obj = None
