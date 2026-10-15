@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import os
-import random
+import secrets
 import shlex
 import time
 import uuid as uuid4
@@ -16,6 +16,7 @@ from core.utils import _m, get_extra_info
 from services.gpu_spec_table import matmul_probe_vram_mb
 
 logger = logging.getLogger(__name__)
+_rng = secrets.SystemRandom()
 
 # Hard cap on the remote matmul run. Real runs finish in 4-27s; without a cap a wedged
 # GPU (e.g. VRAM held by an orphaned container, DAH-2364) hangs the whole pipeline until
@@ -150,9 +151,10 @@ class VerifierParams:
 
     def generate(self):
         # You can modify the range for more randomness or based on specific needs
-        self.dim_n = random.randint(1900, 2000)  # Random dim_n between 1900 and 2000
-        self.dim_k = random.randint(2000000, 2586932)  # Random dim_k between 2000000 and 2586932
-        self.seed = int(time.time())
+        self.dim_n = _rng.randint(1900, 2000)  # Random dim_n between 1900 and 2000
+        self.dim_k = _rng.randint(2000000, 2586932)  # Random dim_k between 2000000 and 2586932
+        # Unpredictable, and inside the positive 31-bit range the clock value it replaces had.
+        self.seed = secrets.randbelow(2**31 - 1) + 1
         self.uuid = str(uuid4.uuid4())
 
     def __str__(self) -> str:

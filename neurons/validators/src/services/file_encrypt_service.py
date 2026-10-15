@@ -1,5 +1,5 @@
 import os
-import random
+import secrets
 import shutil
 import string
 import subprocess
@@ -17,6 +17,7 @@ from services.ssh_service import SSHService
 
 # Where each cycle's job files (the frozen scrape) are written: one `cycle-*` directory per cycle.
 JOB_FILES_ROOT = Path(__file__).parent / "temp"
+_rng = secrets.SystemRandom()
 
 # ORDER IS LOAD-BEARING: machine_scrape derives its encryption key from the literal key order of
 # gpu_details[0], so this list must stay an exact mirror of that dict — same members, same order.
@@ -233,8 +234,8 @@ class FileEncryptService:
         return file_name
 
     def generate_random_name(self):
-        length = random.randint(3, 15)
-        return "_" + "".join(random.choices(string.ascii_letters, k=length))
+        length = _rng.randint(3, 15)
+        return "_" + "".join(_rng.choices(string.ascii_letters, k=length))
 
     def generate_key_mappings(self):
         # Order is load-bearing: ecrypt_miner_job_files() substitutes these keys with a sequential
