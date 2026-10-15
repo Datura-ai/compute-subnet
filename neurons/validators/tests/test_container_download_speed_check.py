@@ -130,7 +130,7 @@ def test_command_runs_in_a_container_with_the_renter_runtime_and_a_size_cap():
     assert cmd.startswith("/usr/bin/docker run --rm --runtime=sysbox-runc ")
     assert "--network" not in cmd  # the default bridge a renter's pod gets
     assert f"Range: bytes=0-{CAP_BYTES - 1}" in cmd and f"head -c {CAP_BYTES}" in cmd
-    assert "files.pythonhosted.org" in cmd and "huggingface.co" in cmd
+    assert all(url in cmd for _, url in module.ENDPOINTS)  # both pinned files, in full
     assert "--runtime" not in download_speed_command(False)
 
 
