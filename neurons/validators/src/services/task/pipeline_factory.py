@@ -41,6 +41,7 @@ from .checks import (
     GpuCountCheck,
     GpuFaultProbeCheck,
     GpuFingerprintCheck,
+    GpuLossHoldCheck,
     GpuModelValidCheck,
     GpuPowerLimitCheck,
     GpuThermalThrottleCheck,
@@ -290,6 +291,9 @@ class PipelineFactory:
                 # GPU checks below (DETAILS_MISMATCH, GPU_MISSING), which halt the cycle before
                 # TenantEnforcementCheck; this reports it to the backend on that same cycle.
                 RentedGpuDropCheck(),
+                # DAH-4457: a node whose GPU dropped out is hidden until its cards stay back; before the fatal GPU
+                # checks and the rented short-circuit, so rented and idle nodes are held alike.
+                GpuLossHoldCheck(),
                 # ticket-0492: pure-data, non-fatal warning on a busy GPU held below its clock by a
                 # thermal/hardware slowdown. Before the rented short-circuit, so rented nodes are judged too;
                 # the score is not changed.
@@ -434,6 +438,7 @@ class PipelineFactory:
                 UploadFilesCheck(),
                 MachineSpecScrapeCheck(),
                 RentedGpuDropCheck(),
+                GpuLossHoldCheck(),
                 GpuThermalThrottleCheck(),
                 TdxHostCheck(),
                 GpuCountCheck(),
@@ -502,6 +507,8 @@ class PipelineFactory:
                 MachineSpecScrapeCheck(),
                 # RentedGpuDropCheck: same place as in build_checks(); under DRY_RUN it logs and posts nothing.
                 RentedGpuDropCheck(),
+                # DAH-4457: same place as in build_checks(); under DRY_RUN it reads the hold and writes none.
+                GpuLossHoldCheck(),
                 # ticket-0492: pure data, same place as in build_checks().
                 GpuThermalThrottleCheck(),
                 # DAH-3484: before the rented halt, same as build_checks().

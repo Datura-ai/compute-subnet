@@ -174,10 +174,10 @@ def test_the_check_is_never_fatal():
     ],
 )
 def test_the_check_runs_right_after_the_rented_gpu_drop_check(build):
-    # before the rented short-circuit, so rented nodes are judged too
+    # before the rented short-circuit, so rented nodes are judged too (the GPU loss hold sits between them)
     ids = [check.check_id for check in build()]
 
-    assert ids.index(GpuThermalThrottleCheck.check_id) == ids.index(RentedGpuDropCheck.check_id) + 1
+    assert ids.index(GpuThermalThrottleCheck.check_id) == ids.index(RentedGpuDropCheck.check_id) + 2
 
 
 # --------------------------------------------------------------------------------------------------
