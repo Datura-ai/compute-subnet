@@ -98,10 +98,10 @@ def make_ctx(context_factory, runner):
     )
 
 
-def test_on_and_enforcing_by_default():
-    # the shadow window logged faults only on a node that corrupts copies, so a fault fails the node
+def test_on_but_not_enforcing_by_default():
+    # a fault is logged; failing the node waits for a review of a day of prod logs
     assert type(settings).model_fields["PINNED_MEMORY_PROBE_CHECK_ENABLED"].default is True
-    assert type(settings).model_fields["PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED"].default is True
+    assert type(settings).model_fields["PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED"].default is False
     assert PinnedMemoryProbeCheck.fatal is True
 
 
@@ -159,10 +159,16 @@ async def test_a_tdx_guest_whose_gpu_cannot_see_pinned_memory_fails_the_node(con
 
 
 @pytest.mark.asyncio
-async def test_without_enforcement_a_fault_warns_and_passes(context_factory, caplog):
-    stdout = probe_stdout(
-        "fault", faults=["gpu 0: cuStreamSynchronize -> CUDA_ERROR_ILLEGAL_ADDRESS (700)"]
-    )
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "gpu 0: cuStreamSynchronize -> CUDA_ERROR_ILLEGAL_ADDRESS (700)",
+        "cuInit -> CUDA_ERROR_UNKNOWN (999)",  # a broken-GPU code: logged as a fault, node still passes
+    ],
+    ids=["copy-fault", "cuda-broken"],
+)
+async def test_without_enforcement_a_fault_warns_and_passes(context_factory, caplog, fault):
+    stdout = probe_stdout("fault", faults=[fault])
     with probe_gate(enforce=False), caplog.at_level(logging.WARNING):
         result = await PinnedMemoryProbeCheck().run(
             make_ctx(context_factory, FakeRunner(stdout, exit_code=1))
@@ -172,6 +178,7 @@ async def test_without_enforcement_a_fault_warns_and_passes(context_factory, cap
     assert result.event.reason_code == "PINNED_MEMORY_PROBE_FAILED"
     assert result.event.severity == "warning"
     assert "NOT changed" in result.event.impact
+    assert result.event.what_we_saw["error"] == fault
     assert any("PINNED_MEMORY_PROBE_FAILED" in record.getMessage() for record in caplog.records)
 
 

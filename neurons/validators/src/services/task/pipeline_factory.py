@@ -362,7 +362,7 @@ class PipelineFactory:
                 # capability-verified population, same filler skip. Flag-gated, shadow-first, off by default.
                 GpuFaultProbeCheck(),
                 # F-1599: a pinned-host-memory H2D/D2H round trip on every GPU (a TDX guest without GPU CC
-                # passes the matmul but cannot DMA pinned memory). On and enforcing by default.
+                # passes the matmul but cannot DMA pinned memory). On by default, shadow (logged only) until enforcement is enabled.
                 PinnedMemoryProbeCheck(),
                 # DAH-2265 Plan 2: advisory, non-fatal — observes whether the executor has
                 # the recommended default image pre-pulled (DOCKER_PULL no-op). Runs here,
