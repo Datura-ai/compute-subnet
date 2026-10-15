@@ -87,6 +87,7 @@ from services.gpu_power_limit import (
     apply_filler_gpu_power_limits,
     clear_filler_pod_applied_caps,
     raise_low_power_limits_to_default,
+    restore_filler_pod_applied_caps,
     restore_all_host_gpu_power_limits,
     restore_filler_pod_gpu_power_limits,
     restore_tracked_gpu_power_limits,
@@ -9859,12 +9860,22 @@ class DockerService:
                     private_key=private_key,
                 ) as docker_client,
             ):
+                cleared_cap_claims: dict[str, int] = {}
                 if payload.workload_kind == WorkloadKind.FILLER:
                     # DAH-2786: our job ends here, so a limit reset from now on is no revert.
                     with _best_effort_delete_step(log, "clear_filler_applied_cap"):
-                        await clear_filler_pod_applied_caps(
+                        cleared_cap_claims = await clear_filler_pod_applied_caps(
                             self.redis_service, payload.pod_id, log_extra=default_extra
                         )
+
+                async def _restore_cap_claims_if_container_alive() -> None:
+                    # Review (#1583): the removal failed, so the filler may still run with our cap.
+                    if cleared_cap_claims:
+                        with _best_effort_delete_step(log, "restore_filler_applied_cap"):
+                            await restore_filler_pod_applied_caps(
+                                self.redis_service, cleared_cap_claims, log_extra=default_extra
+                            )
+
                 await self._stop_container_gracefully(docker_client, payload, log)
 
                 # Fatal boundary: the forced removal is the only step whose failure fails the
@@ -9872,6 +9883,7 @@ class DockerService:
                 try:
                     removal = await self._force_remove_or_kill(docker_client, payload, ssh_client, log)
                     if removal.failure is not None:
+                        await _restore_cap_claims_if_container_alive()
                         # DeletionInProgress: the container is not gone yet and the backend will
                         # re-ask. A filler's wedge sweep ran here when this path raised (below);
                         # answering early must not skip it (DAH-3467, review). No-op while the
@@ -9882,6 +9894,7 @@ class DockerService:
                         pending_deletions.mark(payload.pod_id)
                         return removal.failure
                 except Exception:
+                    await _restore_cap_claims_if_container_alive()
                     # DAH-2427: a failed force-remove (backend FAILED / STOP_FAILED) is the
                     # classic wedge path — sweep before propagating so a wedged card does not
                     # outlive the failed delete. No-op while a live compute app still exists.

@@ -41,6 +41,7 @@ from services.gpu_power_limit import (
     clear_filler_pod_applied_caps,
     detect_cap_revert,
     read_gpu_power_cap_reverts,
+    restore_filler_pod_applied_caps,
 )
 from services.task.checks import gpu_power_limit as check_module
 from services.task.checks.gpu_power_limit import GpuPowerLimitCheck
@@ -328,6 +329,28 @@ async def test_a_reset_while_the_filler_is_stopping_is_not_a_revert(context_fact
         context_factory, monkeypatch, redis, [cleared], [("GPU-a", 400.0)]
     )
     assert _revert_key(CHECK_EXECUTOR_UUID) not in redis.store
+
+
+@pytest.mark.asyncio
+async def test_a_failed_delete_puts_the_cap_claim_back(context_factory, monkeypatch) -> None:
+    # Review (#1583): stop and forced removal failed, so the filler may still run with our cap;
+    # the claim the delete cleared goes back and a host reset counts again.
+    redis = FakeRedis({
+        _pod_index_key(POD_ID): json.dumps(["GPU-a"]),
+        _restore_key("GPU-a"): _stored_restore_record(executor_id=CHECK_EXECUTOR_UUID),
+    })
+
+    claims = await clear_filler_pod_applied_caps(redis, POD_ID)
+    assert claims == {"GPU-a": 280}
+    await restore_filler_pod_applied_caps(redis, claims)
+
+    restored = GpuPowerRestoreRecord.model_validate_json(redis.store[_restore_key("GPU-a")])
+    assert restored.capped_to_watts == 280
+    assert restored.executor_id == CHECK_EXECUTOR_UUID
+    await _run_check_while_filler_runs(
+        context_factory, monkeypatch, redis, [restored], [("GPU-a", 400.0)]
+    )
+    assert _revert_key(CHECK_EXECUTOR_UUID) in redis.store
 
 
 @pytest.mark.asyncio

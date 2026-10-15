@@ -984,19 +984,41 @@ async def clear_filler_pod_applied_caps(
     redis: RedisService,
     pod_id: str,
     log_extra: dict[str, object] | None = None,
-) -> None:
+) -> dict[str, int]:
     """Drop the applied-cap watts from this filler pod's restore records before its container is
     stopped (DAH-2786 review). The backend keeps reporting owner "lium" while the run is STOPPING,
     so without this a host that resets the limit after our job ended would count as a revert.
-    The pre-cap watts stay, so the restore that follows still has its way back. Best-effort."""
+    The pre-cap watts stay, so the restore that follows still has its way back. Best-effort.
+    Returns the cleared claims (gpu uuid -> watts) so a delete that leaves the container alive
+    can put them back with restore_filler_pod_applied_caps."""
     try:
         raw_index: str | bytes | None = await redis.get(_pod_index_key(pod_id))
         capped_uuids: list[str] = [str(uuid) for uuid in json.loads(raw_index)] if raw_index else []
     except Exception as exc:
         _log(logging.ERROR, f"gpu power cap: cannot read pod index for {pod_id} to end its cap claim: {exc}", {}, log_extra)
-        return
+        return {}
+    cleared: dict[str, int] = {}
     for gpu_uuid in capped_uuids:
+        try:
+            raw: str | bytes | None = await redis.get(_restore_key(gpu_uuid))
+            watts = GpuPowerRestoreRecord.model_validate_json(raw).capped_to_watts if raw else None
+        except Exception:
+            watts = None  # the setter below logs an unreadable record
+        if watts is not None:
+            cleared[gpu_uuid] = watts
         await _set_applied_cap_on_restore_record(redis, gpu_uuid, None, None, log_extra)
+    return cleared
+
+
+async def restore_filler_pod_applied_caps(
+    redis: RedisService,
+    claims: dict[str, int],
+    log_extra: dict[str, object] | None = None,
+) -> None:
+    """Put back claims cleared by clear_filler_pod_applied_caps when the delete failed and the
+    filler may still be running with our cap, so a host reset still counts (DAH-2786 review)."""
+    for gpu_uuid, watts in claims.items():
+        await _set_applied_cap_on_restore_record(redis, gpu_uuid, watts, None, log_extra)
 
 
 async def _undo_partial_apply(

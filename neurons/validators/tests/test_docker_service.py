@@ -1472,6 +1472,73 @@ async def test_delete_filler_stops_with_reduced_grace(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("removal_fails", [True, False])
+async def test_delete_filler_restores_cap_claim_only_when_removal_fails(
+    docker_service,
+    monkeypatch,
+    removal_fails,
+):
+    # Review (#1583): the claim is cleared before the stop; if the forced removal then fails the
+    # filler may still run with our cap, so the claim goes back and a host reset still counts.
+    ssh_client = AsyncMock()
+    ssh_client.run = AsyncMock(return_value=_make_ssh_command_result())
+    monkeypatch.setattr(
+        "services.docker_service.asyncssh.connect",
+        Mock(return_value=DummySSHConnectionManager(ssh_client)),
+    )
+    monkeypatch.setattr("services.docker_service.asyncssh.import_private_key", Mock())
+    monkeypatch.setattr(docker_service, "_prepare_known_hosts_policy", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        "services.docker_service.restore_filler_pod_gpu_power_limits", AsyncMock(return_value=0)
+    )
+    monkeypatch.setattr(
+        "services.docker_service.clear_filler_pod_applied_caps",
+        AsyncMock(return_value={"GPU-a": 280}),
+    )
+    restore_claims = AsyncMock()
+    monkeypatch.setattr("services.docker_service.restore_filler_pod_applied_caps", restore_claims)
+    if removal_fails:
+        monkeypatch.setattr(
+            docker_service, "_force_remove_or_kill", AsyncMock(side_effect=RuntimeError("remove failed"))
+        )
+    docker_service.ssh_service.decrypt_payload = Mock(return_value="private-key")
+    docker_service.redis_service.remove_rented_machine = AsyncMock()
+
+    payload = ContainerDeleteRequest(
+        miner_hotkey="miner",
+        executor_id=str(uuid4()),
+        pod_id=str(uuid4()),
+        workload_kind=WorkloadKind.FILLER,
+        container_name="filler_claim",
+    )
+    executor_info = ExecutorSSHInfo(
+        uuid=payload.executor_id,
+        address="127.0.0.1",
+        port=8080,
+        ssh_username="root",
+        ssh_port=2200,
+        python_path="/usr/bin/python",
+        root_dir="/root/app",
+        ssh_host_key=FAKE_SSH_HOST_KEY,
+    )
+
+    result = await docker_service.delete_container(
+        payload=payload,
+        executor_info=executor_info,
+        keypair=Mock(ss58_address="validator-hotkey"),
+        private_key="encrypted",
+    )
+
+    if removal_fails:
+        assert not isinstance(result, ContainerDeleted)
+        restore_claims.assert_awaited_once()
+        assert restore_claims.await_args.args[1] == {"GPU-a": 280}
+    else:
+        assert isinstance(result, ContainerDeleted)
+        restore_claims.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_delete_container_redis_failures_still_deleted(
     docker_service,
     retry_ssh_mock,
