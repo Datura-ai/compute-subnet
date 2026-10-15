@@ -29,12 +29,11 @@ class BatchVerifier:
         ssh_client,
         host: str,
         log_ctx: dict | None = None,
-        max_attempts: int = 2,
     ) -> BatchResult:
-        """Verify ports with retries, and say whether any attempt got as far as testing them."""
+        """Verify ports with retries."""
         log_ctx = log_ctx or {}
         timeout_sec = 60
-        completed = False
+        max_attempts = 2
 
         for attempt in range(1, max_attempts + 1):
             token = uuid.uuid4().hex
@@ -52,8 +51,6 @@ class BatchVerifier:
                     self._attempt(ports, token, container_name, ssh_client, host, log_ctx),
                     timeout=timeout_sec
                 )
-                completed = completed or attempt_result.completed
-
                 if attempt_result.successful:
                     logger.info(
                         _m(
@@ -61,7 +58,7 @@ class BatchVerifier:
                             extra=get_extra_info(log_ctx),
                         )
                     )
-                    return BatchResult(attempt_result.successful, attempt_result.failed, completed)
+                    return BatchResult(attempt_result.successful, attempt_result.failed)
 
                 if attempt < max_attempts:
                     logger.debug(
@@ -90,7 +87,7 @@ class BatchVerifier:
         # attempts and tiers on the way there are DEBUG. An exception inside an attempt keeps
         # ERROR above: that is the validator's own failure, not the node's ports.
         logger.debug(_m(f"all {max_attempts} attempts failed", extra=get_extra_info(log_ctx)))
-        return BatchResult([], ports, completed)
+        return BatchResult([], ports)
 
     async def _attempt(
         self,
@@ -112,7 +109,7 @@ class BatchVerifier:
                     extra=get_extra_info(log_ctx),
                 )
             )
-            return BatchResult([], ports, completed=False)
+            return BatchResult([], ports)
 
         try:
             async with aiohttp.ClientSession(connector=public_host_connector(limit=0)) as session:
@@ -123,7 +120,7 @@ class BatchVerifier:
         finally:
             await self.runner.cleanup(ssh_client, name)
 
-        return BatchResult(successful, failed, completed=True)
+        return BatchResult(successful, failed)
 
 
 class FallbackVerifier:

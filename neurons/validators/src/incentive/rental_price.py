@@ -64,8 +64,8 @@ NVIDIACTL_ROOT_UID = 0
 # The share of a GPU configuration's average filler revenue per GPU-hour that a node is paid:
 # spot-node pay (ENABLE_SPOT_NODE_PAY) and the secure floor (ENABLE_SECURE_FILLER_REVENUE_FLOOR).
 # Two constants on purpose: the owner sets each on its own, so changing one must not move the other.
-FILLER_REVENUE_PAY_FACTOR = 0.95
-SECURE_FILLER_REVENUE_FLOOR_FACTOR = 0.95
+FILLER_REVENUE_PAY_FACTOR = 1.0
+SECURE_FILLER_REVENUE_FLOOR_FACTOR = 1.0
 
 
 # ── Spec measurements ────────────────────────────────────────────────────────
@@ -565,12 +565,17 @@ class RentalPriceIncentive(DefaultIncentive):
             exclusions.append(MinerLogLine.no_payout_because_banned_network_abuse(job_result))
         if job_result.is_spot and not self._on_spot_pay_path(job_result):
             exclusions.append(MinerLogLine.no_payout_because_spot_tier(job_result))
-        if is_missing_discord_after_cutoff(job_result):
+        if job_result.is_provider_email_held:
+            exclusions.append(MinerLogLine.no_payout_because_email_not_confirmed(job_result))
+        # A held node has no listing row, so its Discord state is unknown, not known false.
+        elif is_missing_discord_after_cutoff(job_result):
             exclusions.append(MinerLogLine.no_payout_because_discord_not_connected(job_result))
         if job_result.is_new_rentals_paused and not job_result.is_rented:
             exclusions.append(MinerLogLine.no_payout_because_paused_for_new_rentals(job_result))
         if job_result.default_job_owner == DEFAULT_JOB_OWNER_MINER and not job_result.is_rented:
             exclusions.append(MinerLogLine.no_payout_because_running_own_default_job(job_result))
+        if job_result.is_hotkey_excluded_from_scoring:
+            exclusions.append(MinerLogLine.no_payout_because_hotkey_excluded_from_scoring(job_result))
         return exclusions
 
     @staticmethod

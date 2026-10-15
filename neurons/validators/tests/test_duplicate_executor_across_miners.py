@@ -24,6 +24,7 @@ from services.task.checks.duplicate_executor import (
     MATCH_GPU_UUID,
     MATCH_IP_PORT,
     MATCH_SSH_ENDPOINT,
+    MATCH_SSH_HOST_KEY,
     keep_one_miner_per_executor,
 )
 from services.task.models import JobResult
@@ -259,3 +260,54 @@ def test_only_a_zeroed_copy_of_the_keepers_own_row_is_not_published(enforce):
     assert specs_to_publish(same_row[ALICE]) == []
     assert specs_to_publish(own_row[ALICE]) == own_row[ALICE]
     assert specs_to_publish(same_row[BOB]) == same_row[BOB]
+
+
+HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexamplehostkeyexamplehostkeyexamplehostk"
+
+
+def _verified(result: JobResult, host_key: str = HOST_KEY) -> JobResult:
+    result.executor_info.ssh_host_key = host_key
+    result.ssh_host_key_verified = True
+    return result
+
+
+def _host_key_matches(duplicates) -> list[tuple[str, str]]:
+    return sorted((d.hotkey, d.executor_uuid) for d in duplicates if d.matched_on == MATCH_SSH_HOST_KEY)
+
+
+def test_one_host_key_on_two_endpoints_under_two_hotkeys_is_logged_and_never_zeroed(enforce):
+    direct = _verified(_result("uuid-a", address="198.51.100.7"))
+    relayed = _verified(_result("uuid-b", address="203.0.113.9", port=8002))
+
+    duplicates = keep_one_miner_per_executor({BOB: [direct], ALICE: [relayed]})
+
+    _assert_untouched(direct)
+    _assert_untouched(relayed)
+    assert _host_key_matches(duplicates) == sorted([(BOB, "uuid-a"), (ALICE, "uuid-b")])
+    assert all(d.kept_by is None and not d.enforced for d in duplicates)
+
+
+def test_one_host_key_on_two_ports_under_one_hotkey_is_logged(enforce):
+    first = _verified(_result("uuid-a", ssh_port=2200))
+    second = _verified(_result("uuid-b", port=8002, ssh_port=2201))
+
+    duplicates = keep_one_miner_per_executor({BOB: [first, second]})
+
+    _assert_untouched(first)
+    _assert_untouched(second)
+    assert _host_key_matches(duplicates) == [(BOB, "uuid-a"), (BOB, "uuid-b")]
+
+
+def test_a_host_key_the_validator_did_not_verify_matches_nothing(enforce):
+    first = _verified(_result("uuid-a", ssh_port=2200))
+    unverified = _result("uuid-b", port=8002, ssh_port=2201)
+    unverified.executor_info.ssh_host_key = HOST_KEY
+
+    assert _host_key_matches(keep_one_miner_per_executor({BOB: [first, unverified]})) == []
+
+
+def test_two_nodes_with_their_own_host_keys_match_nothing(enforce):
+    first = _verified(_result("uuid-a", ssh_port=2200))
+    second = _verified(_result("uuid-b", port=8002, ssh_port=2201), host_key=HOST_KEY + "2")
+
+    assert _host_key_matches(keep_one_miner_per_executor({BOB: [first, second]})) == []
