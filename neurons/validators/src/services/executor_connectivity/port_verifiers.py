@@ -29,11 +29,11 @@ class BatchVerifier:
         ssh_client,
         host: str,
         log_ctx: dict | None = None,
-        max_attempts: int = 2,
     ) -> BatchResult:
         """Verify ports with retries, and say whether any attempt got as far as testing them."""
         log_ctx = log_ctx or {}
         timeout_sec = 60
+        max_attempts = 2
         completed = False
 
         for attempt in range(1, max_attempts + 1):
