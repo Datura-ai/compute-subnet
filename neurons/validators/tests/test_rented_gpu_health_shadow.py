@@ -15,7 +15,7 @@ from neurons.validators.src.services.task.checks import (
 )
 from neurons.validators.src.services.task.checks import rented_gpu_health as module
 from neurons.validators.src.services.task.checks.gpu_fault_probe import PROBE_JSON_MARKER, PROBE_SOURCE
-from neurons.validators.src.services.task.checks.rented_gpu_health import judge_card, judge_health
+from neurons.validators.src.services.task.checks.rented_gpu_health import card_flags, judge_card, judge_health
 from neurons.validators.src.services.task.messages import RentedGpuHealthMessages as Msg
 from neurons.validators.src.services.task.pipeline_factory import PipelineFactory
 from protocol.vc_protocol.compute_requests import RentedExecutor, RentedExecutorsResponse, RentedPod
@@ -170,6 +170,57 @@ def test_each_fault_counter_names_its_reason():
     ]
 
 
+def test_card_flags_name_a_reset_a_hung_card_and_a_narrowed_link():
+    # one card broke under a rental: NVML asks for a reset, the clocks sit at max with nothing running
+    # and the link trained down; GeForce cards have no ECC counters to show it
+    broken = _healthy(0) | {
+        "recovery_action": 1,
+        "gfx_clock_mhz": 2820,
+        "gfx_clock_max_mhz": 3105,
+        "util_pct": 0,
+        "pcie_width": 8,
+        "pcie_width_max": 16,
+    }
+
+    assert card_flags(broken) == ["recovery_action", "clocks_high_at_idle", "pcie_width_drop"]
+
+
+@pytest.mark.parametrize(
+    "signals",
+    [
+        {"gfx_clock_mhz": 2820, "gfx_clock_max_mhz": 3105, "util_pct": 97},  # busy at high clocks
+        {"gfx_clock_mhz": 210, "gfx_clock_max_mhz": 3105, "util_pct": 0},  # idle and clocked down
+        {"gfx_clock_mhz": 2820, "gfx_clock_max_mhz": None, "util_pct": 0},  # max clock unknown
+        {"pcie_width": 16, "pcie_width_max": 16},  # an idle Gen1 link at full width is normal
+        {"pcie_width": None, "pcie_width_max": 16},
+        {"recovery_action": 0},
+    ],
+)
+def test_normal_or_unknown_signals_raise_no_flag(signals):
+    assert card_flags(_healthy(0) | signals) == []
+
+
+@pytest.mark.asyncio
+async def test_flags_are_logged_per_card_and_never_fail(context_factory, enabled, caplog):
+    gpus = [_healthy(i) for i in range(8)]
+    gpus[1] |= {"gfx_clock_mhz": 2820, "gfx_clock_max_mhz": 3105, "util_pct": 0, "pcie_width": 16}
+    runner = FakeRunner(_stdout(gpus))
+
+    with caplog.at_level(logging.WARNING, logger=module.__name__):
+        result = await RentedGpuHealthShadowCheck().run(_ctx(context_factory, runner))
+
+    assert result.passed is True and "score" not in result.updates
+    seen = result.event.what_we_saw
+    # a flag alone does not make the card a fault: an idle rented card at high clocks can be legitimate
+    assert seen["verdict"] == "ok" and seen["flagged_card_count"] == 1
+    card = seen["cards"][1]
+    assert card["flags"] == ["clocks_high_at_idle"] and card["gfx_clock_mhz"] == 2820
+    assert seen["cards"][0]["flags"] == []
+    (record,) = [r for r in caplog.records if "rented_gpu_health_shadow" in r.getMessage()]
+    assert record.levelno == logging.WARNING
+    assert "clocks_high_at_idle" in record.msg.to_full_string()
+
+
 def test_extra_cards_beyond_the_rental_are_not_missing():
     verdict = judge_health({"available": True, "count": 8, "gpus": [_healthy(i) for i in range(8)]}, 4)
 
@@ -218,12 +269,30 @@ def _fake_pynvml(lost_index: int, pending_index: int) -> types.ModuleType:
     nvml.nvmlDeviceGetRemappedRows = lambda h: (0, 0, 0, 0)
     nvml.nvmlDeviceGetGpuRecoveryAction = not_supported
     nvml.nvmlDeviceGetRetiredPagesPendingStatus = lambda h: 1 if h == pending_index else 0
+    nvml.asked_fields = []
+
+    def field_values(h, ids):
+        nvml.asked_fields.append(ids)
+        # card 0: an old driver without field 230; card 2: "Reset"
+        code = 3 if h == 0 else 0
+        return [types.SimpleNamespace(nvmlReturn=code, value=types.SimpleNamespace(uiVal=1))]
+
+    nvml.nvmlDeviceGetFieldValues = field_values
+    nvml.NVML_CLOCK_GRAPHICS = 0
+    nvml.nvmlDeviceGetClockInfo = lambda h, kind: 2700
+    nvml.nvmlDeviceGetMaxClockInfo = lambda h, kind: 3105
+    nvml.nvmlDeviceGetUtilizationRates = lambda h: types.SimpleNamespace(gpu=0)
+    nvml.nvmlDeviceGetCurrPcieLinkWidth = not_supported if pending_index == 0 else (lambda h: 8)
+    nvml.nvmlDeviceGetMaxPcieLinkWidth = lambda h: 16
     return nvml
 
 
 def test_health_mode_lists_a_lost_card_and_keeps_reading_the_rest(monkeypatch):
-    monkeypatch.setitem(sys.modules, "pynvml", _fake_pynvml(lost_index=1, pending_index=2))
-    nvml_health = _probe_namespace("nvml_health", "_read_counters")["nvml_health"]
+    nvml = _fake_pynvml(lost_index=1, pending_index=2)
+    monkeypatch.setitem(sys.modules, "pynvml", nvml)
+    nvml_health = _probe_namespace(
+        "nvml_health", "_read_counters", "nvml_recovery_action", "FI_GPU_RECOVERY_ACTION"
+    )["nvml_health"]
 
     snapshot = nvml_health()
 
@@ -233,6 +302,23 @@ def test_health_mode_lists_a_lost_card_and_keeps_reading_the_rest(monkeypatch):
     assert pending["retired_pages_pending"] is True and pending["uuid"] == "GPU-2"
     # NOT_SUPPORTED is not a read error
     assert "read_errors" not in snapshot["gpus"][0]
+    # the recovery action is field 230 (the pinned binding has no getter); a per-field error is None
+    assert snapshot["gpus"][0]["recovery_action"] is None and pending["recovery_action"] == 1
+    assert nvml.asked_fields == [[230], [230]]
+    assert pending["gfx_clock_mhz"] == 2700 and pending["gfx_clock_max_mhz"] == 3105
+    assert pending["util_pct"] == 0 and pending["pcie_width"] == 8 and pending["pcie_width_max"] == 16
+
+
+def test_a_failed_signal_read_is_unknown_not_a_read_error(monkeypatch):
+    nvml = _fake_pynvml(lost_index=1, pending_index=0)
+    monkeypatch.setitem(sys.modules, "pynvml", nvml)
+    nvml_health = _probe_namespace(
+        "nvml_health", "_read_counters", "nvml_recovery_action", "FI_GPU_RECOVERY_ACTION"
+    )["nvml_health"]
+
+    card = nvml_health()["gpus"][0]
+
+    assert card["pcie_width"] is None and "read_errors" not in card
 
 
 def test_health_report_gives_each_card_only_its_own_hardware_xids():

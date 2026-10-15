@@ -754,9 +754,27 @@ def _device_count(mp) -> int:
     return reply["count"]
 
 
-def _read_counters(pynvml, handle, gpu: dict, errors: list | None = None) -> None:
+# NVML_FI_DEV_GET_GPU_RECOVERY_ACTION (nvml.h); the pinned binding has no getter for it
+FI_GPU_RECOVERY_ACTION = 230
+
+
+def nvml_recovery_action(pynvml, handle):
+    """0 none, 1 GPU reset, 2 node reboot, 3 drain P2P, 4 drain and reset; None when the driver (older
+    than R570) or the card does not have the field."""
+    field = pynvml.nvmlDeviceGetFieldValues(handle, [FI_GPU_RECOVERY_ACTION])[0]
+    return field.value.uiVal if field.nvmlReturn == 0 else None
+
+
+def _read_counters(
+    pynvml, handle, gpu: dict, errors: list | None = None, recovery_by_field: bool = False
+) -> None:
     """Fill `gpu` with the fault counters; a read that fails is None (NotSupported on consumer cards,
     missing on old bindings). `errors` collects every failure that is not NOT_SUPPORTED (3)."""
+    recovery = (
+        (lambda h: nvml_recovery_action(pynvml, h))
+        if recovery_by_field
+        else (lambda h: pynvml.nvmlDeviceGetGpuRecoveryAction(h))
+    )
     for key, read in (
         ("uuid", lambda h: pynvml.nvmlDeviceGetUUID(h)),
         ("pci_bus_id", lambda h: pynvml.nvmlDeviceGetPciInfo(h).busId),
@@ -767,7 +785,7 @@ def _read_counters(pynvml, handle, gpu: dict, errors: list | None = None) -> Non
             ),
         ),
         ("remapped_rows", lambda h: list(pynvml.nvmlDeviceGetRemappedRows(h))),
-        ("recovery_action", lambda h: pynvml.nvmlDeviceGetGpuRecoveryAction(h)),
+        ("recovery_action", recovery),
     ):
         try:
             value = read(handle)
@@ -801,8 +819,8 @@ def nvml_snapshot() -> dict:
 
 
 def nvml_health() -> dict:
-    """`--health`: the same counters per card plus retired pages pending, no CUDA. A card NVML cannot
-    open (GPU is lost) is listed with its error instead of ending the read."""
+    """`--health`: the same counters per card plus retired pages pending, clocks, use and PCIe link width,
+    no CUDA. A card NVML cannot open (GPU is lost) is listed with its error instead of ending the read."""
     try:
         import pynvml
     except ImportError:
@@ -823,7 +841,7 @@ def nvml_health() -> dict:
                 gpus.append(gpu)
                 continue
             errors: list = []
-            _read_counters(pynvml, handle, gpu, errors)
+            _read_counters(pynvml, handle, gpu, errors, recovery_by_field=True)
             try:
                 gpu["retired_pages_pending"] = bool(
                     pynvml.nvmlDeviceGetRetiredPagesPendingStatus(handle)
@@ -832,6 +850,24 @@ def nvml_health() -> dict:
                 gpu["retired_pages_pending"] = None
                 if getattr(exc, "value", None) != 3:
                     errors.append(f"retired_pages_pending: {exc}"[:200])
+            # hung-card and link signals for the log only: a failed read is unknown, not a read error
+            for key, read in (
+                (
+                    "gfx_clock_mhz",
+                    lambda h: pynvml.nvmlDeviceGetClockInfo(h, pynvml.NVML_CLOCK_GRAPHICS),
+                ),
+                (
+                    "gfx_clock_max_mhz",
+                    lambda h: pynvml.nvmlDeviceGetMaxClockInfo(h, pynvml.NVML_CLOCK_GRAPHICS),
+                ),
+                ("util_pct", lambda h: pynvml.nvmlDeviceGetUtilizationRates(h).gpu),
+                ("pcie_width", lambda h: pynvml.nvmlDeviceGetCurrPcieLinkWidth(h)),
+                ("pcie_width_max", lambda h: pynvml.nvmlDeviceGetMaxPcieLinkWidth(h)),
+            ):
+                try:
+                    gpu[key] = read(handle)
+                except Exception:  # noqa: BLE001
+                    gpu[key] = None
             if errors:
                 gpu["read_errors"] = errors
             gpus.append(gpu)

@@ -42,6 +42,40 @@ REASON_REMAP_PENDING = "remapped_rows_pending"
 REASON_REMAP_FAILED = "remapped_rows_failed"
 REASON_RECOVERY_ACTION = "recovery_action"
 
+# log-only flags beside the verdict: GeForce cards have no ECC or row-remap counters, so a card that
+# broke under a rental shows only here
+FLAG_RECOVERY_ACTION = "recovery_action"
+FLAG_CLOCKS_HIGH_IDLE = "clocks_high_at_idle"
+FLAG_PCIE_WIDTH_DROP = "pcie_width_drop"
+CLOCKS_HIGH_RATIO = 0.9
+SIGNAL_KEYS = (
+    "recovery_action",
+    "gfx_clock_mhz",
+    "gfx_clock_max_mhz",
+    "util_pct",
+    "pcie_width",
+    "pcie_width_max",
+)
+
+
+def _int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def card_flags(gpu: dict[str, Any]) -> list[str]:
+    """Hung-card and link signals; a rented card idling at high clocks can be legitimate, so these never
+    fail anything. A lower link generation is not flagged: an idle card drops to Gen1 to save power."""
+    flags: list[str] = []
+    if _int(gpu.get("recovery_action")):
+        flags.append(FLAG_RECOVERY_ACTION)
+    clock, top = _int(gpu.get("gfx_clock_mhz")), _int(gpu.get("gfx_clock_max_mhz"))
+    if clock is not None and top and gpu.get("util_pct") == 0 and clock >= CLOCKS_HIGH_RATIO * top:
+        flags.append(FLAG_CLOCKS_HIGH_IDLE)
+    width, width_max = _int(gpu.get("pcie_width")), _int(gpu.get("pcie_width_max"))
+    if width is not None and width_max and width < width_max:
+        flags.append(FLAG_PCIE_WIDTH_DROP)
+    return flags
+
 
 def judge_card(gpu: dict[str, Any]) -> list[str]:
     """The fault reasons one card's health read shows; empty when the card is healthy."""
@@ -82,6 +116,8 @@ def judge_health(nvml: dict[str, Any], expected: int) -> dict[str, Any]:
             "index": _cap(gpu.get("index")),
             "uuid": _cap(gpu.get("uuid")),
             "verdict": "fault" if reasons else CARD_OK,
+            **{key: gpu[key] for key in SIGNAL_KEYS if _int(gpu.get(key)) is not None},
+            "flags": card_flags(gpu),
         }
         if reasons:
             card["reasons"] = reasons
@@ -100,6 +136,7 @@ def judge_health(nvml: dict[str, Any], expected: int) -> dict[str, Any]:
         "expected_gpu_count": expected,
         "nvml_gpu_count": visible,
         "faulty_card_count": len(faulty),
+        "flagged_card_count": sum(1 for card in cards if card.get("flags")),
         "cards": cards,
     }
 
@@ -157,7 +194,8 @@ class RentedGpuHealthShadowCheck:
         xid = report.get("xid") if isinstance(report.get("xid"), dict) else {}
         what["xid_readable"] = bool(xid.get("available"))
         if what["verdict"] == CARD_OK:
-            self._log(ctx, what, logging.INFO)
+            level = logging.WARNING if what["flagged_card_count"] else logging.INFO
+            self._log(ctx, what, level)
             return CheckResult(
                 passed=True,
                 event=render_message(Msg.SHADOW_OK, ctx=ctx, check_id=self.check_id, what=what),
