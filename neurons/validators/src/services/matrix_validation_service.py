@@ -446,6 +446,7 @@ class ValidationService:
         machine_spec: dict,
         default_extra: dict,
         vram_budget_mb: int | None = None,
+        gpu_uuid: str | None = None,
     ) -> "MatmulChallenge":
         """Size and encrypt one capability challenge; the caller decides how it reaches the executor.
 
@@ -467,6 +468,10 @@ class ValidationService:
         gpu_details = machine_spec.get("gpu", {}).get("details", [])
         gpu_count = machine_spec.get("gpu", {}).get("count", 0)
         gpu_uuids = ','.join([detail.get('uuid', '') for detail in gpu_details])
+        if gpu_uuid is not None:
+            # A run pinned to one card: the executor's .so then sees only that card, so its key
+            # is built from that card alone.
+            gpu_uuids, gpu_count = gpu_uuid, 1
 
         # NOTE: machine_info MUST exactly match what the executor's libdmcompverify
         # reconstructs locally via getGPUInfo() — otherwise the hash-derived AES key
@@ -691,6 +696,7 @@ class ValidationService:
         machine_spec: dict,
         vram_budget_mb: int | None = None,
         probe_all_cards: bool = True,
+        gpu_uuid: str | None = None,
     ) -> ValidationResult:
         # The SSH transport of the capability matmul: prepare_matmul_challenge → one remote
         # `decrypt_challenge.py` run → evaluate_matmul_output. The local transport (checks/
@@ -721,7 +727,9 @@ class ValidationService:
         challenge = None
         try:
             script_path = f"{executor_info.root_dir}/src/decrypt_challenge.py"
-            challenge = self.prepare_matmul_challenge(machine_spec, default_extra, vram_budget_mb)
+            challenge = self.prepare_matmul_challenge(
+                machine_spec, default_extra, vram_budget_mb, gpu_uuid=gpu_uuid
+            )
             verifier_params = challenge.params
             log_extra = challenge.log_extra
 
@@ -738,6 +746,9 @@ class ValidationService:
                 )
 
             command = f"{executor_info.python_path} {script_path} {verifier_params}"
+            if gpu_uuid is not None:
+                # gpu_uuid comes from host-reported specs, so it is quoted
+                command = f"CUDA_VISIBLE_DEVICES={shlex.quote(gpu_uuid)} {command}"
 
             logger.info(_m("Matrix Multiplication Python Script Command", extra=get_extra_info(log_extra)))
 
