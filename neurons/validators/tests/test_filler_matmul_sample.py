@@ -1,5 +1,8 @@
+from unittest.mock import MagicMock
+
 import pytest
 from helpers import build_services, build_state
+from neurons.validators.src.services import matrix_validation_service as mvs
 from neurons.validators.src.services.matrix_validation_service import ValidationResult
 from neurons.validators.src.services.task.checks import capability
 from neurons.validators.src.services.task.checks.capability import CapabilityCheck
@@ -90,3 +93,12 @@ async def test_a_failed_sample_is_recorded_and_the_filler_skip_still_passes(
     assert result.event.reason_code == Msg.FILLER_SKIPPED.reason
     assert result.event.what_we_saw["matmul_sample"]["passed"] is False
     assert result.event.what_we_saw["matmul_sample"]["error"]
+
+
+def test_the_default_sample_budget_leaves_room_for_the_matrix(monkeypatch):
+    monkeypatch.setattr(mvs, "DMCompVerifyWrapper", lambda *_a, **_kw: MagicMock())
+    service = mvs.ValidationService()
+
+    dim_k = service.get_max_matrix_dimensions(capability.settings.FILLER_MATMUL_SAMPLE_VRAM_MB, 2000)
+
+    assert dim_k > 0

@@ -321,7 +321,8 @@ class Settings(BaseSettings):
     FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES: int = Field(
         env="FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES", default=0, ge=0
     )
-    FILLER_MATMUL_SAMPLE_VRAM_MB: int = Field(env="FILLER_MATMUL_SAMPLE_VRAM_MB", default=2048, gt=0)
+    # Above the 2048 MB the matmul keeps in reserve, or no matrix fits.
+    FILLER_MATMUL_SAMPLE_VRAM_MB: int = Field(env="FILLER_MATMUL_SAMPLE_VRAM_MB", default=4096, gt=2048)
     # VerifyX challenge config for the first pass (defaults 128 GB / 5 GB in VerifyXSettings). The
     # measurements are still taken and published; only the amount of RAM/disk written shrinks.
     FIRST_PASS_VERIFYX_MEMORY_MAX_TEST_GB: int = Field(env="FIRST_PASS_VERIFYX_MEMORY_MAX_TEST_GB", default=16)
