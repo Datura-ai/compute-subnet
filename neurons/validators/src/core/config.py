@@ -175,6 +175,9 @@ class Settings(BaseSettings):
     DIND_PROBE_FIRST_MISS_GRACE_TTL_SECONDS: int = Field(
         env="DIND_PROBE_FIRST_MISS_GRACE_TTL_SECONDS", default=3600, gt=0
     )
+    # ticket-0494: how long a DinD probe's sysbox pass is remembered for a rented executor whose later
+    # probes cannot reach the host (PortConnectivityCheck). Refreshed by every passing probe.
+    SYSBOX_VERIFIED_TTL_SECONDS: int = Field(env="SYSBOX_VERIFIED_TTL_SECONDS", default=24 * 3600, gt=0)
     DISCORD_INCENTIVE_CUTOFF: datetime = datetime(2026, 6, 15, 12, 0, 0)
 
     # DAH-2265: cached-template requirement. Before the cutoff the CachedTemplateVerificationCheck
@@ -221,6 +224,12 @@ class Settings(BaseSettings):
         47: "5G694c15wAu1LKi9rpSQqJjpBfg4K1oiBxEm5QSVdVZAfp9f",
     }
     ENABLE_NEW_BURN_LOGIC: bool = True
+
+    # Comma-separated miner hotkeys that earn no subnet incentive from this validator. Their
+    # executors are still validated, listed and rentable exactly as before; only the incentive
+    # is zeroed (every pool, spot pay and referral), and the share they would have taken is
+    # left to burn. Empty (the default) changes nothing. Burner hotkeys are never affected.
+    SCORING_EXCLUDED_HOTKEYS: str = Field(env="SCORING_EXCLUDED_HOTKEYS", default="")
 
     # DAH-2251 — referral incentive paid via emission, to referrer hotkeys weighted by
     # the backend's epoch-stable EMA feed. There is no funding wallet, so unlike the
@@ -328,6 +337,14 @@ class Settings(BaseSettings):
     # The matmul is sized from min(card VRAM, this) instead of the whole card: same challenge,
     # seal and UUID check, 5–17x less data to generate and copy.
     FIRST_PASS_MATMUL_VRAM_MB: int = Field(env="FIRST_PASS_MATMUL_VRAM_MB", default=8192)
+    # A filler-only node skips the matmul while the filler runs. With N > 0, every Nth such cycle
+    # runs the challenge on a small VRAM budget beside the filler and records the answer
+    # (FILLER_MATMUL_SAMPLE); the check result never depends on it. 0 = never, the default.
+    FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES: int = Field(
+        env="FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES", default=0, ge=0
+    )
+    # Above the 2048 MB the matmul keeps in reserve, or no matrix fits.
+    FILLER_MATMUL_SAMPLE_VRAM_MB: int = Field(env="FILLER_MATMUL_SAMPLE_VRAM_MB", default=4096, ge=4096)
     # VerifyX challenge config for the first pass (defaults 128 GB / 5 GB in VerifyXSettings). The
     # measurements are still taken and published; only the amount of RAM/disk written shrinks.
     FIRST_PASS_VERIFYX_MEMORY_MAX_TEST_GB: int = Field(env="FIRST_PASS_VERIFYX_MEMORY_MAX_TEST_GB", default=16)
@@ -388,11 +405,9 @@ class Settings(BaseSettings):
     # author (/proc/cpuinfo, /sys present population, docker NCPU).
     CPU_TRUTH_CHECK_ENABLED: bool = Field(env="CPU_TRUTH_CHECK_ENABLED", default=True)
     CPU_TRUTH_ENFORCEMENT_ENABLED: bool = Field(env="CPU_TRUTH_ENFORCEMENT_ENABLED", default=False)
-    # A seal-aware libdmcompverify that gets an unsealed matmul answer always logs MATMUL_RESULT_UNSEALED;
-    # with this on the answer fails. Off until the log shows which executors still answer unsealed.
-    # Only an answer whose plaintext uuid matches counts; a probe that never answered (out of
-    # memory) keeps the mismatch path and its busy-GPU waiver.
-    MATMUL_SEAL_REQUIRED_ENABLED: bool = Field(env="MATMUL_SEAL_REQUIRED_ENABLED", default=False)
+    # The scrape mounts a size-limited vloopback volume the way a rental does and reports the verdict in
+    # its SCRAPE_OK event. Kill switch: off, the scrape skips the test (baked in by FileEncryptService).
+    VLOOPBACK_SCRAPE_CHECK_ENABLED: bool = Field(env="VLOOPBACK_SCRAPE_CHECK_ENABLED", default=True)
     # Item 3 — run the GPU work-proof on every claimed card concurrently (own challenge per card,
     # sized from the registry SKU) and time the aggregate on the validator, so a count lie either
     # fails device selection or serialises past a wide wall-clock threshold.
@@ -482,6 +497,15 @@ class Settings(BaseSettings):
     PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED: bool = Field(
         env="PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED", default=False
     )
+    # The executor's own stack is excused from the provider-side load by image digest, and any
+    # container started from that image carries it. Cores excused that way above this number are
+    # logged (PROVIDER_SIDE_LOAD_STACK_EXCUSE_HIGH); with the cap on, the tier then excuses nothing.
+    PROVIDER_SIDE_LOAD_STACK_EXCUSE_CORES: float = Field(
+        env="PROVIDER_SIDE_LOAD_STACK_EXCUSE_CORES", default=8.0, gt=0
+    )
+    PROVIDER_SIDE_LOAD_STACK_EXCUSE_CAP_ENABLED: bool = Field(
+        env="PROVIDER_SIDE_LOAD_STACK_EXCUSE_CAP_ENABLED", default=False
+    )
     FOREIGN_GPU_WORKLOAD_CHECK_ENABLED: bool = Field(env="FOREIGN_GPU_WORKLOAD_CHECK_ENABLED", default=True)
     FOREIGN_GPU_WORKLOAD_ENFORCEMENT_ENABLED: bool = Field(
         env="FOREIGN_GPU_WORKLOAD_ENFORCEMENT_ENABLED", default=False
@@ -493,16 +517,27 @@ class Settings(BaseSettings):
     # chase and a pinned-memory copy round-trip over a ~2 GB working set, plus NVML before/after: a rise in
     # uncorrected ECC or remapped rows, a pending or failed remap, or a required recovery action is a fault.
     # A card that faults under indexed access (Blender "Illegal address in CUDA queue", 6 Sep) passes the
-    # sequential matmul. CHECK runs it and logs the verdict; ENFORCEMENT lets a fault zero the score. Both
-    # default off: the probe is new GPU work on every idle node per cycle, so it starts as an opt-in shadow.
+    # sequential matmul. CHECK runs it and logs the verdict; ENFORCEMENT lets a fault zero the score.
+    # DAH-4257: CHECK defaults on (shadow). GPU faults mid-rental are the largest renter-reported class
+    # (30 days to 14 Oct), and the probe sat dark in prod. ENFORCEMENT stays off until the shadow counts
+    # are read and the owner decides.
+    GPU_FAULT_PROBE_CHECK_ENABLED: bool = Field(env="GPU_FAULT_PROBE_CHECK_ENABLED", default=True)
+    GPU_FAULT_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="GPU_FAULT_PROBE_ENFORCEMENT_ENABLED", default=False)
     # DAH-3110 — a card NVML reports broken (uncorrected ECC since the driver loaded, a pending or failed
     # row remap, a required recovery action) fails the node like a GPU ban until the host resets or
     # replaces it. On: a broken card faults renters' jobs. Off is the kill switch back to flag-only.
     GPU_MEMORY_HEALTH_ENFORCEMENT_ENABLED: bool = Field(
         env="GPU_MEMORY_HEALTH_ENFORCEMENT_ENABLED", default=True
     )
-    GPU_FAULT_PROBE_CHECK_ENABLED: bool = Field(env="GPU_FAULT_PROBE_CHECK_ENABLED", default=False)
-    GPU_FAULT_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="GPU_FAULT_PROBE_ENFORCEMENT_ENABLED", default=False)
+    # F-1599 — a 64 MB pinned-host-memory H2D/D2H round trip on every GPU of an idle node, compared on the host.
+    # A TDX guest whose GPUs are not in CC mode passed every check yet could not DMA pinned memory (8x H200,
+    # 13 Oct). CHECK runs it; ENFORCEMENT lets wrong data, a copy error or a hung copy fail the node. CHECK is
+    # on (milliseconds of copy per card; a probe that cannot start is UNKNOWN, never a fault). ENFORCEMENT is off
+    # until the PINNED_MEMORY_PROBE_FAILED log shows no healthy node among the faults (owner, 14 Oct).
+    PINNED_MEMORY_PROBE_CHECK_ENABLED: bool = Field(env="PINNED_MEMORY_PROBE_CHECK_ENABLED", default=True)
+    PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED: bool = Field(
+        env="PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED", default=False
+    )
     # A fault probe with no verdict passes. Five such cycles in a row on one node are logged
     # (GPU_FAULT_PROBE_UNKNOWN_STREAK); with this on they are judged like a fault, which fails the
     # node only while GPU_FAULT_PROBE_ENFORCEMENT_ENABLED is on too. Off by default.
@@ -639,28 +674,22 @@ class Settings(BaseSettings):
         env="ENABLE_UNRENTED_PORT_FLOOR_FOR_SPLIT_REMAINDER", default=False
     )
 
-    # Spot-node pay. True: an unrented spot node whose provider chose Spot (the backend's
-    # provider_spot_executor_ids) and that runs Lium fillers earns
-    # min(0.95 x its GPU configuration's average filler revenue, its secure idle rate before
-    # bucket-cap dilution), with no bucket cap (0.95 = FILLER_REVENUE_PAY_FACTOR); a spot node without a filler, or whose configuration
-    # has no usable average, earns 0, and a demoted, force-spot, pinned or no-incentive-rental one
+    # Spot-node pay. True: an unrented spot node on the backend's spot pay list (provider_spot_executor_ids:
+    # set to Spot by its provider, or demoted for penalties) and that runs Lium fillers earns
+    # min(1.0 x its GPU configuration's average filler revenue, its secure idle rate before
+    # bucket-cap dilution), with no bucket cap (1.0 = FILLER_REVENUE_PAY_FACTOR); a spot node without a filler, or whose configuration
+    # has no usable average, earns 0, and a banned, pinned or no-incentive-rental one
     # earns 0 as before. Pays nobody until the backend sends provider_spot_executor_ids.
     # False: every spot node earns 0, as before.
     ENABLE_SPOT_NODE_PAY: bool = Field(env="ENABLE_SPOT_NODE_PAY", default=False)
     # Secure-node floor, independent of the flag above. True: an idle secure node's rate after
-    # bucket-cap dilution is raised to 0.95 x its configuration's average filler revenue, even above
-    # its listed rate (0.95 = SECURE_FILLER_REVENUE_FLOOR_FACTOR, set apart from the spot factor).
+    # bucket-cap dilution is raised to 1.0 x its configuration's average filler revenue, even above
+    # its listed rate (1.0 = SECURE_FILLER_REVENUE_FLOOR_FACTOR, set apart from the spot factor).
     # False: dilution applies as before.
     ENABLE_SECURE_FILLER_REVENUE_FLOOR: bool = Field(env="ENABLE_SECURE_FILLER_REVENUE_FLOOR", default=False)
     # A configuration's filler average is used only when it was taken over at least this many
     # filler GPU-hours; a thinner sample reads as no average.
     FILLER_REVENUE_MIN_GPU_HOURS: float = Field(env="FILLER_REVENUE_MIN_GPU_HOURS", default=24.0)
-
-    # True: when the --network=host batch verifies fewer than MIN_PORT_COUNT ports, the ports it
-    # failed are re-probed through the published-port (-p) tiers renters' pods use, and the two
-    # results are merged; still below the floor, one more batch probes up to 300 declared ports
-    # above those. It can raise many hosts' verified_port_count at once, so it ships off.
-    PORT_PROBE_TOPUP_BELOW_FLOOR: bool = Field(env="PORT_PROBE_TOPUP_BELOW_FLOOR", default=False)
 
     # True: a run below the port floor fails INSUFFICIENT_PORTS (the verdict PortCountCheck gives an
     # unrented node) when every pod in the batch-start rented list is stale: not running and its
@@ -756,6 +785,9 @@ class Settings(BaseSettings):
 
     def get_allowed_gpu_hwmodels(self) -> set[str]:
         return {s.strip() for s in self.GPU_ATTESTATION_ALLOWED_HWMODELS.split(",") if s.strip()}
+
+    def get_scoring_excluded_hotkeys(self) -> set[str]:
+        return {s.strip() for s in self.SCORING_EXCLUDED_HOTKEYS.split(",") if s.strip()}
 
     # Use REST API instead of WebSocket for miner communication
     USE_REST_API: bool = Field(env="USE_REST_API", default=False)

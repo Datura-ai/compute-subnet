@@ -145,13 +145,17 @@ class ResultHandler:
             context.state.rented_data
             and executor_info.uuid in context.state.rented_data.spot_executor_ids
         )
-        is_provider_chosen_spot = bool(
+        is_on_spot_pay_list = bool(
             is_spot
             and executor_info.uuid in context.state.rented_data.provider_spot_executor_ids
         )
         is_new_rentals_paused = bool(
             context.state.rented_data
             and executor_info.uuid in context.state.rented_data.new_rentals_paused_executor_ids
+        )
+        is_provider_email_held = bool(
+            context.state.rented_data
+            and executor_info.uuid in context.state.rented_data.provider_email_held_executor_ids
         )
         default_job_owner = (
             context.state.rented_data.get_default_job_owner(executor_info.uuid)
@@ -245,10 +249,11 @@ class ResultHandler:
             is_rented=context.rented,
             rented_gpu_count=self._get_rented_gpu_count(context),
             is_spot=is_spot,
-            is_provider_chosen_spot=is_provider_chosen_spot,
+            is_on_spot_pay_list=is_on_spot_pay_list,
             is_new_rentals_paused=is_new_rentals_paused,
             is_provider_banned=context.is_provider_banned,
             provider_discord_connected=provider_discord_connected,
+            is_provider_email_held=is_provider_email_held,
             rental_created_at=self._get_rental_created_at(context),
             default_job_owner=default_job_owner,
             has_lium_filler=has_lium_filler,
