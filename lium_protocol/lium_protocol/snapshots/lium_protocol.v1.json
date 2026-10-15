@@ -4613,6 +4613,14 @@
           "title": "Default Job Owner By Executor",
           "type": "object"
         },
+        "executor_owner_hotkeys": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Executor Owner Hotkeys",
+          "type": "object"
+        },
         "executors": {
           "additionalProperties": {
             "$ref": "#/$defs/RentedExecutor"
@@ -4701,6 +4709,14 @@
           ],
           "default": null,
           "title": "Provider Discord Connected Executor Ids"
+        },
+        "provider_email_held_executor_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Provider Email Held Executor Ids",
+          "type": "array"
         },
         "provider_spot_executor_ids": {
           "default": [],
@@ -5733,7 +5749,7 @@
       "$ref": "#/$defs/RentedExecutorsResponse"
     }
   },
-  "protocol_version": "1.5.0",
+  "protocol_version": "1.7.0",
   "socket_replies": {
     "RentedMachineResponse": {
       "$ref": "#/$defs/RentedMachineResponse"
