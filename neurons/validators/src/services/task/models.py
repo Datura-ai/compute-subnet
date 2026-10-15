@@ -59,12 +59,16 @@ class JobResult(BaseModel):
     # minimum-split tier and rate, never as a bundle of its own size.
     is_split_remainder: bool = False
     is_spot: bool = False
-    # in the backend's provider_spot_executor_ids: the provider chose Spot, rather than a demotion,
-    # force-spot hotkey, pin or no-incentive rental putting the node there. Gates spot-node pay.
-    is_provider_chosen_spot: bool = False
+    # in the backend's provider_spot_executor_ids, the spot pay list: set to Spot by its provider, or
+    # force-spot by a penalty demotion; not a banned hotkey, pin or no-incentive rental. Gates spot-node pay.
+    is_on_spot_pay_list: bool = False
     is_new_rentals_paused: bool = False
     is_provider_banned: bool = False
+    # the miner hotkey is in settings.SCORING_EXCLUDED_HOTKEYS: no incentive from any pool, set
+    # by BaseIncentive.calculate_mining_scores. Validation, listing and rentals are unchanged.
+    is_hotkey_excluded_from_scoring: bool = False
     provider_discord_connected: bool = True
+    is_provider_email_held: bool = False
     rental_created_at: datetime | None = None
     default_job_owner: str | None = None  # "miner" | "lium" | None; miner default job is excluded from unrented incentive
     has_lium_filler: bool = False  # the backend lists at least one active Lium filler container on the node
@@ -84,6 +88,9 @@ class JobResult(BaseModel):
     # this node's rented pods as the cycle's SSH probe saw them (services/pod_ssh_probe.py);
     # None when the node has no rented pod with an ssh_port or the probe did not run.
     pod_ssh: list[PodSshObservation] | None = None
+    # True only when this cycle opened the shell with known_hosts pinned to executor_info.ssh_host_key,
+    # so the node proved it holds that key. Results for nodes the cycle never reached stay False.
+    ssh_host_key_verified: bool = False
 
     inspector_outcome: str = "SKIPPED"
 
@@ -98,6 +105,12 @@ class JobResult(BaseModel):
     # itself failed). None on a scored run and on an error no check produced. Read by the
     # rollout-grace classifier at the end of the cycle.
     failure_reason_code: str | None = None
+    # The miner hotkey that keeps this machine's score this cycle, set on the other hotkeys' copies
+    # when duplicate enforcement zeroes them (checks/duplicate_executor.py).
+    duplicate_kept_by: str | None = Field(default=None, exclude=True)
+    # Such a copy under the keeper's own executor UUID: one backend row, so it is not published
+    # and the row hears only the copy that kept the score.
+    duplicate_shares_kept_row: bool = Field(default=False, exclude=True)
 
     # Incentive relevant fields
     mining_score: float | None = None                   # Score for mining pool for scoring logic

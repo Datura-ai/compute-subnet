@@ -24,6 +24,13 @@ from services.rental_docker_sdk import RENTAL_NETWORK_OPTIONS, RentalDockerSdkCl
 from test_deploy_optimizations import _docker_client, _patch_happy, _payload, _run, _ssh_client
 
 
+@contextlib.contextmanager
+def _customer_create_that_reached_create_container(customer):
+    with customer_creates.track(customer):
+        customer_creates.reached_create_container(customer)
+        yield
+
+
 @pytest.fixture
 def svc() -> DockerService:
     return DockerService(ssh_service=Mock(), redis_service=Mock(), attestation_service=Mock())
@@ -108,6 +115,7 @@ async def test_customer_create_registering_until_the_filler_container_exists_ref
     monkeypatch.delattr(svc, "_run_rental_docker_create_with_port_retry")
     docker_api = Mock(inspect_network=Mock(return_value={"Driver": "bridge", "Options": RENTAL_NETWORK_OPTIONS}))
     docker_api.create_container.return_value = {"Id": "filler-container"}
+    docker_api.containers.return_value = []  # the host listing a filler reads before its start
     _docker_client(svc).run_container = RentalDockerSdkClient(docker_api).run_container
     steps = Mock(cleanup=AsyncMock(return_value=True), restore_power=AsyncMock())  # True: the container is gone
     monkeypatch.setattr(svc, "cleanup_failed_container_creation", steps.cleanup)
@@ -116,7 +124,7 @@ async def test_customer_create_registering_until_the_filler_container_exists_ref
     customer_registration = contextlib.ExitStack()
 
     def register_customer(*_args, **_kwargs) -> dict:
-        customer = customer_creates.track(_payload(executor_id=filler.executor_id))
+        customer = _customer_create_that_reached_create_container(_payload(executor_id=filler.executor_id))
         if customer_finishes:
             with customer:
                 pass
@@ -217,17 +225,17 @@ async def test_cancelled_customer_create_is_untracked(miner_service: MinerServic
 def test_filler_is_refused_by_a_customer_create_ending_after_its_start_not_by_older_ones() -> None:
     customer = _payload()
     filler = _payload(workload_kind=WorkloadKind.FILLER, executor_id=customer.executor_id)
-    with customer_creates.track(customer):
+    with _customer_create_that_reached_create_container(customer):
         pass
     customer_running = contextlib.ExitStack()
-    customer_running.enter_context(customer_creates.track(customer))
+    customer_running.enter_context(_customer_create_that_reached_create_container(customer))
 
     with customer_creates.track(filler):
         customer_running.close()
         refused_after_customer_ended = customer_creates.ran_since_filler_started(filler)
     with customer_creates.track(filler):
         refused_after_older_customer_creates = customer_creates.ran_since_filler_started(filler)
-        with customer_creates.track(customer):
+        with _customer_create_that_reached_create_container(customer):
             pass
         with customer_creates.track(filler.model_copy()):
             pass

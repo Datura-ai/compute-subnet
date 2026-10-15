@@ -624,7 +624,7 @@ async def test_tier_fallthrough_is_debug(caplog):
         return [], list(ports)
 
     async def no_batch(ports, **kwargs):
-        return BatchResult([], list(ports), completed=False)
+        return BatchResult([], list(ports))
 
     probe = PortProbe(
         batch_verifier=Mock(verify=no_batch),

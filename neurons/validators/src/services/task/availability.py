@@ -114,8 +114,25 @@ def availability_errors(events: list[ValidationEvent] | None) -> list[Availabili
     return list(errors.values())
 
 
+# The executor reports its own sshd's host key and the validator pins it to this address and port,
+# so an untrusted key means a different sshd answered there: in practice the host's own sshd
+# (a provider on Discord, 11 Oct 2026: the node SSH port was the host's SSH port). Firewall advice
+# misleads. The key is re-read from the miner every cycle, so a recreated executor (new key, same
+# port) fails one check and then passes. A repeat usually means the port; rarely the executor's
+# sshd still serves a key it no longer reports (host-key files rotated without a reload).
+SSH_HOST_KEY_MISMATCH_REMEDIATION = (
+    "If this repeats every check, the SSH server on this port is not presenting the host key the "
+    "executor reports. Usually another SSH server answers the port (the host's own sshd, or a "
+    "port forward to another machine): set the node SSH port (and the public SSH port forward, if "
+    "any) to a port that reaches the executor container, not the host's SSH port, then re-run "
+    "`lium mine`. If the port already reaches the executor, restart the executor container so its "
+    "SSH server loads the key it reports. A single failure while the executor container was being "
+    "recreated clears by itself on the next check."
+)
+
+
 def build_ssh_unreachable_event(
-    *, executor_uuid: str, host: str, port: int | None, error: str
+    *, executor_uuid: str, host: str, port: int | None, error: str, host_key_mismatch: bool = False
 ) -> ValidationEvent:
     return build_availability_event(
         code=AvailabilityErrorCode.EXECUTOR_SSH_UNREACHABLE,
@@ -123,7 +140,9 @@ def build_ssh_unreachable_event(
         reach_target=ReachTarget.EXECUTOR_SSH,
         event_text="Validator cannot open SSH to this node",
         impact="The node is hidden from the market and cannot take new rentals until a check succeeds.",
-        remediation=(
+        remediation=SSH_HOST_KEY_MISMATCH_REMEDIATION
+        if host_key_mismatch
+        else (
             "Check that sshd on the node accepts the validator on its management port, "
             "and that no firewall or rate limit rejects the connection."
         ),
