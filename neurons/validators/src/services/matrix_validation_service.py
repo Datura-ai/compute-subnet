@@ -690,6 +690,7 @@ class ValidationService:
         default_extra: dict,
         machine_spec: dict,
         vram_budget_mb: int | None = None,
+        probe_all_cards: bool = True,
     ) -> ValidationResult:
         # The SSH transport of the capability matmul: prepare_matmul_challenge → one remote
         # `decrypt_challenge.py` run → evaluate_matmul_output. The local transport (checks/
@@ -699,7 +700,8 @@ class ValidationService:
         # enforcement fails a count lie (device-selection error / OOM / serialised aggregate
         # wall-clock). Single-card / unknown-model hosts skip it (probe returns None), which also
         # keeps a not-yet-relevant fleet — and the legacy single-card path below — unchanged.
-        if settings.MATMUL_ALLCARDS_CHECK_ENABLED:
+        # a filler-node sample runs beside the filler, so it never probes every card
+        if settings.MATMUL_ALLCARDS_CHECK_ENABLED and probe_all_cards:
             all_cards = await self._probe_all_claimed_cards(
                 ssh_client, executor_info, default_extra, machine_spec
             )
