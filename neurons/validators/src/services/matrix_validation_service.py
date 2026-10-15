@@ -762,6 +762,12 @@ class ValidationService:
                     error_message=error_msg,
                     timed_out=True,
                 )
+            except asyncio.CancelledError:
+                # DAH-4366: the fast path cancels this lane when the host lane fails first. The
+                # remote matmul would keep the GPU busy into the next cycle's retry, so kill it
+                # (shielded, a second cancel must not stop the kill) and stay cancelled.
+                await asyncio.shield(self._kill_remote_matmul(ssh_client, script_path, log_extra))
+                raise
             except Exception as e:
                 error_msg = f"Failed to execute SSH command: {str(e)}"
                 logger.error(_m(error_msg, extra=get_extra_info(log_extra)))
