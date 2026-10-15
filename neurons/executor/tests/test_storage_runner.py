@@ -19,7 +19,12 @@ from storage.models import (
     StorageAction,
     StorageOperationSpec,
 )
-from storage.reporting import ReportingLeaseExpired, StorageEventReporter
+from storage.reporting import (
+    PENDING_LOGS_MAX_BYTES,
+    ReportingLeaseExpired,
+    StorageEventReporter,
+    _newest_within_bytes,
+)
 from storage.restic import (
     ENCRYPTED_BACKUP_SCRIPT,
     JsonEventWriter,
@@ -1279,3 +1284,13 @@ def test_local_backup_of_a_missing_directory_fails_before_restic_runs(tmp_path: 
 
     with pytest.raises(ResticOperationError, match="backup path does not exist"):
         runner._backup()
+
+
+def test_queued_diagnostic_logs_stay_under_the_waf_body_limit() -> None:
+    lines = [f"{index}" + "ж" * 1999 for index in range(20)]
+
+    kept = _newest_within_bytes(lines)
+
+    assert kept == lines[-len(kept) :]
+    assert len(json.dumps(kept)) <= PENDING_LOGS_MAX_BYTES + len(kept) * 2
+    assert len(json.dumps({"logs": kept})) < 64_000

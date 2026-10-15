@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import random
 import time
 from collections.abc import Callable, Mapping
@@ -13,6 +14,8 @@ from storage.models import ReporterResource, ReporterSpec, StorageAction
 # One progress PUT per interval at most; a hot loop of PUTs tripped the CloudFront WAF rate rule.
 PROGRESS_MIN_INTERVAL_SECONDS = 10.0
 RETRY_BACKOFF_CAP_SECONDS = 60.0
+# Queued log lines stay well under the WAF's 64 KB body limit, leaving room for the rest of the payload.
+PENDING_LOGS_MAX_BYTES = 32_000
 
 
 class ReportingLeaseExpired(RuntimeError):
@@ -85,7 +88,9 @@ class StorageEventReporter:
                 if self._diagnostic_detail is None:
                     self._diagnostic_detail = message[:2000]
                 # Kept until a PUT succeeds, so throttled or failed updates do not drop them.
-                self._pending_logs = [*self._pending_logs, message[:2000]][-20:]
+                self._pending_logs = _newest_within_bytes(
+                    [*self._pending_logs, message[:2000]][-20:]
+                )
                 self._put(self._progress_payload(status="IN_PROGRESS"), terminal=False)
             return
         if event_type == "result":
@@ -239,7 +244,9 @@ class StorageEventReporter:
                         0.5, 1.0
                     )
                     return
-                self._sleeper(min(retry_delay_seconds, remaining_seconds))
+                self._sleeper(
+                    min(retry_delay_seconds * random.uniform(0.5, 1.0), remaining_seconds)
+                )
                 retry_delay_seconds = min(retry_delay_seconds * 2, RETRY_BACKOFF_CAP_SECONDS)
 
     def _url(self) -> str:
@@ -268,3 +275,14 @@ def _optional_string(value: object) -> str | None:
 
 def _optional_integer(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _newest_within_bytes(lines: list[str]) -> list[str]:
+    kept: list[str] = []
+    size = 0
+    for line in reversed(lines):
+        size += len(json.dumps(line))
+        if size > PENDING_LOGS_MAX_BYTES:
+            break
+        kept.append(line)
+    return kept[::-1]
