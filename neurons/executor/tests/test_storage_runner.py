@@ -1304,4 +1304,6 @@ def test_queued_diagnostic_logs_stay_under_the_waf_body_limit() -> None:
     reporter.send({"event": "heartbeat"})
 
     assert len(session.requests) == 2
-    assert len(json.dumps(session.requests[-1]["json"])) < 64_000
+    body = session.requests[-1]["json"]
+    assert len(json.dumps(body)) < 64_000
+    assert body["logs"] == ["19" + "\U0001f525" * 1998]
