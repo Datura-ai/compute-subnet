@@ -8,7 +8,11 @@ import types
 from unittest.mock import patch
 
 import pytest
-from neurons.validators.src.services.task.checks import RentedGpuDropCheck, RentedGpuHealthShadowCheck
+from neurons.validators.src.services.task.checks import (
+    RentedGpuDropCheck,
+    RentedGpuHealthShadowCheck,
+    TenantEnforcementCheck,
+)
 from neurons.validators.src.services.task.checks import rented_gpu_health as module
 from neurons.validators.src.services.task.checks.gpu_fault_probe import PROBE_JSON_MARKER, PROBE_SOURCE
 from neurons.validators.src.services.task.checks.rented_gpu_health import judge_card, judge_health
@@ -179,7 +183,7 @@ def test_extra_cards_beyond_the_rental_are_not_missing():
 def test_the_check_runs_beside_the_drop_check_before_the_rented_halt(build):
     kinds = [type(check) for check in build()]
 
-    assert kinds.index(RentedGpuHealthShadowCheck) == kinds.index(RentedGpuDropCheck) + 1
+    assert kinds.index(RentedGpuDropCheck) < kinds.index(RentedGpuHealthShadowCheck) < kinds.index(TenantEnforcementCheck)
 
 
 # --- the probe's --health mode -----------------------------------------------------------------------------------

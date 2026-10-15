@@ -196,6 +196,7 @@ class _FakeRentalDockerClient:
         driver: str | None = None,
         driver_opts: dict[str, str] | None = None,
         timeout: int | None = None,
+        labels: dict[str, str] | None = None,
     ) -> None:
         self.created_volumes.append(
             {
@@ -3229,7 +3230,10 @@ def test_ssh_bootstrap_script_supports_multi_distro_install(docker_service):
     script = docker_service._ssh_bootstrap_script_path().read_text()
 
     assert "apt-get update" in script
-    assert "apt-get install -y openssh-server" in script
+    assert (
+        "apt-get install -y --no-install-recommends openssh-server ncurses-term xauth python3 wget ca-certificates"
+        in script
+    )
     assert "apk add --no-cache openssh" in script
     assert "dnf install -y openssh-server" in script
     assert "yum install -y openssh-server" in script
@@ -8488,8 +8492,12 @@ async def test_a_failed_mount_in_the_volume_setup_exec_fails_the_encryption(
 
 
 @pytest.mark.asyncio
-async def test_finish_stream_logs_sends_the_last_batch_without_waiting_for_the_next_tick(docker_service):
-    # Arrange: the stream loop is mid-wait when the create logs its last line and finishes
+async def test_finish_stream_logs_sends_the_last_batch_without_waiting_for_the_next_tick(
+    docker_service, monkeypatch
+):
+    # Arrange: the stream loop waits on a tick far longer than the timeout below,
+    # so only a finish that wakes it early passes
+    monkeypatch.setattr(docker_service_module, "LOG_STREAM_INTERVAL", 60)
     docker_service.redis_service.publish = AsyncMock()
     docker_service.log_task = asyncio.create_task(
         docker_service.handle_stream_logs(miner_hotkey="m", executor_id="e", pod_id="p")
@@ -8497,13 +8505,10 @@ async def test_finish_stream_logs_sends_the_last_batch_without_waiting_for_the_n
     await asyncio.sleep(0.05)
     await docker_service.stream_log("last line", "success", "container_creation")
 
-    # Act
-    loop = asyncio.get_running_loop()
-    finish_started_at = loop.time()
-    await docker_service.finish_stream_logs()
+    # Act: a finish that waited for the next tick would hit this timeout
+    await asyncio.wait_for(docker_service.finish_stream_logs(), timeout=5)
 
-    # Assert: well under LOG_STREAM_INTERVAL, and the last line went out
-    assert loop.time() - finish_started_at < 0.1
+    # Assert: the last line went out
     docker_service.redis_service.publish.assert_awaited_once()
     published_logs = docker_service.redis_service.publish.await_args.args[1]["logs"]
     assert [log["log_text"] for log in published_logs] == ["last line"]
