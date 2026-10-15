@@ -65,7 +65,7 @@ from protocol.vc_protocol.validator_requests import bound_pod_states, chunk_pod_
 from services.attestation_service import AttestationService
 from services.docker_service import DockerService, create_steps_after_reply, customer_creates, inflight_creates
 from services.executor_image_policy import ExpectedImageSnapshot
-from services.node_host import public_host_sock
+from services.node_host import for_payload_miner, public_host_sock
 from services.redis_service import MACHINE_SPEC_CHANNEL, POD_STATES_CHANNEL, RedisService
 from services.roce_link_probe import measure_and_attach
 from services.ssh_service import SSHService
@@ -407,6 +407,7 @@ class MinerService:
         pubkey = self._normalize_public_key(public_key)
         return f"0x{keypair.sign(ssh_pubkey_signing_blob(pubkey, nonce)).hex()}"
 
+    @for_payload_miner
     async def request_job_to_miner(
         self,
         payload: MinerJobRequestPayload,
@@ -972,15 +973,14 @@ class MinerService:
         """Yield (executor_uuid, rented_executor) for this miner's rented executors missing from
         ``miner_returned_executors`` (DAH-3558). Shared by the cheap
         ``_has_not_listed_rented_executors`` probe and ``_build_not_listed_rented_results`` so the
-        two never disagree. Flag off: yields nothing and logs each one as
-        RENTED_EXECUTOR_NOT_LISTED_SHADOW.
+        two never disagree.
 
         Only the cycle's whole-miner request (``executor_id`` None) reports: the express lane and
         the rental key-submit ask for one executor and keep their own retry when the miner does
         not return it (DAH-2958). The rented list is the backend's, subnet-wide, with no validator
         assignment on it; like the manual-rental synthesis this assumes the one-validator
         deployment prod runs (every ``miner_executor.validator_hotkey`` row is ours) — a second
-        validator would need the portal's assignment here before turning the flag on.
+        validator would need the portal's assignment here.
         """
         if not rented_data or executor_id is not None:
             return
@@ -996,19 +996,6 @@ class MinerService:
                 continue
             if executor_uuid in miner_returned_ids or executor_uuid in manual_rental_ids:
                 continue
-            if not settings.RENTED_EXECUTOR_NOT_LISTED_REPORT_ENABLED:
-                # Shadow: the count the on-switch decision needs; nothing is written about the node.
-                logger.warning(
-                    _m(
-                        "RENTED_EXECUTOR_NOT_LISTED_SHADOW",
-                        extra=get_extra_info({
-                            "job_batch_id": payload.job_batch_id,
-                            "miner_hotkey": payload.miner_hotkey,
-                            "executor_uuid": executor_uuid,
-                        }),
-                    )
-                )
-                continue
             yield executor_uuid, rented_executor
 
     def _has_not_listed_rented_executors(
@@ -1021,8 +1008,7 @@ class MinerService:
         """Whether an empty answer from the miner still has rented executors to report (DAH-3558).
 
         A miner whose only executors are rented and down answers with zero executors; that used to
-        end as one miner-level failure row and nothing about the nodes. With the report flag off,
-        the iteration also writes the shadow log for the first node it finds.
+        end as one miner-level failure row and nothing about the nodes.
         """
         return any(
             self._iter_not_listed_rented(
@@ -1419,6 +1405,7 @@ class MinerService:
                 error_code=error_code,
             )
 
+    @for_payload_miner
     async def handle_container(self, payload: ContainerBaseRequest):
         """Handle container request, tracking the create so its own delete can cancel it."""
         # DAH-2728: register the create BEFORE the miner handshake — a delete whose handshake is
@@ -1774,6 +1761,7 @@ class MinerService:
                 error_code=FailedContainerErrorCodes.ExceptionError,
             )
 
+    @for_payload_miner
     async def get_pod_logs(self, payload: GetPodLogsRequestFromServer) -> PodLogsResponseToServer:
         """Get pod logs - uses REST API if configured, otherwise WebSocket."""
         if settings.USE_REST_API:
@@ -1901,6 +1889,7 @@ class MinerService:
                 msg=log_text.to_full_string(),
             )
 
+    @for_payload_miner
     async def add_debug_ssh_key(self, payload: AddDebugSshKeyRequest) -> DebugSshKeyAdded:
         """Add debug SSH key - uses REST API if configured, otherwise WebSocket."""
         if settings.USE_REST_API:

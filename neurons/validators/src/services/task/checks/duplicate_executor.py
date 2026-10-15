@@ -21,6 +21,7 @@ MATCH_SSH_ENDPOINT = "ssh_endpoint"
 MATCH_EXECUTOR_UUID = "executor_uuid"
 MATCH_IP_PORT = "ip_port"
 MATCH_GPU_UUID = "gpu_uuid"
+MATCH_SSH_HOST_KEY = "ssh_host_key"
 
 
 class DuplicateExecutorCheck:
@@ -131,6 +132,8 @@ def _log(duplicate: AcrossMinersDuplicate, result: JobResult, default_extra: dic
             if duplicate.enforced
             else "Executor scored under two miner hotkeys this cycle (observe mode, both keep the score)"
         )
+    elif duplicate.matched_on == MATCH_SSH_HOST_KEY:
+        message = "One verified SSH host key answered on two endpoints this cycle (logged only)"
     else:
         message = "Executor reported under two miner hotkeys this cycle on a node-reported key (logged only)"
     logger.warning(
@@ -169,7 +172,8 @@ def keep_one_miner_per_executor(
     DUPLICATE_EXECUTOR_DRY_RUN off, score 0 with EXECUTOR_DUPLICATE_ACROSS_MINERS.
 
     Matches on what the node itself reports (executor UUID, listed ip:port, GPU UUIDs) are
-    logged only, never zeroed: any miner can report another node's values. One hotkey's own
+    logged only, never zeroed: any miner can report another node's values. So is one verified
+    SSH host key on two endpoints, which also covers two copies under one hotkey. One hotkey's own
     repeats are left to MinerService, unscored copies have nothing to pay twice, and a result
     the validator did not log in for (a forced pass, `ssh_port` 0) proves no endpoint.
     """
@@ -233,6 +237,31 @@ def keep_one_miner_per_executor(
                 hotkey=hotkey,
                 other_hotkeys=tuple(sorted(hotkeys - {hotkey})),
                 matched_on=kind,
+                kept_by=None,
+                enforced=False,
+            )
+            duplicates.append(duplicate)
+            _log(duplicate, result, default_extra)
+
+    # The endpoint match above is one address and port. One sshd reached through a second port or a
+    # relay address is the same machine on two endpoints, under one hotkey or two: the host key the
+    # validator pinned and verified for the login is the same. Logged only: an image that ships its
+    # host keys would give every node built from it one key.
+    by_host_key: dict[str, list[tuple[str, JobResult]]] = defaultdict(list)
+    for hotkey, result in scored:
+        host_key = (result.executor_info.ssh_host_key or "").strip()
+        if result.ssh_host_key_verified and host_key and result.executor_info.ssh_port > 0:
+            by_host_key[host_key].append((hotkey, result))
+    for _, copies in sorted(by_host_key.items()):
+        if len({_ssh_endpoint(result) for _, result in copies}) < 2:
+            continue
+        hotkeys = {hotkey for hotkey, _ in copies}
+        for hotkey, result in copies:
+            duplicate = AcrossMinersDuplicate(
+                executor_uuid=str(result.executor_info.uuid),
+                hotkey=hotkey,
+                other_hotkeys=tuple(sorted(hotkeys - {hotkey})),
+                matched_on=MATCH_SSH_HOST_KEY,
                 kept_by=None,
                 enforced=False,
             )
