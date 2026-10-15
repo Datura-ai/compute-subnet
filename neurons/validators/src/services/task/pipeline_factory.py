@@ -49,6 +49,7 @@ from .checks import (
     LocalVerifyCheck,
     MachineSpecScrapeCheck,
     NvmlDigestCheck,
+    PinnedMemoryProbeCheck,
     PortConnectivityCheck,
     PortCountCheck,
     ProviderSideLoadCheck,
@@ -360,6 +361,9 @@ class PipelineFactory:
                 # DAH-3035: the kernel-fault probe right after the matmul it complements — same idle,
                 # capability-verified population, same filler skip. Flag-gated, shadow-first, off by default.
                 GpuFaultProbeCheck(),
+                # F-1599: a pinned-host-memory H2D/D2H round trip on every GPU (a TDX guest without GPU CC
+                # passes the matmul but cannot DMA pinned memory). On and enforcing by default.
+                PinnedMemoryProbeCheck(),
                 # DAH-2265 Plan 2: advisory, non-fatal — observes whether the executor has
                 # the recommended default image pre-pulled (DOCKER_PULL no-op). Runs here,
                 # after specs/gpu_model/driver are populated and the GPU is validated, on the
@@ -460,6 +464,7 @@ class PipelineFactory:
                         [
                             CapabilityCheck(),
                             GpuFaultProbeCheck(),
+                            PinnedMemoryProbeCheck(),
                             CachedTemplateVerificationCheck(),
                         ],
                     ]
@@ -532,6 +537,7 @@ class PipelineFactory:
                 # VerifyXCheck(),
                 CapabilityCheck(),
                 GpuFaultProbeCheck(),
+                PinnedMemoryProbeCheck(),
                 RentalVerificationCheck(),
                 # RentalProbeCheck(),  # SKIP: creates and removes a container on the executor
                 ScoreCheck(),
