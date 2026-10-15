@@ -184,9 +184,9 @@ class _State:
     failures_in_a_row: int = 0
     readings: list[dict[str, Any]] = field(default_factory=list)
     measured: bool = False
-    # every failing reading in the current streak ran on the rentals bridge; a default-bridge reading (a node
-    # with no rental yet) is logged but never enforced
-    streak_on_rentals_network: bool = True
+    # failing readings in a row taken on the rentals bridge. Only these are enforced: a default-bridge reading (a
+    # node with no rental yet) restarts the count, and a state saved without the field starts from 0.
+    rentals_failures_in_a_row: int = 0
 
     def next_due_at(self) -> float:
         if self.failures_in_a_row > 0:
@@ -202,7 +202,7 @@ class _State:
                 failures_in_a_row=int(data.get("failures_in_a_row", 0)),
                 readings=list(data.get("readings") or []),
                 measured=bool(data.get("measured")),
-                streak_on_rentals_network=bool(data.get("streak_on_rentals_network", True)),
+                rentals_failures_in_a_row=int(data.get("rentals_failures_in_a_row", 0)),
             )
         except (TypeError, ValueError, KeyError, AttributeError):
             return None
@@ -260,22 +260,20 @@ class ContainerDownloadSpeedCheck:
         readings = await self._measure(ctx)
         failing, no_verdict = await self._judge(readings)
         on_rentals = all(r.network == RENTAL_NETWORK_NAME for r in readings)
-        streak_on_rentals = state.streak_on_rentals_network if state.failures_in_a_row else True
         if failing:
             failures = state.failures_in_a_row + 1
-            streak_on_rentals = streak_on_rentals and on_rentals
+            rentals_failures = state.rentals_failures_in_a_row + 1 if on_rentals else 0
         elif no_verdict:
-            failures = state.failures_in_a_row
+            failures, rentals_failures = state.failures_in_a_row, state.rentals_failures_in_a_row
         else:
-            failures = 0
-            streak_on_rentals = True
+            failures = rentals_failures = 0
         records = [r.as_record() for r in readings]
         state = _State(
             at=now,
             failures_in_a_row=failures,
             readings=records,
             measured=not no_verdict,
-            streak_on_rentals_network=streak_on_rentals,
+            rentals_failures_in_a_row=rentals_failures,
         )
         logger.info(
             _m(
@@ -321,14 +319,17 @@ class ContainerDownloadSpeedCheck:
         return False, any(r.mbps is None for r in readings)
 
     def _verdict(self, ctx: Context, state: _State, *, probed: bool) -> CheckResult:
-        enforced = settings.CONTAINER_DOWNLOAD_SPEED_ENFORCEMENT_ENABLED and state.streak_on_rentals_network
+        enforced = (
+            settings.CONTAINER_DOWNLOAD_SPEED_ENFORCEMENT_ENABLED
+            and state.rentals_failures_in_a_row >= READINGS_BEFORE_VERDICT
+        )
         what: dict[str, Any] = {
             "endpoints": state.readings,
             "min_mbps": settings.CONTAINER_DOWNLOAD_SPEED_MIN_MBPS,
             "probed_this_cycle": probed,
             "failures_in_a_row": state.failures_in_a_row,
             "enforced": enforced,
-            "streak_on_rentals_network": state.streak_on_rentals_network,
+            "rentals_failures_in_a_row": state.rentals_failures_in_a_row,
         }
         if state.failures_in_a_row >= READINGS_BEFORE_VERDICT:
             template = Msg.SLOW if enforced else Msg.SLOW_OBSERVED
@@ -352,7 +353,7 @@ class ContainerDownloadSpeedCheck:
             "failures_in_a_row": state.failures_in_a_row,
             "readings": state.readings,
             "measured": state.measured,
-            "streak_on_rentals_network": state.streak_on_rentals_network,
+            "rentals_failures_in_a_row": state.rentals_failures_in_a_row,
         }
         try:
             await ctx.services.redis.set(key, json.dumps(payload), ex=_REDIS_TTL_SECONDS)

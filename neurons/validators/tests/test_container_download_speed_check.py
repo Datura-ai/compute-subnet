@@ -204,6 +204,29 @@ async def test_a_streak_with_a_default_bridge_reading_is_never_enforced():
         assert second.passed and second.event.reason_code == Msg.SLOW_OBSERVED.reason
 
 
+async def test_rentals_failures_after_a_bridge_failure_are_enforced():
+    with flags(enforced=True) as clock:
+        ctx, runner, redis = make_ctx(SLOW_ON_BRIDGE, SLOW, SLOW)
+        check = ContainerDownloadSpeedCheck()
+        for _ in range(2):
+            await check.run(ctx)
+            clock.now += 31 * 60
+        third = await check.run(ctx)
+    assert not third.passed and third.event.reason_code == Msg.SLOW.reason
+
+
+async def test_a_streak_saved_without_the_rentals_count_is_not_enforced():
+    with flags(enforced=True) as clock:
+        redis = FakeRedis()
+        # a failing reading saved by an earlier release: no rentals_failures_in_a_row
+        redis.store[f"{module._REDIS_PREFIX}:{EXECUTOR.uuid}"] = json.dumps(
+            {"at": clock.now - 31 * 60, "failures_in_a_row": 1, "readings": [], "measured": True}
+        )
+        ctx, runner, _ = make_ctx(SLOW, redis=redis)
+        res = await ContainerDownloadSpeedCheck().run(ctx)
+    assert res.passed and res.event.reason_code == Msg.SLOW_OBSERVED.reason
+
+
 async def test_slow_then_fast_resets():
     with flags(enforced=True) as clock:
         ctx, runner, redis = make_ctx(SLOW, FAST)
