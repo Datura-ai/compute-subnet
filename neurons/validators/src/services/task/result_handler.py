@@ -145,7 +145,7 @@ class ResultHandler:
             context.state.rented_data
             and executor_info.uuid in context.state.rented_data.spot_executor_ids
         )
-        is_provider_chosen_spot = bool(
+        is_on_spot_pay_list = bool(
             is_spot
             and executor_info.uuid in context.state.rented_data.provider_spot_executor_ids
         )
@@ -249,7 +249,7 @@ class ResultHandler:
             is_rented=context.rented,
             rented_gpu_count=self._get_rented_gpu_count(context),
             is_spot=is_spot,
-            is_provider_chosen_spot=is_provider_chosen_spot,
+            is_on_spot_pay_list=is_on_spot_pay_list,
             is_new_rentals_paused=is_new_rentals_paused,
             is_provider_banned=context.is_provider_banned,
             provider_discord_connected=provider_discord_connected,

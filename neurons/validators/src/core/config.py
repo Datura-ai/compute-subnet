@@ -175,6 +175,9 @@ class Settings(BaseSettings):
     DIND_PROBE_FIRST_MISS_GRACE_TTL_SECONDS: int = Field(
         env="DIND_PROBE_FIRST_MISS_GRACE_TTL_SECONDS", default=3600, gt=0
     )
+    # ticket-0494: how long a DinD probe's sysbox pass is remembered for a rented executor whose later
+    # probes cannot reach the host (PortConnectivityCheck). Refreshed by every passing probe.
+    SYSBOX_VERIFIED_TTL_SECONDS: int = Field(env="SYSBOX_VERIFIED_TTL_SECONDS", default=24 * 3600, gt=0)
     DISCORD_INCENTIVE_CUTOFF: datetime = datetime(2026, 6, 15, 12, 0, 0)
 
     # DAH-2265: cached-template requirement. Before the cutoff the CachedTemplateVerificationCheck
@@ -221,6 +224,12 @@ class Settings(BaseSettings):
         47: "5G694c15wAu1LKi9rpSQqJjpBfg4K1oiBxEm5QSVdVZAfp9f",
     }
     ENABLE_NEW_BURN_LOGIC: bool = True
+
+    # Comma-separated miner hotkeys that earn no subnet incentive from this validator. Their
+    # executors are still validated, listed and rentable exactly as before; only the incentive
+    # is zeroed (every pool, spot pay and referral), and the share they would have taken is
+    # left to burn. Empty (the default) changes nothing. Burner hotkeys are never affected.
+    SCORING_EXCLUDED_HOTKEYS: str = Field(env="SCORING_EXCLUDED_HOTKEYS", default="")
 
     # DAH-2251 — referral incentive paid via emission, to referrer hotkeys weighted by
     # the backend's epoch-stable EMA feed. There is no funding wallet, so unlike the
@@ -305,6 +314,11 @@ class Settings(BaseSettings):
     # what the lost first attempt made. Off: the call fails the rent as before. Either way the
     # failure event carries `error_class: transport`.
     DOCKER_TRANSPORT_RETRY_ENABLED: bool = Field(env="DOCKER_TRANSPORT_RETRY_ENABLED", default=False)
+    # A rental container with a memory limit runs with swap off (--memory-swap = --memory) and
+    # RENTAL_CONTAINER_OOM_SCORE_ADJ, so a host-wide OOM picks its processes before the executor. The
+    # memory limit stays the backend's memory_gb. 0 or below would protect the renter over host services, and Docker
+    # refuses anything past 1000, which would fail every rental create.
+    RENTAL_CONTAINER_OOM_SCORE_ADJ: int = Field(env="RENTAL_CONTAINER_OOM_SCORE_ADJ", default=500, ge=1, le=1000)
     # On a rent, when dockerd refuses to bind a host port the backend handed the pod (a stale
     # container or a provider process holds it), the pod moves to the next free pair of the
     # executor's advertised range (≤ 3 candidates, the host's listening sockets read once over the
@@ -492,6 +506,15 @@ class Settings(BaseSettings):
     # default off: the probe is new GPU work on every idle node per cycle, so it starts as an opt-in shadow.
     GPU_FAULT_PROBE_CHECK_ENABLED: bool = Field(env="GPU_FAULT_PROBE_CHECK_ENABLED", default=False)
     GPU_FAULT_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="GPU_FAULT_PROBE_ENFORCEMENT_ENABLED", default=False)
+    # F-1599 — a 64 MB pinned-host-memory H2D/D2H round trip on every GPU of an idle node, compared on the host.
+    # A TDX guest whose GPUs are not in CC mode passed every check yet could not DMA pinned memory (8x H200,
+    # 13 Oct). CHECK runs it; ENFORCEMENT lets wrong data, a copy error or a hung copy fail the node. CHECK is
+    # on (milliseconds of copy per card; a probe that cannot start is UNKNOWN, never a fault). ENFORCEMENT is off
+    # until the PINNED_MEMORY_PROBE_FAILED log shows no healthy node among the faults (owner, 14 Oct).
+    PINNED_MEMORY_PROBE_CHECK_ENABLED: bool = Field(env="PINNED_MEMORY_PROBE_CHECK_ENABLED", default=True)
+    PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED: bool = Field(
+        env="PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED", default=False
+    )
     # A fault probe with no verdict passes. Five such cycles in a row on one node are logged
     # (GPU_FAULT_PROBE_UNKNOWN_STREAK); with this on they are judged like a fault, which fails the
     # node only while GPU_FAULT_PROBE_ENFORCEMENT_ENABLED is on too. Off by default.
@@ -628,11 +651,11 @@ class Settings(BaseSettings):
         env="ENABLE_UNRENTED_PORT_FLOOR_FOR_SPLIT_REMAINDER", default=False
     )
 
-    # Spot-node pay. True: an unrented spot node whose provider chose Spot (the backend's
-    # provider_spot_executor_ids) and that runs Lium fillers earns
+    # Spot-node pay. True: an unrented spot node on the backend's spot pay list (provider_spot_executor_ids:
+    # set to Spot by its provider, or demoted for penalties) and that runs Lium fillers earns
     # min(0.95 x its GPU configuration's average filler revenue, its secure idle rate before
     # bucket-cap dilution), with no bucket cap (0.95 = FILLER_REVENUE_PAY_FACTOR); a spot node without a filler, or whose configuration
-    # has no usable average, earns 0, and a demoted, force-spot, pinned or no-incentive-rental one
+    # has no usable average, earns 0, and a banned, pinned or no-incentive-rental one
     # earns 0 as before. Pays nobody until the backend sends provider_spot_executor_ids.
     # False: every spot node earns 0, as before.
     ENABLE_SPOT_NODE_PAY: bool = Field(env="ENABLE_SPOT_NODE_PAY", default=False)
@@ -745,6 +768,9 @@ class Settings(BaseSettings):
 
     def get_allowed_gpu_hwmodels(self) -> set[str]:
         return {s.strip() for s in self.GPU_ATTESTATION_ALLOWED_HWMODELS.split(",") if s.strip()}
+
+    def get_scoring_excluded_hotkeys(self) -> set[str]:
+        return {s.strip() for s in self.SCORING_EXCLUDED_HOTKEYS.split(",") if s.strip()}
 
     # Use REST API instead of WebSocket for miner communication
     USE_REST_API: bool = Field(env="USE_REST_API", default=False)

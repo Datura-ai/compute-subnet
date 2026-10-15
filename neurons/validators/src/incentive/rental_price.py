@@ -574,6 +574,8 @@ class RentalPriceIncentive(DefaultIncentive):
             exclusions.append(MinerLogLine.no_payout_because_paused_for_new_rentals(job_result))
         if job_result.default_job_owner == DEFAULT_JOB_OWNER_MINER and not job_result.is_rented:
             exclusions.append(MinerLogLine.no_payout_because_running_own_default_job(job_result))
+        if job_result.is_hotkey_excluded_from_scoring:
+            exclusions.append(MinerLogLine.no_payout_because_hotkey_excluded_from_scoring(job_result))
         return exclusions
 
     @staticmethod
@@ -1069,14 +1071,15 @@ class RentalPriceIncentive(DefaultIncentive):
 
     @staticmethod
     def _on_spot_pay_path(result: JobResult) -> bool:
-        # Only a node whose provider chose Spot is paid: a demoted, force-spot, pinned or
-        # no-incentive-rental node is spot as a restriction and keeps spot_tier, as before. A rented
+        # Only a node on the backend's spot pay list is paid: set to Spot by its provider, or force-spot
+        # by a penalty demotion. A banned hotkey, a pin or a no-incentive rental makes a node spot as a
+        # restriction, off the list, and it keeps spot_tier, as before. A rented
         # spot node stays out of both pools, as before, and so does the free remainder of a
         # partially rented one: it has no configuration average of its own (spot_tier, not "no average")
         return (
             settings.ENABLE_SPOT_NODE_PAY
             and result.is_spot
-            and result.is_provider_chosen_spot
+            and result.is_on_spot_pay_list
             and not result.is_rented
             and not result.is_split_remainder
         )

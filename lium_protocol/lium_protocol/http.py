@@ -84,8 +84,8 @@ class RentedExecutorsResponse(pydantic.BaseModel):
     gpu_splitting_config: dict[str, int] = {}  # executor_id → min_gpu_count_for_rental
     network_ema: dict[str, NetworkEMA] = {}
     spot_executor_ids: list[str] = []
-    # the subset of spot_executor_ids whose provider chose the Spot tier (not demoted, force-spot,
-    # pinned or in a no-incentive rental); only these may take spot-node pay
+    # the subset of spot_executor_ids that may take spot-node pay: set to Spot by the provider, or
+    # demoted for penalties; never a banned hotkey, pin or no-incentive rental
     provider_spot_executor_ids: list[str] = []
     new_rentals_paused_executor_ids: list[str] = []
     # DAH-2703: executor_ids whose filler container was destroyed during create

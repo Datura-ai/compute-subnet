@@ -59,11 +59,14 @@ class JobResult(BaseModel):
     # minimum-split tier and rate, never as a bundle of its own size.
     is_split_remainder: bool = False
     is_spot: bool = False
-    # in the backend's provider_spot_executor_ids: the provider chose Spot, rather than a demotion,
-    # force-spot hotkey, pin or no-incentive rental putting the node there. Gates spot-node pay.
-    is_provider_chosen_spot: bool = False
+    # in the backend's provider_spot_executor_ids, the spot pay list: set to Spot by its provider, or
+    # force-spot by a penalty demotion; not a banned hotkey, pin or no-incentive rental. Gates spot-node pay.
+    is_on_spot_pay_list: bool = False
     is_new_rentals_paused: bool = False
     is_provider_banned: bool = False
+    # the miner hotkey is in settings.SCORING_EXCLUDED_HOTKEYS: no incentive from any pool, set
+    # by BaseIncentive.calculate_mining_scores. Validation, listing and rentals are unchanged.
+    is_hotkey_excluded_from_scoring: bool = False
     provider_discord_connected: bool = True
     is_provider_email_held: bool = False
     rental_created_at: datetime | None = None
