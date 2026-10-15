@@ -2,7 +2,7 @@
 
 The reported count and UUIDs come from the scrape. /proc/driver/nvidia/gpus is the kernel's own
 inventory. A kernel list that is present and shorter than the reported GPU count is a mismatch:
-logged every cycle, and failing the validation under GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED (on by default).
+logged every cycle, and failing the validation under GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED (off by default).
 A missing kernel list is never a failure.
 """
 
@@ -114,14 +114,14 @@ def enforcing(monkeypatch):
     monkeypatch.setattr(settings, "GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED", True)
 
 
-def test_defaults_are_check_on_enforcement_on():
+def test_defaults_are_check_on_enforcement_off():
     fields = type(settings).model_fields
     assert fields["GPU_KERNEL_COUNT_CHECK_ENABLED"].default is True
-    assert fields["GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED"].default is True
+    assert fields["GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED"].default is False
 
 
 @pytest.mark.asyncio
-async def test_kernel_one_reported_eight_fails_the_validation_under_the_default_flags(
+async def test_kernel_one_reported_eight_is_logged_but_passes_under_the_default_flags(
     context_factory, monkeypatch
 ):
     fields = type(settings).model_fields
@@ -131,8 +131,10 @@ async def test_kernel_one_reported_eight_fails_the_validation_under_the_default_
 
     ok, events, _ = await Pipeline([GpuKernelCountCheck()], _Sink()).run(ctx)
 
-    assert ok is False
-    assert events[-1].what_we_saw["steps_failed"] == GpuKernelCountCheck.check_id
+    assert ok is True
+    mismatch = [e for e in events if e.reason_code == Msg.COUNT_MISMATCH.reason]
+    assert mismatch and mismatch[0].severity == "warning"
+    assert mismatch[0].what_we_saw["would_fail"] is True and mismatch[0].what_we_saw["enforced"] is False
 
 
 # ---------------------------- kernel 1 vs reported 8 ----------------------------
