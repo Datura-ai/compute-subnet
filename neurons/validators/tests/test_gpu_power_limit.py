@@ -993,3 +993,27 @@ async def test_strict_pod_restore_requires_every_record_to_be_restored(failure):
     else:
         assert await restore_filler_pod_gpu_power_limits(ssh, redis, POD_ID, require_complete=True) == (0 if failure else 2)
         assert not redis.store
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("require_complete", [True, False])
+async def test_pod_index_delete_failure_after_successful_restore(require_complete):
+    # Arrange: only the final index deletion fails; the GPU record can be cleared.
+    redis = FakeRedis({_pod_index_key(POD_ID): '["GPU-a"]', _restore_key("GPU-a"): _record("GPU-a", 400)})
+    delete_record = redis.delete
+
+    async def delete(key):
+        if key == _pod_index_key(POD_ID):
+            raise ConnectionError("cannot clear index")
+        await delete_record(key)
+
+    redis.delete = delete
+    ssh = fake_ssh(FakeRun(stdout=STATE_CSV), *_set_ok(400))
+    # Act: strict customer checks fail, while existing best-effort cleanup still returns.
+    if require_complete:
+        with pytest.raises(GpuPowerRestoreStateError):
+            await restore_filler_pod_gpu_power_limits(ssh, redis, POD_ID, require_complete=True)
+    else:
+        assert await restore_filler_pod_gpu_power_limits(ssh, redis, POD_ID) == 1
+    # Assert: the record was deleted after restoration, but the stale index remains visible.
+    assert redis.store == {_pod_index_key(POD_ID): '["GPU-a"]'}

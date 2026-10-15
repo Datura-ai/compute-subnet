@@ -301,13 +301,13 @@ async def test_with_the_deferral_off_the_renter_ending_mid_run_scores_0_as_befor
 
 
 @pytest.mark.parametrize(
-    "pod_rental",
-    [_closed(minutes_ago=10), PodRentalActiveResponse(active=True, executor_id=default_executor().uuid)],
+    "pod_rental_factory",
+    [lambda: _closed(minutes_ago=10), lambda: PodRentalActiveResponse(active=True, executor_id=default_executor().uuid)],
     ids=["ended-10-min-ago", "started-mid-run"],
 )
 @pytest.mark.asyncio
-async def test_with_the_deferral_off_every_pod_container_is_the_orphan_zero(context_factory, pod_rental):
-    ctx = _unrented_ctx(context_factory, pod_rental=pod_rental, rented_data=_snapshot_with_pod())
+async def test_with_the_deferral_off_every_pod_container_is_the_orphan_zero(context_factory, pod_rental_factory):
+    ctx = _unrented_ctx(context_factory, pod_rental=pod_rental_factory(), rented_data=_snapshot_with_pod())
 
     result = await GpuUsageCheck().run(ctx)
 
@@ -597,18 +597,18 @@ async def test_a_rental_that_started_mid_run_is_not_an_orphan(context_factory):
 
 @pytest.mark.parametrize("deferral_enabled", [True, False], ids=["flag-on", "flag-off"])
 @pytest.mark.parametrize(
-    "pod_rental",
-    [_closed(minutes_ago=1), PodRentalActiveResponse(active=True, executor_id=default_executor().uuid)],
+    "pod_rental_factory",
+    [lambda: _closed(minutes_ago=1), lambda: PodRentalActiveResponse(active=True, executor_id=default_executor().uuid)],
     ids=["ending", "started-mid-run"],
 )
 @pytest.mark.asyncio
 async def test_a_foreign_process_beside_a_renters_pod_never_gets_advice_to_stop_the_pod(
-    context_factory, deferral_enabled, pod_rental
+    context_factory, deferral_enabled, pod_rental_factory
 ):
     foreign = {"pid": 4242, "container_name": "nodexo-rental-1cd1ba2b"}
     ctx = _unrented_ctx(
         context_factory,
-        pod_rental=pod_rental,
+        pod_rental=pod_rental_factory(),
         rented_data=_snapshot_with_pod(),
         gpu_processes=[_pod_process(), foreign],
     )

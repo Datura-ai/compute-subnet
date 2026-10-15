@@ -538,10 +538,14 @@ async def read_gpu_power_restore_records(
     return GpuPowerRestoreReadResult(records=records, read_failed=read_failed)
 
 
-async def _delete_pod_index(redis: RedisService, pod_id: str, log_extra: dict[str, object] | None) -> None:
+async def _delete_pod_index(
+    redis: RedisService, pod_id: str, log_extra: dict[str, object] | None, *, require_complete: bool = False
+) -> None:
     try:
         await redis.delete(_pod_index_key(pod_id))
     except Exception as exc:
+        if require_complete:
+            raise GpuPowerRestoreStateError("GPU power restore index could not be cleared") from exc
         _log(logging.ERROR, f"gpu power restore: could not clear pod index for {pod_id}: {exc}", {}, log_extra)
 
 
@@ -753,7 +757,7 @@ async def restore_filler_pod_gpu_power_limits(
     restored = await restore_tracked_gpu_power_limits(
         ssh, redis, capped_uuids, log_extra, require_complete=require_complete
     )
-    await _delete_pod_index(redis, pod_id, log_extra)
+    await _delete_pod_index(redis, pod_id, log_extra, require_complete=require_complete)
     return restored
 
 
