@@ -949,7 +949,7 @@ async def test_a_refused_pm_session_does_not_reject_the_filler_before_pl(caplog:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", [None, "timeout", "nonzero", "partial", "redis", "record_redis", "record", "missing_record", "index", "delete", "absent"])
+@pytest.mark.parametrize("failure", [None, "timeout", "nonzero", "partial", "redis", "record_redis", "record", "missing_record", "mismatched_record", "index", "delete", "absent"])
 async def test_strict_pod_restore_requires_every_record_to_be_restored(failure):
     # Arrange: real restore records and setters; keep one GPU's failure distinct from a partial restore.
     redis = FakeRedis({_pod_index_key(POD_ID): '["GPU-a", "GPU-b"]',
@@ -959,6 +959,8 @@ async def test_strict_pod_restore_requires_every_record_to_be_restored(failure):
         redis.store.clear()
     if failure == "missing_record":
         del redis.store[_restore_key("GPU-a")]
+    if failure == "mismatched_record":
+        redis.store[_restore_key("GPU-a")] = _record("GPU-b", 250)
     if failure in ("record", "index"):
         redis.store[_restore_key("GPU-a") if failure == "record" else _pod_index_key(POD_ID)] = "broken"
     if failure == "redis":
@@ -971,6 +973,7 @@ async def test_strict_pod_restore_requires_every_record_to_be_restored(failure):
         redis.get = get
     if failure == "delete":
         redis.delete = AsyncMock(side_effect=ConnectionError("cannot clear record"))
+    initial_records = redis.store.copy()
     async def run(command, **kwargs):
         if command == POWER_STATE_CMD:
             return FakeRun(stdout=STATE_CSV)
@@ -990,6 +993,9 @@ async def test_strict_pod_restore_requires_every_record_to_be_restored(failure):
         # Assert: failed records and the index survive for a later retry.
         assert _pod_index_key(POD_ID) in redis.store
         assert _restore_key("GPU-b") in redis.store
+        if failure == "mismatched_record":
+            ssh.run.assert_not_awaited()
+            assert redis.store == initial_records
     else:
         assert await restore_filler_pod_gpu_power_limits(ssh, redis, POD_ID, require_complete=True) == (0 if failure else 2)
         assert not redis.store

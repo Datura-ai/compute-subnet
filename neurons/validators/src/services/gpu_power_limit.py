@@ -530,7 +530,10 @@ async def read_gpu_power_restore_records(
                 raise GpuPowerRestoreStateError("GPU power restore record is missing")
             continue
         try:
-            records.append(GpuPowerRestoreRecord.model_validate_json(raw))
+            record = GpuPowerRestoreRecord.model_validate_json(raw)
+            if require_complete and record.gpu_uuid != gpu_uuid:
+                raise GpuPowerRestoreStateError("GPU power restore record does not match its indexed GPU")
+            records.append(record)
         except (ValidationError, TypeError, ValueError) as exc:
             if require_complete:
                 raise GpuPowerRestoreStateError("GPU power restore record is corrupt") from exc
