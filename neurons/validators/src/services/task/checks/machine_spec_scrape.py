@@ -238,9 +238,9 @@ async def _enforce_rented_scrape_hang(ctx: Context, result: CheckResult, check_i
     A Redis outage decides nothing.
     """
     key = f"{RENTED_SCRAPE_HANG_KEY_PREFIX}:{ctx.miner_hotkey}:{ctx.executor.uuid}"
-    pod_ids = _rented_pod_ids(ctx)
     try:
-        if not pod_ids or result.event.reason_code != Msg.SCRAPE_TIMEOUT.reason:
+        pod_ids = _rented_pod_ids(ctx) if result.event.reason_code == Msg.SCRAPE_TIMEOUT.reason else []
+        if not pod_ids:
             await ctx.services.redis.delete(key)
             return result
         probe = await ctx.runner.run("true", timeout=HOST_ANSWER_PROBE_TIMEOUT, retryable=False)
