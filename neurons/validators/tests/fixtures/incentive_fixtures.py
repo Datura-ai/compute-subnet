@@ -129,7 +129,6 @@ def mock_subtensor_client(mock_settings):
     client.version_key = 10000
     client.wallet = MagicMock()
     client.send_weights_to_lium = AsyncMock()
-    client.get_last_mechansim_step_block = MagicMock(return_value=123)
     client.get_metagraph = MagicMock(return_value=MagicMock())
     client.get_current_block = MagicMock(return_value=100)
     client.get_time_from_block = AsyncMock(return_value="2024-01-01 00:00:00")

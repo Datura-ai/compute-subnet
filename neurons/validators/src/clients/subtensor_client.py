@@ -465,11 +465,6 @@ class SubtensorClient:
             node = self.get_node()
             return node.query("SubtensorModule", "WeightsSetRateLimit", [self.netuid]).value
 
-    def get_last_mechansim_step_block(self):
-        with _log_sync_block("get_last_mechansim_step_block"):
-            node = self.get_node()
-            return node.query("SubtensorModule", "LastMechansimStepBlock", [self.netuid]).value
-
     def get_uid_for_hotkey(self, hotkey):
         metagraph = self.get_metagraph()
         return metagraph.hotkeys.index(hotkey)

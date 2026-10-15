@@ -144,7 +144,6 @@ async def test_default_algorithm_zeroes_an_excluded_executor(incentive_redis_ser
 @pytest.fixture
 def burn_env(monkeypatch):
     monkeypatch.setattr(settings, "NEW_BURNERS", [BURN_UID])
-    monkeypatch.setattr(settings, "ENABLE_NEW_BURN_LOGIC", True)
     monkeypatch.setattr(settings, "BURNER_COLDKEYS", {})
 
 
@@ -164,7 +163,7 @@ async def test_a_score_left_on_an_excluded_hotkey_moves_to_burn(burn_env, exclud
     incentive = DefaultIncentive(IncentiveConfig(), AsyncMock(), {}, {})
     incentive.miner_incentives = {"miner_a": 0.08, EXCLUDED: 0.05}
 
-    scores = await incentive.calculate_final_weights(miners, last_mechanism_step_block=None)
+    scores = await incentive.calculate_final_weights(miners)
 
     assert scores[EXCLUDED] == 0
     assert scores["miner_a"] == pytest.approx(0.08)
@@ -179,7 +178,7 @@ async def test_an_excluded_hotkey_is_never_a_referral_recipient(burn_env, exclud
     incentive.miner_incentives = {"miner_a": 0.08}
     incentive.referral_feed = _StubReferralFeed({EXCLUDED: 5.0, "referrer_1": 1.0})
 
-    scores = await incentive.calculate_final_weights(miners, last_mechanism_step_block=None)
+    scores = await incentive.calculate_final_weights(miners)
 
     assert scores[EXCLUDED] == 0
     assert scores["referrer_1"] > 0

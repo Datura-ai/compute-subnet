@@ -691,7 +691,6 @@ class Validator:
 
                     # PHASE 2: Calculate final weights with burning logic per cycle
                     miners = await self.subtensor_client.get_miners()
-                    last_mechanism_step_block = self.subtensor_client.get_last_mechansim_step_block()
 
                     # Current subnet epoch for the referral feed's staleness guard. This MUST use
                     # the SAME numbering as the backend feed's epoch_index — see
@@ -714,7 +713,6 @@ class Validator:
 
                     cycle_scores = await incentive.calculate_final_weights(
                         miners=miners,
-                        last_mechanism_step_block=last_mechanism_step_block,
                         current_epoch=current_epoch,
                     )
 

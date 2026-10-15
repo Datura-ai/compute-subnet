@@ -142,7 +142,6 @@ class BaseIncentive(ABC):
     async def calculate_final_weights(
         self,
         miners: list[bittensor.NeuronInfo],
-        last_mechanism_step_block: int | None,
         current_epoch: int | None = None,
     ) -> dict[str, float]:
         """Calculate final weights with burning logic applied for this cycle.
@@ -153,8 +152,6 @@ class BaseIncentive(ABC):
 
         Args:
             miners: List of all miners (needed to identify burners by UID)
-            last_mechanism_step_block: Unused since the old burner selection was removed (DAH-4326);
-                kept so callers of the incentive interface do not change
 
         Returns:
             dict[str, float]: Weights with burning applied for each miner.
