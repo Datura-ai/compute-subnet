@@ -268,6 +268,66 @@ def test_the_probe_on_a_host_without_libcuda_reports_an_error_not_a_fault():
     assert "dev_tdx_guest" in report["tee"]
 
 
+def _lift(*names: str) -> dict:
+    namespace: dict = {"ctypes": __import__("ctypes")}
+    kept = [
+        node
+        for node in ast.parse(PROBE_SOURCE).body
+        if (isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names)
+        or (isinstance(node, ast.Assign) and node.targets[0].id in names)
+    ]
+    exec(compile(ast.Module(body=kept, type_ignores=[]), "probe", "exec"), namespace)
+    return namespace
+
+
+def test_a_driver_error_naming_a_broken_gpu_is_a_fault_even_in_setup():
+    # a listed card whose cuInit answers CUDA_ERROR_UNKNOWN cannot run any renter's CUDA
+    probe = _lift("Cuda", "ProbeError", "CopyFault", "BROKEN_GPU_CODES")
+    cuda = object.__new__(probe["Cuda"])
+    codes = iter([999, 2])
+    cuda.lib = type("Lib", (), {"cuInit": staticmethod(lambda flags: next(codes))})()
+    cuda.error_name = lambda code: f"CUDA_ERROR_{code}"
+
+    with pytest.raises(probe["CopyFault"], match="cuInit -> CUDA_ERROR_999"):
+        cuda.call("cuInit", 0, raise_as_fault=False)
+    # out of memory in setup is still "could not measure"
+    with pytest.raises(probe["ProbeError"]):
+        cuda.call("cuInit", 0, raise_as_fault=False)
+
+
+def test_device_enumeration_that_reports_a_broken_gpu_raises_a_fault():
+    probe = _lift("_device_count", "_reap", "CopyFault", "ProbeError", "COUNT_BUDGET_SECONDS")
+    probe["_count_worker"] = None  # the fake process never runs its target
+
+    class Conn:
+        def poll(self, timeout):
+            return True
+
+        def recv(self):
+            return {"fault": "cuInit -> CUDA_ERROR_UNKNOWN (999)"}
+
+        def close(self):
+            pass
+
+    class Process:
+        def __init__(self, target, args):
+            pass
+
+        def start(self):
+            pass
+
+        def join(self, timeout):
+            pass
+
+        def is_alive(self):
+            return False
+
+    mp = type("Mp", (), {"Pipe": staticmethod(lambda duplex: (Conn(), Conn())), "Process": Process})
+
+    with pytest.raises(probe["CopyFault"], match="CUDA_ERROR_UNKNOWN"):
+        probe["_device_count"](mp)
+
+
 def test_mismatches_counts_chunks_and_finds_the_first_wrong_byte():
     namespace: dict = {}
     kept = [
