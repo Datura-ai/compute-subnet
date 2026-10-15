@@ -1472,14 +1472,17 @@ async def test_delete_filler_stops_with_reduced_grace(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("removal_fails", [True, False])
+@pytest.mark.parametrize(
+    ("removal_fails", "stopped"), [(True, False), (True, True), (False, False), (False, True)]
+)
 async def test_delete_filler_restores_cap_claim_only_when_removal_fails(
     docker_service,
     monkeypatch,
     removal_fails,
+    stopped,
 ):
-    # Review (#1583): the claim is cleared before the stop; if the forced removal then fails the
-    # filler may still run with our cap, so the claim goes back and a host reset still counts.
+    # Review (#1583): the claim is cleared before the stop; only if the graceful stop and the
+    # forced removal both fail may the filler still run with our cap, so only then it goes back.
     ssh_client = AsyncMock()
     ssh_client.run = AsyncMock(return_value=_make_ssh_command_result())
     monkeypatch.setattr(
@@ -1497,6 +1500,7 @@ async def test_delete_filler_restores_cap_claim_only_when_removal_fails(
     )
     restore_claims = AsyncMock()
     monkeypatch.setattr("services.docker_service.restore_filler_pod_applied_caps", restore_claims)
+    monkeypatch.setattr(docker_service, "_stop_container_gracefully", AsyncMock(return_value=stopped))
     if removal_fails:
         monkeypatch.setattr(
             docker_service, "_force_remove_or_kill", AsyncMock(side_effect=RuntimeError("remove failed"))
@@ -1529,12 +1533,11 @@ async def test_delete_filler_restores_cap_claim_only_when_removal_fails(
         private_key="encrypted",
     )
 
-    if removal_fails:
-        assert not isinstance(result, ContainerDeleted)
+    assert isinstance(result, ContainerDeleted) is not removal_fails
+    if removal_fails and not stopped:
         restore_claims.assert_awaited_once()
         assert restore_claims.await_args.args[1] == {"GPU-a": 280}
     else:
-        assert isinstance(result, ContainerDeleted)
         restore_claims.assert_not_awaited()
 
 

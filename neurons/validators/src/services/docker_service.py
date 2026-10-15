@@ -9559,7 +9559,8 @@ class DockerService:
         docker_client: RentalDockerSdkClient,
         payload: ContainerDeleteRequest,
         log: _BoundLog,
-    ) -> None:
+    ) -> bool:
+        """True once the container is stopped or absent."""
         # DAH-2364: SIGTERM plus a grace window, so the workload exits cleanly before the forced
         # removal. Never fatal — the forced removal stays the single source of truth for deletion.
         # Called directly rather than through run_logged_rental_docker_sdk_operation so that an
@@ -9591,7 +9592,8 @@ class DockerService:
                     container_name=payload.container_name,
                     error=str(exc),
                 )
-            return
+                return False
+            return True
 
         log.info(
             "Graceful container stop completed",
@@ -9599,6 +9601,7 @@ class DockerService:
             stop_grace_seconds=stop_grace_seconds,
             duration_ms=int((time.monotonic() - stop_started) * 1000),
         )
+        return True
 
     async def _removal_after_read_timeout(
         self,
@@ -9869,14 +9872,14 @@ class DockerService:
                         )
 
                 async def _restore_cap_claims_if_container_alive() -> None:
-                    # Review (#1583): the removal failed, so the filler may still run with our cap.
-                    if cleared_cap_claims:
+                    # Review (#1583): only a container that did not stop may still run with our cap.
+                    if cleared_cap_claims and not stopped:
                         with _best_effort_delete_step(log, "restore_filler_applied_cap"):
                             await restore_filler_pod_applied_caps(
                                 self.redis_service, cleared_cap_claims, log_extra=default_extra
                             )
 
-                await self._stop_container_gracefully(docker_client, payload, log)
+                stopped = await self._stop_container_gracefully(docker_client, payload, log)
 
                 # Fatal boundary: the forced removal is the only step whose failure fails the
                 # undeploy. Every step below runs after the container is gone and is best-effort.
