@@ -233,15 +233,14 @@ async def _enforce_rented_scrape_hang(ctx: Context, result: CheckResult, check_i
     A plain SCRAPE_TIMEOUT stays undetermined: a busy validator or either side's link ends the same way.
     After it, a trivial command on the same connection tells them apart for this cycle: when the host
     answers, the validator reached it and only the scrape hung. A probe that fails, any other outcome,
-    or no cycle for RENTED_SCRAPE_HANG_GAP_SECONDS ends the run, so validator-side failures never count.
+    a cycle with no rental, or no cycle for RENTED_SCRAPE_HANG_GAP_SECONDS ends the run, so validator-side
+    failures never count and a new rental never inherits an earlier one's hang.
     A Redis outage decides nothing.
     """
-    pod_ids = _rented_pod_ids(ctx)
-    if not pod_ids:
-        return result
     key = f"{RENTED_SCRAPE_HANG_KEY_PREFIX}:{ctx.miner_hotkey}:{ctx.executor.uuid}"
+    pod_ids = _rented_pod_ids(ctx)
     try:
-        if result.event.reason_code != Msg.SCRAPE_TIMEOUT.reason:
+        if not pod_ids or result.event.reason_code != Msg.SCRAPE_TIMEOUT.reason:
             await ctx.services.redis.delete(key)
             return result
         probe = await ctx.runner.run("true", timeout=HOST_ANSWER_PROBE_TIMEOUT, retryable=False)

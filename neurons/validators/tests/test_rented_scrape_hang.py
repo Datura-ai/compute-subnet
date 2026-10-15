@@ -140,3 +140,21 @@ async def test_the_kill_switch_keeps_the_timeout(context_factory):
 
     assert result.event.reason_code == Msg.SCRAPE_TIMEOUT.reason
     assert not result.updates
+
+
+@pytest.mark.asyncio
+async def test_a_cycle_without_a_rental_restarts_the_run_for_the_next_rental(context_factory):
+    services = build_services()
+    # 5 h of host-side hangs on one rental, then one unrented cycle (clean or not)
+    await _cycles(context_factory, services, _every_cycle_until(5 * 3600), lambda _: True)
+    ctx = _ctx(context_factory, services, _Runner(True), rented=False)
+    with patch.object(machine_spec_scrape.time, "time", return_value=T0 + 5 * 3600 + CYCLE_S):
+        await MachineSpecScrapeCheck().run(ctx)
+
+    # a new rental 1 h 15 min later would be past 6 h on the old start; it counts from its own first cycle
+    start = 5 * 3600 + 2 * CYCLE_S
+    result = await _cycles(context_factory, services, [start, start + 3600], lambda _: True)
+
+    assert result.event.reason_code == Msg.SCRAPE_TIMEOUT.reason
+    assert result.event.what_we_saw["host_side_hang_s"] == 3600
+    assert not result.updates
