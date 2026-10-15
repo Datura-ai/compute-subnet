@@ -98,10 +98,10 @@ def make_ctx(context_factory, runner):
     )
 
 
-def test_on_and_in_shadow_by_default():
-    # a fault is logged from the first cycle; failing the node waits for a clean shadow window on real GPUs
+def test_on_and_enforcing_by_default():
+    # the shadow window logged faults only on a node that corrupts copies, so a fault fails the node
     assert type(settings).model_fields["PINNED_MEMORY_PROBE_CHECK_ENABLED"].default is True
-    assert type(settings).model_fields["PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED"].default is False
+    assert type(settings).model_fields["PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED"].default is True
     assert PinnedMemoryProbeCheck.fatal is True
 
 
