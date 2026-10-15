@@ -980,6 +980,25 @@ async def restore_filler_pod_gpu_power_limits(
     return restored
 
 
+async def clear_filler_pod_applied_caps(
+    redis: RedisService,
+    pod_id: str,
+    log_extra: dict[str, object] | None = None,
+) -> None:
+    """Drop the applied-cap watts from this filler pod's restore records before its container is
+    stopped (DAH-2786 review). The backend keeps reporting owner "lium" while the run is STOPPING,
+    so without this a host that resets the limit after our job ended would count as a revert.
+    The pre-cap watts stay, so the restore that follows still has its way back. Best-effort."""
+    try:
+        raw_index: str | bytes | None = await redis.get(_pod_index_key(pod_id))
+        capped_uuids: list[str] = [str(uuid) for uuid in json.loads(raw_index)] if raw_index else []
+    except Exception as exc:
+        _log(logging.ERROR, f"gpu power cap: cannot read pod index for {pod_id} to end its cap claim: {exc}", {}, log_extra)
+        return
+    for gpu_uuid in capped_uuids:
+        await _set_applied_cap_on_restore_record(redis, gpu_uuid, None, None, log_extra)
+
+
 async def _undo_partial_apply(
     ssh: asyncssh.SSHClientConnection,
     redis: RedisService,

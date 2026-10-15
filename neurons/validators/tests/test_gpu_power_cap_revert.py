@@ -36,7 +36,9 @@ from services.gpu_power_limit import (
     GpuPowerRestoreRecord,
     _restore_key,
     _revert_key,
+    _pod_index_key,
     apply_filler_gpu_power_limits,
+    clear_filler_pod_applied_caps,
     detect_cap_revert,
     read_gpu_power_cap_reverts,
 )
@@ -305,6 +307,26 @@ async def test_a_reset_after_the_job_is_never_seen(context_factory, monkeypatch)
 
     await GpuPowerLimitCheck().run(ctx)
 
+    assert _revert_key(CHECK_EXECUTOR_UUID) not in redis.store
+
+
+@pytest.mark.asyncio
+async def test_a_reset_while_the_filler_is_stopping_is_not_a_revert(context_factory, monkeypatch) -> None:
+    # Review (#1583): the backend still reports owner "lium" for a STOPPING run. The delete drops
+    # our cap claim before it stops the container, so a host reset after that is not charged.
+    redis = FakeRedis({
+        _pod_index_key(POD_ID): json.dumps(["GPU-a"]),
+        _restore_key("GPU-a"): _stored_restore_record(executor_id=CHECK_EXECUTOR_UUID),
+    })
+
+    await clear_filler_pod_applied_caps(redis, POD_ID)
+
+    cleared = GpuPowerRestoreRecord.model_validate_json(redis.store[_restore_key("GPU-a")])
+    assert cleared.capped_to_watts is None
+    assert cleared.watts == 400  # the way back is kept for the restore
+    await _run_check_while_filler_runs(
+        context_factory, monkeypatch, redis, [cleared], [("GPU-a", 400.0)]
+    )
     assert _revert_key(CHECK_EXECUTOR_UUID) not in redis.store
 
 

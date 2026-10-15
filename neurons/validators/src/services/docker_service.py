@@ -85,6 +85,7 @@ from services.gpu_power_limit import (
     NVIDIA_SMI_TIMEOUT_SECONDS,
     POWER_LIMIT_SET_CONCURRENCY,
     apply_filler_gpu_power_limits,
+    clear_filler_pod_applied_caps,
     raise_low_power_limits_to_default,
     restore_all_host_gpu_power_limits,
     restore_filler_pod_gpu_power_limits,
@@ -9858,6 +9859,12 @@ class DockerService:
                     private_key=private_key,
                 ) as docker_client,
             ):
+                if payload.workload_kind == WorkloadKind.FILLER:
+                    # DAH-2786: our job ends here, so a limit reset from now on is no revert.
+                    with _best_effort_delete_step(log, "clear_filler_applied_cap"):
+                        await clear_filler_pod_applied_caps(
+                            self.redis_service, payload.pod_id, log_extra=default_extra
+                        )
                 await self._stop_container_gracefully(docker_client, payload, log)
 
                 # Fatal boundary: the forced removal is the only step whose failure fails the
