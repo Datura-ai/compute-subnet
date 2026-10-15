@@ -1,4 +1,4 @@
-"""G18: a seal-aware verifier that gets no sealed blob judges the executor's plaintext uuid and metrics.
+"""G18: a seal-aware verifier that gets no sealed blob fails a matching plaintext answer.
 
 The plaintext is printed by the executor's own wrapper, so a matching answer is logged and failed.
 A sealed answer, or a probe that never answered (out of memory), is judged as before.
