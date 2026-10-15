@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 from core.config import settings
+from core.utils import _m, get_extra_info
 from services.matrix_validation_service import UUID_MISMATCH_ERROR_PREFIX
 
 from ..messages import CapabilityMessages as Msg, MessageTemplate, render_message
@@ -16,6 +17,10 @@ if TYPE_CHECKING:
     from services.matrix_validation_service import ValidationResult
 
 logger = logging.getLogger(__name__)
+
+# Cycles since the last matmul sample on a filler-only node, per (miner hotkey, executor uuid).
+# Per process: a validator restart starts the count again.
+_filler_cycles_since_sample: dict[tuple[str, str], int] = {}
 
 
 class CapabilityCheck:
@@ -41,11 +46,14 @@ class CapabilityCheck:
 
         filler_container = _get_filler_only_container(ctx)
         if filler_container:
+            what_filler: dict = {"filler_container": filler_container}
+            if _filler_matmul_sample_due(ctx):
+                what_filler["matmul_sample"] = await _filler_matmul_sample(ctx, specs)
             event = render_message(
                 Msg.FILLER_SKIPPED,
                 ctx=ctx,
                 check_id=self.check_id,
-                what={"filler_container": filler_container},
+                what=what_filler,
             )
             return CheckResult(passed=True, event=event)
 
@@ -283,6 +291,45 @@ def _failure_template(result: ValidationResult | None) -> MessageTemplate:
         if any(m.lower() in output for m in markers):
             return template
     return Msg.VERIFY_FAILED
+
+
+def _filler_matmul_sample_due(ctx: Context) -> bool:
+    """Every FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES-th filler-only cycle of this node; never when 0."""
+    every = settings.FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES
+    if every <= 0:
+        return False
+    key = (ctx.miner_hotkey, ctx.executor.uuid)
+    cycles = _filler_cycles_since_sample.get(key, 0) + 1
+    if cycles < every:
+        _filler_cycles_since_sample[key] = cycles
+        return False
+    _filler_cycles_since_sample[key] = 0
+    return True
+
+
+async def _filler_matmul_sample(ctx: Context, specs: dict) -> dict:
+    """A filler-only node skips the matmul for as long as the filler runs, so a card that left the
+    node after the filler started is never challenged. This runs the same challenge on a small VRAM
+    budget beside the filler and records the answer. A record only: the filler holds the cards, so
+    a failed sample proves nothing by itself and the check result never depends on it."""
+    sample: dict = {"vram_budget_mb": settings.FILLER_MATMUL_SAMPLE_VRAM_MB}
+    try:
+        result = await ctx.services.validation.validate_gpu_model_and_process_job(
+            ssh_client=ctx.ssh,
+            executor_info=ctx.executor,
+            default_extra=ctx.default_extra,
+            machine_spec=specs,
+            vram_budget_mb=settings.FILLER_MATMUL_SAMPLE_VRAM_MB,
+        )
+        sample.update(
+            passed=bool(result.success),
+            timed_out=bool(result.timed_out),
+            error=result.error_message or None,
+        )
+    except Exception as exc:
+        sample.update(passed=False, timed_out=False, error=str(exc))
+    logger.warning(_m("FILLER_MATMUL_SAMPLE", extra=get_extra_info({**ctx.default_extra, **sample})))
+    return sample
 
 
 def _get_filler_only_container(ctx: Context) -> str | None:

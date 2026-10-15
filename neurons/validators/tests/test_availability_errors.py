@@ -12,6 +12,7 @@ from services.task import service as task_service_module
 from services.task.availability import (
     AVAILABILITY_CATEGORY,
     MAX_PEER_TEXT_LENGTH,
+    SSH_HOST_KEY_MISMATCH_REMEDIATION,
     AvailabilityErrorCode,
     ReachSource,
     ReachTarget,
@@ -173,11 +174,40 @@ async def test_a_cycle_that_cannot_open_ssh_scores_zero_and_reports_the_code(mon
     assert "EXECUTOR_SSH_UNREACHABLE" in result.log_text
 
 
-async def _does_not_resolve(self, host, port, **kwargs):
+class _ShellAnsweredByAnotherSshd(_ShellThatRefusesToConnect):
+    async def __aenter__(self) -> "_ShellAnsweredByAnotherSshd":
+        raise asyncssh.HostKeyNotVerifiable("Host key is not trusted for host 1.2.3.4")
+
+
+@pytest.mark.asyncio
+async def test_an_untrusted_host_key_points_at_the_ssh_port_not_the_firewall(monkeypatch) -> None:
+    """A provider on Discord, 11 Oct 2026: the node SSH port reached the host's own sshd, not the executor."""
+    monkeypatch.setattr(task_service_module, "InteractiveShellService", _ShellAnsweredByAnotherSshd)
+    miner, executor = _a_job_for("node-9")
+
+    result = await _run_cycle(_task_service_that_reaches_the_ssh_connect(), miner, executor)
+
+    [error] = result.availability_errors
+    assert error["reason_code"] == "EXECUTOR_SSH_UNREACHABLE"
+    assert error["remediation"] == SSH_HOST_KEY_MISMATCH_REMEDIATION
+    assert "firewall" not in error["remediation"]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_connect_keeps_the_firewall_advice(monkeypatch) -> None:
+    monkeypatch.setattr(task_service_module, "InteractiveShellService", _ShellThatRefusesToConnect)
+    miner, executor = _a_job_for("node-9")
+
+    result = await _run_cycle(_task_service_that_reaches_the_ssh_connect(), miner, executor)
+
+    assert "firewall" in result.availability_errors[0]["remediation"]
+
+
+def _does_not_resolve(host, port, *args, **kwargs):
     raise socket.gaierror(-2, "Name or service not known")
 
 
-async def _resolves_to_a_private_address(self, host, port, **kwargs):
+def _resolves_to_a_private_address(host, port, *args, **kwargs):
     return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", port))]
 
 
@@ -196,7 +226,7 @@ async def test_a_node_hostname_that_fails_the_preflight_hides_the_node(
 
     A generic error here would leave availability_errors unset and the node listed.
     """
-    monkeypatch.setattr("asyncio.BaseEventLoop.getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr("socket.getaddrinfo", fake_getaddrinfo)
     dialled = AsyncMock(side_effect=AssertionError("the preflight must stop the dial"))
     monkeypatch.setattr("services.interactive_shell_service.asyncssh.connect", dialled)
     miner, executor = _a_job_for("node-9")
