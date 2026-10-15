@@ -298,10 +298,10 @@ class StatusChangeTracker:
 
     def __init__(self, max_entries: int = 200_000):
         self.max_entries = max_entries
-        self._last: OrderedDict[tuple[str, str, str], tuple[str, str, str]] = OrderedDict()
+        self._last: OrderedDict[tuple[str, str, str], tuple[str, ...]] = OrderedDict()
 
     def changed(
-        self, miner_hotkey: str, executor_uuid: str, check_id: str, outcome: tuple[str, str, str]
+        self, miner_hotkey: str, executor_uuid: str, check_id: str, outcome: tuple[str, ...]
     ) -> bool:
         # the miner reports its executor UUIDs: keyed without the hotkey, one miner could replay another
         # provider's UUID and move that provider's lines between INFO and DEBUG
@@ -362,10 +362,19 @@ class LoggerSink:
             str(event.context.get("miner_hotkey") or ""),
             executor_uuid,
             event.check_id,
-            (event.event, event.reason_code, event.severity),
+            (event.event, event.reason_code, event.severity, _vloopback_outcome(event)),
         )
         # The run's last event carries the per-step summary; it stays at INFO as one line per run.
         return not changed and "steps_total_s" not in event.what_we_saw
+
+
+def _vloopback_outcome(event: ValidationEvent) -> str:
+    # SCRAPE_OK stays SCRAPE_OK when the vloopback mount test fails, so its verdict joins the outcome
+    storage_limit = event.what_we_saw.get("storage_limit")
+    vloopback = storage_limit.get("vloopback") if isinstance(storage_limit, dict) else None
+    if not isinstance(vloopback, dict):
+        return ""
+    return f"{vloopback.get('verdict')}:{vloopback.get('reason_code')}"
 
 
 def updates_with_clear_verified_job_evidence(res: CheckResult, check_id: str) -> dict[str, Any]:
