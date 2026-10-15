@@ -30,7 +30,8 @@ _EXIT_CODE_RX = re.compile(r"[0-9]{1,3}")
 # _REFRESH_DETAIL_CHARS of it reaches a published fetch_error
 _REFRESH_CAPTURE_MAX_CHARS = 4096
 _REFRESH_DETAIL_CHARS = 400
-INSPECTOR_COMMAND_TIMEOUT_SECONDS = 30
+# the collector's own start may take 60 s and its canary 15 s on a busy host; 30 s cut every such start short
+INSPECTOR_COMMAND_TIMEOUT_SECONDS = 90
 INSPECTOR_STDERR_CAPTURE_TIMEOUT_SECONDS = 10
 INSPECTOR_STDERR_CAPTURE_MAX_BYTES = 8192
 # One protocol response is one line. asyncssh's readline() hands back a PARTIAL line once a single
