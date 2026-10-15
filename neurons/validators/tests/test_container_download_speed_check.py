@@ -31,11 +31,16 @@ def line(ep: str, got: int, secs: float, rc: int, err: str = "") -> str:
     return f"lium_dl ep={ep} bytes={got} start=100.00 end={100 + secs:.2f} rc={rc}\nlium_dl_err ep={ep} {err}\n"
 
 
+RENTALS = "lium_dl_net name=lium-rentals\n"
+BRIDGE = "lium_dl_net name=bridge\n"  # a node with no rental yet has no lium-rentals network
 # 16 MiB in 1.0 s = 134 Mbps on both
-FAST = line("pypi", CAP_BYTES, 1.0, 0) + line("hf", CAP_BYTES, 1.0, 0)
+FAST = RENTALS + line("pypi", CAP_BYTES, 1.0, 0) + line("hf", CAP_BYTES, 1.0, 0)
 # the reported node: PyPI crawls, 1.8 MB in the 30 s bound
-SLOW = line("pypi", 1_800_000, 30.0, 143) + line("hf", CAP_BYTES, 1.0, 0)
-DNS_DOWN = line("pypi", 0, 0.05, 1, "wget: bad address 'files.pythonhosted.org'") + line("hf", CAP_BYTES, 1.0, 0)
+SLOW = RENTALS + line("pypi", 1_800_000, 30.0, 143) + line("hf", CAP_BYTES, 1.0, 0)
+SLOW_ON_BRIDGE = SLOW.replace(RENTALS, BRIDGE)
+DNS_DOWN = (
+    RENTALS + line("pypi", 0, 0.05, 1, "wget: bad address 'files.pythonhosted.org'") + line("hf", CAP_BYTES, 1.0, 0)
+)
 
 
 def result(stdout: str = "", *, exit_code: int = 0, error_type: str | None = None) -> SSHCommandResult:
@@ -135,9 +140,10 @@ def test_command_runs_in_a_container_with_the_renter_runtime_and_a_size_cap():
     assert "--runtime" not in download_speed_command(False)
 
 
-def test_parse_reports_the_network_the_reading_took():
-    assert parse_download_speed("lium_dl_net name=lium-rentals\n" + FAST)[0].as_record()["network"] == "lium-rentals"
-    assert "network" not in parse_download_speed(FAST)[0].as_record()
+def test_parse_reports_the_network_on_every_reading_failed_or_not():
+    assert [r.as_record()["network"] for r in parse_download_speed(DNS_DOWN)] == ["lium-rentals", "lium-rentals"]
+    assert parse_download_speed(DNS_DOWN)[0].error == "dns_failed"
+    assert "network" not in parse_download_speed(FAST.replace(RENTALS, ""))[0].as_record()
 
 
 def test_parse_measures_mbps_and_names_errors():
@@ -185,6 +191,17 @@ async def test_slow_twice_is_observed_in_shadow_and_fails_under_enforcement():
             clock.now += 60
             third = await check.run(ctx)
             assert len(runner.commands) == 2 and third.passed is (not enforced)
+
+
+async def test_a_streak_with_a_default_bridge_reading_is_never_enforced():
+    for answers in ((SLOW_ON_BRIDGE, SLOW_ON_BRIDGE), (SLOW_ON_BRIDGE, SLOW)):
+        with flags(enforced=True) as clock:
+            ctx, runner, redis = make_ctx(*answers)
+            check = ContainerDownloadSpeedCheck()
+            await check.run(ctx)
+            clock.now += 31 * 60
+            second = await check.run(ctx)
+        assert second.passed and second.event.reason_code == Msg.SLOW_OBSERVED.reason
 
 
 async def test_slow_then_fast_resets():

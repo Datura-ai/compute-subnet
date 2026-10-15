@@ -5,7 +5,7 @@ import json
 import logging
 import shlex
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import aiohttp
@@ -151,14 +151,14 @@ def parse_download_speed(stdout: str) -> list[EndpointReading]:
             # a timed-out fetch that read something is the slow reading itself, not an error; a full read is a
             # reading whatever wget's exit (a server ignoring Range gets SIGPIPE from head)
             mbps = got * 8 / max(seconds, 0.01) / 1e6
-            readings.append(EndpointReading(name, got, seconds, mbps, network=network))
+            readings.append(EndpointReading(name, got, seconds, mbps))
         elif timed_out:
             readings.append(EndpointReading(name, got, seconds, error="timeout", detail=detail))
         else:
             readings.append(
                 EndpointReading(name, got, seconds, error=_error_kind(detail or ""), detail=detail)
             )
-    return readings
+    return [replace(r, network=network) for r in readings]
 
 
 def phase_offset_seconds(uuid: str) -> float:
@@ -184,6 +184,9 @@ class _State:
     failures_in_a_row: int = 0
     readings: list[dict[str, Any]] = field(default_factory=list)
     measured: bool = False
+    # every failing reading in the current streak ran on the rentals bridge; a default-bridge reading (a node
+    # with no rental yet) is logged but never enforced
+    streak_on_rentals_network: bool = True
 
     def next_due_at(self) -> float:
         if self.failures_in_a_row > 0:
@@ -199,6 +202,7 @@ class _State:
                 failures_in_a_row=int(data.get("failures_in_a_row", 0)),
                 readings=list(data.get("readings") or []),
                 measured=bool(data.get("measured")),
+                streak_on_rentals_network=bool(data.get("streak_on_rentals_network", True)),
             )
         except (TypeError, ValueError, KeyError, AttributeError):
             return None
@@ -210,7 +214,7 @@ class ContainerDownloadSpeedCheck:
     A node read 297-588 Mbps on the validator's host-side speed test while a renter container on it fetched
     from PyPI at under 1 Mbps: the host probe runs in the executor container on the host network and never
     crosses the docker bridge, NAT and runtime a renter's container does. This check starts a throwaway
-    alpine container (sysbox-runc where the node has it, the default bridge network) and reads up to
+    alpine container (sysbox-runc where the node has it, on the rentals bridge pods use) and reads up to
     CAP_BYTES of a pinned PyPI wheel and a pinned Hugging Face file, each under FETCH_TIMEOUT_SECONDS.
 
     Every measurement is logged as CONTAINER_DOWNLOAD_SPEED. A reading fails when a measured endpoint is below
@@ -255,14 +259,24 @@ class ContainerDownloadSpeedCheck:
 
         readings = await self._measure(ctx)
         failing, no_verdict = await self._judge(readings)
+        on_rentals = all(r.network == RENTAL_NETWORK_NAME for r in readings)
+        streak_on_rentals = state.streak_on_rentals_network if state.failures_in_a_row else True
         if failing:
             failures = state.failures_in_a_row + 1
+            streak_on_rentals = streak_on_rentals and on_rentals
         elif no_verdict:
             failures = state.failures_in_a_row
         else:
             failures = 0
+            streak_on_rentals = True
         records = [r.as_record() for r in readings]
-        state = _State(at=now, failures_in_a_row=failures, readings=records, measured=not no_verdict)
+        state = _State(
+            at=now,
+            failures_in_a_row=failures,
+            readings=records,
+            measured=not no_verdict,
+            streak_on_rentals_network=streak_on_rentals,
+        )
         logger.info(
             _m(
                 "CONTAINER_DOWNLOAD_SPEED",
@@ -307,13 +321,14 @@ class ContainerDownloadSpeedCheck:
         return False, any(r.mbps is None for r in readings)
 
     def _verdict(self, ctx: Context, state: _State, *, probed: bool) -> CheckResult:
-        enforced = settings.CONTAINER_DOWNLOAD_SPEED_ENFORCEMENT_ENABLED
+        enforced = settings.CONTAINER_DOWNLOAD_SPEED_ENFORCEMENT_ENABLED and state.streak_on_rentals_network
         what: dict[str, Any] = {
             "endpoints": state.readings,
             "min_mbps": settings.CONTAINER_DOWNLOAD_SPEED_MIN_MBPS,
             "probed_this_cycle": probed,
             "failures_in_a_row": state.failures_in_a_row,
             "enforced": enforced,
+            "streak_on_rentals_network": state.streak_on_rentals_network,
         }
         if state.failures_in_a_row >= READINGS_BEFORE_VERDICT:
             template = Msg.SLOW if enforced else Msg.SLOW_OBSERVED
@@ -337,6 +352,7 @@ class ContainerDownloadSpeedCheck:
             "failures_in_a_row": state.failures_in_a_row,
             "readings": state.readings,
             "measured": state.measured,
+            "streak_on_rentals_network": state.streak_on_rentals_network,
         }
         try:
             await ctx.services.redis.set(key, json.dumps(payload), ex=_REDIS_TTL_SECONDS)
