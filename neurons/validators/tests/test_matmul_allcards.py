@@ -79,6 +79,19 @@ async def test_spoof_one_card_under_eight_claim_fails_under_enforcement(svc, mon
 
 
 @pytest.mark.asyncio
+async def test_a_filler_sample_skips_the_all_cards_probe(svc, monkeypatch):
+    _flags(monkeypatch, enforce=True)
+    result = await svc.validate_gpu_model_and_process_job(
+        ssh_client=_ssh(real_cards=1),
+        executor_info=_executor(),
+        default_extra={},
+        machine_spec=_spec(8),
+        probe_all_cards=False,
+    )
+    assert not result.error_message.startswith("All-cards GPU work-proof failed")
+
+
+@pytest.mark.asyncio
 async def test_honest_eight_cards_probe_passes(svc):
     probe = await svc._probe_all_claimed_cards(_ssh(real_cards=8), _executor(), {}, _spec(8))
     assert probe is not None

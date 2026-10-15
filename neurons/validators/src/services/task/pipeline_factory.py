@@ -290,9 +290,9 @@ class PipelineFactory:
                 # GPU checks below (DETAILS_MISMATCH, GPU_MISSING), which halt the cycle before
                 # TenantEnforcementCheck; this reports it to the backend on that same cycle.
                 RentedGpuDropCheck(),
-                # ticket-0492: pure-data, non-fatal warning on a busy GPU held below its clock by a
-                # thermal/hardware slowdown. Before the rented short-circuit, so rented nodes are judged too;
-                # the score is not changed.
+                # ticket-0492: pure data. A busy GPU held below its clock by a thermal/hardware slowdown is a
+                # warning; below half its clock with a slowdown bit it fails an unrented node (score 0) until
+                # fixed. Before the rented short-circuit, so rented nodes get the warning too.
                 GpuThermalThrottleCheck(),
                 # DAH-3484: a regex over specs.cpu.model, no SSH, never fatal. It has to run before
                 # TenantEnforcementCheck halts the pipeline for a rented executor: after that halt

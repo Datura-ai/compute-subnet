@@ -320,6 +320,7 @@ async def _filler_matmul_sample(ctx: Context, specs: dict) -> dict:
             default_extra=ctx.default_extra,
             machine_spec=specs,
             vram_budget_mb=settings.FILLER_MATMUL_SAMPLE_VRAM_MB,
+            probe_all_cards=False,
         )
         sample.update(
             passed=bool(result.success),
