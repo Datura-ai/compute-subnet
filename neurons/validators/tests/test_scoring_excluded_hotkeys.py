@@ -118,7 +118,7 @@ async def test_an_excluded_spot_node_gets_no_spot_pay(monkeypatch):
     incentive = RentalPriceIncentive(IncentiveConfig(), AsyncMock(), {}, {})
     spot = _job(
         is_spot=True,
-        is_provider_chosen_spot=True,
+        is_on_spot_pay_list=True,
         has_lium_filler=True,
         filler_revenue_per_gpu_hour=1.0,
         is_hotkey_excluded_from_scoring=True,
