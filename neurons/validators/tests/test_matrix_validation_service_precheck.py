@@ -297,3 +297,38 @@ async def test_cancelling_the_lane_mid_matmul_kills_the_remote_process(service_w
     assert len(commands) == 2
     assert "pkill -9 -f" in commands[1]
     assert "decrypt_challenge.py" in commands[1]
+
+
+@pytest.mark.asyncio
+async def test_a_second_cancel_does_not_stop_the_kill(service_with_mock_wrapper):
+    """The kill is shielded: cancelling the lane again while pkill is in flight still lets it finish."""
+    svc, _ = service_with_mock_wrapper
+    matmul_started, kill_started, release_kill = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    kill_finished = asyncio.Event()
+
+    async def run(command, **_kwargs):
+        if "pkill" in command:
+            kill_started.set()
+            await release_kill.wait()
+            kill_finished.set()
+            return SimpleNamespace(stdout="", stderr="")
+        matmul_started.set()
+        await asyncio.Event().wait()
+
+    lane = asyncio.create_task(
+        svc.validate_gpu_model_and_process_job(
+            ssh_client=SimpleNamespace(run=run),
+            executor_info=_executor_info(),
+            default_extra={},
+            machine_spec=_machine_spec(),
+        )
+    )
+    await matmul_started.wait()
+    lane.cancel()
+    await kill_started.wait()
+    lane.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await lane
+    release_kill.set()
+    await asyncio.wait_for(kill_finished.wait(), timeout=1)
