@@ -100,3 +100,23 @@ async def test_enforced_drops_rental_eligibility(monkeypatch):
     assert result.mining_score == 0
 
 
+MALFORMED_SPECS: list[dict] = [
+    {"gpu": {"details": [{"capacity": "141 GB"}]}, "hard_disk": {"total": 1}},  # unparsable number
+    {"gpu": {"details": [{"capacity": {"total": 1}}]}, "hard_disk": {"total": 1}},  # nested object
+    {"gpu": ["details"], "hard_disk": {"total": 1}},                            # gpu is a list
+    {"gpu": {"details": 8}, "hard_disk": {"total": 1}},                         # details not iterable
+    {"gpu": {"details": ["141"]}, "hard_disk": {"total": 1}},                   # entry is not a dict
+    {"gpu": {"details": [{"capacity": 1}]}, "hard_disk": "500"},                # hard_disk is a string
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spec", MALFORMED_SPECS)
+async def test_malformed_scrape_never_breaks_scoring(monkeypatch, spec):
+    # Raising out of calculate_executor_score would cost EVERY miner this cycle's weights.
+    monkeypatch.setattr(settings, "ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT", True)
+    incentive = _build_incentive()
+
+    result = await incentive.calculate_executor_score(_make_job(spec=spec))
+
+    assert result.eligible_for_rental_share is True
