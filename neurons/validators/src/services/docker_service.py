@@ -79,6 +79,7 @@ from services.const import (
     PREFERRED_POD_PORTS,
 )
 from services.cvm_quote_broker import ensure_quote_broker, quote_socket_pod_mount
+from services.node_host import node_owner, public_host_sock
 from services.default_docker_image_digest_service import fetch_docker_hub_digest
 from services.gpu_power_limit import (
     NVIDIA_SMI_TIMEOUT_SECONDS,
@@ -105,6 +106,8 @@ from services.gpu_wedge import cure_wedged_gpus, query_wedged_gpu_uuids
 from services.nvidia_devices import build_gpu_docker_config_for_executor
 from services.cluster_fabric import WIREGUARD_LISTEN_PORT, cluster_pod_networking
 from services.redis_service import (
+    RENTAL_PROBE_FAILED_PREFIX,
+    RENTAL_PROBE_OK_PREFIX,
     STREAMING_LOG_CHANNEL,
     RedisService,
 )
@@ -134,6 +137,7 @@ from services.rental_docker_sdk import (
     VolumeMount,
     build_authorized_keys_exec_spec,
     build_container_command_argv,
+    keep_alive_command_for,
     is_docker_container_not_running_error,
     is_docker_not_found_error,
     build_environment_exec_spec,
@@ -913,6 +917,19 @@ def volume_step_detail(exc: BaseException) -> str | None:
     if _is_dead_docker_ssh_session(exc):
         text = f"{DEAD_DOCKER_SSH_SESSION_HINT}: {text}"
     return text[:VOLUME_STEP_DETAIL_MAX_CHARS]
+
+
+# A create that fails here failed on the node itself: its storage refused the volume, or a GPU it
+# advertises is gone. Such a failure stands like a failed rental probe, so the node scores 0 until a
+# probe on it passes instead of going to the next renter. docker_run is left out: runc echoes the
+# renter's command in its start error, so no text there is the node's alone.
+_HOST_FAULT_CREATE_STEPS = frozenset({"volume_creation", "gpu_flags"})
+# rental_probe.STEP_CONTAINER_START: the stamp reads as that probe step failing at the create step
+_RENTAL_PROBE_CONTAINER_START_STEP = "container_start"
+
+
+def is_host_fault_create_failure(current_step: str | None) -> bool:
+    return current_step in _HOST_FAULT_CREATE_STEPS
 
 
 def failure_step_detail(exc: BaseException, current_step: str | None) -> str | None:
@@ -2554,8 +2571,12 @@ class DockerService:
         host_ram_kib: int | None = None,
         gpu_share: float = 1.0,
         quote_socket: bool = False,
+        image_command_fallback: tuple[str, ...] = (),
     ) -> ContainerRunSpec:
         memory_gb = self._rental_memory_gb(payload.memory_gb, host_ram_kib, gpu_share)
+        # Swap off and the renter-first OOM score need a memory limit to hang on (Docker refuses
+        # --memory-swap without --memory).
+        swap_off = bool(memory_gb)
         environment = {
             key: str(value)
             for key, value in (custom_options.environment or {}).items()
@@ -2598,7 +2619,10 @@ class DockerService:
         return ContainerRunSpec(
             image=payload.docker_image,
             name=container_name,
-            command=build_container_command_argv(custom_options.startup_commands),
+            command=(
+                build_container_command_argv(custom_options.startup_commands)
+                or image_command_fallback
+            ),
             environment=environment,
             ports=_published_ports(port_maps, cluster_udp_ports),
             volumes=tuple(volumes),
@@ -2611,6 +2635,8 @@ class DockerService:
             device_requests=gpu_devices.device_requests,
             cpu_count=cpu_count,
             memory_gb=memory_gb,
+            memory_swap_gb=memory_gb if swap_off else None,
+            oom_score_adj=settings.RENTAL_CONTAINER_OOM_SCORE_ADJ if swap_off else None,
             storage_limit_gb=effective_storage_limit_gb,
             pids_limit=self._rental_pids_limit(cpu_count, host_pid_max),
             shm_size=custom_options.shm_size,
@@ -8030,6 +8056,28 @@ class DockerService:
                     )
                     # the broker cold start (image pull, socket wait) must not read as port-check wait
                     prev_timestamp = now_ms()
+                image_command_fallback: tuple[str, ...] = ()
+                if not build_container_command_argv(custom_options.startup_commands) and not (
+                    custom_options.entrypoint and custom_options.entrypoint.strip()
+                ):
+                    try:
+                        image_command_fallback = keep_alive_command_for(
+                            *await docker_client.image_default_command(image=payload.docker_image)
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            _m(
+                                "Could not read the image's default command; keeping it",
+                                extra=get_extra_info({**default_extra, "error": str(exc)}),
+                            )
+                        )
+                    if image_command_fallback:
+                        logger.info(
+                            _m(
+                                "Image's default command exits at start; running sleep infinity",
+                                extra=get_extra_info(default_extra),
+                            )
+                        )
                 # host_pid_max was read and validated fail-closed before any host side-effect above
                 # (review finding on PR #1531); here it only sizes the container's pids.max.
                 run_spec = self._build_rental_container_run_spec(
@@ -8048,6 +8096,7 @@ class DockerService:
                     host_ram_kib=host_ram_kib,
                     gpu_share=rental_gpu_share,
                     quote_socket=quote_socket,
+                    image_command_fallback=image_command_fallback,
                 )
 
                 logger.info(
@@ -8675,6 +8724,7 @@ class DockerService:
 
             await self.finish_stream_logs()
             await self.redis_service.remove_pending_pod(payload.miner_hotkey, payload.executor_id, payload.pod_id)
+            await self.hold_node_until_probe_passes(payload.executor_id, current_step, default_extra)
 
             # Port release now handled by backend.
             # DAH-2475: msg carries the renter-safe headline; detail carries the FULL text (headline +
@@ -8722,6 +8772,30 @@ class DockerService:
                 # The Docker daemon's reason for a volume failure; the dead-transport hint alone for
                 # any other step it surfaces at (docker_run on a template switch); else None.
                 step_detail=failure_step_detail(e, current_step),
+            )
+
+    async def hold_node_until_probe_passes(
+        self, executor_uuid: str, current_step: str | None, log_extra: dict
+    ) -> None:
+        """Stamp a host-fault create failure as the node's standing rental probe failure.
+
+        The node then scores 0 every cycle until a rental probe passes on it; the probe's interval stamp
+        is dropped so that probe runs on the next idle cycle. Without the probe there is nothing to
+        clear the stamp, so nothing is stamped while RENTAL_PROBE_ENABLED is off.
+        """
+        if not settings.RENTAL_PROBE_ENABLED or not is_host_fault_create_failure(current_step):
+            return
+        try:
+            await self.redis_service.set(
+                f"{RENTAL_PROBE_FAILED_PREFIX}:{executor_uuid}",
+                f"{_RENTAL_PROBE_CONTAINER_START_STEP}:{current_step}",
+            )
+            await self.redis_service.delete(f"{RENTAL_PROBE_OK_PREFIX}:{executor_uuid}")
+        except Exception:  # noqa: BLE001 — the create's own failure reply still goes out
+            logger.warning(
+                _m("Host-fault create failure could not be stamped; the next validation may relist the node",
+                   extra=get_extra_info({**log_extra, "failure_step": current_step})),
+                exc_info=True,
             )
 
     async def _run_bootstrap_restore(
@@ -9096,6 +9170,7 @@ class DockerService:
             async with asyncssh.connect(
                 host=executor_info.address,
                 port=executor_info.ssh_port,
+                **await public_host_sock(executor_info.address, executor_info.ssh_port),
                 username=executor_info.ssh_username,
                 client_keys=[pkey],
                 known_hosts=known_hosts_policy,
@@ -9266,15 +9341,16 @@ class DockerService:
                 log_extra,
             )
             require_rental_docker_ssh_host_key(executor_info)
-            await self.start_existing_container(
-                executor_info=executor_info,
-                private_key=private_key,
-                known_hosts_policy=known_hosts_policy,
-                container_name=container_name,
-                local_volume_path=local_volume_path,
-                pod_id=pod_id,
-                default_extra=log_extra,
-            )
+            with node_owner(miner_hotkey):  # a hostname node's DNS counts against its miner
+                await self.start_existing_container(
+                    executor_info=executor_info,
+                    private_key=private_key,
+                    known_hosts_policy=known_hosts_policy,
+                    container_name=container_name,
+                    local_volume_path=local_volume_path,
+                    pod_id=pod_id,
+                    default_extra=log_extra,
+                )
         except asyncio.CancelledError:
             # the whole check runs under an outer timeout, so a cancellation can land between
             # `docker start` and the gocryptfs remount and leave the container up with its
@@ -9772,6 +9848,7 @@ class DockerService:
                 asyncssh.connect(
                     host=executor_info.address,
                     port=executor_info.ssh_port,
+                    **await public_host_sock(executor_info.address, executor_info.ssh_port),
                     username=executor_info.ssh_username,
                     client_keys=[pkey],
                     known_hosts=known_hosts_policy,
@@ -9970,6 +10047,7 @@ class DockerService:
             async with asyncssh.connect(
                 host=executor_info.address,
                 port=executor_info.ssh_port,
+                **await public_host_sock(executor_info.address, executor_info.ssh_port),
                 username=executor_info.ssh_username,
                 client_keys=[pkey],
                 known_hosts=known_hosts_policy,

@@ -14,12 +14,14 @@ from .gpu_fault_probe import GpuFaultProbeCheck
 from .gpu_fingerprint import GpuFingerprintCheck
 from .gpu_model_valid import GpuModelValidCheck
 from .gpu_power_limit import GpuPowerLimitCheck
+from .gpu_thermal_throttle import GpuThermalThrottleCheck
 from .gpu_usage import GpuUsageCheck
 from .gpu_vram_precheck import GpuVramPrecheck
 from .inspector import InspectorRentedCheck
 from .local_verify import LocalVerifyCheck
 from .machine_spec_scrape import MachineSpecScrapeCheck
 from .nvml_digest import NvmlDigestCheck
+from .pinned_memory_probe import PinnedMemoryProbeCheck
 from .port_connectivity import PortConnectivityCheck
 from .provider_side_load import ProviderSideLoadCheck
 from .registry_pull import RegistryPullCheck
@@ -54,12 +56,14 @@ __all__ = [
     "GpuFingerprintCheck",
     "GpuModelValidCheck",
     "GpuPowerLimitCheck",
+    "GpuThermalThrottleCheck",
     "GpuUsageCheck",
     "GpuVramPrecheck",
     "InspectorRentedCheck",
     "LocalVerifyCheck",
     "MachineSpecScrapeCheck",
     "NvmlDigestCheck",
+    "PinnedMemoryProbeCheck",
     "PortConnectivityCheck",
     "PortCountCheck",
     "ProviderSideLoadCheck",

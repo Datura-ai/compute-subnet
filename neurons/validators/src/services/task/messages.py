@@ -307,6 +307,14 @@ class GpuModelMessages:
         category="policy",
         impact="Job skipped; score set to 0",
     )
+    MODEL_MIXED = MessageTemplate(
+        event="Mixed GPU models on one node",
+        reason="GPU_MODEL_MIXED",
+        severity="warning",
+        category="policy",
+        impact="Job skipped; score set to 0",
+        remediation="Every GPU on a node must be the same model.",
+    )
     COUNT_ZERO = MessageTemplate(
         event="No GPUs detected",
         reason="GPU_COUNT_ZERO",
@@ -383,6 +391,27 @@ class DiskHealthMessages:
     )
 
 
+class GpuThermalThrottleMessages:
+    THROTTLED = MessageTemplate(
+        event="GPU thermal throttling under load",
+        reason="GPU_THERMAL_THROTTLE",
+        severity="warning",
+        category="env",
+        impact="Proceed; score not changed (observation only)",
+        remediation="A busy GPU is held far below its clock by a thermal or hardware slowdown (see gpus[]: "
+        "temperature_c, graphics_clock_mhz, max_graphics_clock_mhz, reasons). Check `nvidia-smi -q -d "
+        "PERFORMANCE,TEMPERATURE`, the fans, airflow and the datacenter cooling; the renter is getting a "
+        "fraction of the card's speed.",
+    )
+    OK = MessageTemplate(
+        event="GPU clocks not thermally throttled",
+        reason="GPU_THERMAL_THROTTLE_OK",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+
+
 class RentedGpuDropMessages:
     DROP = MessageTemplate(
         event="Rented node lost a GPU",
@@ -438,12 +467,12 @@ class GpuPowerLimitMessages:
             "reported by NVML."
         ),
     )
-    DATA_INCOMPLETE = MessageTemplate(
-        event="GPU power limit baseline incomplete",
-        reason="GPU_POWER_LIMIT_BASELINE_INCOMPLETE",
-        severity="info",
-        category="env",
-        impact="Proceed without power-limit penalty",
+    DATA_INCOMPLETE_REJECTED = MessageTemplate(
+        event="GPU power limit could not be read",
+        reason="GPU_POWER_LIMIT_UNREADABLE",
+        severity="warning",
+        category="policy",
+        impact="Job skipped; score set to 0",
         remediation="Ensure NVML exposes the current and default power limits for every GPU.",
     )
     LIMIT_OK = MessageTemplate(
@@ -493,6 +522,14 @@ class NvmlDigestMessages:
         category="env",
         impact="Score set to 0 for this cycle",
         remediation="Update to a supported NVIDIA driver version. Your current driver version is not recognized.",
+    )
+    DRIVER_MISSING = MessageTemplate(
+        event="NVIDIA driver version not reported",
+        reason="NVML_DRIVER_MISSING",
+        severity="error",
+        category="env",
+        impact="Score set to 0 for this cycle",
+        remediation="Make sure `nvidia-smi` reports the driver version on the host.",
     )
     DIGEST_OK = MessageTemplate(
         event="NVML library digest verified",
@@ -1541,6 +1578,50 @@ class GpuFaultProbeMessages:
     UNKNOWN = MessageTemplate(
         event="GPU kernel-fault probe could not run",
         reason="GPU_FAULT_PROBE_UNKNOWN",
+        severity="info",
+        category="env",
+        impact="Proceed without penalty",
+    )
+
+
+class PinnedMemoryProbeMessages:
+    """F-1599 — the pinned-host-memory H2D/D2H round trip on every GPU. On by default with enforcement:
+    PROBE_FAILED fails the fatal check and keeps the node unrentable; without
+    PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED it is a warning and passed=True."""
+
+    DISABLED = MessageTemplate(
+        event="Pinned-memory copy probe disabled",
+        reason="PINNED_MEMORY_PROBE_DISABLED",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+    PROBE_OK = MessageTemplate(
+        event="Pinned-memory copy probe passed",
+        reason="PINNED_MEMORY_PROBE_OK",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+    PROBE_FAILED = MessageTemplate(
+        event="Pinned-memory copy probe failed",
+        reason="PINNED_MEMORY_PROBE_FAILED",
+        severity="error",
+        category="env",
+        impact="Score set to 0",
+        remediation=(
+            "A GPU could not copy a page-locked (pinned) host buffer to the device and back: wrong data, a CUDA "
+            "error or a copy that never finished. PyTorch pin_memory() / non_blocking copies fail the same way. "
+            "On a TDX guest (Intel TDX confidential VM) the GPUs must be in confidential-computing mode "
+            "(`nvidia-smi conf-compute -f` shows CC status: ON) or the VM must run without TDX. A multi-GPU "
+            "H100/H200 node runs in Protected PCIe mode instead, where CC status stays OFF: check "
+            "`nvidia-smi conf-compute --get-multigpu-mode`. Also check the IOMMU / swiotlb settings and the "
+            "host `dmesg` for NVRM Xid lines."
+        ),
+    )
+    UNKNOWN = MessageTemplate(
+        event="Pinned-memory copy probe could not run",
+        reason="PINNED_MEMORY_PROBE_UNKNOWN",
         severity="info",
         category="env",
         impact="Proceed without penalty",
