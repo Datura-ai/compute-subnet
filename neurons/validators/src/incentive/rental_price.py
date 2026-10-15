@@ -64,8 +64,8 @@ NVIDIACTL_ROOT_UID = 0
 # The share of a GPU configuration's average filler revenue per GPU-hour that a node is paid:
 # spot-node pay (ENABLE_SPOT_NODE_PAY) and the secure floor (ENABLE_SECURE_FILLER_REVENUE_FLOOR).
 # Two constants on purpose: the owner sets each on its own, so changing one must not move the other.
-FILLER_REVENUE_PAY_FACTOR = 0.95
-SECURE_FILLER_REVENUE_FLOOR_FACTOR = 0.95
+FILLER_REVENUE_PAY_FACTOR = 1.0
+SECURE_FILLER_REVENUE_FLOOR_FACTOR = 1.0
 
 
 # ── Spec measurements ────────────────────────────────────────────────────────
