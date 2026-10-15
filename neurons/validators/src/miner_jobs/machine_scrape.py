@@ -84,6 +84,9 @@ NVML_CLOCK_COUNT = 4
 
 NVML_VALUE_NOT_AVAILABLE_ulonglong = c_ulonglong(-1)
 
+_nvmlTemperatureSensors_t = c_uint
+NVML_TEMPERATURE_GPU = 0
+
 
 class struct_c_nvmlDevice_t(Structure):
     pass  # opaque handle
@@ -519,6 +522,35 @@ def nvmlDeviceGetClockInfo(handle, type_clock):
     return c_clock.value
 
 
+def nvmlDeviceGetMaxClockInfo(handle, type_clock):
+    c_clock = c_uint()
+    fn = _nvmlGetFunctionPointer("nvmlDeviceGetMaxClockInfo")
+    ret = fn(handle, _nvmlClockType_t(type_clock), byref(c_clock))
+    _nvmlCheckReturn(ret)
+    return c_clock.value
+
+
+def nvmlDeviceGetTemperature(handle, sensor):
+    c_temp = c_uint()
+    fn = _nvmlGetFunctionPointer("nvmlDeviceGetTemperature")
+    ret = fn(handle, _nvmlTemperatureSensors_t(sensor), byref(c_temp))
+    _nvmlCheckReturn(ret)
+    return c_temp.value
+
+
+def nvmlDeviceGetClocksEventReasons(handle):
+    # The bitmask of why the clocks sit below max (SW/HW thermal slowdown, power cap, ...). Renamed from
+    # "ThrottleReasons" in driver 535; an older driver only exports the old name, same signature and bits.
+    c_reasons = c_ulonglong()
+    try:
+        fn = _nvmlGetFunctionPointer("nvmlDeviceGetCurrentClocksEventReasons")
+    except NVMLError:
+        fn = _nvmlGetFunctionPointer("nvmlDeviceGetCurrentClocksThrottleReasons")
+    ret = fn(handle, byref(c_reasons))
+    _nvmlCheckReturn(ret)
+    return c_reasons.value
+
+
 def nvmlDeviceGetCurrPcieLinkWidth(handle):
     fn = _nvmlGetFunctionPointer("nvmlDeviceGetCurrPcieLinkWidth")
     width = c_uint()
@@ -838,9 +870,14 @@ def get_docker_info(content: bytes):
             result = run_cmd(f'{docker_path} inspect --format "{{{{.Image}}}}" {container_id}')
             image_id = result.strip()
 
-            # Get the image details
-            result = run_cmd(f'{docker_path}  inspect --format "{{{{json .RepoDigests}}}}" {image_id}')
-            repo_digests = json.loads(result.strip())
+            # Get the image details. A running container can outlive its image (removed or pruned
+            # under it); its digest is then unknown, which excuses nothing, instead of failing the
+            # whole scrape and leaving every GPU on the node unverified.
+            try:
+                result = run_cmd(f'{docker_path}  inspect --format "{{{{json .RepoDigests}}}}" {image_id}')
+                repo_digests = json.loads(result.strip())
+            except RuntimeError:
+                repo_digests = []
 
             # Get the container name
             result = run_cmd(f'{docker_path} inspect --format "{{{{.Name}}}}" {container_id}')
@@ -974,6 +1011,153 @@ def check_sysbox_gpu_compatibility() -> tuple[bool, str]:
 
     except Exception as e:
         return False, f"An unexpected error occurred: {e}"
+
+
+# ticket-0331 (22 Sep 2026): the `--storage-opt` probe passed on a host where every rental volume failed to
+# mount ("setting up ID-mapped mount on path 206/fs"). check_vloopback_volume_ability does what a rental with
+# a disk limit does: a vloopback volume (docker_service.create_local_volume) mounted into a container under
+# the runtime rentals get on this host, written, read back and removed; nvidia_docker_sysbox_setup.sh runs the
+# same test at setup. The verdict goes to the validator's SCRAPE_OK event and changes nothing else.
+# The plugin is only read here: the rental path and setup install it.
+VLOOPBACK_PLUGIN = VLOOPBACK_DRIVER_PREFIX
+VLOOPBACK_PROBE_IMAGE = "daturaai/compute-subnet-executor:latest"
+VLOOPBACK_PROBE_TOKEN = "lium-vloopback-ok"
+# FileEncryptService.ecrypt_miner_job_files rewrites ":on" to ":off" when VLOOPBACK_SCRAPE_CHECK_ENABLED is false
+VLOOPBACK_CHECK_SWITCH = "lium-vloopback-check:on"
+# fixed per-step timeouts: four Docker reads and writes and the test container, then the two removals, at most
+# 90 s inside the scrape's 300 s job
+VLOOPBACK_COMMAND_TIMEOUT_SECONDS = 10
+VLOOPBACK_RUN_TIMEOUT_SECONDS = 30
+VLOOPBACK_CLEANUP_TIMEOUT_SECONDS = 10
+VLOOPBACK_CHECK_NAME_PREFIX = "lium_storage_check_"
+STORAGE_PROBE_DETAIL_CAP = 300
+
+
+def run_storage_probe(command, timeout=VLOOPBACK_COMMAND_TIMEOUT_SECONDS):
+    # (exit status, stdout, last stderr line); the exit status is None when the command timed out
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        return None, "", f"{' '.join(command[:3])} timed out after {round(timeout)}s"
+    stderr_lines = [line for line in (result.stderr or "").splitlines() if line.strip()]
+    last_error = stderr_lines[-1][:STORAGE_PROBE_DETAIL_CAP] if stderr_lines else ""
+    return result.returncode, (result.stdout or "").strip(), last_error
+
+
+def remove_storage_check(name):
+    # the container first: a `docker run` cut off by its timeout leaves it running with the volume attached.
+    # Returns the error of the volume removal, "" once it is gone.
+    run_storage_probe(["docker", "rm", "-f", name], VLOOPBACK_CLEANUP_TIMEOUT_SECONDS)
+    status, _, error = run_storage_probe(["docker", "volume", "rm", "-f", name], VLOOPBACK_CLEANUP_TIMEOUT_SECONDS)
+    return "" if status == 0 else error or "docker volume rm failed"
+
+
+def vloopback_mount_test(name, runtime):
+    # sparse: this runs on every node, and a sparse file only takes the blocks the probe writes
+    status, _, error = run_storage_probe(
+        ["docker", "volume", "create", "-d", VLOOPBACK_PLUGIN, "-o", "size=1G", "-o", "sparse=true", name]
+    )
+    if status is None:
+        return "fail", "VLOOPBACK_CHECK_TIMEOUT", error
+    if status != 0:
+        return "fail", "VLOOPBACK_VOLUME_CREATE_FAILED", error
+
+    status, mountpoint, error = run_storage_probe(["docker", "volume", "inspect", "--format", "{{.Mountpoint}}", name])
+    if status is None:
+        return "fail", "VLOOPBACK_CHECK_TIMEOUT", error
+    if not mountpoint.startswith("/"):
+        detail = f"docker volume inspect gave Mountpoint {mountpoint!r} {error}".rstrip()
+        return "fail", "VLOOPBACK_MOUNTPOINT_NOT_ABSOLUTE", detail
+
+    # a rental runs under sysbox-runc only when the sysbox probe passed (docker_service: payload.is_sysbox)
+    runtime_args = ["--runtime=sysbox-runc"] if runtime == "sysbox-runc" else []
+    status, output, error = run_storage_probe(
+        ["docker", "run", "--rm", "--name", name]
+        + runtime_args
+        + [
+            "-v", f"{name}:/lium-vol",
+            VLOOPBACK_PROBE_IMAGE,
+            "sh", "-c", f"echo {VLOOPBACK_PROBE_TOKEN} > /lium-vol/probe && cat /lium-vol/probe",
+        ],
+        VLOOPBACK_RUN_TIMEOUT_SECONDS,
+    )
+    if status is None:
+        return "fail", "VLOOPBACK_CHECK_TIMEOUT", error
+    if status != 0 or output.splitlines()[-1:] != [VLOOPBACK_PROBE_TOKEN]:
+        return "fail", "VLOOPBACK_MOUNT_FAILED", error or output[-STORAGE_PROBE_DETAIL_CAP:]
+    return "pass", "", ""
+
+
+def check_vloopback_volume_ability(runtime):
+    # -> (verdict, reason code, detail); the verdict is "pass", "fail" or "skipped"
+    status, docker_root_dir, error = run_storage_probe(["docker", "info", "--format", "{{.DockerRootDir}}"])
+    if status is None:
+        return "fail", "VLOOPBACK_CHECK_TIMEOUT", error
+    if status != 0 or not docker_root_dir.startswith("/"):
+        return "fail", "VLOOPBACK_DOCKER_ROOT_UNREADABLE", f"data-root {docker_root_dir!r} {error}".rstrip()
+
+    status, plugin_state, error = run_storage_probe(
+        [
+            "docker", "plugin", "inspect", "--format",
+            "Enabled={{.Enabled}}\n{{range .Settings.Env}}{{println .}}{{end}}",
+            VLOOPBACK_PLUGIN,
+        ]
+    )
+    if status is None:
+        return "fail", "VLOOPBACK_CHECK_TIMEOUT", error
+    if status != 0:
+        if "no such plugin" in error.lower() or "not found" in error.lower():
+            # the first rental with a disk limit installs it (create_local_volume), and so does setup
+            return "skipped", "VLOOPBACK_PLUGIN_ABSENT", error
+        return "fail", "VLOOPBACK_PLUGIN_UNREADABLE", error
+    plugin_lines = plugin_state.splitlines()
+    enabled = plugin_lines[0].partition("Enabled=")[2] if plugin_lines else ""
+    if enabled == "false":
+        # the first rental with a disk limit enables it (create_local_volume), and so does setup
+        return "skipped", "VLOOPBACK_PLUGIN_DISABLED", "docker plugin inspect says Enabled='false'"
+    if enabled != "true":
+        return "fail", "VLOOPBACK_PLUGIN_UNREADABLE", f"docker plugin inspect says Enabled={enabled!r}"
+    data_dir = ""
+    for env_line in plugin_lines[1:]:
+        if env_line.startswith("DATA_DIR="):
+            data_dir = env_line[len("DATA_DIR="):]
+    if not data_dir.startswith("/"):
+        return "fail", "VLOOPBACK_DATA_DIR_NOT_ABSOLUTE", f"the {VLOOPBACK_PLUGIN} plugin's DATA_DIR is {data_dir!r}"
+
+    name = f"{VLOOPBACK_CHECK_NAME_PREFIX}{os.getpid()}_{os.urandom(3).hex()}"
+    try:
+        verdict = vloopback_mount_test(name, runtime)
+    finally:
+        remove_error = remove_storage_check(name)
+    if verdict[0] == "pass" and remove_error:
+        return "fail", "VLOOPBACK_VOLUME_REMOVE_FAILED", remove_error
+    return verdict
+
+
+def vloopback_check_payload(storage_opt_supported, sysbox_supported):
+    runtime = "sysbox-runc" if sysbox_supported else "default"
+    if not VLOOPBACK_CHECK_SWITCH.endswith(":on"):
+        verdict = ("off", "", "")
+    elif not storage_opt_supported:
+        # without --storage-opt the backend already rents this node without a disk limit
+        verdict = ("skipped", "STORAGE_OPT_UNSUPPORTED", "")
+    else:
+        try:
+            verdict = check_vloopback_volume_ability(runtime)
+        except Exception as e:
+            verdict = ("fail", "VLOOPBACK_CHECK_ERROR", f"{e}"[:STORAGE_PROBE_DETAIL_CAP])
+    return {
+        "vc_verdict": verdict[0],
+        "vc_reason_code": verdict[1],
+        "vc_detail": verdict[2],
+        "vc_runtime": runtime,
+    }
 
 
 SYSBOX_RUNC_CANDIDATES = ("sysbox-runc", "/usr/bin/sysbox-runc", "/usr/local/bin/sysbox-runc")
@@ -1268,6 +1452,9 @@ TOPO_GPU_LABEL_PATTERN = r"^GPU\d+$"
 TOPO_NVLINK_CELL_PATTERN = r"^NV(\d+)$"
 NVLINK_ACTIVE_LINK_PATTERN = r"Link \d+: [\d.]+ GB/s"
 NVLINK_GPU_HEADER_PATTERN = r"^GPU \d+:"
+# nvidia-smi underlines the topology header with SGR escapes (ESC[4m ... ESC[0m) even when piped, so
+# without stripping them the header's first GPU cell never matches and every table parses empty.
+TERMINAL_ESCAPE_PATTERN = r"\x1b\[[0-9;]*m"
 
 
 def parse_topology_matrix(output):
@@ -1282,6 +1469,7 @@ def parse_topology_matrix(output):
     labels = []
     rows = []
     for line in output.splitlines():
+        line = re.sub(TERMINAL_ESCAPE_PATTERN, "", line)
         cells = [cell.strip() for cell in re.split(r"\t+|\s{2,}", line.rstrip())]
         if header is None:
             if len(cells) > 1 and cells[0] == "" and re.match(TOPO_GPU_LABEL_PATTERN, cells[1]):
@@ -1860,6 +2048,13 @@ def get_machine_specs():
                     "gpu.speed_pcie": nvmlDeviceGetPcieSpeed(handle),
                     "gpu.utilization": utilization.c_nvmlUtilization_t_gpu,
                     "gpu.memory_utilization": utilization.c_nvmlUtilization_t_memory,
+                    # Thermal-throttle readings (GpuThermalThrottleCheck): a card whose cooling failed keeps
+                    # its utilisation high while the clock collapses. None on a driver that lacks the call.
+                    "gpu.temperature": safeNvmlValue(lambda: nvmlDeviceGetTemperature(handle, NVML_TEMPERATURE_GPU)),
+                    "gpu.max_graphics_speed": safeNvmlValue(
+                        lambda: nvmlDeviceGetMaxClockInfo(handle, NVML_CLOCK_GRAPHICS)
+                    ),
+                    "gpu.clocks_event_reasons": safeNvmlValue(lambda: nvmlDeviceGetClocksEventReasons(handle)),
                 }
             )
 
@@ -1904,6 +2099,7 @@ def get_machine_specs():
     data["data_storage_limit_supported"] = is_supported
     if not is_supported:
         data["data_storage_limit_scrape_error"] = log_text
+    data["data_vloopback_check"] = vloopback_check_payload(is_supported, data["data_sysbox_runtime"])
 
     ncu_profiling = check_ncu_profiling_access()
     data["data_ncu_profiling_access"] = ncu_profiling.access

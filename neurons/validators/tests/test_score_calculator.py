@@ -55,6 +55,15 @@ def test_ema_verifyx_download_speed_scoring_unrented(ema_speed, scores_zeroed, w
         assert warning == ""
 
 
+def test_ema_download_missing_rented_does_not_zero():
+    """Rented executor with missing EMA must not be zeroed — avoids killing emission on active rentals."""
+    ctx = _ctx(None)
+    actual_score, job_score, warning = calculate_scores(ctx, rented=True)
+    assert actual_score == 1.0
+    assert job_score == 1.0
+    assert "unavailable" not in warning
+
+
 def test_no_network_specs_unrented_zeros():
     """ctx.state.specs has no 'network' key at all — non-rented should zero."""
     ctx = _ctx_without_specs({})
@@ -67,6 +76,24 @@ def test_no_network_specs_unrented_zeros():
 def test_no_network_specs_rented_does_not_penalise():
     """ctx.state.specs has no 'network' key — rented should not zero."""
     ctx = _ctx_without_specs({})
+    actual_score, job_score, warning = calculate_scores(ctx, rented=True)
+    assert actual_score == 1.0
+    assert job_score == 1.0
+    assert warning == ""
+
+
+def test_none_specs_unrented_zeros():
+    """ctx.state.specs is None — non-rented should zero."""
+    ctx = _ctx_without_specs(None)
+    actual_score, job_score, warning = calculate_scores(ctx, rented=False)
+    assert actual_score == 0.0
+    assert job_score == 0.0
+    assert "unavailable" in warning
+
+
+def test_none_specs_rented_does_not_penalise():
+    """ctx.state.specs is None — rented should not zero."""
+    ctx = _ctx_without_specs(None)
     actual_score, job_score, warning = calculate_scores(ctx, rented=True)
     assert actual_score == 1.0
     assert job_score == 1.0
@@ -88,3 +115,11 @@ def test_executor_without_deposit_scores_in_full(gpu_model):
     assert actual_score == 1.0
     assert job_score == 1.0
     assert warning == ""
+
+
+def test_inspector_blind_streak_flag_zeroes_a_rented_score():
+    """InspectorRentedCheck is non-fatal: only this flag, set under enforcement, zeroes it."""
+    ctx = _ctx(500.0).model_copy(update={"inspector_blind_streak_passed": False})
+    actual_score, _, warning = calculate_scores(ctx, rented=True)
+    assert actual_score == 0.0
+    assert "Rental sensor saw nothing of the rental" in warning

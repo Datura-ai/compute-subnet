@@ -21,8 +21,10 @@ from payload_models.payloads import (
 
 from core.config import settings
 from core.utils import _m, get_extra_info
+from services.redis_service import RENTAL_PROBE_FAILED_PREFIX, RENTAL_PROBE_OK_PREFIX
 
 from ...const import MIN_PORT_COUNT, POD_CONTAINER_PREFIX
+from ...node_host import open_public_connection, public_host_sock
 from ..messages import NO_OUTBOUND_INTERNET_REMEDIATION, OutboundInternetMessages
 from ..messages import RentalProbeMessages as Msg
 from ..messages import render_message
@@ -115,16 +117,19 @@ _TEARDOWN_DEADLINE_SECONDS = 300
 _SHELL_COMMAND_TIMEOUT_SECONDS = 60
 # every string copied out of the host into the event is bounded (PR_PROCESS §5)
 _TAIL_CHARS = 600
-_REDIS_LAST_OK_PREFIX = "rental_probe_ok"
+_REDIS_LAST_OK_PREFIX = RENTAL_PROBE_OK_PREFIX
 # the failed step of the last probe, standing until a probe passes (review: a skipped or inconclusive
 # next cycle must not relist the node without a clean probe). The key has NO lifetime: only a passed
 # probe deletes it (review: with a lifetime, a node skipped or inconclusive for longer than it was
 # relisted without a clean probe). The key is one short string per executor that failed and never
 # passed again, deregistered ones included.
-_REDIS_FAILED_PREFIX = "rental_probe_failed"
+_REDIS_FAILED_PREFIX = RENTAL_PROBE_FAILED_PREFIX
 # the OK stamp expires: a deregistered executor's stamp ages out, and an expired stamp only makes the
 # probe run again on the next idle cycle
 _REDIS_STAMP_TTL_SECONDS = 30 * 24 * 3600
+# A node whose probe has not passed for this many probe intervals and is skipped for a state of its own
+# Docker is logged as RENTAL_PROBE_LONG_UNPROBED.
+_LONG_UNPROBED_INTERVALS = 4
 
 
 @dataclass
@@ -198,6 +203,10 @@ class RentalProbeCheck:
     marks under the lock, not from the cycle-start snapshot; the lock is released as soon as the
     create returns. Anything the probe cannot read (backend, Redis) makes it skip or reach no verdict;
     it never penalises on missing data alone. RENTAL_PROBE_ENABLED is off by default.
+
+    With RENTAL_PROBE_ENFORCEMENT_ENABLED off (shadow) the probe runs the same way, but a failed step is
+    logged as RENTAL_PROBE_FAILED_OBSERVED and the check passes: no score, job score or verified-job
+    change, no standing failure, and the node is probed again after the interval like a passed one.
     """
 
     check_id = "executor.validate.rental_probe"
@@ -259,14 +268,19 @@ class RentalProbeCheck:
                 standing=standing if rented_meanwhile == "given a filler" else None,
             )
 
-        # a pass stamped earlier in the interval must not shield this failure, and the failure stands
-        # until a probe passes (see _standing_failure)
-        await _clear_last_ok(ctx)
         failure = _Failure(outcome.failed_step, outcome.create_step)
-        await _stamp_failure(ctx, failure)
         what["failed_step"] = outcome.failed_step
         if outcome.create_step:
             what["create_step"] = outcome.create_step
+        if not settings.RENTAL_PROBE_ENFORCEMENT_ENABLED:
+            # shadow: the interval stamp is written on a failure too, so a failing node is probed once per
+            # interval rather than every cycle, and no failure is kept to apply later
+            await _stamp_last_ok(ctx)
+            return self._observed(ctx, failure, what=what, ssh_port=outcome.ssh_port)
+        # a pass stamped earlier in the interval must not shield this failure, and the failure stands
+        # until a probe passes (see _standing_failure)
+        await _clear_last_ok(ctx)
+        await _stamp_failure(ctx, failure)
         return self._failed(ctx, failure, what=what, ssh_port=outcome.ssh_port)
 
     async def _may_probe(self, ctx: Context) -> _ProbeGate | CheckResult:
@@ -305,6 +319,8 @@ class RentalProbeCheck:
             )
         image_present = await _image_present_on_host(ctx, image_ref)
         if image_present is None:
+            if standing is None:
+                await _log_if_long_unprobed(ctx, "could not read the node's image list")
             return self._inconclusive(
                 ctx,
                 "could not read the node's image list",
@@ -315,6 +331,8 @@ class RentalProbeCheck:
         if not image_present:
             # a pull would put minutes of Docker Hub traffic inside the validation cycle; the
             # cached-template check already reports a node that has not pre-pulled the image
+            if standing is None:
+                await _log_if_long_unprobed(ctx, "default renter image is not pulled on the node")
             return self._skipped(
                 ctx,
                 "default renter image is not pulled on the node",
@@ -400,6 +418,22 @@ class RentalProbeCheck:
                 },
             },
         )
+
+    def _observed(
+        self, ctx: Context, failure: _Failure, *, what: dict[str, Any], ssh_port: int | None
+    ) -> CheckResult:
+        """The failed verdict under RENTAL_PROBE_ENFORCEMENT_ENABLED off: logged with its own reason code,
+        which is never the cycle's failure reason, and no update to the score or the verified job."""
+        event = render_message(
+            Msg.PROBE_FAILED_OBSERVED,
+            ctx=ctx,
+            check_id=self.check_id,
+            what=what,
+            remediation=_remediation(
+                failure, ssh_port=ssh_port, expected_gpus=_expected_gpu_count(ctx)
+            ),
+        )
+        return CheckResult(passed=True, event=event)
 
     def _carried(self, ctx: Context, standing: _Failure, *, no_verdict: str) -> CheckResult:
         """This cycle reached no verdict of its own and the last probe failed: fail the node again with
@@ -569,6 +603,30 @@ async def _image_present_on_host(ctx: Context, image_ref: str) -> bool | None:
     return result.exit_status == 0 and bool((result.stdout or "").strip())
 
 
+async def _log_if_long_unprobed(ctx: Context, reason: str) -> None:
+    """Both reasons are states of the node's own Docker, and both end the cycle without a verdict, so a
+    node can stay unprobed for as long as it keeps one of them. Log only: nothing is decided here."""
+    try:
+        last_ok = await _last_ok_at(ctx)
+    except Exception:
+        return
+    hours = None if last_ok is None else (time.time() - last_ok) / 3600
+    if hours is not None and hours < _LONG_UNPROBED_INTERVALS * settings.RENTAL_PROBE_INTERVAL_HOURS:
+        return
+    logger.warning(
+        _m(
+            "RENTAL_PROBE_LONG_UNPROBED",
+            extra=get_extra_info(
+                {
+                    **ctx.default_extra,
+                    "reason": reason,
+                    "hours_since_last_probe_stamp": None if hours is None else round(hours, 1),
+                }
+            ),
+        )
+    )
+
+
 async def _last_ok_at(ctx: Context) -> float | None:
     """Epoch of the last passed probe, None when there is none; raises when Redis cannot be read."""
     raw = await ctx.services.redis.get(f"{_REDIS_LAST_OK_PREFIX}:{ctx.executor.uuid}")
@@ -590,7 +648,7 @@ async def _stamp_last_ok(ctx: Context) -> None:
     except Exception:
         logger.warning(
             _m(
-                "Rental probe passed but its interval stamp could not be written",
+                "Rental probe's interval stamp could not be written",
                 extra=get_extra_info(ctx.default_extra),
             ),
             exc_info=True,
@@ -619,6 +677,9 @@ class _Failure:
 async def _standing_failure(ctx: Context) -> _Failure | None:
     """The last probe's failed step, kept until a probe passes; None when there is none or Redis could
     not be read (logged; this cycle then decides as if none stood, which is what today's code does)."""
+    if not settings.RENTAL_PROBE_ENFORCEMENT_ENABLED:
+        # shadow: a failure stamped while enforcement was on fails nothing any more
+        return None
     try:
         raw = await ctx.services.redis.get(f"{_REDIS_FAILED_PREFIX}:{ctx.executor.uuid}")
     except Exception:
@@ -1177,7 +1238,7 @@ async def _wait_for_sshd(
     while True:
         try:
             reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port, limit=SSH_ID_LINE_MAX),
+                open_public_connection(host, port, limit=SSH_ID_LINE_MAX),
                 timeout=_SSHD_CONNECT_TIMEOUT_SECONDS,
             )
             try:
@@ -1249,6 +1310,7 @@ async def _login_and_list_gpus(
             conn = await asyncssh.connect(
                 host=host,
                 port=port,
+                **await public_host_sock(host, port, _SSH_LOGIN_TIMEOUT_SECONDS),
                 username="root",
                 client_keys=[pkey],
                 known_hosts=None,
