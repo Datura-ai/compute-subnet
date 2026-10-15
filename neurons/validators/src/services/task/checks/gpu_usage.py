@@ -496,7 +496,7 @@ def lium_workload_containers(ctx: Context) -> set[str]:
     containers: set[str] = set(rented_data.get_filler_containers(ctx.executor.uuid))
     rented_executor = rented_data.executors.get(ctx.executor.uuid)
     if rented_executor:
-        containers.update(pod.container_name for pod in rented_executor.pods)
+        containers.update(pod.docker_container_name for pod in rented_executor.pods)
     containers.discard("")
     return containers
 
@@ -749,7 +749,7 @@ def _containers_claimed_by_another_executor(ctx: Context) -> set[str]:
 
     for executor_uuid, rented_executor in rented_data.executors.items():
         if executor_uuid != our_executor_uuid:
-            claimed.update(pod.container_name for pod in rented_executor.pods)
+            claimed.update(pod.docker_container_name for pod in rented_executor.pods)
 
     claimed.discard("")
     return claimed
