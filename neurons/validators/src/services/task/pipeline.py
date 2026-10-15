@@ -203,9 +203,6 @@ class Context(BaseModel):
     started_at_monotonic: float = Field(default_factory=time.monotonic)
     executor: ExecutorSSHInfo
     miner_hotkey: str
-    # DAH-4272: the hotkey whose key the node accepted for this cycle's SSH login. Only that
-    # hotkey may write or reset the node's verified record; None means no login backs the write.
-    ssh_login_hotkey: str | None = None
     miner_coldkey: str | None = None
     miner_address: str
     miner_port: int

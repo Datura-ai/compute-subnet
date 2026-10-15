@@ -349,7 +349,6 @@ class ResultHandler:
             context: Pipeline context with verification state
             success: Whether validation succeeded
         """
-        login_hotkey = context.ssh_login_hotkey
         if success:
             # On success, update verification data if we have GPU info
             gpu_model_count = context.state.gpu_model_count or ""
@@ -363,7 +362,6 @@ class ResultHandler:
                     success=True,
                     spec=gpu_model_count,
                     uuids=gpu_uuids,
-                    login_hotkey=login_hotkey,
                 )
         else:
             # On failure, either clear or mark as failed
@@ -376,7 +374,6 @@ class ResultHandler:
                     reason=reason,
                     evidence=context.clear_verified_job_evidence,
                     anchor_broken=context.gpu_anchor_broken,
-                    login_hotkey=login_hotkey,
                 )
             else:
                 await self.redis_service.set_verified_job_info(
@@ -384,7 +381,6 @@ class ResultHandler:
                     executor_id=executor_id,
                     prev_info=verified_job_info,
                     success=False,
-                    login_hotkey=login_hotkey,
                 )
 
     @staticmethod

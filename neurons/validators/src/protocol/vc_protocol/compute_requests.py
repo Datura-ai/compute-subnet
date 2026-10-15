@@ -191,11 +191,6 @@ class RentedExecutorsResponse(BaseModel):
     # Average filler revenue per GPU configuration: what the spot-node pay and the secure floor are
     # measured against. Defaults to empty so an older backend pays spot nodes nothing, as before.
     filler_revenue_by_gpu_config: list[FillerRevenueByGpuConfig] = []
-    # executor_id → the miner hotkey of the executor's MinerExecutor row (the portal's record of who
-    # owns it), for every listed executor. A write to the verified-job record by another hotkey is
-    # foreign (ResultHandler). Defaults to empty: an older backend names no owner and every write
-    # is let through.
-    executor_owner_hotkeys: dict[str, str] = {}
 
     def get_filler_revenue_per_gpu_hour(
         self, base_model: str | None, gpu_count: int, min_gpu_hours: float

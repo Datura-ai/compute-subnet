@@ -176,7 +176,7 @@ class PipelineFactory:
         """
         runner = SSHCommandRunner(shell.ssh_client, max_retries=1)
         verified_job_info = await self.redis_service.get_verified_job_info(
-            executor_info.uuid
+            miner_info.miner_hotkey, executor_info.uuid
         )
 
         default_extra = {
@@ -202,8 +202,6 @@ class PipelineFactory:
             pipeline_id=pipeline_id,
             executor=executor_info,
             miner_hotkey=miner_info.miner_hotkey,
-            # the shell passed in is open: the node accepted this hotkey's key
-            ssh_login_hotkey=miner_info.miner_hotkey,
             miner_coldkey=miner_info.miner_coldkey,
             miner_address=miner_info.miner_address,
             miner_port=miner_info.miner_port,

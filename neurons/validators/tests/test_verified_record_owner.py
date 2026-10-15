@@ -1,139 +1,72 @@
-"""DAH-4272: only the hotkey whose SSH login the node accepted this cycle writes its record.
+"""DAH-4272: the verified record (count, spec, GPU anchor, broken mark) is per (miner hotkey, executor id).
 
-A write or reset from any other hotkey is logged (VERIFIED_RECORD_WRITE_WITHOUT_LOGIN) and, with
-VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED on, refused. The backend's portal owner is not consulted:
-a node that runs under a key other than the one the portal lists must stay verified.
+An executor id is self-declared and unique only per hotkey (the backend's uq_miner_executor), so a hotkey that
+lists another's executor id writes, resets and marks only its own record.
 """
 
+import asyncio
 import json
-import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from neurons.validators.src.services import redis_service
-from neurons.validators.src.services.redis_service import RedisService
+from fakeredis import FakeServer
+from fakeredis.aioredis import FakeRedis
 from neurons.validators.src.services.task import pipeline_factory as pipeline_factory_module
 from neurons.validators.src.services.task.pipeline_factory import PipelineFactory
-from neurons.validators.src.services.task.result_handler import ResultHandler
-from tests.helpers import build_state
+from services.redis_service import (
+    GPU_ANCHOR_BROKEN_KEY,
+    RESET_VERIFIED_JOB_CHANNEL,
+    VERIFIED_JOB_COUNT_KEY,
+    RedisService,
+)
 
-VERIFIED_RECORD = {"count": 7, "failed": 0, "spec": "s", "uuids": "GPU-a"}
-# b8717923: the portal lists one hotkey, the node runs (and logs in) under another of the
-# same provider
 B8717923 = "b8717923-0000-4000-8000-000000000000"
-PORTAL_OWNER = "5GivXCUF-portal-owner"
 RUNNING_HOTKEY = "5C8CG5Jk-running-hotkey"
+OTHER_HOTKEY = "5Other-hotkey"
 
 
 @pytest.fixture
 def service():
     service = RedisService.__new__(RedisService)
-    service.hset = AsyncMock()
+    service.redis = FakeRedis(server=FakeServer())
+    service.lock = asyncio.Lock()
     service.publish = AsyncMock()
     return service
 
 
-@pytest.fixture
-def enforced(monkeypatch):
-    monkeypatch.setattr(redis_service.settings, "VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", True)
-
-
-def _written_verified_record(service) -> dict:
-    return json.loads(service.hset.await_args.args[2])
-
-
-def _logs(caplog, key: str) -> int:
-    return sum(key in record.getMessage() for record in caplog.records)
-
-
 @pytest.mark.asyncio
-async def test_a_write_and_reset_backed_by_the_login_go_through_under_enforcement(
-    service, enforced, caplog
-):
-    with caplog.at_level(logging.WARNING, logger=redis_service.logger.name):
-        await service.set_verified_job_info(
-            "hotkey", "exec-1", prev_info=VERIFIED_RECORD, login_hotkey="hotkey"
-        )
-        assert _written_verified_record(service)["count"] == 8
-        await service.clear_verified_job_info(
-            "hotkey", "exec-1", prev_info=VERIFIED_RECORD, login_hotkey="hotkey"
-        )
+async def test_a_reset_and_anchor_mark_by_another_hotkey_leave_the_record_alone(service):
+    await service.set_verified_job_info(RUNNING_HOTKEY, B8717923, prev_info={}, success=True, spec="B300:8", uuids="GPU-a")
+    honest = await service.get_verified_job_info(RUNNING_HOTKEY, B8717923)
 
-    assert _written_verified_record(service)["count"] == 0
-    service.publish.assert_awaited_once()
-    assert _logs(caplog, "VERIFIED_RECORD_WRITE_WITHOUT_LOGIN") == 0
+    await service.clear_verified_job_info(OTHER_HOTKEY, B8717923, prev_info={}, anchor_broken=True)
 
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("login_hotkey", [None, "another-hotkey"])
-async def test_a_write_without_the_login_is_logged_and_still_written_by_default(
-    service, caplog, login_hotkey
-):
-    with caplog.at_level(logging.WARNING, logger=redis_service.logger.name):
-        await service.clear_verified_job_info(
-            "hotkey", "exec-1", prev_info=VERIFIED_RECORD, login_hotkey=login_hotkey
-        )
-
-    assert _logs(caplog, "VERIFIED_RECORD_WRITE_WITHOUT_LOGIN") == 1
-    assert _written_verified_record(service) == {**VERIFIED_RECORD, "count": 0}
-    service.publish.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("login_hotkey", [None, "another-hotkey"])
-async def test_a_write_or_reset_without_the_login_is_refused_under_enforcement(
-    service, enforced, login_hotkey
-):
-    await service.clear_verified_job_info(
-        "hotkey", "exec-1", prev_info=VERIFIED_RECORD, login_hotkey=login_hotkey
-    )
-    await service.set_verified_job_info(
-        "hotkey", "exec-1", prev_info=VERIFIED_RECORD, login_hotkey=login_hotkey
+    assert await service.get_verified_job_info(RUNNING_HOTKEY, B8717923) == honest
+    assert GPU_ANCHOR_BROKEN_KEY not in honest
+    assert (await service.get_verified_job_info(OTHER_HOTKEY, B8717923))[GPU_ANCHOR_BROKEN_KEY] is True
+    channel, published = service.publish.await_args.args
+    assert (channel, published["miner_hotkey"], published["executor_uuid"]) == (
+        RESET_VERIFIED_JOB_CHANNEL, OTHER_HOTKEY, B8717923
     )
 
-    service.hset.assert_not_awaited()
-    service.publish.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_a_record_from_before_the_release_is_read_once_then_rewritten_per_hotkey(service):
+    legacy = {"count": 7, "failed": 0, "spec": "B300:8", "uuids": "GPU-a", GPU_ANCHOR_BROKEN_KEY: True}
+    await service.redis.hset(VERIFIED_JOB_COUNT_KEY, B8717923, json.dumps(legacy))
+
+    prev = await service.get_verified_job_info(RUNNING_HOTKEY, B8717923)
+    assert prev == legacy
+    await service.set_verified_job_info(RUNNING_HOTKEY, B8717923, prev_info=prev, success=True)
+
+    written = json.loads(await service.redis.hget(VERIFIED_JOB_COUNT_KEY, f"{RUNNING_HOTKEY}:{B8717923}"))
+    assert written == {**legacy, "count": 8}
+    assert await service.get_verified_job_info(RUNNING_HOTKEY, B8717923) == written
 
 
 @pytest.mark.asyncio
-async def test_b8717923_stays_verified_under_the_key_it_runs_on(service, enforced, caplog):
-    # the node accepts RUNNING_HOTKEY's key while the portal lists PORTAL_OWNER: its own
-    # verified writes go through, enforced or not, and nothing is logged
-    with caplog.at_level(logging.WARNING, logger=redis_service.logger.name):
-        await service.set_verified_job_info(
-            RUNNING_HOTKEY, B8717923, prev_info=VERIFIED_RECORD, login_hotkey=RUNNING_HOTKEY
-        )
-
-    assert _written_verified_record(service)["count"] == 8
-    assert _logs(caplog, "VERIFIED_RECORD_WRITE_WITHOUT_LOGIN") == 0
-    assert PORTAL_OWNER not in caplog.text
-
-
-def test_owner_enforcement_is_off_by_default():
-    fields = type(redis_service.settings).model_fields
-    assert fields["VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED"].default is False
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("success, clear", [(True, False), (False, True), (False, False)])
-async def test_the_result_handler_passes_the_login_hotkey(context_factory, success, clear):
-    redis = AsyncMock()
-    ctx = context_factory(
-        state=build_state(gpu_model_count="1x H100", gpu_uuids="GPU-a"),
-        miner_hotkey=RUNNING_HOTKEY,
-    ).model_copy(update={"clear_verified_job_info": clear, "ssh_login_hotkey": RUNNING_HOTKEY})
-
-    await ResultHandler(redis_service=redis, dry_run=False)._persist_verification_data(
-        RUNNING_HOTKEY, B8717923, VERIFIED_RECORD, ctx, success=success
-    )
-
-    call = redis.clear_verified_job_info if clear else redis.set_verified_job_info
-    assert call.await_args.kwargs["login_hotkey"] == RUNNING_HOTKEY
-
-
-@pytest.mark.asyncio
-async def test_build_context_records_the_hotkey_whose_login_opened_the_shell(monkeypatch):
+async def test_build_context_reads_the_record_of_the_validated_hotkey(monkeypatch):
     # Context validates a live asyncssh connection; capture the kwargs instead
     monkeypatch.setattr(pipeline_factory_module, "Context", lambda **kw: SimpleNamespace(**kw))
     factory = PipelineFactory.__new__(PipelineFactory)
@@ -177,4 +110,4 @@ async def test_build_context_records_the_hotkey_whose_login_opened_the_shell(mon
         default_docker_image_digests={},
     )
 
-    assert ctx.ssh_login_hotkey == RUNNING_HOTKEY
+    factory.redis_service.get_verified_job_info.assert_awaited_once_with(RUNNING_HOTKEY, B8717923)

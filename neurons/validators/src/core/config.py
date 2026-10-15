@@ -484,12 +484,6 @@ class Settings(BaseSettings):
     # re-registers the node to list a different set. Off again = the mark stays in the record but is ignored.
     # Flip after reading a week of the warn-mode rows.
     GPU_ANCHOR_HARD_ENABLED: bool = Field(env="GPU_ANCHOR_HARD_ENABLED", default=False)
-    # The verified record (count, spec, GPU anchor) is keyed by executor id alone. DAH-4272: only
-    # the hotkey whose SSH login the node accepted this cycle may write or reset it; any other
-    # write is logged (VERIFIED_RECORD_WRITE_WITHOUT_LOGIN) and, with this on, refused.
-    VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED: bool = Field(
-        env="VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", default=False
-    )
     PROVIDER_SIDE_LOAD_CHECK_ENABLED: bool = Field(env="PROVIDER_SIDE_LOAD_CHECK_ENABLED", default=True)
     PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED: bool = Field(
         env="PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED", default=False

@@ -34,6 +34,7 @@ GPU_ANCHOR_KEY = "uuids"
 # DAH-3457: field of a verified-job record, set once by GpuFingerprintCheck under GPU_ANCHOR_HARD_ENABLED and kept by
 # every later write; read back by the same check, which then fails the node without comparing the sets.
 GPU_ANCHOR_BROKEN_KEY = "anchor_broken"
+
 EXECUTORS_UPTIME_PREFIX = "executors_uptime"
 NORMALIZED_SCORE_CHANNEL = "normalized_score_channel"
 REVENUE_PER_GPU_TYPE_SET = "revenue_per_gpu_type"
@@ -159,6 +160,12 @@ class RedisWrites:
 
     def __len__(self) -> int:
         return len(self.ops)
+
+
+def _verified_job_field(miner_hotkey: str, executor_id: str) -> str:
+    """The verified record is per (miner hotkey, executor id): an executor id is unique only per hotkey, so a
+    hotkey that lists another's executor id writes, resets and marks only its own record."""
+    return f"{miner_hotkey}:{executor_id}"
 
 
 class RedisService:
@@ -584,10 +591,7 @@ class RedisService:
         success: bool = True,
         spec: str = '',
         uuids: str = '',
-        login_hotkey: str | None = None,
     ):
-        if self._refuse_write_without_login(miner_hotkey, executor_id, login_hotkey):
-            return
         count = prev_info.get('count', 0)
         failed = prev_info.get('failed', 0)
         prev_spec = prev_info.get('spec', '')
@@ -615,7 +619,7 @@ class RedisService:
         if prev_info.get(GPU_ANCHOR_BROKEN_KEY):
             data[GPU_ANCHOR_BROKEN_KEY] = True
 
-        await self.hset(VERIFIED_JOB_COUNT_KEY, executor_id, json.dumps(data))
+        await self.hset(VERIFIED_JOB_COUNT_KEY, _verified_job_field(miner_hotkey, executor_id), json.dumps(data))
 
     async def clear_verified_job_info(
         self,
@@ -625,10 +629,7 @@ class RedisService:
         reason: ResetVerifiedJobReason = ResetVerifiedJobReason.DEFAULT,
         evidence: dict | None = None,
         anchor_broken: bool = False,
-        login_hotkey: str | None = None,
     ):
-        if self._refuse_write_without_login(miner_hotkey, executor_id, login_hotkey):
-            return
         spec = prev_info.get('spec', '')
         uuids = prev_info.get(GPU_ANCHOR_KEY, '')
 
@@ -640,7 +641,7 @@ class RedisService:
         }
         if anchor_broken or prev_info.get(GPU_ANCHOR_BROKEN_KEY):
             data[GPU_ANCHOR_BROKEN_KEY] = True
-        await self.hset(VERIFIED_JOB_COUNT_KEY, executor_id, json.dumps(data))
+        await self.hset(VERIFIED_JOB_COUNT_KEY, _verified_job_field(miner_hotkey, executor_id), json.dumps(data))
 
         # DAH-3386: the check that cleared the job and what it saw ride along; the backend puts them on the
         # penalty row (lium-platform DAH-3385). Optional on the wire: an older backend ignores the keys.
@@ -659,33 +660,12 @@ class RedisService:
             },
         )
 
-    def _refuse_write_without_login(
-        self, miner_hotkey: str, executor_id: str, login_hotkey: str | None
-    ) -> bool:
-        """DAH-4272: the record is keyed by executor id alone, so a write must come from the hotkey
-        the node accepted this cycle (`login_hotkey`, set when the validator's SSH login succeeded).
-        A hotkey whose login the node refused never reaches a write, and nothing here asks the
-        portal who owns the node: one provider can run a node under one hotkey while the portal
-        lists it under another. Any other write is logged, and refused only under
-        VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED."""
-        if login_hotkey is not None and login_hotkey == miner_hotkey:
-            return False
-        enforced = settings.VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED
-        logger.warning(
-            _m(
-                "VERIFIED_RECORD_WRITE_WITHOUT_LOGIN",
-                extra={
-                    "executor_uuid": executor_id,
-                    "miner_hotkey": miner_hotkey,
-                    "login_hotkey": login_hotkey,
-                    "enforced": enforced,
-                },
-            )
-        )
-        return enforced
-
-    async def get_verified_job_info(self, executor_id: str):
-        data = await self.hget(VERIFIED_JOB_COUNT_KEY, executor_id)
+    async def get_verified_job_info(self, miner_hotkey: str, executor_id: str):
+        data = await self.hget(VERIFIED_JOB_COUNT_KEY, _verified_job_field(miner_hotkey, executor_id))
+        if not data:
+            # shortcut: a record from before the per-hotkey key is read once and rewritten under it on the
+            # node's next cycle; drop this fallback once every listed node has been validated after the release.
+            data = await self.hget(VERIFIED_JOB_COUNT_KEY, executor_id)
         if not data:
             return {}
 
