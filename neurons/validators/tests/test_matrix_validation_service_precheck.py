@@ -26,6 +26,8 @@ def service_with_mock_wrapper(monkeypatch):
     mock_wrapper = MagicMock(name="DMCompVerifyWrapper")
     mock_wrapper.DMCompVerify_new.return_value = "fake_verifier_ptr"
     mock_wrapper.getCipherText.return_value = "deadbeef"
+    # a library without unseal: these tests read the plaintext answer
+    mock_wrapper._has_sealed = False
     monkeypatch.setattr(mvs, "DMCompVerifyWrapper", lambda *_a, **_kw: mock_wrapper)
     return mvs.ValidationService(), mock_wrapper
 

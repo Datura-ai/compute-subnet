@@ -622,21 +622,16 @@ class ValidationService:
             # matching plaintext uuid is a real answer that skipped the seal; a probe that never
             # answered (out of memory, `sealed: null`) falls through to the mismatch below, which
             # the capability check can still waive for a busy GPU.
-            logger.warning(
-                _m(
-                    "MATMUL_RESULT_UNSEALED",
-                    extra=get_extra_info({**log_extra, "enforced": settings.MATMUL_SEAL_REQUIRED_ENABLED}),
-                )
+            logger.warning(_m("MATMUL_RESULT_UNSEALED", extra=get_extra_info(log_extra)))
+            return ValidationResult(
+                success=False,
+                expected_uuid=verifier_params.uuid,
+                returned_uuid="",
+                stdout=stdout,
+                stderr=stderr,
+                error_message="Unsealed result from a seal-aware verifier",
+                sealed=False,
             )
-            if settings.MATMUL_SEAL_REQUIRED_ENABLED:
-                return ValidationResult(
-                    success=False,
-                    expected_uuid=verifier_params.uuid,
-                    returned_uuid="",
-                    stdout=stdout,
-                    stderr=stderr,
-                    error_message="Unsealed result from a seal-aware verifier",
-                )
 
         try:
             uuid_array = verifier_params.uuid.split(",")
