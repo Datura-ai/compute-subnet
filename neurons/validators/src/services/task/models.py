@@ -64,7 +64,11 @@ class JobResult(BaseModel):
     is_on_spot_pay_list: bool = False
     is_new_rentals_paused: bool = False
     is_provider_banned: bool = False
+    # the miner hotkey is in settings.SCORING_EXCLUDED_HOTKEYS: no incentive from any pool, set
+    # by BaseIncentive.calculate_mining_scores. Validation, listing and rentals are unchanged.
+    is_hotkey_excluded_from_scoring: bool = False
     provider_discord_connected: bool = True
+    is_provider_email_held: bool = False
     rental_created_at: datetime | None = None
     default_job_owner: str | None = None  # "miner" | "lium" | None; miner default job is excluded from unrented incentive
     has_lium_filler: bool = False  # the backend lists at least one active Lium filler container on the node

@@ -1,7 +1,7 @@
 import ctypes
 import json
 import math
-import random
+import secrets
 import os
 import logging
 import re
@@ -273,7 +273,7 @@ class VerifyXValidationService:
 
         gpu_info = {"uuids": gpu_uuids, "gpu_count": gpu_count, "gpu_model": gpu_model}
 
-        seed = random.getrandbits(64)
+        seed = secrets.randbits(64)
         verifyx_validator = VerifyXValidator(lib_name, seed)
 
         challenge_config = {
