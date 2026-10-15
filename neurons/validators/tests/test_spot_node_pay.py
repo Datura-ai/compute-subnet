@@ -1,8 +1,8 @@
 """Spot-node pay (ENABLE_SPOT_NODE_PAY) and the secure floor (ENABLE_SECURE_FILLER_REVENUE_FLOOR).
 
-Spot: an idle spot node running Lium fillers is paid min(0.95 x its GPU configuration's average
+Spot: an idle spot node running Lium fillers is paid min(1.0 x its GPU configuration's average
 filler revenue per GPU-hour, its secure rate before cap dilution), outside the buckets.
-Secure floor: an idle secure node's cap-diluted rate is raised to 0.95 x that average, even
+Secure floor: an idle secure node's cap-diluted rate is raised to 1.0 x that average, even
 above its listed rate. The two factors are separate constants. No cap (owner rule): spot pay and floor top-ups are paid on top of the
 burn-capped rental share, up to the whole incentive pool. Both flags off reproduce the old
 numbers exactly.
@@ -38,8 +38,8 @@ TAO_PRICE = 1_000_000.0
 AT_CAP_TAO_PRICE = 1e-6
 ALPHA_RATE = 1.0
 # the owner's factors, written out rather than imported so that a change to either constant fails here
-SPOT_FACTOR = 0.95
-FLOOR_FACTOR = 0.95
+SPOT_FACTOR = 1.0
+FLOOR_FACTOR = 1.0
 
 
 def _config(cap: int = BUCKET_CAP) -> IncentiveConfig:
@@ -78,7 +78,7 @@ def _node(uuid: str, **overrides) -> JobResult:
 
 def _spot(uuid: str = "spot-1", **overrides) -> JobResult:
     return _node(
-        uuid, **{"is_spot": True, "is_provider_chosen_spot": True, "has_lium_filler": True, **overrides}
+        uuid, **{"is_spot": True, "is_on_spot_pay_list": True, "has_lium_filler": True, **overrides}
     )
 
 
@@ -352,11 +352,11 @@ async def test_spot_flag_off_keeps_spot_at_zero():
 
 
 @pytest.mark.asyncio
-async def test_a_spot_node_the_provider_did_not_choose_is_scored_as_before(monkeypatch):
-    # a demoted, force-spot, pinned or no-incentive-rental node: spot, but not provider-chosen
+async def test_a_spot_node_off_the_pay_list_is_scored_as_before(monkeypatch):
+    # a banned, pinned or no-incentive-rental node: spot, but not on the spot pay list
     def cycle() -> list[JobResult]:
         return [
-            _spot("restricted", is_provider_chosen_spot=False, filler_revenue_per_gpu_hour=2.0),
+            _spot("restricted", is_on_spot_pay_list=False, filler_revenue_per_gpu_hour=2.0),
             _node("secure-1"),
         ]
 
@@ -379,7 +379,7 @@ async def test_a_spot_result_built_without_the_providers_choice_is_not_paid(spot
 
     await _run([spot])
 
-    assert spot.is_provider_chosen_spot is False
+    assert spot.is_on_spot_pay_list is False
     assert spot.incentive == 0
     assert _codes(spot) == [ZeroIncentiveReason.SPOT_TIER]
 
@@ -1129,7 +1129,7 @@ _EXECUTOR_ID = str(default_executor().uuid)
         ({"provider_spot_executor_ids": ["another-executor"]}, {}, [ZeroIncentiveReason.SPOT_TIER]),
         # an older backend that does not send the field
         ({}, {}, [ZeroIncentiveReason.SPOT_TIER]),
-        # a banned provider is out even if the backend listed the node as provider-chosen
+        # a banned provider is out even if the backend listed the node for spot pay
         (
             {"provider_spot_executor_ids": [_EXECUTOR_ID], "banned_hotkeys": ["miner-hotkey"]},
             {"is_provider_banned": True},
@@ -1141,9 +1141,9 @@ _EXECUTOR_ID = str(default_executor().uuid)
             [ZeroIncentiveReason.BANNED_NETWORK_ABUSE, ZeroIncentiveReason.SPOT_TIER],
         ),
     ],
-    ids=["demoted-or-pinned", "listed-for-another-node", "field-absent", "banned-listed", "banned"],
+    ids=["off-the-pay-list", "listed-for-another-node", "field-absent", "banned-listed", "banned"],
 )
-async def test_only_a_provider_chosen_spot_node_is_paid(
+async def test_only_a_spot_node_on_the_pay_list_is_paid(
     context_factory, spot_pay_on, fields, context, expected_codes
 ):
     result = await _handled(context_factory, _spot_reply(**fields), **context)
@@ -1158,12 +1158,12 @@ async def test_only_a_provider_chosen_spot_node_is_paid(
 
 
 @pytest.mark.asyncio
-async def test_a_provider_chosen_spot_node_is_paid(context_factory, spot_pay_on):
+async def test_a_spot_node_on_the_pay_list_is_paid(context_factory, spot_pay_on):
     result = await _handled(
         context_factory, _spot_reply(provider_spot_executor_ids=[_EXECUTOR_ID])
     )
 
-    assert result.is_provider_chosen_spot is True
+    assert result.is_on_spot_pay_list is True
     await _run([result, _node("secure-1")])
     assert result.spot_pay_candidate is True
     assert result.effective_rate == pytest.approx(SPOT_FACTOR * 2.0)
@@ -1172,13 +1172,13 @@ async def test_a_provider_chosen_spot_node_is_paid(context_factory, spot_pay_on)
 
 
 @pytest.mark.asyncio
-async def test_the_provider_list_alone_does_not_make_a_node_spot(context_factory):
+async def test_the_pay_list_alone_does_not_make_a_node_spot(context_factory):
     data = RentedExecutorsResponse(executors={}, provider_spot_executor_ids=[_EXECUTOR_ID])
 
     result = await _handled(context_factory, data)
 
     assert result.is_spot is False
-    assert result.is_provider_chosen_spot is False
+    assert result.is_on_spot_pay_list is False
 
 
 @pytest.mark.parametrize(
