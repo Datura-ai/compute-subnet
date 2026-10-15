@@ -1,8 +1,8 @@
 """Spot-node pay (ENABLE_SPOT_NODE_PAY) and the secure floor (ENABLE_SECURE_FILLER_REVENUE_FLOOR).
 
-Spot: an idle spot node running Lium fillers is paid min(0.95 x its GPU configuration's average
+Spot: an idle spot node running Lium fillers is paid min(1.0 x its GPU configuration's average
 filler revenue per GPU-hour, its secure rate before cap dilution), outside the buckets.
-Secure floor: an idle secure node's cap-diluted rate is raised to 0.95 x that average, even
+Secure floor: an idle secure node's cap-diluted rate is raised to 1.0 x that average, even
 above its listed rate. The two factors are separate constants. No cap (owner rule): spot pay and floor top-ups are paid on top of the
 burn-capped rental share, up to the whole incentive pool. Both flags off reproduce the old
 numbers exactly.
@@ -38,8 +38,8 @@ TAO_PRICE = 1_000_000.0
 AT_CAP_TAO_PRICE = 1e-6
 ALPHA_RATE = 1.0
 # the owner's factors, written out rather than imported so that a change to either constant fails here
-SPOT_FACTOR = 0.95
-FLOOR_FACTOR = 0.95
+SPOT_FACTOR = 1.0
+FLOOR_FACTOR = 1.0
 
 
 def _config(cap: int = BUCKET_CAP) -> IncentiveConfig:

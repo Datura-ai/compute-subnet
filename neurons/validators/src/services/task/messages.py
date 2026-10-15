@@ -405,6 +405,27 @@ class DiskHealthMessages:
     )
 
 
+class GpuThermalThrottleMessages:
+    THROTTLED = MessageTemplate(
+        event="GPU thermal throttling under load",
+        reason="GPU_THERMAL_THROTTLE",
+        severity="warning",
+        category="env",
+        impact="Proceed; score not changed (observation only)",
+        remediation="A busy GPU is held far below its clock by a thermal or hardware slowdown (see gpus[]: "
+        "temperature_c, graphics_clock_mhz, max_graphics_clock_mhz, reasons). Check `nvidia-smi -q -d "
+        "PERFORMANCE,TEMPERATURE`, the fans, airflow and the datacenter cooling; the renter is getting a "
+        "fraction of the card's speed.",
+    )
+    OK = MessageTemplate(
+        event="GPU clocks not thermally throttled",
+        reason="GPU_THERMAL_THROTTLE_OK",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+
+
 class RentedGpuDropMessages:
     DROP = MessageTemplate(
         event="Rented node lost a GPU",

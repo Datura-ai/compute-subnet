@@ -405,11 +405,9 @@ class Settings(BaseSettings):
     # author (/proc/cpuinfo, /sys present population, docker NCPU).
     CPU_TRUTH_CHECK_ENABLED: bool = Field(env="CPU_TRUTH_CHECK_ENABLED", default=True)
     CPU_TRUTH_ENFORCEMENT_ENABLED: bool = Field(env="CPU_TRUTH_ENFORCEMENT_ENABLED", default=False)
-    # A seal-aware libdmcompverify that gets an unsealed matmul answer always logs MATMUL_RESULT_UNSEALED;
-    # with this on the answer fails. Off until the log shows which executors still answer unsealed.
-    # Only an answer whose plaintext uuid matches counts; a probe that never answered (out of
-    # memory) keeps the mismatch path and its busy-GPU waiver.
-    MATMUL_SEAL_REQUIRED_ENABLED: bool = Field(env="MATMUL_SEAL_REQUIRED_ENABLED", default=False)
+    # The scrape mounts a size-limited vloopback volume the way a rental does and reports the verdict in
+    # its SCRAPE_OK event. Kill switch: off, the scrape skips the test (baked in by FileEncryptService).
+    VLOOPBACK_SCRAPE_CHECK_ENABLED: bool = Field(env="VLOOPBACK_SCRAPE_CHECK_ENABLED", default=True)
     # Item 3 — run the GPU work-proof on every claimed card concurrently (own challenge per card,
     # sized from the registry SKU) and time the aggregate on the validator, so a count lie either
     # fails device selection or serialises past a wide wall-clock threshold.
@@ -674,26 +672,20 @@ class Settings(BaseSettings):
 
     # Spot-node pay. True: an unrented spot node on the backend's spot pay list (provider_spot_executor_ids:
     # set to Spot by its provider, or demoted for penalties) and that runs Lium fillers earns
-    # min(0.95 x its GPU configuration's average filler revenue, its secure idle rate before
-    # bucket-cap dilution), with no bucket cap (0.95 = FILLER_REVENUE_PAY_FACTOR); a spot node without a filler, or whose configuration
+    # min(1.0 x its GPU configuration's average filler revenue, its secure idle rate before
+    # bucket-cap dilution), with no bucket cap (1.0 = FILLER_REVENUE_PAY_FACTOR); a spot node without a filler, or whose configuration
     # has no usable average, earns 0, and a banned, pinned or no-incentive-rental one
     # earns 0 as before. Pays nobody until the backend sends provider_spot_executor_ids.
     # False: every spot node earns 0, as before.
     ENABLE_SPOT_NODE_PAY: bool = Field(env="ENABLE_SPOT_NODE_PAY", default=False)
     # Secure-node floor, independent of the flag above. True: an idle secure node's rate after
-    # bucket-cap dilution is raised to 0.95 x its configuration's average filler revenue, even above
-    # its listed rate (0.95 = SECURE_FILLER_REVENUE_FLOOR_FACTOR, set apart from the spot factor).
+    # bucket-cap dilution is raised to 1.0 x its configuration's average filler revenue, even above
+    # its listed rate (1.0 = SECURE_FILLER_REVENUE_FLOOR_FACTOR, set apart from the spot factor).
     # False: dilution applies as before.
     ENABLE_SECURE_FILLER_REVENUE_FLOOR: bool = Field(env="ENABLE_SECURE_FILLER_REVENUE_FLOOR", default=False)
     # A configuration's filler average is used only when it was taken over at least this many
     # filler GPU-hours; a thinner sample reads as no average.
     FILLER_REVENUE_MIN_GPU_HOURS: float = Field(env="FILLER_REVENUE_MIN_GPU_HOURS", default=24.0)
-
-    # True: when the --network=host batch verifies fewer than MIN_PORT_COUNT ports, the ports it
-    # failed are re-probed through the published-port (-p) tiers renters' pods use, and the two
-    # results are merged; still below the floor, one more batch probes up to 300 declared ports
-    # above those. It can raise many hosts' verified_port_count at once, so it ships off.
-    PORT_PROBE_TOPUP_BELOW_FLOOR: bool = Field(env="PORT_PROBE_TOPUP_BELOW_FLOOR", default=False)
 
     # True: a run below the port floor fails INSUFFICIENT_PORTS (the verdict PortCountCheck gives an
     # unrented node) when every pod in the batch-start rented list is stale: not running and its
