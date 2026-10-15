@@ -590,8 +590,8 @@ class ValidationService:
         # uuid+metrics from inside, so a miner who only edits the (untrusted) Python
         # wrapper cannot forge or inflate the result. If a sealed blob is present but
         # fails authentication, we REJECT — we do not fall back to the miner-controlled
-        # plaintext line. Executors that predate sealing send no blob and keep the
-        # legacy behavior, so independent validator/executor upgrades stay compatible.
+        # plaintext line. An executor that sends no blob fails here when our library can
+        # unseal (below); only a validator library without unseal still reads the plaintext.
         if getattr(self.wrapper, "_has_sealed", False) and sealed_blob:
             inner = self.wrapper.unsealResult(gen_ptr, sealed_blob)
             inner_obj = None
@@ -622,21 +622,16 @@ class ValidationService:
             # matching plaintext uuid is a real answer that skipped the seal; a probe that never
             # answered (out of memory, `sealed: null`) falls through to the mismatch below, which
             # the capability check can still waive for a busy GPU.
-            logger.warning(
-                _m(
-                    "MATMUL_RESULT_UNSEALED",
-                    extra=get_extra_info({**log_extra, "enforced": settings.MATMUL_SEAL_REQUIRED_ENABLED}),
-                )
+            logger.warning(_m("MATMUL_RESULT_UNSEALED", extra=get_extra_info(log_extra)))
+            return ValidationResult(
+                success=False,
+                expected_uuid=verifier_params.uuid,
+                returned_uuid="",
+                stdout=stdout,
+                stderr=stderr,
+                error_message="Unsealed result from a seal-aware verifier",
+                sealed=False,
             )
-            if settings.MATMUL_SEAL_REQUIRED_ENABLED:
-                return ValidationResult(
-                    success=False,
-                    expected_uuid=verifier_params.uuid,
-                    returned_uuid="",
-                    stdout=stdout,
-                    stderr=stderr,
-                    error_message="Unsealed result from a seal-aware verifier",
-                )
 
         try:
             uuid_array = verifier_params.uuid.split(",")

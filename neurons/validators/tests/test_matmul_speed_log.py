@@ -268,7 +268,7 @@ def test_sealed_answer_carries_seal_and_size(monkeypatch):
     assert result.elapsed_seconds is None
 
 
-def test_unsealed_answer_is_marked_unsealed(monkeypatch):
+def test_unsealed_answer_fails_and_is_marked_unsealed(monkeypatch):
     validation = matmul_service(monkeypatch)
     challenge = validation.prepare_matmul_challenge(SPECS, {}, vram_budget_mb=8192)
     uuid = challenge.params.uuid
@@ -277,9 +277,9 @@ def test_unsealed_answer_is_marked_unsealed(monkeypatch):
     result = validation.evaluate_matmul_output(challenge, stdout=stdout)
     challenge.close()
 
-    assert result.success is True
+    assert result.success is False
     assert result.sealed is False
-    assert result.metrics == {"fp32_tflops": 9999.0}
+    assert result.metrics is None
 
 
 def test_sealed_blob_on_a_library_without_unseal_is_unsealed(monkeypatch):
