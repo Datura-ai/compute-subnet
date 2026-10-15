@@ -13,6 +13,7 @@ import aiohttp
 from core.config import settings
 from core.docker_utils import ALPINE_HELPER_IMAGE
 from core.utils import _m, get_extra_info
+from services.rental_docker_sdk import RENTAL_NETWORK_NAME
 
 from ..messages import ContainerDownloadSpeedMessages as Msg
 from ..messages import render_message
@@ -66,10 +67,16 @@ _FETCH_SCRIPT = (
 
 
 def download_speed_command(sysbox: bool) -> str:
-    """A throwaway container on the node's default bridge network, under sysbox-runc where renters get it."""
+    """A throwaway container on the rentals bridge, under sysbox-runc where renters get it.
+
+    Pods run on RENTAL_NETWORK_NAME (own DNS and MTU), so that is the path to measure. The node creates it at its
+    first rental; until then the probe falls back to the default bridge and says which one it used.
+    """
     runtime = "--runtime=sysbox-runc " if sysbox else ""
     return (
-        f"/usr/bin/docker run --rm {runtime}--entrypoint /bin/sh {ALPINE_HELPER_IMAGE} "
+        f"net=bridge; /usr/bin/docker network inspect {RENTAL_NETWORK_NAME} >/dev/null 2>&1 && "
+        f"net={RENTAL_NETWORK_NAME}; echo \"{MARKER}_net name=$net\"; "
+        f"/usr/bin/docker run --rm --network \"$net\" {runtime}--entrypoint /bin/sh {ALPINE_HELPER_IMAGE} "
         f"-c {shlex.quote(_FETCH_SCRIPT)}"
     )
 
@@ -83,6 +90,7 @@ class EndpointReading:
     # None = measured; else why not: dns_failed, unreachable, timeout, http_error, no_output, other
     error: str | None = None
     detail: str | None = None
+    network: str | None = None
 
     def as_record(self) -> dict[str, Any]:
         record: dict[str, Any] = {"endpoint": self.endpoint, "bytes": self.bytes}
@@ -94,6 +102,8 @@ class EndpointReading:
             record["error"] = self.error
         if self.detail:
             record["detail"] = self.detail[:_TAIL_CHARS]
+        if self.network:
+            record["network"] = self.network
         return record
 
 
@@ -112,8 +122,11 @@ def parse_download_speed(stdout: str) -> list[EndpointReading]:
     """One reading per endpoint; an endpoint with no marker line is `no_output`."""
     fields: dict[str, dict[str, str]] = {}
     errors: dict[str, str] = {}
+    network = None
     for line in (stdout or "").splitlines():
-        if line.startswith(f"{MARKER}_err ep="):
+        if line.startswith(f"{MARKER}_net name="):
+            network = line[len(f"{MARKER}_net name=") :].strip() or None
+        elif line.startswith(f"{MARKER}_err ep="):
             name, _, text = line[len(f"{MARKER}_err ep=") :].partition(" ")
             errors[name] = text.strip()
         elif line.startswith(f"{MARKER} "):
@@ -138,7 +151,7 @@ def parse_download_speed(stdout: str) -> list[EndpointReading]:
             # a timed-out fetch that read something is the slow reading itself, not an error; a full read is a
             # reading whatever wget's exit (a server ignoring Range gets SIGPIPE from head)
             mbps = got * 8 / max(seconds, 0.01) / 1e6
-            readings.append(EndpointReading(name, got, seconds, mbps))
+            readings.append(EndpointReading(name, got, seconds, mbps, network=network))
         elif timed_out:
             readings.append(EndpointReading(name, got, seconds, error="timeout", detail=detail))
         else:

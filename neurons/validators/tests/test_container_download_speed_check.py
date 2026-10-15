@@ -127,11 +127,17 @@ def test_defaults_shadow_and_bounded():
 
 def test_command_runs_in_a_container_with_the_renter_runtime_and_a_size_cap():
     cmd = download_speed_command(True)
-    assert cmd.startswith("/usr/bin/docker run --rm --runtime=sysbox-runc ")
-    assert "--network" not in cmd  # the default bridge a renter's pod gets
+    # the rentals bridge a pod runs on, or the default bridge before the node's first rental
+    assert "docker network inspect lium-rentals" in cmd and "net=lium-rentals" in cmd and "net=bridge" in cmd
+    assert '/usr/bin/docker run --rm --network "$net" --runtime=sysbox-runc ' in cmd
     assert f"Range: bytes=0-{CAP_BYTES - 1}" in cmd and f"head -c {CAP_BYTES}" in cmd
     assert all(url in cmd for _, url in module.ENDPOINTS)  # both pinned files, in full
     assert "--runtime" not in download_speed_command(False)
+
+
+def test_parse_reports_the_network_the_reading_took():
+    assert parse_download_speed("lium_dl_net name=lium-rentals\n" + FAST)[0].as_record()["network"] == "lium-rentals"
+    assert "network" not in parse_download_speed(FAST)[0].as_record()
 
 
 def test_parse_measures_mbps_and_names_errors():
