@@ -792,6 +792,20 @@ def test_get_rented_containers_answers_the_dind_volume_sweep_like_listed_contain
     assert names == listed_container_names(rented_data)
 
 
+@pytest.mark.parametrize("validator_dry_run", [False, True])
+def test_pipeline_factory_cleanup_dry_run_follows_validator_dry_run(monkeypatch, validator_dry_run):
+    """DAH-4330: no separate cleanup toggle; cleanup only reports under the validator's DRY_RUN."""
+    from core.config import settings
+    from services.task import pipeline_factory as pipeline_factory_module
+
+    monkeypatch.setattr(pipeline_factory_module, "InspectorValidationService", MagicMock)
+    monkeypatch.setattr(settings, "DRY_RUN", validator_dry_run)
+    factory = pipeline_factory_module.PipelineFactory(*(MagicMock() for _ in range(7)))
+
+    assert factory.container_cleanup.dry_run is validator_dry_run
+    assert not hasattr(settings, "CONTAINER_CLEANUP_DRY_RUN")
+
+
 def test_listed_container_names_protects_the_pod_container_of_an_unnamed_pod():
     # DAH-4315: the backend lists a new pod before it records the container name
     names = listed_container_names(_rented_data(EXECUTOR_UUID, [""]))

@@ -293,7 +293,6 @@ class DefaultIncentive(BaseIncentive):
     async def calculate_final_weights(
         self,
         miners: list[bittensor.NeuronInfo],
-        last_mechanism_step_block: int | None,
         current_epoch: int | None = None,
     ) -> dict[str, float]:
         """Calculate scores with burning logic for this cycle.
@@ -304,7 +303,6 @@ class DefaultIncentive(BaseIncentive):
 
         Args:
             miners: List of miner neuron information
-            last_mechanism_step_block: Last mechanism step block number
 
         Returns:
             dict[str, float]: Scores with burning applied for each miner
@@ -313,7 +311,6 @@ class DefaultIncentive(BaseIncentive):
         burn_scores = self.burn_service.calculate_burn_scores(
             miners=miners,
             burn_share=self.burn_share,  # burn-emission share sourced from shared config (DAH-2274)
-            last_mechanism_step_block=last_mechanism_step_block,
         )
         cycle_scores = dict(burn_scores)
         for miner in miners:

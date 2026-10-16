@@ -744,13 +744,6 @@ class SysboxRequiredMessages:
         category="policy",
         impact="Proceed",
     )
-    DISABLED = MessageTemplate(
-        event="Sysbox requirement disabled",
-        reason="SYSBOX_REQUIRED_DISABLED",
-        severity="info",
-        category="policy",
-        impact="Proceed",
-    )
 
 
 class DuplicateExecutorMessages:
@@ -1352,13 +1345,6 @@ def _verify_failed(label: str, reason_suffix: str, remediation: str) -> MessageT
 
 
 class VerifyXMessages:
-    DISABLED = MessageTemplate(
-        event="VerifyX validation skipped",
-        reason="VERIFYX_DISABLED",
-        severity="info",
-        category="env",
-        impact="Proceed",
-    )
     FILLER_SKIPPED = MessageTemplate(
         event="VerifyX validation skipped",
         reason="VERIFYX_SKIPPED_ACTIVE_FILLER",
