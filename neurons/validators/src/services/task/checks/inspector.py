@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import replace
 from typing import Any
 
+from core.utils import _m, get_extra_info
 from services.const import SECONDS_PER_BLOCK
 from services.inspector_validation_service import InspectorValidationResponse
 
@@ -15,6 +17,17 @@ from ..messages import render_message
 from ..pipeline import CheckResult, Context
 from ..models import ValidationEvent
 from protocol.vc_protocol.compute_requests import RentedPod
+
+logger = logging.getLogger(__name__)
+
+# Outcomes in which the sensor saw nothing of the rental: an error, a failed canary, a stopped
+# collector, or one that only just started (the collector is restarted before every read, so a host
+# that kills it always reads as just started).
+BLIND_OUTCOMES = frozenset(
+    {"ERROR", "CANARY_FAILED", "COLLECTOR_NOT_RUNNING", "COLLECTOR_RECENTLY_STARTED"}
+)
+BLIND_STREAK_KEY_PREFIX = "inspector:blind_streak"
+BLIND_STREAK_TTL_SECONDS = 24 * 60 * 60
 
 
 class InspectorRentedCheck:
@@ -75,12 +88,14 @@ class InspectorRentedCheck:
             inspector_event = _build_inspector_event(
                 ctx, event, rented_pods, result, outcome="ERROR"
             )
+            passed = await _record_blind_streak_and_decide_pass(ctx, "ERROR")
             return CheckResult(
-                passed=True,
+                passed=passed,
                 event=event,
                 updates={
                     "default_extra": extra,
                     "state": replace(ctx.state, inspector_event=inspector_event),
+                    **_score_gate_updates_for_failed_streak(passed),
                 },
             )
 
@@ -103,10 +118,15 @@ class InspectorRentedCheck:
             inspector_event = _build_inspector_event(
                 ctx, event, rented_pods, result, outcome="ERROR", report=report
             )
+            passed = await _record_blind_streak_and_decide_pass(ctx, "ERROR")
             return CheckResult(
-                passed=True,
+                passed=passed,
                 event=event,
-                updates={"default_extra": extra, "state": replace(ctx.state, inspector_event=inspector_event)},
+                updates={
+                    "default_extra": extra,
+                    "state": replace(ctx.state, inspector_event=inspector_event),
+                    **_score_gate_updates_for_failed_streak(passed),
+                },
             )
         warnings = _collector_start_warnings(report)
         verdict = build_verdict(
@@ -116,6 +136,9 @@ class InspectorRentedCheck:
             sensor_attested=sensor_attested,
         )
         if verdict.provider_origin:
+            # a finding seen while the canary failed or the collector was down or just started
+            # does not show the sensor saw everything, so that cycle still counts as blind
+            await _record_blind_streak_and_decide_pass(ctx, _sensor_outcome(report, warnings))
             return self._record_provider_origin(
                 ctx,
                 verdict=verdict,
@@ -190,12 +213,14 @@ class InspectorRentedCheck:
         inspector_event = _build_inspector_event(
             ctx, event, rented_pods, result, outcome=outcome, report=report, verdict=verdict
         )
+        passed = await _record_blind_streak_and_decide_pass(ctx, outcome)
         return CheckResult(
-            passed=True,
+            passed=passed,
             event=event,
             updates={
                 "default_extra": extra,
                 "state": replace(ctx.state, inspector_event=inspector_event),
+                **_score_gate_updates_for_failed_streak(passed),
             },
         )
 
@@ -247,6 +272,48 @@ class InspectorRentedCheck:
         )
 
 
+async def _record_blind_streak_and_decide_pass(ctx: Context, outcome: str) -> bool:
+    """Counts the rented cycles in a row whose inspector outcome saw nothing of the rental.
+
+    Each of those outcomes passes on its own (a sensor can break honestly), so a host that keeps
+    the sensor dead for a whole rental is never looked at. The streak is logged from
+    INSPECTOR_BLIND_STREAK_LIMIT on; it fails the check only under
+    INSPECTOR_BLIND_STREAK_ENFORCEMENT_ENABLED. The check is non-fatal, so the caller also sets
+    `inspector_blind_streak_passed` (`_score_gate_updates_for_failed_streak`), which
+    calculate_scores zeroes on. A collector that only just started counts as blind. A Redis outage
+    decides nothing."""
+    key = f"{BLIND_STREAK_KEY_PREFIX}:{ctx.miner_hotkey}:{ctx.executor.uuid}"
+    try:
+        if outcome not in BLIND_OUTCOMES:
+            await ctx.services.redis.delete(key)
+            return True
+        streak = int(await ctx.services.redis.get(key) or 0) + 1
+        await ctx.services.redis.set(key, str(streak), ex=BLIND_STREAK_TTL_SECONDS)
+    except Exception:
+        logger.warning(
+            _m("INSPECTOR_BLIND_STREAK_UNAVAILABLE", extra=get_extra_info(ctx.default_extra)),
+            exc_info=True,
+        )
+        return True
+    if streak < settings.INSPECTOR_BLIND_STREAK_LIMIT:
+        return True
+    enforced = settings.INSPECTOR_BLIND_STREAK_ENFORCEMENT_ENABLED
+    logger.warning(
+        _m(
+            "INSPECTOR_BLIND_STREAK",
+            extra=get_extra_info(
+                {**ctx.default_extra, "streak": streak, "outcome": outcome, "enforced": enforced}
+            ),
+        )
+    )
+    return not enforced
+
+
+def _score_gate_updates_for_failed_streak(passed: bool) -> dict[str, bool]:
+    """The context flag calculate_scores zeroes the score on; set only when the streak failed."""
+    return {} if passed else {"inspector_blind_streak_passed": False}
+
+
 def _build_inspector_event(
     ctx: Context,
     event: ValidationEvent,
@@ -294,6 +361,17 @@ def _sensor_attested(ctx: Context) -> bool:
     # Elsewhere the checksum was read through the provider's own shell and proves nothing — say
     # so in the verdict.
     return bool(ctx.tdx_attestation_passed) and settings.ENABLE_ATTESTATION_WHITELIST
+
+
+def _sensor_outcome(report: dict[str, Any], warnings: list[dict[str, Any]]) -> str:
+    """The blind-streak outcome of a cycle with a provider-origin finding."""
+    if _canary_failed(report):
+        return "CANARY_FAILED"
+    if _collector_not_running(report):
+        return "COLLECTOR_NOT_RUNNING"
+    if warnings:
+        return "COLLECTOR_RECENTLY_STARTED"
+    return "MALICIOUS"
 
 
 def _canary_failed(report: dict[str, Any]) -> bool:

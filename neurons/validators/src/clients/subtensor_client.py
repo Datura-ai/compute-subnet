@@ -465,11 +465,6 @@ class SubtensorClient:
             node = self.get_node()
             return node.query("SubtensorModule", "WeightsSetRateLimit", [self.netuid]).value
 
-    def get_last_mechansim_step_block(self):
-        with _log_sync_block("get_last_mechansim_step_block"):
-            node = self.get_node()
-            return node.query("SubtensorModule", "LastMechansimStepBlock", [self.netuid]).value
-
     def get_uid_for_hotkey(self, hotkey):
         metagraph = self.get_metagraph()
         return metagraph.hotkeys.index(hotkey)
@@ -890,7 +885,7 @@ class SubtensorClient:
             active_hotkeys or set(),
             # only the uids that actually receive burn, mirroring BurnService.is_burner —
             # a retired burner slot is an ordinary miner uid and must be able to take the floor
-            set(settings.NEW_BURNERS if settings.ENABLE_NEW_BURN_LOGIC else settings.BURNERS),
+            set(settings.NEW_BURNERS),
         )
 
         logger.info(

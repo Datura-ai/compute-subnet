@@ -1,11 +1,9 @@
 """DAH-3558: a rented node the miner left out of its answer gets a failed row, not silence.
 
 A rented node the miner does not put in AcceptSSHKeyRequest.executors gets no pipeline, and
-the wave writes nothing about it (the measurement is in the PR body). With
-RENTED_EXECUTOR_NOT_LISTED_REPORT_ENABLED the wave writes one failed result
-(score 0, RENTED_EXECUTOR_NOT_LISTED, availability error) per rented executor of the miner that
-the backend lists and the miner did not return. Flag off: today's behaviour, nothing is added.
-On main (no flag, no methods) every test here fails; that is the fail-old proof.
+the wave writes nothing about it (the measurement is in the PR body). The wave writes one failed
+result (score 0, RENTED_EXECUTOR_NOT_LISTED, availability error) per rented executor of the miner
+that the backend lists and the miner did not return.
 
 The helper tests drive `_build_not_listed_rented_results` directly (pure, like the manual-rental
 synthesis next to it); the last tests drive the REST path end to end, so the empty-answer guard
@@ -69,13 +67,6 @@ def make_service() -> MinerService:
     )
 
 
-@pytest.fixture
-def flag_on(monkeypatch):
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "RENTED_EXECUTOR_NOT_LISTED_REPORT_ENABLED", True)
-
-
 def build(service: MinerService, rented_data: RentedExecutorsResponse, *, listed_ids=(LISTED,), executor_id=None):
     return service._build_not_listed_rented_results(make_payload(), rented_data, miner_returned(*listed_ids), executor_id)
 
@@ -83,41 +74,7 @@ def build(service: MinerService, rented_data: RentedExecutorsResponse, *, listed
 # --- the helper -----------------------------------------------------------------------------
 
 
-def test_flag_off_adds_nothing(monkeypatch):
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "RENTED_EXECUTOR_NOT_LISTED_REPORT_ENABLED", False)
-    rented_data = RentedExecutorsResponse(executors={MISSING: rented(), LISTED: rented()})
-
-    assert build(make_service(), rented_data) == []
-    assert make_service()._has_not_listed_rented_executors(make_payload(), rented_data, [], None) is False
-
-
-def test_flag_off_logs_the_node_the_miner_left_out(monkeypatch, caplog):
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "RENTED_EXECUTOR_NOT_LISTED_REPORT_ENABLED", False)
-    rented_data = RentedExecutorsResponse(executors={MISSING: rented(), LISTED: rented()})
-
-    with caplog.at_level("WARNING"):
-        results = build(make_service(), rented_data)
-
-    assert results == []
-    shadow = [r.getMessage() for r in caplog.records if "RENTED_EXECUTOR_NOT_LISTED_SHADOW" in r.getMessage()]
-    assert len(shadow) == 1
-
-
-def test_flag_on_writes_no_shadow_log(flag_on, caplog):
-    rented_data = RentedExecutorsResponse(executors={MISSING: rented(), LISTED: rented()})
-
-    with caplog.at_level("WARNING"):
-        results = build(make_service(), rented_data)
-
-    assert len(results) == 1
-    assert not any("RENTED_EXECUTOR_NOT_LISTED_SHADOW" in r.getMessage() for r in caplog.records)
-
-
-def test_rented_executor_the_miner_left_out_gets_one_failed_row(flag_on):
+def test_rented_executor_the_miner_left_out_gets_one_failed_row():
     """The regression: 700fea51, 16 Sep 13:21Z. The backend lists it as rented; the miner answered
     with its other executors only. Today the cycle writes nothing about it."""
     rented_data = RentedExecutorsResponse(executors={MISSING: rented(), LISTED: rented()})
@@ -145,7 +102,7 @@ def test_rented_executor_the_miner_left_out_gets_one_failed_row(flag_on):
     assert "pod-1" in result.log_text
 
 
-def test_listed_other_miners_and_manual_rentals_are_left_alone(flag_on):
+def test_listed_other_miners_and_manual_rentals_are_left_alone():
     other = str(uuid4())
     manual = str(uuid4())
     rented_data = RentedExecutorsResponse(
@@ -160,13 +117,13 @@ def test_listed_other_miners_and_manual_rentals_are_left_alone(flag_on):
     assert build(make_service(), rented_data) == []
 
 
-def test_uuid_case_does_not_split_a_listed_executor_from_its_rental(flag_on):
+def test_uuid_case_does_not_split_a_listed_executor_from_its_rental():
     rented_data = RentedExecutorsResponse(executors={LISTED.upper(): rented()})
 
     assert build(make_service(), rented_data, listed_ids=(LISTED,)) == []
 
 
-def test_single_executor_request_reports_nothing(flag_on):
+def test_single_executor_request_reports_nothing():
     """The express lane and a rental key-submit ask the miner for one executor and keep their own
     bounded retry when the miner does not return it (DAH-2958); only the cycle's whole-miner
     request writes the outage row."""
@@ -176,7 +133,7 @@ def test_single_executor_request_reports_nothing(flag_on):
     assert make_service()._has_not_listed_rented_executors(make_payload(), rented_data, [], MISSING) is False
 
 
-def test_probe_agrees_with_the_builder(flag_on):
+def test_probe_agrees_with_the_builder():
     service = make_service()
     rented_data = RentedExecutorsResponse(executors={MISSING: rented(), LISTED: rented()})
 
@@ -200,7 +157,7 @@ def _reached_result(executor_id: str):
     return result
 
 
-def test_not_listed_rows_do_not_tip_the_outage_ratio(flag_on):
+def test_not_listed_rows_do_not_tip_the_outage_ratio():
     """Regression (review round 2): the not-listed rows carry an availability error the validator
     never measured, and they counted on both sides of the DAH-2748 ratio. One miner dropping eight
     rented nodes at once then read as our own outage and silenced a real SSH failure elsewhere."""
@@ -219,7 +176,7 @@ def test_not_listed_rows_do_not_tip_the_outage_ratio(flag_on):
     assert all(row.availability_errors for row in not_listed)
 
 
-def test_not_listed_rows_are_not_silenced_and_do_not_pad_the_checked_count(flag_on):
+def test_not_listed_rows_are_not_silenced_and_do_not_pad_the_checked_count():
     """The other side of the ratio: eight validator connects failed out of ten, our own outage.
     The not-listed rows neither dilute that share nor lose their error: the miner's answer is not
     a reading our egress can explain."""
@@ -291,7 +248,7 @@ async def request(service: MinerService, rented_data: RentedExecutorsResponse):
 
 
 @pytest.mark.asyncio
-async def test_cycle_result_carries_the_listed_verdict_and_the_missing_rented_node(rest_service, flag_on):
+async def test_cycle_result_carries_the_listed_verdict_and_the_missing_rented_node(rest_service):
     rest_service.miner_returns(LISTED)
     rented_data = RentedExecutorsResponse(executors={MISSING: rented(), LISTED: rented()})
 
@@ -306,9 +263,9 @@ async def test_cycle_result_carries_the_listed_verdict_and_the_missing_rented_no
 
 
 @pytest.mark.asyncio
-async def test_a_miner_whose_only_rented_node_is_down_gets_a_row_for_the_node_not_a_miner_failure(rest_service, flag_on):
+async def test_a_miner_whose_only_rented_node_is_down_gets_a_row_for_the_node_not_a_miner_failure(rest_service):
     """Zero executors used to end as one miner-level failure row (uuid 1111-…) and nothing about
-    the node; with the flag the node gets its own row."""
+    the node; now the node gets its own row."""
     rest_service.miner_returns()
     rented_data = RentedExecutorsResponse(executors={MISSING: rented()})
 
@@ -320,7 +277,7 @@ async def test_a_miner_whose_only_rented_node_is_down_gets_a_row_for_the_node_no
 
 @pytest.mark.asyncio
 async def test_websocket_path_zero_executors_falls_through_to_the_rented_node_row(
-    rest_service, flag_on, monkeypatch
+    rest_service, monkeypatch
 ):
     """The same fall-through on the WebSocket path, the default transport."""
     from core.config import settings
@@ -333,37 +290,3 @@ async def test_websocket_path_zero_executors_falls_through_to_the_rented_node_ro
 
     assert [r.executor_info.uuid for r in out["results"]] == [MISSING]
     assert out["results"][0].failure_reason_code == "RENTED_EXECUTOR_NOT_LISTED"
-
-
-@pytest.mark.asyncio
-async def test_flag_off_zero_executors_is_still_a_miner_failure(rest_service, monkeypatch):
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "RENTED_EXECUTOR_NOT_LISTED_REPORT_ENABLED", False)
-    rest_service.miner_returns()
-    rented_data = RentedExecutorsResponse(executors={MISSING: rented()})
-
-    out = await request(rest_service, rented_data)
-
-    [result] = out["results"]
-    assert result.executor_info.uuid == "11111111-1111-1111-1111-111111111111"
-    assert "zero executors" in result.log_text
-
-
-@pytest.mark.asyncio
-async def test_flag_off_zero_executors_logs_the_rented_node_once(rest_service, monkeypatch, caplog):
-    """Zero executors never reaches the builder: the shadow log comes from the probe."""
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "RENTED_EXECUTOR_NOT_LISTED_REPORT_ENABLED", False)
-    rest_service.miner_returns()
-    rented_data = RentedExecutorsResponse(executors={MISSING: rented()})
-
-    with caplog.at_level("WARNING"):
-        out = await request(rest_service, rented_data)
-
-    [result] = out["results"]
-    assert result.executor_info.uuid == "11111111-1111-1111-1111-111111111111"
-    shadow = [r for r in caplog.records if "RENTED_EXECUTOR_NOT_LISTED_SHADOW" in r.getMessage()]
-    assert len(shadow) == 1
-    assert shadow[0].msg.extra["executor_uuid"] == MISSING

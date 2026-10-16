@@ -43,12 +43,14 @@ from .checks import (
     GpuFingerprintCheck,
     GpuModelValidCheck,
     GpuPowerLimitCheck,
+    GpuThermalThrottleCheck,
     GpuUsageCheck,
     GpuVramPrecheck,
     InspectorRentedCheck,
     LocalVerifyCheck,
     MachineSpecScrapeCheck,
     NvmlDigestCheck,
+    PinnedMemoryProbeCheck,
     PortConnectivityCheck,
     PortCountCheck,
     ProviderSideLoadCheck,
@@ -129,9 +131,9 @@ class PipelineFactory:
         self.backend_client = backend_client
         self.pod_recovery = pod_recovery
 
-        dry_run = settings.DRY_RUN or settings.CONTAINER_CLEANUP_DRY_RUN
-        logger.info(f"ContainerCleanup dry_run={dry_run}")
-        self.container_cleanup = ContainerCleanup(dry_run=dry_run)
+        # Cleanup only reports, removing nothing, when the whole validator runs under DRY_RUN.
+        logger.info(f"ContainerCleanup dry_run={settings.DRY_RUN}")
+        self.container_cleanup = ContainerCleanup(dry_run=settings.DRY_RUN)
         # One tracker for the factory's lifetime: build_pipeline() makes a new sink every cycle.
         self.status_tracker = StatusChangeTracker()
 
@@ -249,7 +251,6 @@ class PipelineFactory:
                 # constant when the backend is unreachable (shared config empty).
                 nvml_digest_map=shared_client.config.nvml_ml_digests or LIB_NVIDIA_ML_DIGESTS,
                 nvml_invalid_drivers=shared_client.config.nvml_invalid_drivers,
-                verifyx_enabled=settings.ENABLE_VERIFYX,
                 inspector_enabled=settings.ENABLE_INSPECTOR,
                 port_private_key=private_key,
                 port_public_key=public_key,
@@ -288,6 +289,10 @@ class PipelineFactory:
                 # GPU checks below (DETAILS_MISMATCH, GPU_MISSING), which halt the cycle before
                 # TenantEnforcementCheck; this reports it to the backend on that same cycle.
                 RentedGpuDropCheck(),
+                # ticket-0492: pure data. A busy GPU held below its clock by a thermal/hardware slowdown is a
+                # warning; below half its clock with a slowdown bit it fails an unrented node (score 0) until
+                # fixed. Before the rented short-circuit, so rented nodes get the warning too.
+                GpuThermalThrottleCheck(),
                 # DAH-3484: a regex over specs.cpu.model, no SSH, never fatal. It has to run before
                 # TenantEnforcementCheck halts the pipeline for a rented executor: after that halt
                 # the published specs had no tdx_host_supported key and the backend stored false,
@@ -360,6 +365,9 @@ class PipelineFactory:
                 # DAH-3035: the kernel-fault probe right after the matmul it complements — same idle,
                 # capability-verified population, same filler skip. Flag-gated, shadow-first, off by default.
                 GpuFaultProbeCheck(),
+                # F-1599: a pinned-host-memory H2D/D2H round trip on every GPU (a TDX guest without GPU CC
+                # passes the matmul but cannot DMA pinned memory). On and enforcing by default.
+                PinnedMemoryProbeCheck(),
                 # DAH-2265 Plan 2: advisory, non-fatal — observes whether the executor has
                 # the recommended default image pre-pulled (DOCKER_PULL no-op). Runs here,
                 # after specs/gpu_model/driver are populated and the GPU is validated, on the
@@ -425,6 +433,7 @@ class PipelineFactory:
                 UploadFilesCheck(),
                 MachineSpecScrapeCheck(),
                 RentedGpuDropCheck(),
+                GpuThermalThrottleCheck(),
                 TdxHostCheck(),
                 GpuCountCheck(),
                 GpuModelValidCheck(),
@@ -460,6 +469,7 @@ class PipelineFactory:
                         [
                             CapabilityCheck(),
                             GpuFaultProbeCheck(),
+                            PinnedMemoryProbeCheck(),
                             CachedTemplateVerificationCheck(),
                         ],
                     ]
@@ -491,6 +501,8 @@ class PipelineFactory:
                 MachineSpecScrapeCheck(),
                 # RentedGpuDropCheck: same place as in build_checks(); under DRY_RUN it logs and posts nothing.
                 RentedGpuDropCheck(),
+                # ticket-0492: pure data, same place as in build_checks().
+                GpuThermalThrottleCheck(),
                 # DAH-3484: before the rented halt, same as build_checks().
                 TdxHostCheck(),
                 GpuCountCheck(),
@@ -532,6 +544,7 @@ class PipelineFactory:
                 # VerifyXCheck(),
                 CapabilityCheck(),
                 GpuFaultProbeCheck(),
+                PinnedMemoryProbeCheck(),
                 RentalVerificationCheck(),
                 # RentalProbeCheck(),  # SKIP: creates and removes a container on the executor
                 ScoreCheck(),

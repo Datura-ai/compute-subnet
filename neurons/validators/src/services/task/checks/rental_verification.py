@@ -20,7 +20,7 @@ from protocol.vc_protocol.compute_requests import (
     FillerRunActiveResponse,
 )
 
-from ...const import FILLER_CONTAINER_PREFIX, FILLER_LIVENESS_GRACE_MINUTES
+from ...const import FILLER_CONTAINER_PREFIX, FILLER_LIVENESS_GRACE_MINUTES, LOOPBACK_PLUGIN_ALIAS
 from ..messages import MessageTemplate, render_message
 from ..messages import RentalVerificationMessages as Msg
 from ..pipeline import CheckResult, Context
@@ -113,20 +113,6 @@ class RentalVerificationCheck:
         Returns:
             CheckResult with verification status
         """
-        # Skip if rental verification is disabled
-        if settings.SKIP_RENTAL_VERIFICATION:
-            event = render_message(
-                Msg.SKIPPED,
-                ctx=ctx,
-                check_id=self.check_id,
-                what={"skipped": True},
-            )
-            return CheckResult(
-                passed=True,
-                event=event,
-                updates={},
-            )
-
         rented_data = ctx.state.rented_data
         rented_executor = rented_data.executors.get(ctx.executor.uuid) if rented_data else None
         has_customer_rental = bool(rented_executor and rented_executor.pods)
@@ -254,6 +240,7 @@ class RentalVerificationCheck:
                 rental_in_progress=has_customer_rental,
                 gpu_uuids=gpu_uuids,
                 cpu_count=cpu_count,
+                loopback_plugin=LOOPBACK_PLUGIN_ALIAS,
             )
 
             # Handle API failure (None response) - fail this executor

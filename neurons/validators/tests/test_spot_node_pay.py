@@ -1,8 +1,8 @@
 """Spot-node pay (ENABLE_SPOT_NODE_PAY) and the secure floor (ENABLE_SECURE_FILLER_REVENUE_FLOOR).
 
-Spot: an idle spot node running Lium fillers is paid min(0.95 x its GPU configuration's average
+Spot: an idle spot node running Lium fillers is paid min(1.0 x its GPU configuration's average
 filler revenue per GPU-hour, its secure rate before cap dilution), outside the buckets.
-Secure floor: an idle secure node's cap-diluted rate is raised to 0.95 x that average, even
+Secure floor: an idle secure node's cap-diluted rate is raised to 1.0 x that average, even
 above its listed rate. The two factors are separate constants. No cap (owner rule): spot pay and floor top-ups are paid on top of the
 burn-capped rental share, up to the whole incentive pool. Both flags off reproduce the old
 numbers exactly.
@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from core.config import settings, shared_client
+from core.validator import settle_cycle_results
 from datura.requests.miner_requests import ExecutorSSHInfo
 from incentive.config import DEFAULT_PRICE, IncentiveConfig
 from incentive import rental_price
@@ -38,8 +39,9 @@ TAO_PRICE = 1_000_000.0
 AT_CAP_TAO_PRICE = 1e-6
 ALPHA_RATE = 1.0
 # the owner's factors, written out rather than imported so that a change to either constant fails here
-SPOT_FACTOR = 0.95
-FLOOR_FACTOR = 0.95
+SPOT_FACTOR = 1.0
+FLOOR_FACTOR = 1.0
+SPOT_RENTAL_FACTOR = 0.5
 
 
 def _config(cap: int = BUCKET_CAP) -> IncentiveConfig:
@@ -78,7 +80,7 @@ def _node(uuid: str, **overrides) -> JobResult:
 
 def _spot(uuid: str = "spot-1", **overrides) -> JobResult:
     return _node(
-        uuid, **{"is_spot": True, "is_provider_chosen_spot": True, "has_lium_filler": True, **overrides}
+        uuid, **{"is_spot": True, "is_on_spot_pay_list": True, "has_lium_filler": True, **overrides}
     )
 
 
@@ -179,6 +181,11 @@ def spot_pay_on(monkeypatch):
 
 
 @pytest.fixture
+def spot_rental_on(monkeypatch):
+    monkeypatch.setattr(settings, "ENABLE_SPOT_RENTAL_INCENTIVE", True)
+
+
+@pytest.fixture
 def floor_on(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_SECURE_FILLER_REVENUE_FLOOR", True)
 
@@ -188,6 +195,7 @@ def flags_default_off(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_SPOT_NODE_PAY", False)
     monkeypatch.setattr(settings, "SPOT_IDLE_PAY_SECURE_DECISION_ENABLED", False)
     monkeypatch.setattr(settings, "ENABLE_SECURE_FILLER_REVENUE_FLOOR", False)
+    monkeypatch.setattr(settings, "ENABLE_SPOT_RENTAL_INCENTIVE", False)
 
 
 # ── spot-node pay ────────────────────────────────────────────────────────────
@@ -378,6 +386,88 @@ async def test_secure_decision_flag_alone_pays_no_spot_node(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_rented_spot_earns_half_of_a_rented_secure_node(spot_rental_on):
+    spot = _spot(is_rented=True)
+    secure = _node("secure-1", is_rented=True)
+    redis_service = AsyncMock()
+    redis_service.get_portion_per_gpu_type.return_value = 1.0
+    incentive = RentalPriceIncentive(_config(), redis_service, {"hk": [spot, secure]}, {H100: 16})
+    incentive.price_provider = AsyncMock()
+    incentive.price_provider.get_tao_price.return_value = TAO_PRICE
+    incentive.price_provider.get_alpha_rate.return_value = ALPHA_RATE
+
+    await incentive.calculate_mining_scores()
+
+    assert secure.incentive > 0
+    assert spot.incentive == pytest.approx(SPOT_RENTAL_FACTOR * secure.incentive)
+    assert spot.mining_score == pytest.approx(SPOT_RENTAL_FACTOR * secure.mining_score)
+    assert _codes(spot) == []
+
+
+@pytest.mark.asyncio
+async def test_rented_spot_counts_in_the_gpu_denominator_only_when_it_earns(monkeypatch):
+    results = {"hk": [_spot(is_rented=True), _node("secure-1", is_rented=True)]}
+
+    monkeypatch.setattr(settings, "ENABLE_SPOT_RENTAL_INCENTIVE", False)
+    assert RentalPriceIncentive(_config(), AsyncMock(), results, {}).get_snapshot().mining.total_gpu_model_count_map == {
+        H100: 8
+    }
+
+    monkeypatch.setattr(settings, "ENABLE_SPOT_RENTAL_INCENTIVE", True)
+    assert RentalPriceIncentive(_config(), AsyncMock(), results, {}).get_snapshot().mining.total_gpu_model_count_map == {
+        H100: 16
+    }
+
+
+@pytest.mark.parametrize("flag_on, gpus", [(False, 8), (True, 16)], ids=["flag-off", "flag-on"])
+def test_the_live_gpu_denominator_counts_rented_spot_only_when_it_earns(monkeypatch, flag_on, gpus):
+    monkeypatch.setattr(settings, "ENABLE_SPOT_RENTAL_INCENTIVE", flag_on)
+    spot = _spot(is_rented=True)
+    spot.executor_info.port = 8081
+    results = {"hk-spot": [spot], "hk-secure": [_node("secure-1", is_rented=True)]}
+
+    assert settle_cycle_results(results, {}) == {H100: gpus}
+
+
+@pytest.mark.asyncio
+async def test_the_rented_spot_score_log_carries_the_factor_and_the_final_score(spot_rental_on):
+    spot = _spot(is_rented=True)
+    secure = _node("secure-1", is_rented=True)
+    redis_service = AsyncMock()
+    redis_service.get_portion_per_gpu_type.return_value = 1.0
+    incentive = RentalPriceIncentive(_config(), redis_service, {"hk": [spot, secure]}, {H100: 16})
+
+    await incentive.calculate_executor_score(spot)
+    await incentive.calculate_executor_score(secure)
+
+    spot_line = next(line for line in spot.incentive_logs if "Mining score is calculated" in line)
+    secure_line = next(line for line in secure.incentive_logs if "Mining score is calculated" in line)
+    assert "spot_rental_factor" in spot_line
+    assert f'"mining_score": {spot.mining_score}' in spot_line
+    assert "spot_rental_factor" not in secure_line
+
+
+@pytest.mark.asyncio
+async def test_rented_spot_as_a_restriction_still_earns_nothing(spot_rental_on):
+    spot = _spot(is_rented=True, is_on_spot_pay_list=False)
+
+    await _run([spot, _node("secure-1", is_rented=True)])
+
+    assert spot.incentive == 0
+    assert _codes(spot) == [ZeroIncentiveReason.SPOT_TIER]
+
+
+@pytest.mark.asyncio
+async def test_spot_rental_flag_does_not_pay_an_idle_spot_node(spot_rental_on):
+    spot = _spot(filler_revenue_per_gpu_hour=2.0)
+
+    await _run([spot, _node("secure-1")])
+
+    assert spot.incentive == 0
+    assert _codes(spot) == [ZeroIncentiveReason.SPOT_TIER]
+
+
+@pytest.mark.asyncio
 async def test_the_free_remainder_of_a_partially_rented_spot_node_keeps_spot_tier(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_SPLIT_PARTIAL_RENTAL_SCORING", True)
     config = IncentiveConfig(
@@ -433,11 +523,11 @@ async def test_spot_flag_off_keeps_spot_at_zero():
 
 
 @pytest.mark.asyncio
-async def test_a_spot_node_the_provider_did_not_choose_is_scored_as_before(monkeypatch):
-    # a demoted, force-spot, pinned or no-incentive-rental node: spot, but not provider-chosen
+async def test_a_spot_node_off_the_pay_list_is_scored_as_before(monkeypatch):
+    # a banned, pinned or no-incentive-rental node: spot, but not on the spot pay list
     def cycle() -> list[JobResult]:
         return [
-            _spot("restricted", is_provider_chosen_spot=False, filler_revenue_per_gpu_hour=2.0),
+            _spot("restricted", is_on_spot_pay_list=False, filler_revenue_per_gpu_hour=2.0),
             _node("secure-1"),
         ]
 
@@ -460,7 +550,7 @@ async def test_a_spot_result_built_without_the_providers_choice_is_not_paid(spot
 
     await _run([spot])
 
-    assert spot.is_provider_chosen_spot is False
+    assert spot.is_on_spot_pay_list is False
     assert spot.incentive == 0
     assert _codes(spot) == [ZeroIncentiveReason.SPOT_TIER]
 
@@ -1210,7 +1300,7 @@ _EXECUTOR_ID = str(default_executor().uuid)
         ({"provider_spot_executor_ids": ["another-executor"]}, {}, [ZeroIncentiveReason.SPOT_TIER]),
         # an older backend that does not send the field
         ({}, {}, [ZeroIncentiveReason.SPOT_TIER]),
-        # a banned provider is out even if the backend listed the node as provider-chosen
+        # a banned provider is out even if the backend listed the node for spot pay
         (
             {"provider_spot_executor_ids": [_EXECUTOR_ID], "banned_hotkeys": ["miner-hotkey"]},
             {"is_provider_banned": True},
@@ -1222,9 +1312,9 @@ _EXECUTOR_ID = str(default_executor().uuid)
             [ZeroIncentiveReason.BANNED_NETWORK_ABUSE, ZeroIncentiveReason.SPOT_TIER],
         ),
     ],
-    ids=["demoted-or-pinned", "listed-for-another-node", "field-absent", "banned-listed", "banned"],
+    ids=["off-the-pay-list", "listed-for-another-node", "field-absent", "banned-listed", "banned"],
 )
-async def test_only_a_provider_chosen_spot_node_is_paid(
+async def test_only_a_spot_node_on_the_pay_list_is_paid(
     context_factory, spot_pay_on, fields, context, expected_codes
 ):
     result = await _handled(context_factory, _spot_reply(**fields), **context)
@@ -1239,12 +1329,12 @@ async def test_only_a_provider_chosen_spot_node_is_paid(
 
 
 @pytest.mark.asyncio
-async def test_a_provider_chosen_spot_node_is_paid(context_factory, spot_pay_on):
+async def test_a_spot_node_on_the_pay_list_is_paid(context_factory, spot_pay_on):
     result = await _handled(
         context_factory, _spot_reply(provider_spot_executor_ids=[_EXECUTOR_ID])
     )
 
-    assert result.is_provider_chosen_spot is True
+    assert result.is_on_spot_pay_list is True
     await _run([result, _node("secure-1")])
     assert result.spot_pay_candidate is True
     assert result.effective_rate == pytest.approx(SPOT_FACTOR * 2.0)
@@ -1253,13 +1343,13 @@ async def test_a_provider_chosen_spot_node_is_paid(context_factory, spot_pay_on)
 
 
 @pytest.mark.asyncio
-async def test_the_provider_list_alone_does_not_make_a_node_spot(context_factory):
+async def test_the_pay_list_alone_does_not_make_a_node_spot(context_factory):
     data = RentedExecutorsResponse(executors={}, provider_spot_executor_ids=[_EXECUTOR_ID])
 
     result = await _handled(context_factory, data)
 
     assert result.is_spot is False
-    assert result.is_provider_chosen_spot is False
+    assert result.is_on_spot_pay_list is False
 
 
 @pytest.mark.parametrize(

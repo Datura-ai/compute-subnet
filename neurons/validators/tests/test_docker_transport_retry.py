@@ -6,6 +6,7 @@ timed out (60 s)`, `create volume failed: 'NoneType' object has no attribute 'se
 last one is docker-py/urllib3 dereferencing a channel that is `None`.
 """
 
+import asyncio
 import http.client
 import socket
 import struct
@@ -14,11 +15,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
+import paramiko
 import pytest
 from datura.requests.miner_requests import ExecutorSSHInfo
 from docker.errors import APIError, NotFound
 from payload_models.payloads import FailedContainerRequest
 from services.docker_service import DockerService
+from services.node_host import node_owner
 from urllib3.util import Timeout
 from services.rental_docker_sdk import (
     TRANSPORT_ERROR_CLASS,
@@ -249,6 +252,24 @@ async def test_create_volume_retry_refuses_a_same_name_volume_on_another_driver(
         await _client(api).create_volume(
             volume_name="volume_p1", driver="vloopback", driver_opts=None
         )
+
+    assert api.calls == ["create_volume", "inspect_volume"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested_driver, adopted", [("vloopback:v2", False), ("vloopback", True)])
+async def test_adopt_takes_a_same_name_volume_only_from_the_requested_plugin_tag(requested_driver, adopted):
+    # `vloopback` is `vloopback:latest`, the old plugin; `vloopback:v2` is another plugin
+    api = _FakeApiClient(adapter=_FakeAdapter())
+    api.create_volume_errors = [EOFError()]
+    api.existing_volumes["volume_p1"] = {"Name": "volume_p1", "Driver": "vloopback:latest"}
+    created = _client(api).create_volume(volume_name="volume_p1", driver=requested_driver, driver_opts={"size": "10g"})
+
+    if adopted:
+        await created
+    else:
+        with pytest.raises(RentalDockerOperationError, match="already exists on driver 'vloopback:latest'"):
+            await created
 
     assert api.calls == ["create_volume", "inspect_volume"]
 
@@ -529,6 +550,7 @@ def test_connection_live_channel_gets_timeout_and_dial_stdio(tmp_path):
 
     connection.connect()
 
+    transport.open_session.assert_called_once_with(timeout=15)
     channel.settimeout.assert_called_once_with(60)
     channel.exec_command.assert_called_once_with("docker system dial-stdio")
     assert connection.sock is channel
@@ -600,6 +622,100 @@ async def test_factory_reads_the_flag_callable_per_connect(monkeypatch):
     flag["on"] = True
     async with factory.connect(executor_info=info, private_key="PRIVATE KEY") as client:
         assert client._transport_retry_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_hostname_lookup_fails_the_connect_at_the_deadline_off_the_default_executor(
+    monkeypatch,
+):
+    # a miner's DNS zone that never answers: the lookup must neither outlive the connect's deadline
+    # nor sit in the event loop's default executor, where the validator's own DNS runs
+    import services.rental_docker_sdk as sdk
+
+    release = threading.Event()
+    lookup_threads = []
+
+    def stalled_getaddrinfo(*args, **kwargs):
+        lookup_threads.append(threading.current_thread().name)
+        release.wait(10)
+        raise socket.gaierror("released")
+
+    async def default_executor_lookup(*args, **kwargs):
+        raise AssertionError("the lookup ran in the loop's default executor")
+
+    monkeypatch.setattr(socket, "getaddrinfo", stalled_getaddrinfo)
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", default_executor_lookup)
+    monkeypatch.setattr(sdk, "_DOCKER_SSH_REOPEN_TIMEOUT_SECONDS", 0.2)
+    api_client_factory = Mock(return_value=_FakeApiClient())
+    factory = RentalDockerSdkClientFactory(api_client_factory=api_client_factory)
+    info = SimpleNamespace(
+        address="gpu-node1.example.net",
+        ssh_port=2222,
+        ssh_username="root",
+        ssh_host_key="ssh-ed25519 AAAATESTKEY",
+    )
+
+    started = asyncio.get_running_loop().time()
+    try:
+        with pytest.raises(RentalDockerConnectionError, match="did not resolve within"):
+            async with factory.connect(executor_info=info, private_key="PRIVATE KEY"):
+                pass
+        elapsed = asyncio.get_running_loop().time() - started
+    finally:
+        release.set()
+
+    assert elapsed < 2
+    assert len(lookup_threads) == 1 and lookup_threads[0].startswith("node-dns")
+    api_client_factory.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_miner_whose_dns_stalls_cannot_stop_another_miners_rental_connect(monkeypatch):
+    # review of #1565: hostname executors behind a zone that drops queries held every thread of the rental
+    # lookup pool, and honest miners' hostname rentals then failed at the deadline. The rental connect now
+    # resolves under the authenticated miner's quota (node_owner), like every other node lookup.
+    import services.node_host as node_host
+    import services.rental_docker_sdk as sdk
+
+    release = threading.Event()
+
+    def lookup(host, port, *args, **kwargs):
+        if "evil" in host:
+            release.wait(5)
+            raise socket.gaierror(-3, "Temporary failure in name resolution")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", lookup)
+    monkeypatch.setattr(sdk, "_validate_paramiko_known_hosts", lambda path: None)
+    monkeypatch.setattr(sdk, "_DOCKER_SSH_REOPEN_TIMEOUT_SECONDS", 0.5)
+    api_client_factory = Mock(return_value=_FakeApiClient())
+    factory = RentalDockerSdkClientFactory(api_client_factory=api_client_factory)
+
+    def info(address):
+        return SimpleNamespace(
+            address=address, ssh_port=2222, ssh_username="root", ssh_host_key="ssh-ed25519 AAAATESTKEY"
+        )
+
+    async def connect_as(miner, address):
+        with node_owner(miner):
+            async with factory.connect(executor_info=info(address), private_key="PRIVATE KEY"):
+                pass
+
+    try:
+        hostile = [
+            asyncio.create_task(connect_as("hostile-hotkey", f"gpu.evil{i}.example"))
+            for i in range(node_host.NODE_DNS_MAX_WORKERS + 8)
+        ]
+        await asyncio.sleep(0.05)
+
+        await connect_as("honest-hotkey", "gpu-node1.good.example")
+
+        api_client_factory.assert_called_once()
+        results = await asyncio.gather(*hostile, return_exceptions=True)
+        assert all(isinstance(r, RentalDockerConnectionError) for r in results)
+        assert node_host._dns_busy.get("miner:hostile-hotkey", 0) <= node_host.NODE_DNS_PER_MINER
+    finally:
+        release.set()
 
 
 # ---------------------------------------------------------------------------
@@ -824,3 +940,8 @@ async def test_two_drops_on_connect_fail_the_connect_without_a_third(tmp_path, m
         async with factory.connect(executor_info=_connect_info(), private_key="PRIVATE KEY"):
             pass
     assert api_client_factory.call_count == 2
+
+
+def test_a_channel_open_that_times_out_is_a_transport_error():
+    # paramiko's text when open_session gets no answer within its timeout
+    assert is_rental_docker_transport_error(paramiko.SSHException("Timeout opening channel."))

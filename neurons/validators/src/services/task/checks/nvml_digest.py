@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 
-from core.config import settings
 from core.utils import _m, get_extra_info
 from services.const import LIB_NVIDIA_ML_DIGESTS
 
@@ -33,10 +32,8 @@ class NvmlDigestCheck:
         expected_digest = digest_map.get(driver_version)
 
         if not driver_version:
-            # The driver string comes from the node's own scrape: reporting none skips the comparison below.
-            missing_result = self._log_missing_driver_and_fail_if_enforced(ctx, lib_digest)
-            if missing_result is not None:
-                return missing_result
+            # The driver string comes from the node's own scrape: reporting none fails the check.
+            return self._log_missing_driver_and_fail(ctx, lib_digest)
 
         if driver_version and expected_digest != lib_digest:
             # Check if driver version is unknown (not in our map)
@@ -92,23 +89,9 @@ class NvmlDigestCheck:
         )
         return CheckResult(passed=True, event=event)
 
-    def _log_missing_driver_and_fail_if_enforced(
-        self, ctx: Context, lib_digest: str
-    ) -> CheckResult | None:
-        """Log NVML_DRIVER_MISSING; return a failing result only when enforcement is on."""
-        logger.warning(
-            _m(
-                "NVML_DRIVER_MISSING",
-                extra=get_extra_info(
-                    {
-                        **ctx.default_extra,
-                        "enforced": settings.NVML_DRIVER_MISSING_ENFORCEMENT_ENABLED,
-                    }
-                ),
-            )
-        )
-        if not settings.NVML_DRIVER_MISSING_ENFORCEMENT_ENABLED:
-            return None
+    def _log_missing_driver_and_fail(self, ctx: Context, lib_digest: str) -> CheckResult:
+        """Log NVML_DRIVER_MISSING and return a failing result."""
+        logger.warning(_m("NVML_DRIVER_MISSING", extra=get_extra_info(ctx.default_extra)))
         event = render_message(
             Msg.DRIVER_MISSING,
             ctx=ctx,

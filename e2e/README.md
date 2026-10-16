@@ -104,8 +104,9 @@ known verdicts below); with `E2E_GPU=1` the suite expects `gpu_count ≥ 1` and 
 the platform reads (`executor_uuid`, `score`, `log_text`, `incentive_reasons`, …). Failure paths: the seeded
 offline executor is dropped by the miner within its timeout and never scored while the live one is; an unreachable
 miner yields the synthetic failed result in seconds, not a hung cycle; `SysboxRequiredCheck` is in the pipeline
-and its refusal is `SYSBOX_REQUIRED_MISSING` (the stack runs with `REQUIRE_SYSBOX_FOR_UNRENTED=false` — neither a
-CI box nor a Lium pod can run sysbox; bare metal is the only place the flag-on AVAILABLE verdict can be observed).
+and its refusal is `SYSBOX_REQUIRED_MISSING` (the requirement is always on; neither a CI box nor a Lium pod can run
+sysbox, and on a GPU-less runner the scrape halts the pipeline before the check, so bare metal is the only place the
+AVAILABLE verdict can be observed).
 
 **`tests/rental`** — `MinerService.handle_container`: `ContainerCreateRequest` for the executor → a container from
 `pod/Dockerfile` (ubuntu + openssh-server; `seed` builds it onto the executor's dockerd) with the renter's key,
@@ -123,7 +124,7 @@ does); no `/dev/nvidia0` inside on a GPU-less host (with `E2E_GPU=1` the suite e
 
 ## What it cannot prove (and where that is proven)
 
-Weights on chain, the AVAILABLE verdict of an unrented executor behind `REQUIRE_SYSBOX_FOR_UNRENTED` (needs sysbox on
+Weights on chain, the AVAILABLE verdict of an unrented executor behind `SysboxRequiredCheck` (needs sysbox on
 bare metal), TDX/CVM attestation, the real GPU checks (matmul, VerifyX, nvml digest, fingerprint — `E2E_GPU=1` on a
 GPU host is meant to run them; no such run yet), the portal → central-miner sync (the executor row is seeded),
 Watchtower. Those stay on the team's staging (testnet-37, the staging A4000).
