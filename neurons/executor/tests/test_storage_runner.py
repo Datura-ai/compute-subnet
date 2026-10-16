@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import bz2
+import hashlib
 import io
 import json
+import os
+import shutil
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
@@ -1344,6 +1348,52 @@ def test_backup_passes_the_exclude_patterns_to_restic(monkeypatch: pytest.Monkey
     runner._backup()
 
     assert commands[0][-3:] == ["--exclude=.cache", "--exclude=.ssh", "."]
+
+
+# As neurons/executor/Dockerfile pins it.
+RESTIC_URL = "https://github.com/restic/restic/releases/download/v0.19.1/restic_0.19.1_linux_amd64.bz2"
+RESTIC_SHA256 = "f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c"
+
+
+@pytest.fixture(scope="session")
+def restic_binary(tmp_path_factory: pytest.TempPathFactory) -> str:
+    """restic on PATH, else the pinned release, checksum-verified (CI has no restic)."""
+    if found := shutil.which("restic"):
+        return found
+    archive = requests.get(RESTIC_URL, timeout=60).content
+    assert hashlib.sha256(archive).hexdigest() == RESTIC_SHA256
+    binary = tmp_path_factory.mktemp("restic") / "restic"
+    binary.write_bytes(bz2.decompress(archive))
+    binary.chmod(0o755)
+    return str(binary)
+
+
+def test_real_restic_skips_nested_excludes_and_keeps_neighbours(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, restic_binary: str
+) -> None:
+    """The runner's own backup arguments, run by the real restic binary against a local repository."""
+    workspace = tmp_path / "workspace"
+    for name in ("proj/.config/gcloud/credentials.db", "proj/.config/gcloud_notes", "proj/.config/other/x", ".env",
+                 ".env.local", "proj/model.bin"):
+        (workspace / name).parent.mkdir(parents=True, exist_ok=True)
+        (workspace / name).write_text("x")
+    payload = _operation_payload()
+    payload["workspace"]["exclude_patterns"] = [".config/gcloud", ".env"]
+    runner = ResticStorageRunner(StorageOperationSpec.from_mapping(payload), LocalWorkspace(workspace))
+    commands = []
+    monkeypatch.setattr(runner, "_stream", lambda command, **kwargs: commands.append(command) or (0, {"snapshot_id": SNAPSHOT_ID}))
+    runner._backup()
+    env = {**os.environ, "RESTIC_REPOSITORY": str(tmp_path / "repo"), "RESTIC_PASSWORD": "test"}
+
+    restic = restic_binary
+    subprocess.run([restic, "init"], env=env, check=True, capture_output=True)
+    subprocess.run([restic, *commands[0]], cwd=workspace, env=env, check=True, capture_output=True)
+    listing = subprocess.run([restic, "ls", "latest", "--json"], env=env, check=True, capture_output=True, text=True)
+    paths = {entry["path"] for entry in map(json.loads, listing.stdout.splitlines()) if entry.get("path")}
+
+    assert {"/proj/.config/gcloud_notes", "/proj/.config/other/x", "/.env.local", "/proj/model.bin"} <= paths
+    assert not {path for path in paths if "/.config/gcloud/" in path or path.endswith("/.config/gcloud")}
+    assert "/.env" not in paths
 
 
 @pytest.mark.parametrize("patterns", [".cache", [""], [1]])
