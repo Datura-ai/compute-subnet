@@ -148,7 +148,7 @@ async def _run_check(
     # `success` (True or False) is what the check reads, as after `evaluate_verifyx_capture`.
     verifyx_service = DummyVerifyXService(success=True, updated_specs=verification_result)
     services = build_services(verifyx=verifyx_service)
-    config = build_context_config(verifyx_enabled=True)
+    config = build_context_config()
     state = build_state(
         specs=specs if specs is not None else {"gpu": {"count": 8}, "network": {}},
         rented_data=_rented_data_with_ema("executor-123", download=prev_ema, upload=prev_upload),

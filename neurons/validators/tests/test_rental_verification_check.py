@@ -64,21 +64,9 @@ class DummyBackendClient:
         return self.response
 
 
-@pytest.mark.parametrize(
-    "skip_verification,expected_pass,expected_reason",
-    [
-        (True, True, Msg.SKIPPED.reason),
-        (False, True, Msg.VERIFIED.reason),
-    ],
-)
 @pytest.mark.asyncio
-async def test_rental_verification_skip(
-    skip_verification,
-    expected_pass,
-    expected_reason,
-    context_factory,
-):
-    """Test that rental verification is skipped when SKIP_RENTAL_VERIFICATION is enabled."""
+async def test_rental_verification_always_calls_backend(context_factory):
+    """Rental verification always asks the backend; there is no setting that skips it."""
     backend_client = DummyBackendClient(
         response=ExecutorHealthCheckResponse(success=True, error=None, details={})
     )
@@ -87,18 +75,12 @@ async def test_rental_verification_skip(
 
     ctx = context_factory(services=services, state=state)
 
-    with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = skip_verification
+    with patch("neurons.validators.src.services.task.checks.rental_verification.settings"):
         result = await RentalVerificationCheck().run(ctx)
 
-    assert result.passed is expected_pass
-    assert result.event.reason_code == expected_reason
-
-    # Should not call API when skipped
-    if skip_verification:
-        assert backend_client.called_with is None
-    else:
-        assert backend_client.called_with is not None
+    assert result.passed is True
+    assert result.event.reason_code == Msg.VERIFIED.reason
+    assert backend_client.called_with is not None
 
 
 @pytest.mark.asyncio
@@ -114,8 +96,7 @@ async def test_rental_verification_no_ports():
     from tests.helpers import make_context
     ctx = make_context(services=services, state=state)
 
-    with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
+    with patch("neurons.validators.src.services.task.checks.rental_verification.settings"):
         result = await RentalVerificationCheck().run(ctx)
 
     assert result.passed is False
@@ -141,8 +122,7 @@ async def test_rental_verification_success():
     from tests.helpers import make_context
     ctx = make_context(services=services, state=state)
 
-    with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
+    with patch("neurons.validators.src.services.task.checks.rental_verification.settings"):
         result = await RentalVerificationCheck().run(ctx)
 
     assert result.passed is True
@@ -179,8 +159,7 @@ async def test_rental_verification_failed():
     from tests.helpers import make_context
     ctx = make_context(services=services, state=state)
 
-    with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
+    with patch("neurons.validators.src.services.task.checks.rental_verification.settings"):
         result = await RentalVerificationCheck().run(ctx)
 
     assert result.passed is False
@@ -213,8 +192,7 @@ async def test_rental_verification_nvml_mismatch_clears_verified_job_info():
     from tests.helpers import make_context
     ctx = make_context(services=services, state=state)
 
-    with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
+    with patch("neurons.validators.src.services.task.checks.rental_verification.settings"):
         result = await RentalVerificationCheck().run(ctx)
 
     assert result.passed is False
@@ -244,8 +222,7 @@ async def test_rental_verification_device_fault_quarantines_the_host_too():
     from tests.helpers import make_context
     ctx = make_context(services=services, state=state)
 
-    with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
+    with patch("neurons.validators.src.services.task.checks.rental_verification.settings"):
         result = await RentalVerificationCheck().run(ctx)
 
     assert result.passed is False
@@ -265,8 +242,7 @@ async def test_rental_verification_api_error():
     from tests.helpers import make_context
     ctx = make_context(services=services, state=state)
 
-    with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
+    with patch("neurons.validators.src.services.task.checks.rental_verification.settings"):
         result = await RentalVerificationCheck().run(ctx)
 
     assert result.passed is False
@@ -288,8 +264,7 @@ async def test_rental_verification_exception():
     from tests.helpers import make_context
     ctx = make_context(services=services, state=state)
 
-    with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
+    with patch("neurons.validators.src.services.task.checks.rental_verification.settings"):
         result = await RentalVerificationCheck().run(ctx)
 
     assert result.passed is False
@@ -310,8 +285,7 @@ async def test_rental_verification_uses_first_verified_port():
     from tests.helpers import make_context
     ctx = make_context(services=services, state=state)
 
-    with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
+    with patch("neurons.validators.src.services.task.checks.rental_verification.settings"):
         result = await RentalVerificationCheck().run(ctx)
 
     assert result.passed is True
@@ -362,8 +336,7 @@ async def test_rental_verification_cleans_health_check_on_success():
     ssh = _RecordingSSH()
     ctx = make_context(services=services, state=state, ssh=ssh)
 
-    with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
+    with patch("neurons.validators.src.services.task.checks.rental_verification.settings"):
         result = await RentalVerificationCheck().run(ctx)
 
     assert result.passed is True
@@ -384,8 +357,7 @@ async def test_rental_verification_cleans_health_check_on_failure():
     ssh = _RecordingSSH()
     ctx = make_context(services=services, state=state, ssh=ssh)
 
-    with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
+    with patch("neurons.validators.src.services.task.checks.rental_verification.settings"):
         result = await RentalVerificationCheck().run(ctx)
 
     assert result.passed is False
@@ -405,8 +377,7 @@ async def test_rental_verification_cleans_health_check_on_exception():
     ssh = _RecordingSSH()
     ctx = make_context(services=services, state=state, ssh=ssh)
 
-    with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
+    with patch("neurons.validators.src.services.task.checks.rental_verification.settings"):
         result = await RentalVerificationCheck().run(ctx)
 
     assert result.passed is False
@@ -429,8 +400,7 @@ async def test_rental_verification_cleanup_failure_does_not_change_result():
     from tests.helpers import make_context
     ctx = make_context(services=services, state=state, ssh=FailingSSH())
 
-    with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
+    with patch("neurons.validators.src.services.task.checks.rental_verification.settings"):
         result = await RentalVerificationCheck().run(ctx)
 
     # Cleanup blew up, but verification still passed.
@@ -454,8 +424,7 @@ async def test_rental_verification_skips_cleanup_when_no_ports():
     ssh = _RecordingSSH()
     ctx = make_context(services=services, state=state, ssh=ssh)
 
-    with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
+    with patch("neurons.validators.src.services.task.checks.rental_verification.settings"):
         result = await RentalVerificationCheck().run(ctx)
 
     assert result.passed is False
@@ -567,7 +536,6 @@ def _filler_context(
 
 async def _run_filler_check(ctx: Context, *, check_enabled: bool = True, enforcement: bool = False) -> CheckResult:
     with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
         mock_settings.FILLER_LIVENESS_CHECK_ENABLED = check_enabled
         mock_settings.FILLER_LIVENESS_ENFORCEMENT_ENABLED = enforcement
         return await RentalVerificationCheck().run(ctx)
@@ -777,8 +745,7 @@ async def test_rental_verification_sends_flag_when_customer_rental():
 
     ctx = make_context(services=services, state=state)
 
-    with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
+    with patch("neurons.validators.src.services.task.checks.rental_verification.settings"):
         result = await RentalVerificationCheck().run(ctx)
 
     assert result.passed is True
@@ -799,8 +766,7 @@ async def test_rental_verification_flag_false_when_no_customer_rental():
 
     ctx = make_context(services=services, state=state)
 
-    with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
+    with patch("neurons.validators.src.services.task.checks.rental_verification.settings"):
         result = await RentalVerificationCheck().run(ctx)
 
     assert result.passed is True
@@ -938,8 +904,7 @@ async def test_rental_verification_sends_scraped_gpu_uuids():
 
     ctx = make_context(services=services, state=state)
 
-    with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
+    with patch("neurons.validators.src.services.task.checks.rental_verification.settings"):
         result = await RentalVerificationCheck().run(ctx)
 
     assert result.passed is True
@@ -962,8 +927,7 @@ async def test_rental_verification_sends_empty_list_when_the_scrape_has_no_gpu_d
 
     ctx = make_context(services=services, state=state)
 
-    with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
+    with patch("neurons.validators.src.services.task.checks.rental_verification.settings"):
         result = await RentalVerificationCheck().run(ctx)
 
     assert result.passed is True
@@ -994,8 +958,7 @@ async def test_rental_verification_skips_gpu_details_without_a_uuid():
 
     ctx = make_context(services=services, state=state)
 
-    with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
+    with patch("neurons.validators.src.services.task.checks.rental_verification.settings"):
         result = await RentalVerificationCheck().run(ctx)
 
     assert result.passed is True
@@ -1048,7 +1011,6 @@ async def test_cpu_quota_verdict_is_observe_only_in_shadow():
     ctx = make_context(services=services, state=state, ssh=_RecordingSSH())
 
     with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
         mock_settings.RENTAL_CPU_LIMIT_CHECK_ENABLED = True
         mock_settings.RENTAL_CPU_LIMIT_ENFORCEMENT_ENABLED = False
         result = await RentalVerificationCheck().run(ctx)
@@ -1070,7 +1032,6 @@ async def test_cpu_quota_verdict_zeroes_score_under_enforcement():
     ctx = make_context(services=services, state=state, ssh=_RecordingSSH())
 
     with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
         mock_settings.RENTAL_CPU_LIMIT_CHECK_ENABLED = True
         mock_settings.RENTAL_CPU_LIMIT_ENFORCEMENT_ENABLED = True
         result = await RentalVerificationCheck().run(ctx)
@@ -1094,7 +1055,6 @@ async def test_advertised_cpu_count_is_sent_to_the_backend():
     ctx = make_context(services=services, state=state, ssh=_RecordingSSH())
 
     with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
         mock_settings.RENTAL_CPU_LIMIT_CHECK_ENABLED = True
         await RentalVerificationCheck().run(ctx)
 
@@ -1117,7 +1077,6 @@ async def test_fake_present_population_does_not_cap_the_advertised_count():
     ctx = make_context(services=services, state=state, ssh=_OnlineCpuSSH(44, present=176))
 
     with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
         mock_settings.RENTAL_CPU_LIMIT_CHECK_ENABLED = True
         await RentalVerificationCheck().run(ctx)
 
@@ -1136,7 +1095,6 @@ async def test_cpu_count_is_not_sent_when_the_check_is_disabled():
     ctx = make_context(services=services, state=state)
 
     with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
         mock_settings.RENTAL_CPU_LIMIT_CHECK_ENABLED = False
         await RentalVerificationCheck().run(ctx)
 
@@ -1158,7 +1116,6 @@ async def test_cpu_count_is_not_sent_for_a_tdx_host():
     ctx = make_context(executor=executor, services=services, state=state)
 
     with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.SKIP_RENTAL_VERIFICATION = False
         mock_settings.RENTAL_CPU_LIMIT_CHECK_ENABLED = True
         await RentalVerificationCheck().run(ctx)
 

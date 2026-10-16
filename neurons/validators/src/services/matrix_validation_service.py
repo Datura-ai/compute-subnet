@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import os
-import random
+import secrets
 import shlex
 import time
 import uuid as uuid4
@@ -16,6 +16,7 @@ from core.utils import _m, get_extra_info
 from services.gpu_spec_table import matmul_probe_vram_mb
 
 logger = logging.getLogger(__name__)
+_rng = secrets.SystemRandom()
 
 # Hard cap on the remote matmul run. Real runs finish in 4-27s; without a cap a wedged
 # GPU (e.g. VRAM held by an orphaned container, DAH-2364) hangs the whole pipeline until
@@ -150,9 +151,10 @@ class VerifierParams:
 
     def generate(self):
         # You can modify the range for more randomness or based on specific needs
-        self.dim_n = random.randint(1900, 2000)  # Random dim_n between 1900 and 2000
-        self.dim_k = random.randint(2000000, 2586932)  # Random dim_k between 2000000 and 2586932
-        self.seed = int(time.time())
+        self.dim_n = _rng.randint(1900, 2000)  # Random dim_n between 1900 and 2000
+        self.dim_k = _rng.randint(2000000, 2586932)  # Random dim_k between 2000000 and 2586932
+        # Unpredictable, and inside the positive 31-bit range the clock value it replaces had.
+        self.seed = secrets.randbelow(2**31 - 1) + 1
         self.uuid = str(uuid4.uuid4())
 
     def __str__(self) -> str:
@@ -588,8 +590,8 @@ class ValidationService:
         # uuid+metrics from inside, so a miner who only edits the (untrusted) Python
         # wrapper cannot forge or inflate the result. If a sealed blob is present but
         # fails authentication, we REJECT — we do not fall back to the miner-controlled
-        # plaintext line. Executors that predate sealing send no blob and keep the
-        # legacy behavior, so independent validator/executor upgrades stay compatible.
+        # plaintext line. An executor that sends no blob fails here when our library can
+        # unseal (below); only a validator library without unseal still reads the plaintext.
         if getattr(self.wrapper, "_has_sealed", False) and sealed_blob:
             inner = self.wrapper.unsealResult(gen_ptr, sealed_blob)
             inner_obj = None
@@ -620,21 +622,16 @@ class ValidationService:
             # matching plaintext uuid is a real answer that skipped the seal; a probe that never
             # answered (out of memory, `sealed: null`) falls through to the mismatch below, which
             # the capability check can still waive for a busy GPU.
-            logger.warning(
-                _m(
-                    "MATMUL_RESULT_UNSEALED",
-                    extra=get_extra_info({**log_extra, "enforced": settings.MATMUL_SEAL_REQUIRED_ENABLED}),
-                )
+            logger.warning(_m("MATMUL_RESULT_UNSEALED", extra=get_extra_info(log_extra)))
+            return ValidationResult(
+                success=False,
+                expected_uuid=verifier_params.uuid,
+                returned_uuid="",
+                stdout=stdout,
+                stderr=stderr,
+                error_message="Unsealed result from a seal-aware verifier",
+                sealed=False,
             )
-            if settings.MATMUL_SEAL_REQUIRED_ENABLED:
-                return ValidationResult(
-                    success=False,
-                    expected_uuid=verifier_params.uuid,
-                    returned_uuid="",
-                    stdout=stdout,
-                    stderr=stderr,
-                    error_message="Unsealed result from a seal-aware verifier",
-                )
 
         try:
             uuid_array = verifier_params.uuid.split(",")
@@ -693,6 +690,7 @@ class ValidationService:
         default_extra: dict,
         machine_spec: dict,
         vram_budget_mb: int | None = None,
+        probe_all_cards: bool = True,
     ) -> ValidationResult:
         # The SSH transport of the capability matmul: prepare_matmul_challenge → one remote
         # `decrypt_challenge.py` run → evaluate_matmul_output. The local transport (checks/
@@ -702,7 +700,8 @@ class ValidationService:
         # enforcement fails a count lie (device-selection error / OOM / serialised aggregate
         # wall-clock). Single-card / unknown-model hosts skip it (probe returns None), which also
         # keeps a not-yet-relevant fleet — and the legacy single-card path below — unchanged.
-        if settings.MATMUL_ALLCARDS_CHECK_ENABLED:
+        # a filler-node sample runs beside the filler, so it never probes every card
+        if settings.MATMUL_ALLCARDS_CHECK_ENABLED and probe_all_cards:
             all_cards = await self._probe_all_claimed_cards(
                 ssh_client, executor_info, default_extra, machine_spec
             )
@@ -760,6 +759,12 @@ class ValidationService:
                     error_message=error_msg,
                     timed_out=True,
                 )
+            except asyncio.CancelledError:
+                # DAH-4366: the fast path cancels this lane when the host lane fails first. The
+                # remote matmul would keep the GPU busy into the next cycle's retry, so kill it
+                # (shielded, a second cancel must not stop the kill) and stay cancelled.
+                await asyncio.shield(self._kill_remote_matmul(ssh_client, script_path, log_extra))
+                raise
             except Exception as e:
                 error_msg = f"Failed to execute SSH command: {str(e)}"
                 logger.error(_m(error_msg, extra=get_extra_info(log_extra)))

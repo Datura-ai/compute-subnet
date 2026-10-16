@@ -3,6 +3,7 @@ import contextlib
 import dataclasses
 import enum
 import ipaddress
+import json
 import logging
 import math
 import random
@@ -79,7 +80,7 @@ from services.const import (
     PREFERRED_POD_PORTS,
 )
 from services.cvm_quote_broker import ensure_quote_broker, quote_socket_pod_mount
-from services.node_host import public_host_sock
+from services.node_host import node_owner, public_host_sock
 from services.default_docker_image_digest_service import fetch_docker_hub_digest
 from services.gpu_power_limit import (
     NVIDIA_SMI_TIMEOUT_SECONDS,
@@ -175,6 +176,37 @@ LOG_STREAM_INTERVAL = 0.5  # 500ms — keeps build-log p95 emit→publish under 
 # but build phases emit dense progress (one line per layer) and a 5s batch
 # would violate the SSE latency requirement.
 IN_CONTAINER_SSH_BOOTSTRAP_PATH = "/tmp/lium-ssh-bootstrap.sh"
+
+# Each batch goes to the backend as one LogStreamRequest frame, and its validator socket takes at most 1 MiB per
+# frame (lium-platform F-29). A batch is budgeted by the JSON bytes of its entries, fields included, which leaves
+# half the frame for the envelope; one line (a renter's Dockerfile prints what it likes) is cut at 16 Ki characters,
+# at most 96 KiB once escaped.
+LOG_BATCH_MAX_BYTES = 512 * 1024
+LOG_LINE_MAX_CHARS = 16 * 1024
+
+
+def log_batches(
+    logs: list[dict], max_bytes: int = LOG_BATCH_MAX_BYTES, line_max_chars: int = LOG_LINE_MAX_CHARS
+) -> list[list[dict]]:
+    """The queued log entries in order, split so no batch serializes to more than max_bytes; long lines are cut."""
+    batches: list[list[dict]] = []
+    batch: list[dict] = []
+    size = 0
+    for log in logs:
+        text = log["log_text"]
+        if len(text) > line_max_chars:
+            # the mark fits inside the cap, so the cut line is no longer than the cap
+            mark = f" [cut from {len(text)} chars]"
+            log = {**log, "log_text": text[: line_max_chars - len(mark)] + mark}
+        entry_bytes = len(json.dumps(log)) + 2  # ASCII-escaped, so never smaller than the frame's UTF-8; + ", "
+        if batch and size + entry_bytes > max_bytes:
+            batches.append(batch)
+            batch, size = [], 0
+        batch.append(log)
+        size += entry_bytes
+    if batch:
+        batches.append(batch)
+    return batches
 
 # DAH-2364: SIGTERM grace window (docker stop -t semantics) given to a container before
 # forced removal. SIGKILL-only removal of GPU-heavy workloads repeatedly triggered a
@@ -3328,16 +3360,20 @@ class DockerService:
                 self.logs_queue.clear()
 
             if logs_to_process:
+                batches = log_batches(logs_to_process)
+                published = 0
                 try:
-                    await self.redis_service.publish(
-                        STREAMING_LOG_CHANNEL,
-                        {
-                            "logs": logs_to_process,
-                            "miner_hotkey": miner_hotkey,
-                            "executor_uuid": executor_id,
-                            "pod_id": pod_id,
-                        },
-                    )
+                    for batch in batches:
+                        await self.redis_service.publish(
+                            STREAMING_LOG_CHANNEL,
+                            {
+                                "logs": batch,
+                                "miner_hotkey": miner_hotkey,
+                                "executor_uuid": executor_id,
+                                "pod_id": pod_id,
+                            },
+                        )
+                        published += 1
 
                     logger.info(
                         _m(
@@ -3347,9 +3383,13 @@ class DockerService:
                     )
 
                 except Exception as e:
+                    # as before batching: a failed publish is not retried and its lines are lost. The rest of the
+                    # pass is dropped too, so a Redis outage costs one publish timeout per pass, not one per batch;
+                    # a requeue would resend a batch Redis took but did not acknowledge, and nothing dedupes it
+                    dropped = sum(len(batch) for batch in batches[published:])
                     logger.error(
                         _m(
-                            "Error publishing log stream",
+                            f"Error publishing log stream; dropped {dropped} log lines",
                             extra=get_extra_info({**default_extra, "error": str(e)}),
                         ),
                         exc_info=True,
@@ -9341,15 +9381,16 @@ class DockerService:
                 log_extra,
             )
             require_rental_docker_ssh_host_key(executor_info)
-            await self.start_existing_container(
-                executor_info=executor_info,
-                private_key=private_key,
-                known_hosts_policy=known_hosts_policy,
-                container_name=container_name,
-                local_volume_path=local_volume_path,
-                pod_id=pod_id,
-                default_extra=log_extra,
-            )
+            with node_owner(miner_hotkey):  # a hostname node's DNS counts against its miner
+                await self.start_existing_container(
+                    executor_info=executor_info,
+                    private_key=private_key,
+                    known_hosts_policy=known_hosts_policy,
+                    container_name=container_name,
+                    local_volume_path=local_volume_path,
+                    pod_id=pod_id,
+                    default_extra=log_extra,
+                )
         except asyncio.CancelledError:
             # the whole check runs under an outer timeout, so a cancellation can land between
             # `docker start` and the gocryptfs remount and leave the container up with its

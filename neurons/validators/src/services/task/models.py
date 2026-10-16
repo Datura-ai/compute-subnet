@@ -68,6 +68,7 @@ class JobResult(BaseModel):
     # by BaseIncentive.calculate_mining_scores. Validation, listing and rentals are unchanged.
     is_hotkey_excluded_from_scoring: bool = False
     provider_discord_connected: bool = True
+    is_provider_email_held: bool = False
     rental_created_at: datetime | None = None
     default_job_owner: str | None = None  # "miner" | "lium" | None; miner default job is excluded from unrented incentive
     has_lium_filler: bool = False  # the backend lists at least one active Lium filler container on the node

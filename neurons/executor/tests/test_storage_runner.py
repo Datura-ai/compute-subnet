@@ -19,7 +19,12 @@ from storage.models import (
     StorageAction,
     StorageOperationSpec,
 )
-from storage.reporting import ReportingLeaseExpired, StorageEventReporter
+from storage.reporting import (
+    PENDING_LOGS_MAX_BYTES,
+    ReportingLeaseExpired,
+    StorageEventReporter,
+    _newest_within_bytes,
+)
 from storage.restic import (
     ENCRYPTED_BACKUP_SCRIPT,
     JsonEventWriter,
@@ -968,6 +973,7 @@ def test_reporter_preserves_zero_counters_and_receives_cancellation() -> None:
 
 def test_restore_reporter_surfaces_scan_then_restore_stages() -> None:
     session = _ReporterSession()
+    clock = _ManualClock()
     reporter = StorageEventReporter(
         OPERATION_ID,
         StorageAction.RESTORE,
@@ -977,11 +983,13 @@ def test_restore_reporter_surfaces_scan_then_restore_stages() -> None:
             resource=ReporterResource.RESTORE,
         ),
         session=session,
+        clock=clock,
     )
 
     reporter.send(
         {"event": "restic", "payload": {"message_type": "status", "total_files": 123}}
     )
+    clock.now += 10
     reporter.send(
         {
             "event": "restic",
@@ -1087,6 +1095,69 @@ def test_terminal_reporting_retries_until_the_reporting_lease_expires() -> None:
         reporter.send({"event": "result", "status": "COMPLETED", "result_quality": "FULL"})
 
     assert clock.now == 3
+
+
+class _WafBlockedSession:
+    def __init__(self) -> None:
+        self.status_code = 403
+        self.put_times: list[float] = []
+        self.clock: _ManualClock | None = None
+
+    def put(self, *args: object, **kwargs: object) -> SimpleNamespace:
+        assert self.clock is not None
+        self.put_times.append(self.clock.now)
+        status_code = self.status_code
+
+        def raise_for_status() -> None:
+            if status_code >= 400:
+                raise requests.HTTPError(f"{status_code} blocked")
+
+        return SimpleNamespace(
+            status_code=status_code, raise_for_status=raise_for_status, json=lambda: {}
+        )
+
+
+def test_progress_reporting_is_throttled_and_backs_off_on_403() -> None:
+    clock = _ManualClock()
+    session = _WafBlockedSession()
+    session.clock = clock
+    session.status_code = 200
+    reporter = StorageEventReporter(
+        OPERATION_ID,
+        StorageAction.RESTORE,
+        ReporterSpec(
+            api_url="https://api.example",
+            auth_token="token",
+            resource=ReporterResource.RESTORE,
+        ),
+        session=session,
+        clock=clock,
+    )
+
+    # Four events a second for 30 s while the backend accepts: one PUT per 10 s.
+    for _ in range(120):
+        reporter.send({"event": "heartbeat"})
+        clock.now += 0.25
+    assert session.put_times == [0.0, 10.0, 20.0]
+
+    # The WAF now answers 403: retries spread out (10, 20, 40, 60 s ceilings, with jitter)
+    # and never raise while the reporting lease is still valid.
+    session.status_code = 403
+    session.put_times.clear()
+    for _ in range(480):
+        reporter.send({"event": "heartbeat"})
+        clock.now += 0.25
+    gaps = [b - a for a, b in zip(session.put_times, session.put_times[1:])]
+    assert len(session.put_times) <= 8
+    assert all(gap >= 5 for gap in gaps)
+    assert all(gap <= 60.25 for gap in gaps)
+    assert any(gap > 20 for gap in gaps)
+
+    # The final result is always sent, even inside the backoff window.
+    session.status_code = 200
+    session.put_times.clear()
+    reporter.send({"event": "result", "status": "COMPLETED", "result_quality": "FULL"})
+    assert session.put_times == [clock.now]
 
 
 def test_reporter_full_completion_finishes_known_counters() -> None:
@@ -1213,3 +1284,13 @@ def test_local_backup_of_a_missing_directory_fails_before_restic_runs(tmp_path: 
 
     with pytest.raises(ResticOperationError, match="backup path does not exist"):
         runner._backup()
+
+
+def test_queued_diagnostic_logs_stay_under_the_waf_body_limit() -> None:
+    lines = [f"{index}" + "ж" * 1999 for index in range(20)]
+
+    kept = _newest_within_bytes(lines)
+
+    assert kept == lines[-len(kept) :]
+    assert len(json.dumps(kept)) <= PENDING_LOGS_MAX_BYTES + len(kept) * 2
+    assert len(json.dumps({"logs": kept})) < 64_000

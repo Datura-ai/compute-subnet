@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from core.config import get_total_burn_emission, settings, shared_client
 from core.utils import _m, get_logger
 from incentive.config import BASE_GPU_MAP
-from incentive.eligibility import is_missing_discord_after_cutoff
+from incentive.eligibility import earns_spot_rental_incentive, is_missing_discord_after_cutoff
 from incentive.miner_incentive_log import MinerLogLine, ZeroIncentiveReason
 
 if TYPE_CHECKING:
@@ -64,8 +64,10 @@ NVIDIACTL_ROOT_UID = 0
 # The share of a GPU configuration's average filler revenue per GPU-hour that a node is paid:
 # spot-node pay (ENABLE_SPOT_NODE_PAY) and the secure floor (ENABLE_SECURE_FILLER_REVENUE_FLOOR).
 # Two constants on purpose: the owner sets each on its own, so changing one must not move the other.
-FILLER_REVENUE_PAY_FACTOR = 0.95
-SECURE_FILLER_REVENUE_FLOOR_FACTOR = 0.95
+FILLER_REVENUE_PAY_FACTOR = 1.0
+SECURE_FILLER_REVENUE_FLOOR_FACTOR = 1.0
+# The share of the secure rental incentive that a rented spot node earns (ENABLE_SPOT_RENTAL_INCENTIVE).
+SPOT_RENTAL_INCENTIVE_FACTOR = 0.5
 
 
 # ── Spec measurements ────────────────────────────────────────────────────────
@@ -563,9 +565,14 @@ class RentalPriceIncentive(DefaultIncentive):
         exclusions: list[MinerLogLine] = []
         if job_result.is_provider_banned:
             exclusions.append(MinerLogLine.no_payout_because_banned_network_abuse(job_result))
-        if job_result.is_spot and not self._on_spot_pay_path(job_result):
+        if job_result.is_spot and not (
+            self._on_spot_pay_path(job_result) or earns_spot_rental_incentive(job_result)
+        ):
             exclusions.append(MinerLogLine.no_payout_because_spot_tier(job_result))
-        if is_missing_discord_after_cutoff(job_result):
+        if job_result.is_provider_email_held:
+            exclusions.append(MinerLogLine.no_payout_because_email_not_confirmed(job_result))
+        # A held node has no listing row, so its Discord state is unknown, not known false.
+        elif is_missing_discord_after_cutoff(job_result):
             exclusions.append(MinerLogLine.no_payout_because_discord_not_connected(job_result))
         if job_result.is_new_rentals_paused and not job_result.is_rented:
             exclusions.append(MinerLogLine.no_payout_because_paused_for_new_rentals(job_result))
@@ -1070,9 +1077,9 @@ class RentalPriceIncentive(DefaultIncentive):
     def _on_spot_pay_path(result: JobResult) -> bool:
         # Only a node on the backend's spot pay list is paid: set to Spot by its provider, or force-spot
         # by a penalty demotion. A banned hotkey, a pin or a no-incentive rental makes a node spot as a
-        # restriction, off the list, and it keeps spot_tier, as before. A rented
-        # spot node stays out of both pools, as before, and so does the free remainder of a
-        # partially rented one: it has no configuration average of its own (spot_tier, not "no average")
+        # restriction, off the list, and it keeps spot_tier, as before. A rented spot node is not on
+        # this path (earns_spot_rental_incentive decides its pay), and neither is the free remainder of
+        # a partially rented one: it has no configuration average of its own (spot_tier, not "no average")
         return (
             settings.ENABLE_SPOT_NODE_PAY
             and result.is_spot
@@ -1385,6 +1392,10 @@ class RentalPriceIncentive(DefaultIncentive):
         # For rented or non-eligible GPUs, use parent's default scoring logic
         return await super().calculate_executor_score(job_result)
 
+    def _spot_rental_factor(self, job_result: JobResult) -> float:
+        # A rented spot node is scored as a rented secure node, then paid a fixed share of it.
+        return SPOT_RENTAL_INCENTIVE_FACTOR if earns_spot_rental_incentive(job_result) else 1.0
+
     async def estimate_executor(
         self,
         params: ExecutorEstimateParams,
@@ -1563,7 +1574,9 @@ class RentalPriceIncentive(DefaultIncentive):
                     continue
                 # Keep snapshot totals aligned with live scoring denominators:
                 # executors excluded from incentive pools should not inflate estimates.
-                if result.is_spot or is_missing_discord_after_cutoff(result):
+                if result.is_spot and not earns_spot_rental_incentive(result):
+                    continue
+                if is_missing_discord_after_cutoff(result):
                     continue
                 total_gpu_model_count_map[result.gpu_model] = (
                     total_gpu_model_count_map.get(result.gpu_model, 0) + result.gpu_count
