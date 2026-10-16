@@ -1318,3 +1318,35 @@ def test_queued_diagnostic_logs_stay_under_the_waf_body_limit() -> None:
     assert kept == lines[-len(kept) :]
     assert len(json.dumps(kept)) <= PENDING_LOGS_MAX_BYTES + len(kept) * 2
     assert len(json.dumps({"logs": kept})) < 64_000
+
+
+@pytest.mark.parametrize(("kind", "passes"), [("absent", True), ("dir", True), ("file", False)])
+def test_encrypted_backup_preflight_lets_an_absent_path_through(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str, passes: bool
+) -> None:
+    target = tmp_path / "backup"
+    if kind == "dir":
+        target.mkdir()
+    elif kind == "file":
+        target.write_text("x")
+
+    real_run = subprocess.run
+
+    def run_locally(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        script = command[command.index("-c") + 1]
+        return real_run(["/bin/sh", "-c", script, "sh", str(target)], capture_output=True, text=True)
+
+    monkeypatch.setattr("storage.workspace.subprocess.run", run_locally)
+    validate = lambda: WorkspaceResolver(docker_binary="docker")._validate_encrypted_path(  # noqa: E731
+        image="executor:test",
+        pid=1,
+        visible_path=PurePosixPath(str(target)),
+        requested_path=PurePosixPath("/root/backup"),
+        action=StorageAction.BACKUP,
+    )
+
+    if passes:
+        validate()
+    else:
+        with pytest.raises(WorkspaceResolutionError):
+            validate()
