@@ -125,8 +125,9 @@ class BatchVerifier:
             sample = random.sample(ports, min(EXTERNAL_PROBE_SAMPLE, len(ports))) if self.external_probe else []
             reached = await self.external_probe.reached(host, sample, token) if sample else None
             async with aiohttp.ClientSession(connector=public_host_connector(limit=0)) as session:
-                successful, failed = await self.port_tester.test_many(
-                    session, host, [p for p in ports if p not in (reached or [])], token, log_ctx
+                remaining = [p for p in ports if p not in (reached or [])]
+                successful, failed = (
+                    await self.port_tester.test_many(session, host, remaining, token, log_ctx) if remaining else ([], [])
                 )
                 logger.info(
                     _m(f"progress: {len(successful)}/{len(ports)} verified", extra=get_extra_info(log_ctx))

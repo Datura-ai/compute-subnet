@@ -51,6 +51,16 @@ async def test_batch_counts_ports_the_outside_prober_reached_without_fetching_th
 
 
 @pytest.mark.asyncio
+async def test_batch_skips_the_validator_fetch_when_the_prober_reached_every_port(mocker):
+    verifier, port_tester = _verifier(mocker, lambda sample: sample)
+
+    result = await verifier.verify(PORTS[:3], ssh_client=mocker.Mock(), host="1.2.3.4")
+
+    assert sorted(result.successful, key=lambda p: p.internal) == PORTS[:3]
+    port_tester.test_many.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_a_failed_prober_never_flags_the_node(mocker):
     verifier, _ = _verifier(mocker, lambda sample: None)
 
