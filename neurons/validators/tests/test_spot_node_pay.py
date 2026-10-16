@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from core.config import settings
+from core.validator import settle_cycle_results
 from datura.requests.miner_requests import ExecutorSSHInfo
 from incentive.config import DEFAULT_PRICE, IncentiveConfig
 from incentive import rental_price
@@ -40,6 +41,7 @@ ALPHA_RATE = 1.0
 # the owner's factors, written out rather than imported so that a change to either constant fails here
 SPOT_FACTOR = 1.0
 FLOOR_FACTOR = 1.0
+SPOT_RENTAL_FACTOR = 0.5
 
 
 def _config(cap: int = BUCKET_CAP) -> IncentiveConfig:
@@ -179,6 +181,11 @@ def spot_pay_on(monkeypatch):
 
 
 @pytest.fixture
+def spot_rental_on(monkeypatch):
+    monkeypatch.setattr(settings, "ENABLE_SPOT_RENTAL_INCENTIVE", True)
+
+
+@pytest.fixture
 def floor_on(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_SECURE_FILLER_REVENUE_FLOOR", True)
 
@@ -187,6 +194,7 @@ def floor_on(monkeypatch):
 def flags_default_off(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_SPOT_NODE_PAY", False)
     monkeypatch.setattr(settings, "ENABLE_SECURE_FILLER_REVENUE_FLOOR", False)
+    monkeypatch.setattr(settings, "ENABLE_SPOT_RENTAL_INCENTIVE", False)
 
 
 # ── spot-node pay ────────────────────────────────────────────────────────────
@@ -291,6 +299,88 @@ async def test_rented_spot_stays_out_of_both_pools(spot_pay_on):
     spot = _spot(is_rented=True, filler_revenue_per_gpu_hour=2.0)
 
     await _run([spot])
+
+    assert spot.incentive == 0
+    assert _codes(spot) == [ZeroIncentiveReason.SPOT_TIER]
+
+
+@pytest.mark.asyncio
+async def test_rented_spot_earns_half_of_a_rented_secure_node(spot_rental_on):
+    spot = _spot(is_rented=True)
+    secure = _node("secure-1", is_rented=True)
+    redis_service = AsyncMock()
+    redis_service.get_portion_per_gpu_type.return_value = 1.0
+    incentive = RentalPriceIncentive(_config(), redis_service, {"hk": [spot, secure]}, {H100: 16})
+    incentive.price_provider = AsyncMock()
+    incentive.price_provider.get_tao_price.return_value = TAO_PRICE
+    incentive.price_provider.get_alpha_rate.return_value = ALPHA_RATE
+
+    await incentive.calculate_mining_scores()
+
+    assert secure.incentive > 0
+    assert spot.incentive == pytest.approx(SPOT_RENTAL_FACTOR * secure.incentive)
+    assert spot.mining_score == pytest.approx(SPOT_RENTAL_FACTOR * secure.mining_score)
+    assert _codes(spot) == []
+
+
+@pytest.mark.asyncio
+async def test_rented_spot_counts_in_the_gpu_denominator_only_when_it_earns(monkeypatch):
+    results = {"hk": [_spot(is_rented=True), _node("secure-1", is_rented=True)]}
+
+    monkeypatch.setattr(settings, "ENABLE_SPOT_RENTAL_INCENTIVE", False)
+    assert RentalPriceIncentive(_config(), AsyncMock(), results, {}).get_snapshot().mining.total_gpu_model_count_map == {
+        H100: 8
+    }
+
+    monkeypatch.setattr(settings, "ENABLE_SPOT_RENTAL_INCENTIVE", True)
+    assert RentalPriceIncentive(_config(), AsyncMock(), results, {}).get_snapshot().mining.total_gpu_model_count_map == {
+        H100: 16
+    }
+
+
+@pytest.mark.parametrize("flag_on, gpus", [(False, 8), (True, 16)], ids=["flag-off", "flag-on"])
+def test_the_live_gpu_denominator_counts_rented_spot_only_when_it_earns(monkeypatch, flag_on, gpus):
+    monkeypatch.setattr(settings, "ENABLE_SPOT_RENTAL_INCENTIVE", flag_on)
+    spot = _spot(is_rented=True)
+    spot.executor_info.port = 8081
+    results = {"hk-spot": [spot], "hk-secure": [_node("secure-1", is_rented=True)]}
+
+    assert settle_cycle_results(results, {}) == {H100: gpus}
+
+
+@pytest.mark.asyncio
+async def test_the_rented_spot_score_log_carries_the_factor_and_the_final_score(spot_rental_on):
+    spot = _spot(is_rented=True)
+    secure = _node("secure-1", is_rented=True)
+    redis_service = AsyncMock()
+    redis_service.get_portion_per_gpu_type.return_value = 1.0
+    incentive = RentalPriceIncentive(_config(), redis_service, {"hk": [spot, secure]}, {H100: 16})
+
+    await incentive.calculate_executor_score(spot)
+    await incentive.calculate_executor_score(secure)
+
+    spot_line = next(line for line in spot.incentive_logs if "Mining score is calculated" in line)
+    secure_line = next(line for line in secure.incentive_logs if "Mining score is calculated" in line)
+    assert "spot_rental_factor" in spot_line
+    assert f'"mining_score": {spot.mining_score}' in spot_line
+    assert "spot_rental_factor" not in secure_line
+
+
+@pytest.mark.asyncio
+async def test_rented_spot_as_a_restriction_still_earns_nothing(spot_rental_on):
+    spot = _spot(is_rented=True, is_on_spot_pay_list=False)
+
+    await _run([spot, _node("secure-1", is_rented=True)])
+
+    assert spot.incentive == 0
+    assert _codes(spot) == [ZeroIncentiveReason.SPOT_TIER]
+
+
+@pytest.mark.asyncio
+async def test_spot_rental_flag_does_not_pay_an_idle_spot_node(spot_rental_on):
+    spot = _spot(filler_revenue_per_gpu_hour=2.0)
+
+    await _run([spot, _node("secure-1")])
 
     assert spot.incentive == 0
     assert _codes(spot) == [ZeroIncentiveReason.SPOT_TIER]

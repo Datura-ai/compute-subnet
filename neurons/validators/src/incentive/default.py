@@ -269,16 +269,26 @@ class DefaultIncentive(BaseIncentive):
             )
 
         # Apply multiplier
+        spot_rental_factor: float = self._spot_rental_factor(job_result)
         job_result.mining_score *= (
-            job_result.sysbox_multiplier * job_result.uptime_multiplier * job_result.driver_multiplier
+            job_result.sysbox_multiplier
+            * job_result.uptime_multiplier
+            * job_result.driver_multiplier
+            * spot_rental_factor
         )
-        line: MinerLogLine = MinerLogLine.mining_score_calculated(job_result, is_rented_after_cutoff)
+        line: MinerLogLine = MinerLogLine.mining_score_calculated(
+            job_result, is_rented_after_cutoff, spot_rental_factor
+        )
         job_result.record_incentive_log(line)
         logger.info(line.as_internal_log())
         # a rented node zeroed by the Sysbox portion must say why (the idle path has its own reason)
         if job_result.is_rented and job_result.sysbox_multiplier == 0:
             job_result.record_incentive_log(MinerLogLine.no_payout_because_rented_sysbox_not_confirmed(job_result))
         return job_result
+
+    def _spot_rental_factor(self, job_result: JobResult) -> float:
+        """Share of the mining score a rented spot node keeps; 1.0 for every other node."""
+        return 1.0
 
     async def calculate_final_weights(
         self,
