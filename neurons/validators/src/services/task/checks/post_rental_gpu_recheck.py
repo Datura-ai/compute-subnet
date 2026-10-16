@@ -8,12 +8,18 @@ this check runs the all-cards matmul and the kernel-fault probe on every card, w
 MATMUL_ALLCARDS_* / GPU_FAULT_PROBE_* flags say. A failure fails the node and keeps the marker; a pass
 clears it. Off by default (POST_RENTAL_GPU_RECHECK_ENABLED): the cycle then only logs
 POST_RENTAL_GPU_RECHECK_WOULD_REQUIRE.
+
+A card that falls off the bus (GpuModelValidCheck's GPU_DETAILS_MISMATCH) also sets the marker, and a
+second drop of the same card UUID within REPEAT_DROP_WINDOW_SECONDS holds the node: this check fails it
+until REPEAT_DROP_HOLD_SECONDS pass with no further drop, then the usual recheck must pass. Shadow-only
+(POST_RENTAL_GPU_RECHECK_WOULD_HOLD) while the flag is off.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -33,6 +39,12 @@ logger = logging.getLogger(__name__)
 # a few days: long enough to outlast a weekend rental's tail, short enough that a stale flag dies
 MARKER_TTL_SECONDS = 3 * 24 * 3600
 MAX_MARKED_CARDS = 16
+# a card dropping twice in a week is a flaky card or slot, not a one-off
+REPEAT_DROP_WINDOW_SECONDS = 7 * 24 * 3600
+# sightings closer than this are one incident: a dropped card stays missing for many cycles
+DROP_INCIDENT_GAP_SECONDS = 6 * 3600
+# a repeat dropper re-lists only after a day without a drop, and then a clean recheck
+REPEAT_DROP_HOLD_SECONDS = 24 * 3600
 
 
 def marker_key(miner_hotkey: str, executor_uuid: str) -> str:
@@ -73,11 +85,71 @@ async def record_marker(ctx: Context, source: str, health: dict[str, Any]) -> No
         )
 
 
+def drop_history_key(miner_hotkey: str, executor_uuid: str) -> str:
+    return f"{POST_RENTAL_GPU_RECHECK_PREFIX}:drops:{miner_hotkey}:{executor_uuid}"
+
+
+def hold_key(miner_hotkey: str, executor_uuid: str) -> str:
+    return f"{POST_RENTAL_GPU_RECHECK_PREFIX}:hold:{miner_hotkey}:{executor_uuid}"
+
+
+async def record_gpu_drop(ctx: Context, missing_uuids: list[str]) -> None:
+    """A card fell off the bus: owe a recheck, and hold the node when the same card dropped before in the
+    window. Never raises: the caller's verdict must not depend on Redis."""
+    missing_uuids = missing_uuids[:MAX_MARKED_CARDS]
+    await record_marker(
+        ctx,
+        "gpu_details_mismatch",
+        {
+            "verdict": "gpu_missing",
+            "cards": [{"uuid": u, "verdict": "missing"} for u in missing_uuids],
+        },
+    )
+    if settings.DRY_RUN or not missing_uuids:
+        return
+    redis = ctx.services.redis
+    key = drop_history_key(ctx.miner_hotkey, ctx.executor.uuid)
+    now = time.time()
+    try:
+        raw = await redis.get(key)
+        history = json.loads(raw) if raw else {}
+        repeats: dict[str, list[float]] = {}
+        for uuid in missing_uuids:
+            seen = history.get(uuid) or {"incidents": [], "last_seen": 0}
+            if now - seen["last_seen"] > DROP_INCIDENT_GAP_SECONDS:
+                seen["incidents"] = [
+                    t for t in seen["incidents"] if now - t < REPEAT_DROP_WINDOW_SECONDS
+                ] + [now]
+            seen["last_seen"] = now
+            history[uuid] = seen
+            if len(seen["incidents"]) >= 2:
+                repeats[uuid] = seen["incidents"]
+        await redis.set(key, json.dumps(history), ex=REPEAT_DROP_WINDOW_SECONDS)
+        if repeats:
+            # rewritten on every sighting: the hold runs from the last cycle the card was missing
+            hold = {"at": datetime.now(UTC).isoformat(), "repeated_drops": repeats}
+            await redis.set(
+                hold_key(ctx.miner_hotkey, ctx.executor.uuid),
+                json.dumps(hold),
+                ex=REPEAT_DROP_HOLD_SECONDS,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            _m(
+                "POST_RENTAL_GPU_DROP_HISTORY_FAILED",
+                extra=get_extra_info({**ctx.default_extra, "error": str(exc)}),
+            )
+        )
+
+
 class PostRentalGpuRecheckCheck:
     check_id = "gpu.validate.post_rental_recheck"
     fatal = True
 
     async def run(self, ctx: Context) -> CheckResult:
+        held = await self._hold(ctx)
+        if held is not None:
+            return held
         key = marker_key(ctx.miner_hotkey, ctx.executor.uuid)
         try:
             raw = await ctx.services.redis.get(key)
@@ -158,6 +230,27 @@ class PostRentalGpuRecheckCheck:
         return CheckResult(
             passed=True,
             event=render_message(Msg.PASSED, ctx=ctx, check_id=self.check_id, what=what),
+        )
+
+    async def _hold(self, ctx: Context) -> CheckResult | None:
+        """A repeat dropper's hold: the failed cycle while it lasts, None when there is none."""
+        try:
+            raw = await ctx.services.redis.get(hold_key(ctx.miner_hotkey, ctx.executor.uuid))
+        except Exception:  # noqa: BLE001 — an unreadable hold is no hold, as for the marker
+            return None
+        if raw is None:
+            return None
+        try:
+            hold = json.loads(raw)
+        except (TypeError, ValueError):
+            hold = {"raw": str(raw)[:200]}
+        what: dict[str, Any] = {"executor_uuid": ctx.executor.uuid, "hold": hold}
+        if not settings.POST_RENTAL_GPU_RECHECK_ENABLED:
+            self._log(ctx, "POST_RENTAL_GPU_RECHECK_WOULD_HOLD", what, logging.WARNING)
+            return None
+        self._log(ctx, "POST_RENTAL_GPU_RECHECK_HELD", what, logging.WARNING)
+        return CheckResult(
+            passed=False, event=render_message(Msg.HELD, ctx=ctx, check_id=self.check_id, what=what)
         )
 
     @staticmethod

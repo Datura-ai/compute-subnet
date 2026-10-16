@@ -558,6 +558,18 @@ class PostRentalGpuRecheckMessages:
             "and wait one cycle."
         ),
     )
+    HELD = MessageTemplate(
+        event="Held: the same GPU fell off the bus twice",
+        reason="POST_RENTAL_GPU_RECHECK_HELD",
+        severity="error",
+        category="env",
+        impact="Score set to 0",
+        remediation=(
+            "The same GPU dropped off the bus twice within 7 days. Check the host `dmesg` for NVRM Xid 79 "
+            "(\"fallen off the bus\"), then reseat or replace the card and check its power and riser. The node "
+            "re-lists 24 hours after the last drop, once every card passes the all-cards recheck."
+        ),
+    )
 
 
 class GpuPowerLimitMessages:
