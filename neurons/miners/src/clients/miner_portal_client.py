@@ -93,7 +93,9 @@ class MinerPortalClient:
 
         while True:
             try:
-                async for ws in self.connect():
+                # one connection per pass: the async-for form reconnects with the headers signed at the first
+                # connect, which the portal refuses (403) once they are older than its 10 s window
+                async with self.connect() as ws:
                     try:
                         logger.info(
                             _m(
