@@ -49,6 +49,7 @@ class DummyBackendClient:
         rental_in_progress: bool = False,
         gpu_uuids: list[str] | None = None,
         cpu_count: int | None = None,
+        loopback_plugin: str | None = None,
     ):
         self.called_with = {
             "miner_address": miner_address,
@@ -59,6 +60,7 @@ class DummyBackendClient:
             "rental_in_progress": rental_in_progress,
             "gpu_uuids": gpu_uuids,
             "cpu_count": cpu_count,
+            "loopback_plugin": loopback_plugin,
         }
         return self.response
 
@@ -98,6 +100,7 @@ async def test_rental_verification_success():
         "rental_in_progress": False,  # no customer rental in this state
         "gpu_uuids": [],  # this state carries no scraped gpu details
         "cpu_count": None,  # this state carries no scraped cpu count
+        "loopback_plugin": "vloopback:v2",  # the plugin alias new rental volumes are created on
     }
 
 
