@@ -15,9 +15,13 @@ class SamplingValidationService:
         self.success = success
         self.raises = raises
         self.budgets: list[int | None] = []
+        self.probe_all_cards: list[bool] = []
 
-    async def validate_gpu_model_and_process_job(self, *, vram_budget_mb=None, **_):
+    async def validate_gpu_model_and_process_job(
+        self, *, vram_budget_mb=None, probe_all_cards=True, **_
+    ):
         self.budgets.append(vram_budget_mb)
+        self.probe_all_cards.append(probe_all_cards)
         if self.raises:
             raise RuntimeError("ssh went away")
         return ValidationResult(
@@ -66,6 +70,7 @@ async def test_every_nth_filler_cycle_runs_a_small_sample(context_factory, monke
     results = await _filler_cycles(context_factory, service, 7)
 
     assert service.budgets == [capability.settings.FILLER_MATMUL_SAMPLE_VRAM_MB] * 2
+    assert service.probe_all_cards == [False, False]
     assert ["matmul_sample" in r.event.what_we_saw for r in results] == [
         False,
         False,
