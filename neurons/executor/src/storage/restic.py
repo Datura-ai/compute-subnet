@@ -32,7 +32,9 @@ MEBIBYTE = 1024 * 1024
 RESTIC_TMPFS_BYTES = 512 * MEBIBYTE
 # Without `|| exit`, a failed cd leaves sh in the helper's own directory and restic backs that up instead.
 # sh's own cd error is dropped: StorageEventReporter keeps the first diagnostic, which must be ours.
-ENCRYPTED_BACKUP_SCRIPT = 'cd "$1" 2>/dev/null || exit 66; shift; exec "$@"'
+# Runs the backup inside a helper (docker volume or encrypted namespace). A missing or empty path exits 66 before
+# restic starts, so nothing is uploaded (DAH-2002).
+BACKUP_SOURCE_SCRIPT = 'cd "$1" 2>/dev/null || exit 66; [ -n "$(ls -A)" ] || exit 66; shift; exec "$@"'
 BACKUP_SOURCE_MISSING_EXIT = 66
 
 class ResticOperationError(RuntimeError):
@@ -358,8 +360,6 @@ class ResticStorageRunner:
             self._workspace.path.is_dir() and any(self._workspace.path.iterdir())
         ):
             return nothing
-        # shortcut: an empty path in a docker-helper or encrypted workspace still uploads an empty snapshot;
-        # probe it inside the helper if those runs show up as noise
         exit_code, summary = self._stream(command, working_directory=True)
         snapshot_id = _snapshot_id(summary)
         if exit_code == BACKUP_SOURCE_MISSING_EXIT and not snapshot_id:
@@ -540,7 +540,7 @@ class ResticStorageRunner:
                 namespace_command = [
                     "/bin/sh",
                     "-c",
-                    ENCRYPTED_BACKUP_SCRIPT,
+                    BACKUP_SOURCE_SCRIPT,
                     "sh",
                     str(self._workspace.path),
                     *restic_command,
@@ -558,7 +558,20 @@ class ResticStorageRunner:
             f"{self._workspace.volume_name}:/workspace:{volume_mode}",
         ]
         if working_directory:
-            command.extend(["--workdir", str(self._workspace.path)])
+            command.extend(
+                [
+                    "--entrypoint",
+                    "/bin/sh",
+                    self._workspace.image,
+                    "-c",
+                    BACKUP_SOURCE_SCRIPT,
+                    "sh",
+                    str(self._workspace.path),
+                    self._restic_binary,
+                    *restic_command[1:],
+                ]
+            )
+            return command, None
         command.extend(
             [
                 "--entrypoint",

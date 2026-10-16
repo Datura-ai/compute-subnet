@@ -26,7 +26,7 @@ from storage.reporting import (
     _newest_within_bytes,
 )
 from storage.restic import (
-    ENCRYPTED_BACKUP_SCRIPT,
+    BACKUP_SOURCE_SCRIPT,
     JsonEventWriter,
     ResticOperationError,
     ResticStorageRunner,
@@ -375,7 +375,8 @@ def test_plain_backup_uses_read_only_volume_and_keeps_secrets_out_of_arguments()
 
     assert cwd is None
     assert "customer-volume:/workspace:ro" in command
-    assert command[command.index("--workdir") + 1] == "/workspace/checkpoints"
+    script = command.index(BACKUP_SOURCE_SCRIPT)
+    assert command[script + 2 : script + 4] == ["/workspace/checkpoints", runner._restic_binary]
     assert command[command.index("--log-driver") + 1] == "none"
     assert command[command.index("--tmpfs") + 1] == "/tmp:rw,nosuid,nodev,size=536870912"
     assert "AWS_ACCESS_KEY_ID" in command
@@ -1247,7 +1248,7 @@ def test_encrypted_backup_script_stops_when_the_backup_path_is_missing(tmp_path:
     marker = tmp_path / "ran"
 
     completed = subprocess.run(
-        ["/bin/sh", "-c", ENCRYPTED_BACKUP_SCRIPT, "sh", str(tmp_path / "missing"), "touch", str(marker)],
+        ["/bin/sh", "-c", BACKUP_SOURCE_SCRIPT, "sh", str(tmp_path / "missing"), "touch", str(marker)],
         capture_output=True,
     )
 
@@ -1255,6 +1256,19 @@ def test_encrypted_backup_script_stops_when_the_backup_path_is_missing(tmp_path:
     assert not marker.exists()
     # the reporter keeps the first diagnostic, so sh's own cd error must not reach it ahead of ours
     assert completed.stderr == b""
+
+
+def test_backup_source_script_stops_when_the_backup_path_is_empty(tmp_path: Path) -> None:
+    marker = tmp_path / "ran"
+    (tmp_path / "backup").mkdir()
+
+    completed = subprocess.run(
+        ["/bin/sh", "-c", BACKUP_SOURCE_SCRIPT, "sh", str(tmp_path / "backup"), "touch", str(marker)],
+        capture_output=True,
+    )
+
+    assert completed.returncode == 66
+    assert not marker.exists()
 
 
 class _MissingSourcePopen(_FakePopen):
