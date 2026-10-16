@@ -403,6 +403,17 @@ class GpuThermalThrottleMessages:
         "PERFORMANCE,TEMPERATURE`, the fans, airflow and the datacenter cooling; the renter is getting a "
         "fraction of the card's speed.",
     )
+    COLLAPSED = MessageTemplate(
+        event="GPU clock collapsed by thermal throttling",
+        reason="GPU_THERMAL_COLLAPSE",
+        severity="error",
+        category="env",
+        impact="Job skipped; score set to 0 until a busy GPU holds at least half its max clock",
+        remediation="A busy GPU runs below half its max clock with a thermal or hardware slowdown set (see "
+        "gpus[]: temperature_c, graphics_clock_mhz, max_graphics_clock_mhz, reasons). Fix the cooling (fans, "
+        "airflow, datacenter temperature; `nvidia-smi -q -d PERFORMANCE,TEMPERATURE`); the node passes again "
+        "on the next validation once the clock recovers.",
+    )
     OK = MessageTemplate(
         event="GPU clocks not thermally throttled",
         reason="GPU_THERMAL_THROTTLE_OK",
@@ -729,13 +740,6 @@ class SysboxRequiredMessages:
     SYSBOX_OK = MessageTemplate(
         event="Sysbox requirement satisfied",
         reason="SYSBOX_REQUIRED_OK",
-        severity="info",
-        category="policy",
-        impact="Proceed",
-    )
-    DISABLED = MessageTemplate(
-        event="Sysbox requirement disabled",
-        reason="SYSBOX_REQUIRED_DISABLED",
         severity="info",
         category="policy",
         impact="Proceed",
@@ -1341,13 +1345,6 @@ def _verify_failed(label: str, reason_suffix: str, remediation: str) -> MessageT
 
 
 class VerifyXMessages:
-    DISABLED = MessageTemplate(
-        event="VerifyX validation skipped",
-        reason="VERIFYX_DISABLED",
-        severity="info",
-        category="env",
-        impact="Proceed",
-    )
     FILLER_SKIPPED = MessageTemplate(
         event="VerifyX validation skipped",
         reason="VERIFYX_SKIPPED_ACTIVE_FILLER",

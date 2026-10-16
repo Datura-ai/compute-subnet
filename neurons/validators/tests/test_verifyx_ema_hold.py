@@ -184,7 +184,7 @@ async def _cycle_with_the_image_check(context_factory, probes, rented_data, redi
     )
     ctx = context_factory(
         services=build_services(verifyx=probes, backend=_backend(images=[_IMAGE]), redis=redis),
-        config=build_context_config(verifyx_enabled=True),
+        config=build_context_config(),
         state=build_state(
             gpu_model="NVIDIA H200",
             specs={"gpu": {"count": 1, "driver": "580.95.05"}},
