@@ -174,7 +174,6 @@ def _ctx(keypair, monkeypatch, verifyx_service, *, sealed="challenge", state=Non
         config=build_context_config(
             validator_keypair=keypair,
             first_pass=config.get("first_pass", False),
-            verifyx_enabled=config.get("verifyx_enabled", True),
         ),
         state=state or build_state(specs=SPECS),
     )
@@ -471,30 +470,13 @@ async def test_verifyx_verdict_is_the_checks_own_including_the_ema_gate(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "reply,disabled,step,expected",
-    [
-        ({"lib_sha": "old"}, False, "verifyx", {"liumd_reason": "lib_mismatch", "agree": False}),
-        ({}, True, "verifyx", {"today": "skipped", "today_reason_code": "VERIFYX_DISABLED"}),
-    ],
-    ids=["outdated-library", "verifyx-disabled"],
-)
-async def test_verifyx_library_and_toggle_decide_the_comparison(
-    keypair, monkeypatch, verifyx_service, reply, disabled, step, expected
-):
-    fake = FakeLiumd(**reply)
-    events = PASSED
-    if disabled:
-        events = [_event(VERIFYX, "VERIFYX_DISABLED"), _event(CAPABILITY, "GPU_VERIFY_OK")]
-    ctx = _ctx(keypair, monkeypatch, verifyx_service, verifyx_enabled=not disabled)
+async def test_an_outdated_verifyx_library_disagrees(keypair, monkeypatch, verifyx_service):
+    fake = FakeLiumd(lib_sha="old")
 
-    record = await _shadow(ctx, fake, events=events)
+    record = await _shadow(_ctx(keypair, monkeypatch, verifyx_service), fake, events=PASSED)
 
-    assert expected.items() <= record["steps"][step].items()
-    if disabled:
-        [intent] = fake.intents
-        assert intent["steps"]["verifyx"] is None and intent["steps"]["matmul"]
-        assert record["agree"] is True
+    expected = {"liumd_reason": "lib_mismatch", "agree": False}
+    assert expected.items() <= record["steps"]["verifyx"].items()
 
 
 @pytest.mark.asyncio

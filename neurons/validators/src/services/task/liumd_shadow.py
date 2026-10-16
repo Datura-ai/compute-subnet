@@ -204,7 +204,7 @@ async def _compare(
     cold_retry = _cold_retry_possible(ctx)
     if cold_retry:
         steps["verifyx"]["liumd_reason"] = "cold_sample_retry"
-    ask_verifyx = today["verifyx"].verdict in RAN and ctx.config.verifyx_enabled and not cold_retry
+    ask_verifyx = today["verifyx"].verdict in RAN and not cold_retry
     if not (ask_matmul or ask_verifyx):
         return _skipped("no_gpu_step_ran", steps=steps)
     specs = ctx.state.specs
