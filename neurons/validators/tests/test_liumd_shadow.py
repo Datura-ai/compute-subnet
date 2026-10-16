@@ -22,6 +22,7 @@ from services.liumd_exec_client import LiumdRefusal
 from services.local_verify_client import SCHEMA, LocalVerifyUnavailable, parse_answer
 from services.task import liumd_shadow
 from services.task import service as task_service_module
+from services.task.checks import verifyx as verifyx_check
 from services.task.checks.verifyx import VerifyXCheck
 from services.task.liumd_shadow import (
     LIUMD_SHADOW_EVENT,
@@ -384,25 +385,39 @@ def _network_ema(download):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "prev_ema,network,first_pass,today,retry",
+    "prev_ema,network,first_pass,today,retry,prior_fallbacks",
     [
         # The reviewer's probe: raw success, but the EMA (100 → 75) falls under the floor.
-        (100.0, {"download_speed": 50.0}, False, "fail", None),
-        (100.0, {"download_speed": 50.0}, True, "fail", None),
-        (None, {"download_speed": 50.0}, False, "fail", None),
+        (100.0, {"download_speed": 50.0}, False, "fail", None, 0),
+        (100.0, {"download_speed": 50.0}, True, "fail", None, 0),
+        (None, {"download_speed": 50.0}, False, "fail", None, 0),
         # A first pass on a never-measured host defers the floor to the first scored cycle.
-        (None, {"download_speed": 50.0}, True, "pass", None),
-        (300.0, {"download_speed": 900.0}, False, "pass", None),
+        (None, {"download_speed": 50.0}, True, "pass", None, 0),
+        (300.0, {"download_speed": 900.0}, False, "pass", None, 0),
         # A Cloudflare fallback with no reading keeps the stored EMA, under and over the floor.
-        (80.0, {"download_speed": None, "cloudflare_fallback": True}, False, "fail", None),
-        (150.0, {"download_speed": None, "cloudflare_fallback": True}, False, "pass", None),
+        (80.0, {"download_speed": None, "cloudflare_fallback": True}, False, "fail", None, 0),
+        (150.0, {"download_speed": None, "cloudflare_fallback": True}, False, "pass", None, 0),
         # Nothing stored and nothing read: the EMA stays unseeded and the check passes.
-        (None, {"download_speed": None, "cloudflare_fallback": True}, False, "pass", None),
+        (None, {"download_speed": None, "cloudflare_fallback": True}, False, "pass", None, 0),
         # Cold retries on, never measured: today re-measures 50 then 150 Mbps and passes, where
         # the shadow's one 50 Mbps sample would fail. Not compared.
-        (None, {"download_speed": 50.0}, False, "pass", {"download_speed": 150.0}),
+        (None, {"download_speed": 50.0}, False, "pass", {"download_speed": 150.0}, 0),
         # Cold retries on, but a stored EMA: no retry today, so compared as ever.
-        (100.0, {"download_speed": 50.0}, False, "fail", {"download_speed": 150.0}),
+        (100.0, {"download_speed": 50.0}, False, "fail", {"download_speed": 150.0}, 0),
+        # Past the package-fallback cap today's check scores the package reading as zero (EMA 150 →
+        # 75, fail) while the shadow would read 1,000 Mbps and pass. Not compared.
+        (
+            150.0,
+            {
+                "download_speed": 1000.0,
+                "capacity_download_speed": None,
+                "cloudflare_fallback": True,
+            },
+            False,
+            "fail",
+            None,
+            8,
+        ),
     ],
     ids=[
         "ema-drops-under-floor",
@@ -415,12 +430,24 @@ def _network_ema(download):
         "unseeded",
         "cold-retry-not-compared",
         "cold-retry-on-known-host",
+        "package-fallback-cap-not-compared",
     ],
 )
 async def test_verifyx_verdict_is_the_checks_own_including_the_ema_gate(
-    keypair, monkeypatch, verifyx_service, prev_ema, network, first_pass, today, retry
+    keypair,
+    monkeypatch,
+    verifyx_service,
+    prev_ema,
+    network,
+    first_pass,
+    today,
+    retry,
+    prior_fallbacks,
 ):
     monkeypatch.setattr(settings, "VERIFYX_COLD_SAMPLE_RETRY_ENABLED", retry is not None)
+    verifyx_check._package_fallback_probes.clear()
+    if prior_fallbacks:
+        verifyx_check._package_fallback_probes[("5Miner", UUID)] = prior_fallbacks
     judged = {"success": True, "ram": {}, "network": network}
     retried = [{"success": True, "ram": {}, "network": retry}] if retry else []
     verifyx_service.judged = judged
@@ -459,6 +486,9 @@ async def test_verifyx_verdict_is_the_checks_own_including_the_ema_gate(
         assert entry["liumd_reason"] == "cold_sample_retry"
         assert "liumd_verdict" not in entry
         assert fake.intents[0]["steps"]["verifyx"] is None
+    elif prior_fallbacks:
+        assert entry.get("agree") is None
+        assert entry["liumd_reason"] == "package_fallback_cap"
     else:
         assert entry["liumd_verdict"] == today
         assert entry["agree"] is True

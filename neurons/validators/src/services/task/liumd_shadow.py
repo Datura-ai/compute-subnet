@@ -50,7 +50,13 @@ from core.utils import _m, get_extra_info
 
 from .checks.capability import CapabilityCheck
 from .checks.local_verify import _step_reason
-from .checks.verifyx import VerifyXCheck, _first_pass_challenge_config, verifyx_verdict
+from .checks.verifyx import (
+    MAX_PACKAGE_FALLBACK_PROBES,
+    VerifyXCheck,
+    _first_pass_challenge_config,
+    _package_fallback_probes,
+    verifyx_verdict,
+)
 from .pipeline import Context
 
 logger = logging.getLogger(__name__)
@@ -202,9 +208,17 @@ async def _compare(
     # On a never-measured executor today's check may re-measure a cold sample below the gate
     # (DAH-2959) and pass on the second; the shadow's one sample is not comparable.
     cold_retry = _cold_retry_possible(ctx)
+    # Past the package-fallback cap today's check scores the package reading as zero; the shadow
+    # still reads it, so the two are not comparable.
+    fallback_cap = (
+        _package_fallback_probes.get((ctx.miner_hotkey, ctx.executor.uuid), 0)
+        > MAX_PACKAGE_FALLBACK_PROBES
+    )
     if cold_retry:
         steps["verifyx"]["liumd_reason"] = "cold_sample_retry"
-    ask_verifyx = today["verifyx"].verdict in RAN and not cold_retry
+    elif fallback_cap:
+        steps["verifyx"]["liumd_reason"] = "package_fallback_cap"
+    ask_verifyx = today["verifyx"].verdict in RAN and not cold_retry and not fallback_cap
     if not (ask_matmul or ask_verifyx):
         return _skipped("no_gpu_step_ran", steps=steps)
     specs = ctx.state.specs
