@@ -98,7 +98,7 @@ async def test_build_context_reads_the_record_of_the_validated_hotkey(monkeypatc
         miner_address="1.1.1.1", miner_port=1,
     )
 
-    ctx = await factory.build_context(
+    await factory.build_context(
         shell=SimpleNamespace(ssh_client=MagicMock()),
         miner_info=miner_info,
         executor_info=executor,
