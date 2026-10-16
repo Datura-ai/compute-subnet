@@ -113,20 +113,6 @@ class RentalVerificationCheck:
         Returns:
             CheckResult with verification status
         """
-        # Skip if rental verification is disabled
-        if settings.SKIP_RENTAL_VERIFICATION:
-            event = render_message(
-                Msg.SKIPPED,
-                ctx=ctx,
-                check_id=self.check_id,
-                what={"skipped": True},
-            )
-            return CheckResult(
-                passed=True,
-                event=event,
-                updates={},
-            )
-
         rented_data = ctx.state.rented_data
         rented_executor = rented_data.executors.get(ctx.executor.uuid) if rented_data else None
         has_customer_rental = bool(rented_executor and rented_executor.pods)

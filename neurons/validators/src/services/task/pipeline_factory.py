@@ -131,9 +131,9 @@ class PipelineFactory:
         self.backend_client = backend_client
         self.pod_recovery = pod_recovery
 
-        dry_run = settings.DRY_RUN or settings.CONTAINER_CLEANUP_DRY_RUN
-        logger.info(f"ContainerCleanup dry_run={dry_run}")
-        self.container_cleanup = ContainerCleanup(dry_run=dry_run)
+        # Cleanup only reports, removing nothing, when the whole validator runs under DRY_RUN.
+        logger.info(f"ContainerCleanup dry_run={settings.DRY_RUN}")
+        self.container_cleanup = ContainerCleanup(dry_run=settings.DRY_RUN)
         # One tracker for the factory's lifetime: build_pipeline() makes a new sink every cycle.
         self.status_tracker = StatusChangeTracker()
 
@@ -251,7 +251,6 @@ class PipelineFactory:
                 # constant when the backend is unreachable (shared config empty).
                 nvml_digest_map=shared_client.config.nvml_ml_digests or LIB_NVIDIA_ML_DIGESTS,
                 nvml_invalid_drivers=shared_client.config.nvml_invalid_drivers,
-                verifyx_enabled=settings.ENABLE_VERIFYX,
                 inspector_enabled=settings.ENABLE_INSPECTOR,
                 port_private_key=private_key,
                 port_public_key=public_key,
