@@ -1271,6 +1271,29 @@ def test_backup_source_script_stops_when_the_backup_path_is_empty(tmp_path: Path
     assert not marker.exists()
 
 
+def test_backup_source_script_fails_when_the_backup_path_is_a_file(tmp_path: Path) -> None:
+    marker = tmp_path / "ran"
+    (tmp_path / "backup").write_text("x")
+
+    completed = subprocess.run(
+        ["/bin/sh", "-c", BACKUP_SOURCE_SCRIPT, "sh", str(tmp_path / "backup"), "touch", str(marker)],
+        capture_output=True,
+    )
+
+    assert completed.returncode == 1
+    assert not marker.exists()
+
+
+def test_local_backup_of_a_file_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    path = tmp_path / "backup"
+    path.write_text("x")
+    runner = ResticStorageRunner(StorageOperationSpec.from_mapping(_operation_payload()), LocalWorkspace(path))
+    monkeypatch.setattr("storage.restic.subprocess.Popen", lambda *a, **k: pytest.fail("restic ran"))
+
+    with pytest.raises(ResticOperationError, match="not a directory"):
+        runner._backup()
+
+
 class _MissingSourcePopen(_FakePopen):
     def __init__(self, command: list[str], *args: object, **kwargs: object) -> None:
         super().__init__(command, *args, **kwargs)
