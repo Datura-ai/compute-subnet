@@ -409,10 +409,17 @@ async def get_miner_identity(
     to list this executor under an account confirm that the machine at this address is set up for
     that account's hotkey. Public: the hotkey is public on chain, and nothing else is returned.
 
+    With `MINER_ACCOUNT_CLAIM` set (`lium mine --register` writes it), the answer also carries it as
+    `account_claim`: every node of an e-mail or Google portal account reports the same pool hotkey, so
+    the claim is what ties the node to the account that installed it. It is not a secret.
+
     Returns:
-        dict: {"miner_hotkey": "<ss58>", "nonce": "<the nonce sent>"}
+        dict: {"miner_hotkey": "<ss58>", "nonce": "<the nonce sent>"[, "account_claim": "<claim>"]}
     """
-    return {"miner_hotkey": settings.MINER_HOTKEY_SS58_ADDRESS, "nonce": nonce}
+    answer = {"miner_hotkey": settings.MINER_HOTKEY_SS58_ADDRESS, "nonce": nonce}
+    if settings.MINER_ACCOUNT_CLAIM:
+        answer["account_claim"] = settings.MINER_ACCOUNT_CLAIM
+    return answer
 
 
 def _is_loopback_client(request: Request) -> bool:

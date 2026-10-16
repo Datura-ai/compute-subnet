@@ -22,7 +22,7 @@ def test_returns_configured_hotkey_and_echoes_nonce():
     response = _client().get("/miner-identity", params={"nonce": NONCE})
 
     assert response.status_code == 200
-    assert response.json() == {"miner_hotkey": settings.MINER_HOTKEY_SS58_ADDRESS, "nonce": NONCE}
+    assert response.json() == {"miner_hotkey": settings.MINER_HOTKEY_SS58_ADDRESS, "nonce": NONCE}  # no claim set
 
 
 def test_follows_the_configured_hotkey(monkeypatch):
@@ -33,6 +33,14 @@ def test_follows_the_configured_hotkey(monkeypatch):
     response = _client().get("/miner-identity", params={"nonce": NONCE})
 
     assert response.json()["miner_hotkey"] == "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+
+
+def test_carries_the_account_claim_when_configured(monkeypatch):
+    monkeypatch.setattr(settings, "MINER_ACCOUNT_CLAIM", "c1" * 16)
+
+    response = _client().get("/miner-identity", params={"nonce": NONCE})
+
+    assert response.json()["account_claim"] == "c1" * 16
 
 
 def test_nonce_is_required():
