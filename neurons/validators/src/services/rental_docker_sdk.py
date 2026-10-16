@@ -17,6 +17,7 @@ from typing import TypeVar
 
 from core.utils import _m, get_extra_info
 from datura.requests.miner_requests import ExecutorSSHInfo
+from services.node_host import NodeHostError, dial_validated, resolve_public_host
 
 
 # 1 h: no rental pull that succeeded in 30 days took more than 44 min (DAH-3720).
@@ -292,6 +293,9 @@ class ContainerRunSpec:
     device_requests: tuple[GpuDeviceRequest, ...] = ()
     cpu_count: int | None = None
     memory_gb: int | None = None
+    # --memory-swap; equal to memory_gb means the container gets no swap
+    memory_swap_gb: int | None = None
+    oom_score_adj: int | None = None
     storage_limit_gb: int | None = None
     # cgroup pids.max for the container. Caps total tasks (processes + threads) so a tenant fork
     # bomb cannot exhaust the host's global PID space and starve the executor/sshd of forks. None
@@ -471,6 +475,17 @@ class RentalDockerSdkClient:
                 _wrap_error_message("Docker SDK inspect image failed", exc)
             ) from exc
         return tuple(local_image.get("RepoDigests") or ())
+
+    async def image_default_command(self, *, image: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The local image's (Entrypoint, Cmd) as `docker run` would use them with no override."""
+        try:
+            image_attrs = await _in_docker_thread(self._api_client.inspect_image, image)
+            config = image_attrs.get("Config") or {}
+        except Exception as exc:
+            raise RentalDockerOperationError(
+                _wrap_error_message("Docker SDK inspect image failed", exc)
+            ) from exc
+        return tuple(config.get("Entrypoint") or ()), tuple(config.get("Cmd") or ())
 
     async def local_image_is_current(
         self, *, image: str, auth_config: dict[str, str] | None = None
@@ -1197,6 +1212,14 @@ class RentalDockerSdkClientFactory:
         private_key: str,
     ) -> AsyncIterator[RentalDockerSdkClient]:
         host_key = require_rental_docker_ssh_host_key(executor_info)
+        # a hostname is resolved and checked once here; paramiko then dials (and re-dials) these
+        # addresses over a socket we open, never a second lookup of the name
+        try:
+            pinned_addresses = await resolve_public_host(executor_info.address, executor_info.ssh_port)
+        except NodeHostError as exc:
+            raise RentalDockerConnectionError(
+                _wrap_error_message("Docker SDK client construction failed", exc)
+            ) from exc
         transport_retry_enabled = (
             bool(self.transport_retry_enabled())
             if callable(self.transport_retry_enabled)
@@ -1229,6 +1252,7 @@ class RentalDockerSdkClientFactory:
                 _build_docker_ssh_base_url(executor_info),
                 key_path,
                 known_hosts_path,
+                pinned_addresses,
             )
             try:
                 try:
@@ -1271,6 +1295,7 @@ class RentalDockerSdkClientFactory:
         base_url: str,
         key_path: Path,
         known_hosts_path: Path,
+        pinned_addresses: list,
     ):
         with _DOCKER_SDK_SSH_ADAPTER_LOCK:
             if self.api_client_factory is not None:
@@ -1286,7 +1311,31 @@ class RentalDockerSdkClientFactory:
                 use_ssh_client=False,
                 key_path=key_path,
                 known_hosts_path=known_hosts_path,
+                pinned_addresses=pinned_addresses,
             )
+
+
+# A pod's container must keep running so the SSH keys can be installed and the renter can log
+# in. An image whose default command is a bare shell (`pytorch/pytorch`, `nvidia/cuda`:
+# CMD ["/bin/bash"]) exits at once without a TTY: the most common failed rent of a renter image
+# in early October 2026.
+_INTERACTIVE_SHELLS = frozenset(
+    {"sh", "bash", "zsh", "/bin/sh", "/bin/bash", "/bin/zsh", "/usr/bin/bash", "/usr/bin/zsh"}
+)
+KEEP_ALIVE_COMMAND: tuple[str, ...] = ("sleep", "infinity")
+
+
+def keep_alive_command_for(entrypoint: tuple[str, ...], cmd: tuple[str, ...]) -> tuple[str, ...]:
+    """`sleep infinity` when the image's default command would exit at start; () keeps it.
+
+    The command replaces only Cmd, so an entrypoint wrapper that ends in `exec "$@"`
+    (nvidia/cuda's) still runs.
+    """
+    if len(cmd) == 1 and cmd[0] in _INTERACTIVE_SHELLS:
+        return KEEP_ALIVE_COMMAND
+    if not cmd and not entrypoint:
+        return KEEP_ALIVE_COMMAND
+    return ()
 
 
 def build_container_command_argv(startup_commands: str | None) -> tuple[str, ...]:
@@ -1403,11 +1452,13 @@ def _default_docker_api_client_factory(**kwargs):
 
     key_path = kwargs.pop("key_path", None)
     known_hosts_path = kwargs.pop("known_hosts_path", None)
+    pinned_addresses = kwargs.pop("pinned_addresses", [])
     if key_path is not None and known_hosts_path is not None:
         return _create_docker_api_client_with_rental_ssh_adapter(
             docker_module=docker,
             key_path=key_path,
             known_hosts_path=known_hosts_path,
+            pinned_addresses=pinned_addresses,
             **kwargs,
         )
 
@@ -1419,6 +1470,7 @@ def _create_docker_api_client_with_rental_ssh_adapter(
     docker_module,
     key_path: Path,
     known_hosts_path: Path,
+    pinned_addresses: list = (),
     **kwargs,
 ):
     import docker.api.client as docker_api_client
@@ -1430,6 +1482,7 @@ def _create_docker_api_client_with_rental_ssh_adapter(
     docker_api_client.SSHHTTPAdapter = _build_rental_ssh_http_adapter_class(
         key_path=key_path,
         known_hosts_path=known_hosts_path,
+        pinned_addresses=pinned_addresses,
     )
     try:
         return docker_module.APIClient(**kwargs)
@@ -1450,7 +1503,11 @@ def _build_rental_ssh_http_adapter_class(
     *,
     key_path: Path,
     known_hosts_path: Path,
+    pinned_addresses: list = (),
 ):
+    """``pinned_addresses``: ``resolve_public_host``'s results for a node registered by hostname.
+    Every (re)connect then hands paramiko a socket to one of them, so the name is not looked up
+    again; paramiko still checks the host key against the name. Empty for an IP literal."""
     from docker.transport.sshconn import SSHConnection, SSHConnectionPool, SSHHTTPAdapter
 
     class RentalSSHConnection(SSHConnection):
@@ -1521,6 +1578,10 @@ def _build_rental_ssh_http_adapter_class(
 
     class RentalSSHHTTPAdapter(SSHHTTPAdapter):
         def _connect(self) -> None:
+            if self.ssh_client and pinned_addresses:
+                self.ssh_params["sock"] = dial_validated(
+                    pinned_addresses, _DOCKER_SSH_REOPEN_TIMEOUT_SECONDS
+                )
             super()._connect()
             transport = self.ssh_client.get_transport() if self.ssh_client else None
             if transport is not None:
@@ -1596,6 +1657,11 @@ def _build_host_config_kwargs(spec: ContainerRunSpec) -> dict:
         "device_requests": _device_requests(spec.device_requests),
         "nano_cpus": spec.cpu_count * 1_000_000_000 if spec.cpu_count else None,
         "mem_limit": f"{spec.memory_gb}g" if spec.memory_gb else None,
+        # Docker refuses --memory-swap without --memory
+        "memswap_limit": (
+            f"{spec.memory_swap_gb}g" if spec.memory_gb and spec.memory_swap_gb else None
+        ),
+        "oom_score_adj": spec.oom_score_adj,
         "pids_limit": spec.pids_limit if spec.pids_limit else None,
         "storage_opt": (
             {"size": f"{spec.storage_limit_gb}g"}

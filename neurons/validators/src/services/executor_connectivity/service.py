@@ -80,6 +80,7 @@ class ExecutorConnectivityService:
                 second_pass=verification.second_pass,
                 probe_tier=verification.probe_tier,
                 declared_port_count=verification.declared_port_count,
+                sysbox_measured=verification.sysbox_measured,
             )
 
             return result

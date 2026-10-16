@@ -69,7 +69,7 @@ def _make_ssh_mock(containers: list[str], ages_by_name: dict[str, int], current_
 
 def _rented_data(executor_uuid: str, pods: list[str]):
     """Build a RentedExecutorsResponse-like mock."""
-    pod_mocks = [MagicMock(container_name=name) for name in pods]
+    pod_mocks = [RentedPod(pod_id=f"pod-{i}", container_name=name) for i, name in enumerate(pods)]
     executor_mock = MagicMock(pods=pod_mocks)
     resp = MagicMock()
     resp.executors = {executor_uuid: executor_mock}
@@ -790,3 +790,11 @@ def test_get_rented_containers_answers_the_dind_volume_sweep_like_listed_contain
     names = ContainerCleanup()._get_rented_containers(rented_data, EXECUTOR_UUID)
 
     assert names == listed_container_names(rented_data)
+
+
+def test_listed_container_names_protects_the_pod_container_of_an_unnamed_pod():
+    # DAH-4315: the backend lists a new pod before it records the container name
+    names = listed_container_names(_rented_data(EXECUTOR_UUID, [""]))
+
+    assert "pod_pod-0" in names and "pod_pod-0__prev" in names
+    assert "" not in names and "__prev" not in names

@@ -87,6 +87,7 @@ class ConnectivityOrchestrator:
         failed = list(probe_result.failed)
 
         dind_port = successful.pop(0) if successful else random.choice(ports)
+        sysbox_requested = sysbox_runtime
         dind_result = await self.dind_probe.verify(
             dind_port,
             ssh_client=ssh_client,
@@ -158,6 +159,7 @@ class ConnectivityOrchestrator:
             declared_port_count=declared_port_count,
             port_ranges=port_ranges,
             second_pass=second_pass.outcome if second_pass else None,
+            sysbox_measured=dind_result.sysbox_runtime if dind_result.success and sysbox_requested else None,
         )
 
     async def _second_pass(

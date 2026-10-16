@@ -9,6 +9,7 @@ from services.matrix_validation_service import UUID_MISMATCH_ERROR_PREFIX
 
 from ..messages import CapabilityMessages as Msg, MessageTemplate, render_message
 from ..pipeline import CheckResult, Context
+from .matmul_speed_log import log_matmul_speed
 
 if TYPE_CHECKING:
     from protocol.vc_protocol.compute_requests import RentedExecutorsResponse
@@ -76,6 +77,9 @@ class CapabilityCheck:
                 )
             except Exception as exc:
                 failure_reason = str(exc)
+
+        # Shadow line: the speed this run measured next to the reported model. Log only.
+        log_matmul_speed(specs, result, transport=transport, default_extra=ctx.default_extra)
 
         if result and result.success:
             what: dict = {"metrics": result.metrics, "transport": transport}
