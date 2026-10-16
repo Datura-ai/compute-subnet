@@ -56,3 +56,18 @@ def test_each_reconnect_signs_a_fresh_handshake(monkeypatch):
         asyncio.run(client.run_forever())
 
     assert connects.call_count == 3
+
+
+def test_connect_failures_back_off_and_reset_after_a_connection(monkeypatch):
+    client = object.__new__(MinerPortalClient)
+    client.logging_extra = {}
+    client.handle_send_messages = AsyncMock()
+    client.connect = Mock(side_effect=[OSError(), OSError(), _Connect(), OSError(), _Stop()])
+    sleeps = AsyncMock()
+    monkeypatch.setattr(portal_client.asyncio, "sleep", sleeps)
+    monkeypatch.setattr(portal_client.random, "uniform", lambda low, high: high)
+
+    with pytest.raises(_Stop):
+        asyncio.run(client.run_forever())
+
+    assert [call.args[0] for call in sleeps.await_args_list] == [2, 4, portal_client.CONNECT_INTERVAL, 2]
