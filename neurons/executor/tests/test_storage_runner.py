@@ -682,6 +682,7 @@ def test_exit_code_three_with_snapshot_is_completed_partial(
     operation = StorageOperationSpec.from_mapping(_operation_payload())
     output = io.StringIO()
     events = JsonEventWriter(str(OPERATION_ID), 0, output=output)
+    (tmp_path / "file").write_text("x")
     workspace = LocalWorkspace(tmp_path)
     runner = ResticStorageRunner(operation, workspace, event_writer=events)
 
@@ -1265,8 +1266,9 @@ class _MissingSourcePopen(_FakePopen):
         return 66
 
 
-def test_backup_of_a_missing_path_fails_with_a_clear_message(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_backup_of_a_missing_path_is_an_empty_no_op(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     operation = StorageOperationSpec.from_mapping(_operation_payload())
+    (tmp_path / "file").write_text("x")  # past the local pre-check: restic itself reports the missing source
     runner = ResticStorageRunner(operation, LocalWorkspace(tmp_path))
     monkeypatch.setattr(
         "storage.restic.subprocess.run",
@@ -1274,16 +1276,24 @@ def test_backup_of_a_missing_path_fails_with_a_clear_message(monkeypatch: pytest
     )
     monkeypatch.setattr("storage.restic.subprocess.Popen", _MissingSourcePopen)
 
-    with pytest.raises(ResticOperationError, match="backup path does not exist"):
-        runner._backup()
+    result = runner._backup()
+
+    assert (result.status, result.result_quality, result.snapshot_id) == ("COMPLETED", OperationResultQuality.EMPTY, None)
 
 
-def test_local_backup_of_a_missing_directory_fails_before_restic_runs(tmp_path: Path) -> None:
-    operation = StorageOperationSpec.from_mapping(_operation_payload())
-    runner = ResticStorageRunner(operation, LocalWorkspace(tmp_path / "missing"))
+@pytest.mark.parametrize("make_dir", [False, True], ids=["missing", "empty"])
+def test_local_backup_of_a_missing_or_empty_directory_skips_restic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_dir: bool
+) -> None:
+    path = tmp_path / "backup"
+    if make_dir:
+        path.mkdir()
+    runner = ResticStorageRunner(StorageOperationSpec.from_mapping(_operation_payload()), LocalWorkspace(path))
+    monkeypatch.setattr("storage.restic.subprocess.Popen", lambda *a, **k: pytest.fail("restic ran"))
 
-    with pytest.raises(ResticOperationError, match="backup path does not exist"):
-        runner._backup()
+    result = runner._backup()
+
+    assert (result.status, result.result_quality, result.snapshot_id) == ("COMPLETED", OperationResultQuality.EMPTY, None)
 
 
 def test_queued_diagnostic_logs_stay_under_the_waf_body_limit() -> None:

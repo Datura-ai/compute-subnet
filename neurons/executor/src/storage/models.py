@@ -39,6 +39,7 @@ class ReporterResource(StrEnum):
 class OperationResultQuality(StrEnum):
     FULL = "FULL"
     PARTIAL = "PARTIAL"
+    EMPTY = "EMPTY"  # DAH-2002: the backup path is missing or empty, so nothing was uploaded
 
 
 class OperationSpecError(ValueError):

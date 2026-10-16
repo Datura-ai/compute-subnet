@@ -1386,6 +1386,9 @@ def build_gpu_docker_config(
     )
 
 
+ROOT_BACKUP_DIR = "/root/backup"
+
+
 def build_authorized_keys_exec_spec(
     *,
     container_name: str,
@@ -1398,12 +1401,14 @@ def build_authorized_keys_exec_spec(
     # chmod up front: key injection now runs before the sshd bootstrap's own
     # `chmod 700` (DAH-2341), and sshd may come up in between.
     quoted_dir = shlex.quote(target_path.rsplit("/", 1)[0])
+    # DAH-2002: the default backup covers /root/backup, so every pod starts with the folder
+    backup_dir = f" {ROOT_BACKUP_DIR}" if target_path == "/root/.ssh/authorized_keys" else ""
     return ContainerExecSpec(
         container_name=container_name,
         argv=(
             "sh",
             "-c",
-            f"mkdir -p {quoted_dir} && chmod 700 {quoted_dir} "
+            f"mkdir -p {quoted_dir}{backup_dir} && chmod 700 {quoted_dir} "
             f"&& cat >> {shlex.quote(target_path)}",
         ),
         stdin=key_data,

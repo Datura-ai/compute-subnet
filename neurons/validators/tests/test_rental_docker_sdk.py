@@ -1678,3 +1678,13 @@ def test_rental_ssh_adapter_hands_paramiko_a_socket_to_the_pinned_address(tmp_pa
     finally:
         connected["sock"].close()
         listener.close()
+
+
+def test_authorized_keys_exec_creates_the_backup_folder_only_for_root() -> None:
+    root = build_authorized_keys_exec_spec(container_name="c", public_keys=["k"]).argv[-1]
+    other = build_authorized_keys_exec_spec(
+        container_name="c", public_keys=["k"], target_path="/home/u/.ssh/authorized_keys"
+    ).argv[-1]
+
+    assert root.startswith("mkdir -p /root/.ssh /root/backup && ")
+    assert "/root/backup" not in other

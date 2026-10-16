@@ -352,12 +352,18 @@ class ResticStorageRunner:
             f"lium-operation:{self._operation.operation_id}",
             ".",
         ]
-        if isinstance(self._workspace, LocalWorkspace) and not self._workspace.path.is_dir():
-            raise ResticOperationError("the backup path does not exist in the volume")
+        # DAH-2002: a missing or empty path is a no-op, not a failed run (the default backup covers /root/backup)
+        nothing = ResticResult("COMPLETED", OperationResultQuality.EMPTY, None, 0)
+        if isinstance(self._workspace, LocalWorkspace) and not (
+            self._workspace.path.is_dir() and any(self._workspace.path.iterdir())
+        ):
+            return nothing
+        # shortcut: an empty path in a docker-helper or encrypted workspace still uploads an empty snapshot;
+        # probe it inside the helper if those runs show up as noise
         exit_code, summary = self._stream(command, working_directory=True)
         snapshot_id = _snapshot_id(summary)
         if exit_code == BACKUP_SOURCE_MISSING_EXIT and not snapshot_id:
-            raise ResticOperationError("the backup path does not exist in the volume")
+            return nothing
         if exit_code == 0 and snapshot_id:
             return ResticResult("COMPLETED", OperationResultQuality.FULL, snapshot_id, exit_code)
         if exit_code == 3 and snapshot_id:
