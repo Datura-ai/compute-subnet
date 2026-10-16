@@ -758,3 +758,35 @@ async def test_a_mined_reclaim_whose_receipt_lacks_its_event_keeps_the_record_un
         await client.settle_earlier_send()
     assert client._read_sent_record(CHAIN_ID) is None
     assert len(provider.sent) == 1
+
+
+async def test_a_second_run_while_one_is_sending_sends_nothing():
+    import fcntl
+
+    provider = FakeProvider(calls={selector("reclaims(uint256)"): open_reclaim()}, logs=[reclaimed_log()])
+    path = collateral_module.SENT_RECORD_PATH
+    with open(path.with_name(path.name + ".lock"), "a") as other_run:
+        fcntl.flock(other_run, fcntl.LOCK_EX)
+        with pytest.raises(CollateralTransactionError, match="Another run is sending"):
+            await client_with(provider).finalize_reclaim(5)
+    assert provider.sent == []
+    await client_with(provider).finalize_reclaim(5)
+    assert len(provider.sent) == 1
+
+
+@pytest.mark.parametrize("over,sent", [(1, 0), (0, 1)], ids=["above", "at"])
+async def test_a_gas_price_quote_above_the_ceiling_signs_nothing_and_one_at_it_is_signed(over, sent):
+    ceiling_wei = collateral_module.DEFAULT_MAX_GAS_PRICE_GWEI * 10**9
+    provider = FakeProvider(
+        calls={selector("reclaims(uint256)"): open_reclaim()},
+        logs=[reclaimed_log()],
+        gas_price=ceiling_wei + over,
+    )
+    if over:
+        with pytest.raises(CollateralTransactionError, match="COLLATERAL_MAX_GAS_PRICE_GWEI"):
+            await client_with(provider).finalize_reclaim(5)
+        assert "eth_getTransactionCount" not in [method for method, _ in provider.requests]
+    else:
+        await client_with(provider).finalize_reclaim(5)
+        assert decode_legacy(provider.sent[0])["gasPrice"] == ceiling_wei
+    assert len(provider.sent) == sent

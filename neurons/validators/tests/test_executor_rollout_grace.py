@@ -7,8 +7,10 @@ containers under the validator's SSH sessions, and the cycle read the fleet as 1
 """
 
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from core.validator import Validator
 from datura.requests.miner_requests import ExecutorSSHInfo
 from services.executor_rollout import (
     ExecutorRolloutTracker,
@@ -17,7 +19,6 @@ from services.executor_rollout import (
     withhold_rollout_verdicts,
 )
 from services.task.models import JobResult
-
 
 OLD = "sha256:" + "a" * 64
 NEW = "sha256:" + "b" * 64
@@ -82,7 +83,9 @@ def _failed(
         spec = {
             "docker": {
                 "container_id": "c1",
-                "containers": [{"container_id": "c1", "name": "executor-executor-1", "digest": observed_digest}],
+                "containers": [
+                    {"container_id": "c1", "name": "executor-executor-1", "digest": observed_digest}
+                ],
             }
         }
     if image_status is not None:
@@ -177,3 +180,35 @@ def test_a_failure_the_rollout_does_not_explain_stands() -> None:
 # --- the cycle: what happens when the tracker itself cannot be read -----------------------------
 
 
+def _validator_process(tracker: ExecutorRolloutTracker) -> Validator:
+    validator_process = Validator.__new__(Validator)
+    validator_process.default_extra = {}
+    validator_process.rollout_tracker = tracker
+    return validator_process
+
+
+@pytest.mark.asyncio
+async def test_a_redis_error_leaves_every_verdict_standing_instead_of_ending_the_cycle() -> None:
+    """Regression: the tracker's exception reaching `sync` — the whole cycle is lost to the
+    `[sync] Unexpected error` handler (no weights, no publish for anyone) because the grace
+    bookkeeping failed. Without Redis the cycle must run as it did before this change."""
+    broken = ExecutorRolloutTracker(
+        redis_service=MagicMock(get=AsyncMock(side_effect=ConnectionError("down"))), grace_cycles=2
+    )
+    validator_process = _validator_process(broken)
+    unreachable = _failed("node-1", "EXECUTOR_SSH_UNREACHABLE")
+
+    window = await validator_process.observe_executor_rollout(NEW, J0)
+    kept, withheld = withhold_rollout_verdicts({"5Miner": [unreachable]}, window, J0)
+
+    assert window.covers(J0) is False
+    assert kept == {"5Miner": [unreachable]}
+    assert withheld == []
+
+    # Redis was fine at cycle start and died before the cycle-end observation: the cycle keeps
+    # the window it saw at its start instead of dropping every withheld verdict.
+    seen_at_start = _open_window()
+    assert (
+        await validator_process.observe_executor_rollout(NEW, J0, fallback=seen_at_start)
+        is seen_at_start
+    )

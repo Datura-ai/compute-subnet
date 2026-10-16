@@ -100,3 +100,13 @@ def test_upload_signed_by_the_next_hotkey_is_rejected_while_only_current_is_conf
 # --- core/config.py: where the two hotkeys come from ----------------------------------------------
 
 
+def test_upload_signed_by_the_next_hotkey_is_accepted_when_configured(
+    client, miner_keypair, current_validator, next_validator, monkeypatch
+):
+    # regression: the verifier reads only the first configured hotkey, so the chain swap
+    # (phase 2) is fleet-wide downtime
+    _trust(monkeypatch, current=current_validator, next=next_validator)
+
+    response = client.post("/upload_ssh_key", json=_upload_payload(miner_keypair, next_validator))
+
+    assert response.status_code == 200
