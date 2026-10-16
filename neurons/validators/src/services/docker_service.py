@@ -2152,7 +2152,7 @@ def _build_volume_setup_exec_script(
     if with_authorized_keys:
         # chmod up front: sshd may already be up and must find the directory private
         lines.append(
-            "{ mkdir -p /root/.ssh /root/backup && chmod 700 /root/.ssh && cat >> /root/.ssh/authorized_keys; } || exit 93"
+            "{ mkdir -p /root/.ssh && chmod 700 /root/.ssh && cat >> /root/.ssh/authorized_keys; } || exit 93"
         )
     return "\n".join(lines)
 

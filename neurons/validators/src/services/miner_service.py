@@ -2183,6 +2183,7 @@ class MinerService:
                 "volume_path": payload.source_volume_path,
                 "requested_path": payload.backup_path or payload.source_volume_path,
                 "container_name": payload.container_name,
+                "exclude_patterns": payload.exclude_patterns,
             },
             "reporter": {
                 "api_url": settings.COMPUTE_REST_API_URL_EXTERNAL,

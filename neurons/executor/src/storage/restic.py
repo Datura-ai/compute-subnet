@@ -352,9 +352,10 @@ class ResticStorageRunner:
             f"lium-pod-{self._operation.pod_id}",
             "--tag",
             f"lium-operation:{self._operation.operation_id}",
+            *(f"--exclude={pattern}" for pattern in self._operation.workspace.exclude_patterns),
             ".",
         ]
-        # DAH-2002: a missing or empty path is a no-op, not a failed run (the default backup covers /root/backup)
+        # DAH-2002: a missing or empty path is a no-op, not a failed run
         nothing = ResticResult("COMPLETED", OperationResultQuality.EMPTY, None, 0)
         if isinstance(self._workspace, LocalWorkspace) and not (
             self._workspace.path.is_dir() and any(self._workspace.path.iterdir())

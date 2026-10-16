@@ -1310,6 +1310,28 @@ def test_local_backup_of_a_missing_or_empty_directory_skips_restic(
     assert (result.status, result.result_quality, result.snapshot_id) == ("COMPLETED", OperationResultQuality.EMPTY, None)
 
 
+def test_backup_passes_the_exclude_patterns_to_restic(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    payload = _operation_payload()
+    payload["workspace"]["exclude_patterns"] = [".cache", ".ssh"]
+    (tmp_path / "file").write_text("x")
+    runner = ResticStorageRunner(StorageOperationSpec.from_mapping(payload), LocalWorkspace(tmp_path))
+    commands = []
+    monkeypatch.setattr(runner, "_stream", lambda command, **kwargs: commands.append(command) or (0, {"snapshot_id": SNAPSHOT_ID}))
+
+    runner._backup()
+
+    assert commands[0][-3:] == ["--exclude=.cache", "--exclude=.ssh", "."]
+
+
+@pytest.mark.parametrize("patterns", [".cache", [""], [1]])
+def test_operation_spec_rejects_malformed_exclude_patterns(patterns: object) -> None:
+    payload = _operation_payload()
+    payload["workspace"]["exclude_patterns"] = patterns
+
+    with pytest.raises(OperationSpecError):
+        StorageOperationSpec.from_mapping(payload)
+
+
 def test_queued_diagnostic_logs_stay_under_the_waf_body_limit() -> None:
     lines = [f"{index}" + "ж" * 1999 for index in range(20)]
 

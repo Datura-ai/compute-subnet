@@ -629,7 +629,7 @@ async def test_a_present_public_hub_image_rent_makes_the_same_host_calls(
         " --format=csv,noheader,nounits",
         "nohup /usr/bin/python /root/app/src/inspector_executor.py --start-collector >/dev/null 2>&1 &",
     ]
-    assert _exec_argv_texts(svc) == ["sh -c mkdir -p /root/.ssh /root/backup && chmod 700 /root/.ssh && cat >> /root/.ssh/authorized_keys"]
+    assert _exec_argv_texts(svc) == ["sh -c mkdir -p /root/.ssh && chmod 700 /root/.ssh && cat >> /root/.ssh/authorized_keys"]
 
 
 @pytest.mark.asyncio

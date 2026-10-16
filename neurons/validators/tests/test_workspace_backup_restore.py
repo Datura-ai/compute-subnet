@@ -529,6 +529,17 @@ def test_restic_backup_empty_path_targets_the_whole_volume():
     assert spec["reporter"]["failure_timeout_seconds"] == 600
 
 
+def test_restic_backup_spec_carries_the_exclude_patterns():
+    payload = _backup_payload()
+    payload.backup_engine = "restic"
+    payload.repository_password = "repository-password"
+    payload.exclude_patterns = [".cache", ".ssh"]
+
+    spec = MinerService._restic_backup_operation_spec(payload)
+
+    assert spec["workspace"]["exclude_patterns"] == [".cache", ".ssh"]
+
+
 def test_restic_online_restore_empty_path_targets_the_whole_volume():
     payload = _restore_payload()
     payload.backup_engine = "restic"
