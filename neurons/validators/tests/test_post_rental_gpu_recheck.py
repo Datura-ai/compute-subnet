@@ -149,6 +149,7 @@ async def test_on_a_fault_fails_the_node_and_keeps_the_marker(context_factory, r
     assert "gpu 1: wrong result" in result.event.what_we_saw["error"]
     assert validation.calls == 1 and len(runner.calls) == 1
     assert KEY in ctx.services.redis.store
+    assert ctx.services.redis.ttl[KEY] == module.MARKER_TTL_SECONDS
 
 
 @pytest.mark.asyncio
