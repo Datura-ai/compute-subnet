@@ -414,6 +414,11 @@ class Settings(BaseSettings):
     # from a real 8-GPU box show what that costs an honest miner.
     MATMUL_ALLCARDS_CHECK_ENABLED: bool = Field(env="MATMUL_ALLCARDS_CHECK_ENABLED", default=False)
     MATMUL_ALLCARDS_ENFORCEMENT_ENABLED: bool = Field(env="MATMUL_ALLCARDS_ENFORCEMENT_ENABLED", default=False)
+    # The sysbox probe container must run in a user namespace (sysbox always uses one); an identity uid map
+    # is logged as SYSBOX_IDENTITY_UID_MAP and, with this on, the node is not counted as running sysbox.
+    SYSBOX_USERNS_ENFORCEMENT_ENABLED: bool = Field(
+        env="SYSBOX_USERNS_ENFORCEMENT_ENABLED", default=False
+    )
     # Item 2b — send the advertised CPU-core count in the rental-verification health check so the
     # host's Docker daemon creates the probe with `--cpus=<advertised>` and rejects a count that
     # exceeds the machine's physical cores (a signal the lscpu wrapper cannot forge, since dockerd
