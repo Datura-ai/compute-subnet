@@ -42,7 +42,7 @@ The executor names the miner hotkey from `MINER_HOTKEY_SS58_ADDRESS` in `.env` o
 curl -s "http://127.0.0.1:$(grep -E '^EXTERNAL_PORT=' .env | cut -d= -f2)/miner-identity?nonce=$(openssl rand -hex 16)"
 ```
 
-The answer is `{"miner_hotkey": "<ss58>", "nonce": "<the nonce sent>"}`, plus `"account_claim"` when `MINER_ACCOUNT_CLAIM` is set in `.env` (`lium mine --register` writes it; the provider portal requires it of a node set up for Lium's shared pool hotkey). An executor older than this route answers `401`: update it as described below.
+The answer is `{"miner_hotkey": "<ss58>", "nonce": "<the nonce sent>"}`, plus `"account_claim"` when `MINER_ACCOUNT_CLAIM` is set in `.env` (`lium mine --register` writes it). An executor older than this route answers `401`: update it as described below.
 
 ## One-time restart of a node that stopped updating
 

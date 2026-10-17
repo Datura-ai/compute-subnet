@@ -18,7 +18,7 @@ AUTHENTICATED_REQUEST_TIMEOUT_SECONDS = 30
 # Everything not listed here must carry a miner signature in its body. A GET has
 # no body, so a GET route is reachable only when it is named below: either public
 # by design or verifying its own signature (the validator's, sent in headers).
-# /miner-identity returns only the configured miner hotkey, which is public on chain.
+# /miner-identity returns the miner hotkey (public on chain) and the account claim (not a secret).
 PUBLIC_GET_PATHS = frozenset({"/version", "/update-status", "/miner-identity"})
 SELF_AUTHENTICATED_GET_PATTERNS = (
     re.compile(r"^/containers/[^/]+/logs/?$"),  # verify_container_logs_signature
