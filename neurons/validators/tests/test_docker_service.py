@@ -3420,13 +3420,13 @@ async def _start_after_reboot(docker_service, monkeypatch, *, repaired: bool):
     client.start_error = Exception(_STALE_MOUNT_START_ERROR)
     real_start = client.start
 
-    async def start_once_blocked(*, container_name: str) -> None:
+    async def start_failing_only_first_call(*, container_name: str) -> None:
         try:
             await real_start(container_name=container_name)
         finally:
             client.start_error = None
 
-    client.start = start_once_blocked
+    client.start = start_failing_only_first_call
     ssh_client = AsyncMock()
     ssh_client.run = AsyncMock(return_value=_make_ssh_command_result(stdout="volume_x\n"))
     monkeypatch.setattr("services.docker_service.asyncssh.import_private_key", Mock(return_value="pkey"))
