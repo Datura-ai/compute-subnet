@@ -3,7 +3,7 @@ import re
 import shlex
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
 
 import asyncssh
@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from core.docker_utils import DockerCommand, collect_container_death_diagnostics
 from core.utils import _m, get_extra_info
-from protocol.vc_protocol.compute_requests import RentedPod
+from protocol.vc_protocol.compute_requests import RentedExecutor, RentedPod
 from protocol.vc_protocol.validator_requests import (
     ContainerState,
     PodContainerState,
@@ -21,6 +21,7 @@ from protocol.vc_protocol.validator_requests import (
 from ...const import (
     GPU_MEMORY_UTILIZATION_LIMIT,
     GPU_UTILIZATION_LIMIT,
+    POD_CONTAINER_NAME_GRACE_MINUTES,
 )
 from core.config import settings
 
@@ -96,6 +97,40 @@ def _gpu_usage_violation_details(
     }
 
 
+def _rental_of_validated_miner(
+    ctx: Context, rented_executor: RentedExecutor | None
+) -> RentedExecutor | None:
+    """The rental listed under this executor's UUID, or None when enforcement is on and it belongs
+    to another miner. The mismatch is logged either way."""
+    if not rented_executor or rented_executor.miner_hotkey == ctx.miner_hotkey:
+        return rented_executor
+    logger.warning(
+        _m(
+            "RENTED_OWNER_MISMATCH",
+            extra=get_extra_info(
+                {
+                    **ctx.default_extra,
+                    "executor_uuid": ctx.executor.uuid,
+                    "rental_miner_hotkey": rented_executor.miner_hotkey,
+                    "enforced": settings.RENTED_OWNER_MISMATCH_ENFORCEMENT_ENABLED,
+                }
+            ),
+        )
+    )
+    return None if settings.RENTED_OWNER_MISMATCH_ENFORCEMENT_ENABLED else rented_executor
+
+
+def _within_container_name_grace(pod: RentedPod) -> bool:
+    """An unnamed pod is waited for only this long after it was created; a pod with no
+    created_at (backend predates the field) is waited for as before."""
+    if pod.created_at is None:
+        return True
+    created_at = pod.created_at
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=UTC)
+    return datetime.now(UTC) - created_at < timedelta(minutes=POD_CONTAINER_NAME_GRACE_MINUTES)
+
+
 @dataclass
 class _DownedPodOutcome:
     """What the check does with a rented pod that was found not running."""
@@ -133,7 +168,9 @@ class TenantEnforcementCheck:
 
         # Get rented executor from context instead of Redis
         rented_data = ctx.state.rented_data
-        rented_executor = rented_data.executors.get(ctx.executor.uuid) if rented_data else None
+        rented_executor = _rental_of_validated_miner(
+            ctx, rented_data.executors.get(ctx.executor.uuid) if rented_data else None
+        )
         # EVERY filler on the node: a partially rented split node keeps one filler per free VRAM
         # bundle running beside the renter (DAH-2465/DAH-2467), and allowlisting only the first
         # makes its siblings' GPU processes read as usage outside the tenant.
@@ -185,7 +222,7 @@ class TenantEnforcementCheck:
             return _with_pod_states(result, ctx, rented_pods, state_by_pod_id)
 
         for pod_index, pod in enumerate(rented_pods):
-            pod_container_name = pod.container_name
+            pod_container_name = pod.docker_container_name
             pod_id = pod.pod_id
             try:
                 pod_running, ssh_pub_keys = await _check_pod_running_and_read_authorized_keys(ctx.ssh, pod_container_name)
@@ -202,6 +239,13 @@ class TenantEnforcementCheck:
                 )
             if pod_running:
                 state_by_pod_id[pod_id] = ContainerState.RUNNING
+            elif pod.container_name_pending and _within_container_name_grace(pod):
+                # DAH-4315: the backend lists a pod before it records the container's name, so
+                # its container may still be being created. Judged next cycle, not penalised.
+                state_by_pod_id[pod_id] = ContainerState.UNKNOWN
+                extra.setdefault("pods_awaiting_container", []).append(pod_id)
+                ssh_pub_keys = []
+                continue
             else:
                 diagnostics = await _collect_pod_diagnostics(ctx.ssh, pod_container_name)
                 state_by_pod_id[pod_id] = _container_state_from_diagnostics(diagnostics)
@@ -290,7 +334,7 @@ class TenantEnforcementCheck:
                 # dockerd refused the keys read
                 ssh_pub_keys = []
 
-        container_names = [pod.container_name for pod in rented_pods]
+        container_names = [pod.docker_container_name for pod in rented_pods]
         container_names.extend(filler_containers)
         gpu_processes = list(ctx.state.gpu_processes)
         gpu_running_outside = _has_gpu_process_outside_container(container_names, gpu_processes)
@@ -707,7 +751,9 @@ async def _every_listed_pod_stale(ctx: Context, rented_pods: list[RentedPod], st
         return False
     for other in rented_pods[1:]:
         try:
-            other_state = await _check_pod_running_and_read_authorized_keys(ctx.ssh, other.container_name)
+            other_state = await _check_pod_running_and_read_authorized_keys(
+                ctx.ssh, other.docker_container_name
+            )
         except (asyncssh.Error, OSError):
             return False
         if other_state.running:

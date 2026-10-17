@@ -211,7 +211,7 @@ def _probe(download: float | None) -> MockVerifyXResponse:
 def _ctx(context_factory, service, *, first_pass: bool, rented_data=None):
     return context_factory(
         services=build_services(verifyx=service),
-        config=build_context_config(verifyx_enabled=True, first_pass=first_pass),
+        config=build_context_config(first_pass=first_pass),
         state=build_state(specs={"gpu": {"count": 1}}, rented_data=rented_data),
     )
 

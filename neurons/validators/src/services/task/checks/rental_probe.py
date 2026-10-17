@@ -24,6 +24,7 @@ from core.utils import _m, get_extra_info
 from services.redis_service import RENTAL_PROBE_FAILED_PREFIX, RENTAL_PROBE_OK_PREFIX
 
 from ...const import MIN_PORT_COUNT, POD_CONTAINER_PREFIX
+from ...node_host import open_public_connection, public_host_sock
 from ..messages import NO_OUTBOUND_INTERNET_REMEDIATION, OutboundInternetMessages
 from ..messages import RentalProbeMessages as Msg
 from ..messages import render_message
@@ -126,6 +127,9 @@ _REDIS_FAILED_PREFIX = RENTAL_PROBE_FAILED_PREFIX
 # the OK stamp expires: a deregistered executor's stamp ages out, and an expired stamp only makes the
 # probe run again on the next idle cycle
 _REDIS_STAMP_TTL_SECONDS = 30 * 24 * 3600
+# A node whose probe has not passed for this many probe intervals and is skipped for a state of its own
+# Docker is logged as RENTAL_PROBE_LONG_UNPROBED.
+_LONG_UNPROBED_INTERVALS = 4
 
 
 @dataclass
@@ -315,6 +319,8 @@ class RentalProbeCheck:
             )
         image_present = await _image_present_on_host(ctx, image_ref)
         if image_present is None:
+            if standing is None:
+                await _log_if_long_unprobed(ctx, "could not read the node's image list")
             return self._inconclusive(
                 ctx,
                 "could not read the node's image list",
@@ -325,6 +331,8 @@ class RentalProbeCheck:
         if not image_present:
             # a pull would put minutes of Docker Hub traffic inside the validation cycle; the
             # cached-template check already reports a node that has not pre-pulled the image
+            if standing is None:
+                await _log_if_long_unprobed(ctx, "default renter image is not pulled on the node")
             return self._skipped(
                 ctx,
                 "default renter image is not pulled on the node",
@@ -596,6 +604,30 @@ async def _image_present_on_host(ctx: Context, image_ref: str) -> bool | None:
     except (TimeoutError, asyncssh.Error, OSError):
         return None
     return result.exit_status == 0 and bool((result.stdout or "").strip())
+
+
+async def _log_if_long_unprobed(ctx: Context, reason: str) -> None:
+    """Both reasons are states of the node's own Docker, and both end the cycle without a verdict, so a
+    node can stay unprobed for as long as it keeps one of them. Log only: nothing is decided here."""
+    try:
+        last_ok = await _last_ok_at(ctx)
+    except Exception:
+        return
+    hours = None if last_ok is None else (time.time() - last_ok) / 3600
+    if hours is not None and hours < _LONG_UNPROBED_INTERVALS * settings.RENTAL_PROBE_INTERVAL_HOURS:
+        return
+    logger.warning(
+        _m(
+            "RENTAL_PROBE_LONG_UNPROBED",
+            extra=get_extra_info(
+                {
+                    **ctx.default_extra,
+                    "reason": reason,
+                    "hours_since_last_probe_stamp": None if hours is None else round(hours, 1),
+                }
+            ),
+        )
+    )
 
 
 async def _last_ok_at(ctx: Context) -> float | None:
@@ -1209,7 +1241,7 @@ async def _wait_for_sshd(
     while True:
         try:
             reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port, limit=SSH_ID_LINE_MAX),
+                open_public_connection(host, port, limit=SSH_ID_LINE_MAX),
                 timeout=_SSHD_CONNECT_TIMEOUT_SECONDS,
             )
             try:
@@ -1281,6 +1313,7 @@ async def _login_and_list_gpus(
             conn = await asyncssh.connect(
                 host=host,
                 port=port,
+                **await public_host_sock(host, port, _SSH_LOGIN_TIMEOUT_SECONDS),
                 username="root",
                 client_keys=[pkey],
                 known_hosts=None,

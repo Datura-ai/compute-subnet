@@ -1,5 +1,8 @@
+import logging
+
 import pytest
 
+from neurons.validators.src.services.task.checks import nvml_digest
 from neurons.validators.src.services.task.checks.nvml_digest import NvmlDigestCheck
 from neurons.validators.src.services.task.messages import NvmlDigestMessages as Msg
 
@@ -9,15 +12,6 @@ from tests.helpers import build_context_config, build_services, build_state
 @pytest.mark.parametrize(
     "driver_version,lib_digest,nvml_digest_map,expected_pass,expected_reason,expect_clear",
     [
-        # No driver version - should pass
-        (
-            "",
-            "abc123",
-            {"535.183.01": "58fc46eefa8ebb265293556951a75a39:67185f510159acdc8f38b768b059bfb0f3ec5869baaffd1dc1c949e52012b18f"},
-            True,
-            Msg.DIGEST_OK.reason,
-            False,
-        ),
         # Matching digest - should pass
         (
             "535.183.01",
@@ -194,3 +188,16 @@ async def test_nvml_digest_check_allows_driver_610_43_02(context_factory):
     assert result.passed is True
     assert result.event.reason_code == Msg.DIGEST_OK.reason
     assert "clear_verified_job_info" not in result.updates
+
+
+@pytest.mark.asyncio
+async def test_a_missing_driver_is_logged_and_fails(context_factory, caplog):
+    specs = {"gpu": {"driver": ""}, "md5_checksums": {"libnvidia_ml": "abc123"}}
+    ctx = context_factory(state=build_state(specs=specs))
+
+    with caplog.at_level(logging.WARNING, logger=nvml_digest.logger.name):
+        result = await NvmlDigestCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.event.reason_code == Msg.DRIVER_MISSING.reason
+    assert any("NVML_DRIVER_MISSING" in record.getMessage() for record in caplog.records)
