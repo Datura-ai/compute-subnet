@@ -191,6 +191,9 @@ class RentedExecutorsResponse(BaseModel):
     # Average filler revenue per GPU configuration: what the spot-node pay and the secure floor are
     # measured against. Defaults to empty so an older backend pays spot nodes nothing, as before.
     filler_revenue_by_gpu_config: list[FillerRevenueByGpuConfig] = []
+    # executor_id → the hotkey the backend lists the executor under. Only that hotkey may take over a
+    # verified record stored under the bare executor id (RedisService.get_verified_job_info).
+    executor_owner_hotkeys: dict[str, str] = {}
 
     def get_filler_revenue_per_gpu_hour(
         self, base_model: str | None, gpu_count: int, min_gpu_hours: float

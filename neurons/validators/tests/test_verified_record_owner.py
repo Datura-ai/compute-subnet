@@ -52,12 +52,17 @@ async def test_a_reset_and_anchor_mark_by_another_hotkey_leave_the_record_alone(
 
 
 @pytest.mark.asyncio
-async def test_a_record_from_before_the_release_is_read_once_then_rewritten_per_hotkey(service):
+async def test_a_record_from_before_the_release_moves_only_to_the_listed_owner(service):
     legacy = {"count": 7, "failed": 0, "spec": "B300:8", "uuids": "GPU-a", GPU_ANCHOR_BROKEN_KEY: True}
     await service.redis.hset(VERIFIED_JOB_COUNT_KEY, B8717923, json.dumps(legacy))
 
-    prev = await service.get_verified_job_info(RUNNING_HOTKEY, B8717923)
+    assert await service.get_verified_job_info(OTHER_HOTKEY, B8717923, listed_owner=RUNNING_HOTKEY) == {}
+    assert await service.get_verified_job_info(RUNNING_HOTKEY, B8717923) == {}
+
+    prev = await service.get_verified_job_info(RUNNING_HOTKEY, B8717923, listed_owner=RUNNING_HOTKEY)
     assert prev == legacy
+    assert await service.redis.hget(VERIFIED_JOB_COUNT_KEY, B8717923) is None
+    assert await service.get_verified_job_info(OTHER_HOTKEY, B8717923, listed_owner=OTHER_HOTKEY) == {}
     await service.set_verified_job_info(RUNNING_HOTKEY, B8717923, prev_info=prev, success=True)
 
     written = json.loads(await service.redis.hget(VERIFIED_JOB_COUNT_KEY, f"{RUNNING_HOTKEY}:{B8717923}"))
@@ -110,4 +115,4 @@ async def test_build_context_reads_the_record_of_the_validated_hotkey(monkeypatc
         default_docker_image_digests={},
     )
 
-    factory.redis_service.get_verified_job_info.assert_awaited_once_with(RUNNING_HOTKEY, B8717923)
+    factory.redis_service.get_verified_job_info.assert_awaited_once_with(RUNNING_HOTKEY, B8717923, None)
