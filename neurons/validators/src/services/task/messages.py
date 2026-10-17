@@ -2046,3 +2046,31 @@ class LocalVerifyMessages:
         category="transport",
         impact="The matmul and VerifyX verdicts below come from the executor's local run, judged by the validator",
     )
+
+
+class GpuAttestationIdentityMessages:
+    # DAH-4551: warning in shadow; fails the node under GPU_ATTESTATION_IDENTITY_ENFORCEMENT_ENABLED.
+    MISMATCH = MessageTemplate(
+        event="GPU identity does not match the NVIDIA-signed card identity",
+        reason="GPU_IDENTITY_MISMATCH",
+        severity="warning",
+        category="policy",
+        impact="Score set to 0 while the finding stands",
+        remediation="Report the GPUs the host really has: each GPU UUID must stay on the same physical card, "
+        "and nothing may intercept NVML or nvidia-smi on the host or in the executor container.",
+    )
+    # Expected on most hosts: NVML only attests Hopper/Blackwell cards in Confidential Computing mode.
+    UNAVAILABLE = MessageTemplate(
+        event="GPU attestation not available on this node",
+        reason="GPU_ATTESTATION_UNAVAILABLE",
+        severity="info",
+        category="policy",
+        impact="Proceed",
+    )
+    OK = MessageTemplate(
+        event="GPU identity verified against NVIDIA's root",
+        reason="GPU_IDENTITY_OK",
+        severity="info",
+        category="policy",
+        impact="Proceed",
+    )
