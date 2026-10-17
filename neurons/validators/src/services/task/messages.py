@@ -1872,6 +1872,53 @@ class CpuTruthMessages:
     )
 
 
+class GpuKernelCountMessages:
+    """Reported GPU list against the kernel's list (/proc/driver/nvidia/gpus). Shadow
+    (GPU_KERNEL_COUNT_CHECK_ENABLED without enforcement) renders COUNT_MISMATCH as a warning and
+    keeps passed=True; only GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED makes it fail the validation.
+    UUID_MISMATCH is logged only, under either flag."""
+
+    COUNT_OK = MessageTemplate(
+        event="Reported GPUs match the kernel's GPU list",
+        reason="GPU_KERNEL_COUNT_OK",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+    COUNT_MISMATCH = MessageTemplate(
+        event="Reported GPU count exceeds the kernel's GPU list",
+        reason="GPU_KERNEL_COUNT_MISMATCH",
+        severity="error",
+        category="env",
+        impact="Validation failed; score set to 0",
+        remediation=(
+            "Report only the GPUs this host has. The NVIDIA kernel driver "
+            "(/proc/driver/nvidia/gpus) lists fewer cards than the node reports."
+        ),
+    )
+    UUID_MISMATCH = MessageTemplate(
+        event="Reported GPU UUIDs are missing from the kernel's GPU list",
+        reason="GPU_KERNEL_UUID_MISMATCH",
+        severity="warning",
+        category="env",
+        impact="Shadow observation only: the validation result was NOT changed",
+    )
+    NOT_EVALUATED = MessageTemplate(
+        event="Kernel GPU list not available; reported GPU count not evaluated",
+        reason="GPU_KERNEL_COUNT_NOT_EVALUATED",
+        severity="info",
+        category="env",
+        impact="Proceed without penalty",
+    )
+    SKIPPED = MessageTemplate(
+        event="Kernel GPU count check disabled",
+        reason="GPU_KERNEL_COUNT_DISABLED",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+
+
 class ProviderSideLoadMessages:
     """DAH-2734 — the CPU/disk twin of the foreign-GPU gate: a provider who runs another
     subnet's miner on a listed machine sells capacity he already uses himself. Shadow
