@@ -75,7 +75,7 @@ class DuplicateExecutorCheck:
                 updates={"clear_verified_job_info": True},
             )
 
-        conflict = await self._cross_hotkey_gpu_uuids(ctx)
+        conflict, seen_writes = await self._cross_hotkey_gpu_uuids(ctx)
         if conflict is not None:
             return conflict
 
@@ -85,20 +85,22 @@ class DuplicateExecutorCheck:
             check_id=self.check_id,
             what={"executor_uuid": ctx.executor.uuid},
         )
-        return CheckResult(passed=True, event=event)
+        updates = {"gpu_uuid_hotkeys_seen": seen_writes} if seen_writes else {}
+        return CheckResult(passed=True, event=event, updates=updates)
 
-    async def _cross_hotkey_gpu_uuids(self, ctx: Context) -> CheckResult | None:
+    async def _cross_hotkey_gpu_uuids(self, ctx: Context) -> tuple[CheckResult | None, dict[str, str]]:
         """DAH-4546: GPU UUIDs seen under a different miner hotkey within the window.
 
         GPU_UUID_HOTKEYS_SEEN maps each reported GPU UUID to {hotkey: last seen epoch s}. The current
-        hotkey is recorded only when no other hotkey holds a card inside the window, so the hotkey that
+        hotkey is recorded only when no other hotkey holds a card inside the window and the whole cycle
+        passes (the check returns the writes; ResultHandler applies them on success), so the hotkey that
         listed the cards first keeps passing and the relister fails until the first one has not reported
         them for CROSS_HOTKEY_GPU_UUID_WINDOW_DAYS (a sale or move waits out the window once). The same
         hotkey under a new executor id matches its own entry and passes. Off = a structured warning only.
         """
         uuids = sorted({u for u in (ctx.state.gpu_uuids or "").split(",") if u})
         if not uuids:
-            return None
+            return None, {}
         redis = ctx.services.redis
         now = time.time()
         window = settings.CROSS_HOTKEY_GPU_UUID_WINDOW_DAYS * 86400
@@ -113,11 +115,7 @@ class DuplicateExecutorCheck:
             if any(hk != ctx.miner_hotkey for hk in hotkeys)
         }
         if not matches:
-            for uuid, hotkeys in seen.items():
-                await redis.hset(
-                    GPU_UUID_HOTKEYS_SEEN, uuid, json.dumps({**hotkeys, ctx.miner_hotkey: now})
-                )
-            return None
+            return None, {uuid: json.dumps({**hotkeys, ctx.miner_hotkey: now}) for uuid, hotkeys in seen.items()}
 
         enforced = settings.CROSS_HOTKEY_GPU_UUID_ENFORCEMENT_ENABLED
         what = {
@@ -135,7 +133,7 @@ class DuplicateExecutorCheck:
             )
         )
         if not enforced:
-            return None
+            return None, {}
         event = render_message(Msg.CROSS_HOTKEY_GPU_UUID, ctx=ctx, check_id=self.check_id, what=what)
         # A live pod keeps being verified, as with a GPU ban (has_live_rental).
         return CheckResult(
@@ -143,7 +141,7 @@ class DuplicateExecutorCheck:
             event=event,
             updates={"clear_verified_job_info": True},
             fatal=not has_live_rental(ctx),
-        )
+        ), {}
 
 
 @dataclass(frozen=True)
