@@ -170,6 +170,10 @@ def _no_answer(stderr: str) -> ValidationResult:
             "wrong_answer",
         ),
         (ValidationResult(success=False, timed_out=True, error_message="timed out"), "timeout"),
+        (
+            ValidationResult(success=False, error_message="ssh failed", validator_error=True),
+            "validator_error",
+        ),
     ],
 )
 async def test_a_failed_sample_names_why(context_factory, monkeypatch, result, kind):
@@ -204,3 +208,26 @@ async def test_a_pinned_run_targets_one_card_and_keys_on_it(monkeypatch):
     assert ssh.run.call_args.args[0].startswith("CUDA_VISIBLE_DEVICES=GPU-1 python ")
     machine_info = json.loads(wrapper.generateChallenge.call_args.args[2])
     assert machine_info == {"uuids": "GPU-1", "gpu_count": 1, "gpu_model": "NVIDIA H100 80GB HBM3"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cipher", ["", "deadbeef"])
+async def test_an_ssh_or_cipher_failure_is_flagged_as_ours(monkeypatch, cipher):
+    wrapper = MagicMock()
+    wrapper.getCipherText.return_value = cipher
+    wrapper._has_sealed = False
+    monkeypatch.setattr(mvs, "DMCompVerifyWrapper", lambda *_a, **_kw: wrapper)
+    ssh = SimpleNamespace(run=AsyncMock(side_effect=OSError("connection lost")))
+
+    result = await mvs.ValidationService().validate_gpu_model_and_process_job(
+        ssh_client=ssh,
+        executor_info=SimpleNamespace(root_dir="/root/app", python_path="python"),
+        default_extra={},
+        machine_spec=_cards(3),
+        vram_budget_mb=4096,
+        probe_all_cards=False,
+        gpu_uuid="GPU-1",
+    )
+
+    assert result.success is False
+    assert result.validator_error is True

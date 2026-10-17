@@ -192,6 +192,9 @@ class ValidationResult:
     elapsed_source: str | None = None
     dim_n: int | None = None
     dim_k: int | None = None
+    # True when the run failed on the validator's side (SSH, our cipher, our own exception), not
+    # because of the executor's answer.
+    validator_error: bool = False
 
     def __bool__(self) -> bool:
         """Allow using ValidationResult in boolean context for backward compatibility."""
@@ -680,7 +683,8 @@ class ValidationService:
                 returned_uuid=uuid if 'uuid' in locals() else "",
                 stdout=stdout,
                 stderr=stderr,
-                error_message=error_msg
+                error_message=error_msg,
+                validator_error=True,
             )
 
     def _answer_was_sealed(self, sealed_blob: str) -> bool:
@@ -743,6 +747,7 @@ class ValidationService:
                     success=False,
                     expected_uuid=verifier_params.uuid,
                     error_message=error_msg,
+                    validator_error=True,
                 )
 
             command = f"{executor_info.python_path} {script_path} {verifier_params}"
@@ -782,7 +787,8 @@ class ValidationService:
                 return ValidationResult(
                     success=False,
                     expected_uuid=verifier_params.uuid,
-                    error_message=error_msg
+                    error_message=error_msg,
+                    validator_error=True,
                 )
 
             logger.info(f"{script_path}: {result}")
@@ -793,7 +799,8 @@ class ValidationService:
                 return ValidationResult(
                     success=False,
                     expected_uuid=verifier_params.uuid,
-                    error_message=error_msg
+                    error_message=error_msg,
+                    validator_error=True,
                 )
 
             try:
@@ -805,7 +812,8 @@ class ValidationService:
                 return ValidationResult(
                     success=False,
                     expected_uuid=verifier_params.uuid,
-                    error_message=error_msg
+                    error_message=error_msg,
+                    validator_error=True,
                 )
 
             run_seconds = time.perf_counter() - run_started
@@ -821,7 +829,8 @@ class ValidationService:
             logger.error(_m(error_msg, extra=default_extra))
             return ValidationResult(
                 success=False,
-                error_message=error_msg
+                error_message=error_msg,
+                validator_error=True,
             )
         finally:
             # Always release the per-call verifier object (it held the seal key).

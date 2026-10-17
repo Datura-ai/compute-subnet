@@ -353,7 +353,10 @@ async def _filler_matmul_sample(ctx: Context, specs: dict) -> dict:
 
 def _sample_error_kind(result: ValidationResult) -> str:
     """no_memory: the probe could not allocate VRAM (the filler holds the card), not a wrong
-    answer. Same classification as the scored capability failure."""
+    answer. Same classification as the scored capability failure. An SSH or cipher failure on our
+    side is validator_error, so it never reads like a spoof."""
+    if result.validator_error:
+        return "validator_error"
     template = _failure_template(result)
     if template is Msg.VERIFY_FAILED_VRAM_UNAVAILABLE:
         return "no_memory"
