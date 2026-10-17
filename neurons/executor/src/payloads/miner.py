@@ -17,3 +17,9 @@ class UploadSShKeyPayload(MinerAuthPayload):
 
 class GetPodLogsPaylod(MinerAuthPayload):
     container_name: str
+
+
+class MinerIdentityResponse(BaseModel):
+    miner_hotkey: str
+    nonce: str
+    account_claim: str | None = None
