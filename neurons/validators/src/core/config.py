@@ -398,6 +398,12 @@ class Settings(BaseSettings):
     # `kernel_view_would_ban` is emitted on every banned_provider/banned event; the ban itself is
     # matched on the reported list until this is flipped from a week of clean fleet data.
     KERNEL_GPU_BAN_ENFORCEMENT_ENABLED: bool = Field(env="KERNEL_GPU_BAN_ENFORCEMENT_ENABLED", default=False)
+    # DAH-4546: a node whose GPU UUIDs another miner hotkey reported within the window fails with
+    # GPU_UUID_SEEN_UNDER_OTHER_HOTKEY (DuplicateExecutorCheck). Off = a structured warning only (shadow).
+    CROSS_HOTKEY_GPU_UUID_ENFORCEMENT_ENABLED: bool = Field(
+        env="CROSS_HOTKEY_GPU_UUID_ENFORCEMENT_ENABLED", default=False
+    )
+    CROSS_HOTKEY_GPU_UUID_WINDOW_DAYS: int = Field(env="CROSS_HOTKEY_GPU_UUID_WINDOW_DAYS", default=7)
     # Item 2a — corroborate the advertised CPU(s) count against sources the lscpu wrapper does not
     # author (/proc/cpuinfo, /sys present population, docker NCPU).
     CPU_TRUTH_CHECK_ENABLED: bool = Field(env="CPU_TRUTH_CHECK_ENABLED", default=True)
