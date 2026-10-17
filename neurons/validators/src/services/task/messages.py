@@ -2059,6 +2059,24 @@ class GpuAttestationIdentityMessages:
         remediation="Report the GPUs the host really has: each GPU UUID must stay on the same physical card, "
         "and nothing may intercept NVML or nvidia-smi on the host or in the executor container.",
     )
+    # The fallback for cards that cannot attest: the same card under a new UUID (serial or slots kept).
+    SWAPPED = MessageTemplate(
+        event="GPU UUIDs were swapped: the same cards are reported under new UUIDs",
+        reason="GPU_UUID_SWAPPED",
+        severity="warning",
+        category="policy",
+        impact="Score set to 0 while the finding stands",
+        remediation="Report each GPU under its real UUID; a GPU UUID must not change while the card stays.",
+    )
+    # A UUID whose model, memory or serial changed, or one host listing several models.
+    INCONSISTENT = MessageTemplate(
+        event="GPU details are inconsistent with what this UUID reported before",
+        reason="GPU_IDENTITY_INCONSISTENT",
+        severity="warning",
+        category="policy",
+        impact="Score set to 0 while the finding stands",
+        remediation="Each GPU UUID must keep its model, memory size and serial; a node lists one GPU model.",
+    )
     # Expected on most hosts: NVML only attests Hopper/Blackwell cards in Confidential Computing mode.
     UNAVAILABLE = MessageTemplate(
         event="GPU attestation not available on this node",

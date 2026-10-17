@@ -131,7 +131,7 @@ def test_report_signed_by_a_key_outside_the_chain_is_rejected():
         verify_gpu_evidence(card.pem, _report(card, nonce, signer=ec.generate_private_key(ec.SECP384R1())), nonce, ca.root)
 
 
-def _ctx(context_factory, ca, rows_for, *, gpus=("GPU-a",), redis=None, rented=False):
+def _ctx(context_factory, ca, rows_for, *, gpus=("GPU-a",), redis=None, rented=False, details=None):
     """`rows_for(nonce)` is what the host prints for the validator's nonce (the last arg of the command)."""
 
     async def run(cmd, *args, **kwargs):
@@ -155,7 +155,11 @@ def _ctx(context_factory, ca, rows_for, *, gpus=("GPU-a",), redis=None, rented=F
     )
     services = build_services(redis=redis) if redis is not None else build_services()
     return context_factory(
-        state=build_state(gpu_uuids=",".join(gpus), rented_data=rented_data),
+        state=build_state(
+            gpu_uuids=",".join(gpus),
+            rented_data=rented_data,
+            gpu_details=details if details is not None else [{"uuid": u, "name": "H100", "capacity": 81559} for u in gpus],
+        ),
         ssh=SimpleNamespace(run=run),
         services=services,
         executor=executor,
@@ -260,3 +264,108 @@ def test_host_script_runs_and_reports_no_nvml_as_a_row():
     out = subprocess.run(build_attest_command(b"\x03" * 32), shell=True, capture_output=True, text=True, timeout=30)
     rows = parse_attest_output(out.stdout)
     assert len(rows) == 1 and "error" in rows[0]
+
+
+# --- fallback: NVML serial / VBIOS / PCI slot plus the scrape's model and memory, for cards that cannot attest
+
+
+def _hw(gpu_uuid, serial=None, vbios="96.00.74.00.01", pci=None):
+    return {"uuid": gpu_uuid, "cert_rc": 3, "serial": serial, "vbios": vbios, "pci": pci, "board_part": "900-21010"}
+
+
+async def _twice(context_factory, first, second, **kw):
+    """Run a clean first cycle, then `second`; each is (rows, gpus, details)."""
+    ca = FakeCa()
+    rows, gpus, details = first
+    ctx = _ctx(context_factory, ca, lambda n: rows, gpus=gpus, details=details)
+    assert (await _run(ctx, ca, enforce=True)).passed is True
+    rows, gpus, details = second
+    ctx = _ctx(context_factory, ca, lambda n: rows, gpus=gpus, details=details, redis=ctx.services.redis)
+    return await _run(ctx, ca, **kw)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enforce", [False, True])
+async def test_same_serial_under_a_new_uuid_is_a_swap(context_factory, enforce):
+    result = await _twice(
+        context_factory,
+        ([_hw("GPU-a", serial="1650123456789")], ("GPU-a",), None),
+        ([_hw("GPU-z", serial="1650123456789")], ("GPU-z",), None),
+        enforce=enforce,
+    )
+    assert result.passed is (not enforce)
+    assert result.event.reason_code == Msg.SWAPPED.reason
+    assert result.event.what_we_saw["moved"] == {"GPU-z": "serial_was_under:GPU-a"}
+
+
+@pytest.mark.asyncio
+async def test_every_uuid_new_in_the_same_slots_is_a_swap(context_factory):
+    # consumer cards report no serial: the PCI slots + model set is what stays
+    result = await _twice(
+        context_factory,
+        ([_hw("GPU-a", pci="00000000:17:00.0"), _hw("GPU-b", pci="00000000:65:00.0")], ("GPU-a", "GPU-b"), None),
+        ([_hw("GPU-y", pci="00000000:17:00.0"), _hw("GPU-z", pci="00000000:65:00.0")], ("GPU-y", "GPU-z"), None),
+        enforce=True,
+    )
+    assert result.passed is False
+    assert result.event.reason_code == Msg.SWAPPED.reason
+    assert result.event.what_we_saw["findings"] == ["uuids_changed_same_slots"]
+
+
+@pytest.mark.asyncio
+async def test_replacing_one_failed_card_in_place_is_not_a_swap(context_factory):
+    result = await _twice(
+        context_factory,
+        ([_hw("GPU-a", pci="00000000:17:00.0"), _hw("GPU-b", pci="00000000:65:00.0")], ("GPU-a", "GPU-b"), None),
+        ([_hw("GPU-a", pci="00000000:17:00.0"), _hw("GPU-n", pci="00000000:65:00.0")], ("GPU-a", "GPU-n"), None),
+        enforce=True,
+    )
+    assert result.passed is True
+
+
+@pytest.mark.asyncio
+async def test_one_host_listing_several_models_is_inconsistent(context_factory):
+    ca = FakeCa()
+    gpus = ("GPU-a", "GPU-b", "GPU-c")
+    details = [
+        {"uuid": "GPU-a", "name": "H100", "capacity": 81559},
+        {"uuid": "GPU-b", "name": "A100", "capacity": 81920},
+        {"uuid": "GPU-c", "name": "RTX 4090", "capacity": 24564},
+    ]
+    ctx = _ctx(context_factory, ca, lambda n: [_hw(u) for u in gpus], gpus=gpus, details=details)
+    result = await _run(ctx, ca, enforce=True)
+    assert result.passed is False
+    assert result.event.reason_code == Msg.INCONSISTENT.reason
+    assert result.event.what_we_saw["findings"] == ["mixed_models_one_host"]
+
+
+@pytest.mark.asyncio
+async def test_uuid_changing_model_across_cycles_is_inconsistent(context_factory):
+    result = await _twice(
+        context_factory,
+        ([_hw("GPU-a")], ("GPU-a",), [{"uuid": "GPU-a", "name": "H100", "capacity": 81559}]),
+        ([_hw("GPU-a")], ("GPU-a",), [{"uuid": "GPU-a", "name": "H200", "capacity": 143771}]),
+        enforce=True,
+    )
+    assert result.passed is False
+    assert result.event.reason_code == Msg.INCONSISTENT.reason
+    assert result.event.what_we_saw["hardware_changed"] == {"GPU-a": ["name", "capacity"]}
+
+
+@pytest.mark.asyncio
+async def test_vbios_update_and_ecc_toggle_are_recorded_not_flagged(context_factory):
+    ca = FakeCa()
+    ctx = _ctx(context_factory, ca, lambda n: [_hw("GPU-a", serial="1650123456789")])
+    assert (await _run(ctx, ca, enforce=True)).passed is True
+    redis = ctx.services.redis
+    ctx = _ctx(
+        context_factory,
+        ca,
+        lambda n: [_hw("GPU-a", serial="1650123456789", vbios="96.00.99.00.02")],
+        details=[{"uuid": "GPU-a", "name": "H100", "capacity": 79647}],  # ECC on: ~2.3% less
+        redis=redis,
+    )
+    result = await _run(ctx, ca, enforce=True)
+    assert result.passed is True
+    assert result.event.reason_code == Msg.UNAVAILABLE.reason
+    assert json.loads(await redis.get("gpu_identity:hw:GPU-a"))["vbios"] == "96.00.99.00.02"
