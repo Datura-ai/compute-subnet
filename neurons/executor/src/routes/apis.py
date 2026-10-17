@@ -269,7 +269,7 @@ def _check_miner_binding(payload: UploadSShKeyPayload) -> None:
     """
     own_hotkey = settings.MINER_HOTKEY_SS58_ADDRESS
     if not payload.miner_hotkey or not payload.validator_miner_signature:
-        outcome = "legacy"
+        miner_binding = "legacy"
     else:
         blob = ssh_pubkey_signing_blob(payload.public_key, payload.nonce, payload.miner_hotkey)
         try:
@@ -277,9 +277,9 @@ def _check_miner_binding(payload: UploadSShKeyPayload) -> None:
         except Exception:
             signed = False
         if not signed:
-            outcome = "bad_signature"
+            miner_binding = "bad_signature"
         elif payload.miner_hotkey != own_hotkey:
-            outcome = "mismatch"
+            miner_binding = "mismatch"
         else:
             return
     enforced = settings.REQUIRE_MINER_BOUND_SSH_KEY
@@ -287,7 +287,7 @@ def _check_miner_binding(payload: UploadSShKeyPayload) -> None:
         _m(
             "ssh_key_miner_binding",
             extra={
-                "miner_binding": outcome,
+                "miner_binding": miner_binding,
                 "signed_miner_hotkey": payload.miner_hotkey,
                 "executor_miner_hotkey": own_hotkey,
                 "enforced": enforced,
