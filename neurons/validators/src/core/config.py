@@ -404,6 +404,15 @@ class Settings(BaseSettings):
         env="CROSS_HOTKEY_GPU_UUID_ENFORCEMENT_ENABLED", default=False
     )
     CROSS_HOTKEY_GPU_UUID_WINDOW_DAYS: int = Field(env="CROSS_HOTKEY_GPU_UUID_WINDOW_DAYS", default=7)
+    # Cross-check the reported GPU count and UUIDs against the kernel's GPU list
+    # (/proc/driver/nvidia/gpus, the same read the ban checks make). CHECK_ENABLED evaluates and
+    # logs a verdict every validation (check_id gpu.validate.kernel_count) without changing the
+    # result. ENFORCEMENT_ENABLED makes a kernel list that is present and shorter than the
+    # reported GPU count fail the validation (GPU_KERNEL_COUNT_MISMATCH); a missing kernel list
+    # never fails. Enforcement is off by default: the verdict is logged (enforced=false) and
+    # enforcement goes on by this flag after a review of one day of prod logs (owner, 15 Oct).
+    GPU_KERNEL_COUNT_CHECK_ENABLED: bool = Field(env="GPU_KERNEL_COUNT_CHECK_ENABLED", default=True)
+    GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED: bool = Field(env="GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED", default=False)
     # Item 2a — corroborate the advertised CPU(s) count against sources the lscpu wrapper does not
     # author (/proc/cpuinfo, /sys present population, docker NCPU).
     CPU_TRUTH_CHECK_ENABLED: bool = Field(env="CPU_TRUTH_CHECK_ENABLED", default=True)
@@ -420,6 +429,11 @@ class Settings(BaseSettings):
     # from a real 8-GPU box show what that costs an honest miner.
     MATMUL_ALLCARDS_CHECK_ENABLED: bool = Field(env="MATMUL_ALLCARDS_CHECK_ENABLED", default=False)
     MATMUL_ALLCARDS_ENFORCEMENT_ENABLED: bool = Field(env="MATMUL_ALLCARDS_ENFORCEMENT_ENABLED", default=False)
+    # The sysbox probe container must run in a user namespace (sysbox always uses one); an identity uid map
+    # is logged as SYSBOX_IDENTITY_UID_MAP and, with this on, the node is not counted as running sysbox.
+    SYSBOX_USERNS_ENFORCEMENT_ENABLED: bool = Field(
+        env="SYSBOX_USERNS_ENFORCEMENT_ENABLED", default=False
+    )
     # Item 2b — send the advertised CPU-core count in the rental-verification health check so the
     # host's Docker daemon creates the probe with `--cpus=<advertised>` and rejects a count that
     # exceeds the machine's physical cores (a signal the lscpu wrapper cannot forge, since dockerd
@@ -463,6 +477,12 @@ class Settings(BaseSettings):
     # verified job is cleared, so the backend marks the executor inactive and billing stops. A transport
     # error or timeout decides nothing. Off by default: the pod keeps the plain POD_NOT_RUNNING verdict.
     REBOOT_FAILED_HOST_CHECK_ENABLED: bool = Field(env="REBOOT_FAILED_HOST_CHECK_ENABLED", default=False)
+    # The backend keys rentals by executor UUID, which is the miner's word: a box registered under another
+    # miner's rented UUID would halt as rented (score kept, no matmul). The mismatch is always logged
+    # (RENTED_OWNER_MISMATCH); with this on, such a node is validated as not rented. Off by default.
+    RENTED_OWNER_MISMATCH_ENFORCEMENT_ENABLED: bool = Field(
+        env="RENTED_OWNER_MISMATCH_ENFORCEMENT_ENABLED", default=False
+    )
     # Report a rented node that lost a GPU to the backend from the first cycle that sees it (a possible
     # glitch waits one more); observation only, no score change. Off by default.
     RENTED_GPU_DROP_CHECK_ENABLED: bool = Field(env="RENTED_GPU_DROP_CHECK_ENABLED", default=False)
@@ -551,13 +571,15 @@ class Settings(BaseSettings):
     # runtime quarantine, and the failed step stands in Redis until a probe passes: a later cycle with
     # no verdict of its own (filler running, image gone, inconclusive) fails the node again with it; a
     # rented node is left alone. An idle node with the image pulled is probed again every cycle until
-    # it passes. Off by default:
-    # it rents a container on every idle node every 6 h, so the team turns it on after staging.
-    RENTAL_PROBE_ENABLED: bool = Field(env="RENTAL_PROBE_ENABLED", default=False)
+    # it passes. DAH-4258: on by default, in shadow (enforcement below defaults off). Renters' most common
+    # complaint after GPU faults is a pod they cannot reach (SSH refused, "error connection"), the exact
+    # path this probe walks, and it sat dark in prod. It rents a container on every idle node every 6 h.
+    RENTAL_PROBE_ENABLED: bool = Field(env="RENTAL_PROBE_ENABLED", default=True)
     # Off: shadow mode. The probe runs on the same interval and logs RENTAL_PROBE_FAILED_OBSERVED, but a
-    # failure changes no score, job score or verified job and is not kept as a standing failure. On by
-    # default so a validator that already runs the probe keeps enforcing it.
-    RENTAL_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="RENTAL_PROBE_ENFORCEMENT_ENABLED", default=True)
+    # failure changes no score, job score or verified job and is not kept as a standing failure.
+    # DAH-4258: off by default, so turning the probe on is a shadow run. Enforcing is the owner's call
+    # on the shadow counts; a validator that already enforces sets this explicitly.
+    RENTAL_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="RENTAL_PROBE_ENFORCEMENT_ENABLED", default=False)
     RENTAL_PROBE_INTERVAL_HOURS: float = Field(env="RENTAL_PROBE_INTERVAL_HOURS", default=6.0, gt=0)
     RENTAL_PROBE_SSH_DEADLINE_SECONDS: int = Field(env="RENTAL_PROBE_SSH_DEADLINE_SECONDS", default=90, gt=0)
     # A node whose containers cannot reach the internet passed every check. CHECK runs the rental probe's

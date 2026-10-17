@@ -41,6 +41,7 @@ from .checks import (
     GpuCountCheck,
     GpuFaultProbeCheck,
     GpuFingerprintCheck,
+    GpuKernelCountCheck,
     GpuModelValidCheck,
     GpuPowerLimitCheck,
     GpuThermalThrottleCheck,
@@ -256,6 +257,7 @@ class PipelineFactory:
                 port_public_key=public_key,
                 job_batch_id=miner_info.job_batch_id,
                 first_pass=first_pass and settings.FIRST_PASS_FAST_PATH_ENABLED,
+                express_first_pass=first_pass,
             ),
             state=ContextState(
                 upload_local_dir=encrypted_files.tmp_directory,
@@ -322,6 +324,11 @@ class PipelineFactory:
                 SpecChangeCheck(),
                 BannedProviderCheck(),
                 BannedGpuCheck(),
+                # Reported GPU count and UUIDs against the kernel's list, which BannedProviderCheck
+                # read above. Logs a verdict every cycle; fails the validation only under
+                # GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED. Before the rented short-circuit, so rented
+                # and idle nodes are judged alike.
+                GpuKernelCountCheck(),
                 DuplicateExecutorCheck(),
                 CollateralStatusCheck(),
                 # Reap orphaned (non-rented) rental containers BEFORE the port checks.
@@ -446,6 +453,7 @@ class PipelineFactory:
                 SpecChangeCheck(),
                 BannedProviderCheck(),
                 BannedGpuCheck(),
+                GpuKernelCountCheck(),
                 DuplicateExecutorCheck(),
                 CollateralStatusCheck(),
                 _STALE_CONTAINER_CLEANUP_SINGLETON,
@@ -524,6 +532,7 @@ class PipelineFactory:
                 SpecChangeCheck(),
                 BannedProviderCheck(),
                 BannedGpuCheck(),
+                GpuKernelCountCheck(),
                 DuplicateExecutorCheck(),
                 CollateralStatusCheck(),
                 # StaleContainerCleanupCheck(),  # SKIP: removes containers on the executor
