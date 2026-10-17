@@ -106,6 +106,10 @@ _CREATE_DEADLINE_SECONDS = 300
 # the idleness re-read runs under the per-executor create lock; the lock's TTL (redis_service.py) covers
 # this budget plus the create deadline, so a re-read that overruns it gives the lock back instead
 _IDLENESS_REREAD_BUDGET_SECONDS = 30
+# the executor task is cancelled at JOB_TIME_OUT - 120 (miner_service), and a cancel there drops the
+# miner's whole result; a probe starts only while a stuck create plus a usual teardown still fit
+_MIN_TASK_SECONDS_LEFT = _CREATE_DEADLINE_SECONDS + 60
+_TASK_TIMEOUT_MARGIN_SECONDS = 120
 # the outer cap on delete_container (DAH-3467, review): a stop with its 30 s grace, a `rm -f` that
 # outlives the Docker SDK's 60 s read timeout, the 60 s inspect window plus one 15 s inspect past
 # it, and six "volume is in use" retries 5 s apart come to about 190 s on the inspect-confirmed
@@ -502,6 +506,11 @@ async def _skip_reason(ctx: Context) -> tuple[str | None, dict[str, Any]]:
     if ctx.config.express_first_pass and not settings.RENTAL_PROBE_ENFORCEMENT_ENABLED:
         # a shadow verdict cannot fail the node, so the container create waits for the next cycle
         return "first pass", {}
+    task_seconds_left = (
+        settings.JOB_TIME_OUT - _TASK_TIMEOUT_MARGIN_SECONDS - (time.monotonic() - ctx.started_at_monotonic)
+    )
+    if task_seconds_left < _MIN_TASK_SECONDS_LEFT:
+        return "too little cycle time left", {"task_seconds_left": int(task_seconds_left)}
 
     try:
         last_ok = await _last_ok_at(ctx)

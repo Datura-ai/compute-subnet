@@ -83,6 +83,7 @@ def probe_settings(
         s.RENTAL_PROBE_SSH_DEADLINE_SECONDS = deadline
         s.NO_OUTBOUND_INTERNET_CHECK_ENABLED = egress_check
         s.NO_OUTBOUND_INTERNET_ENFORCEMENT_ENABLED = egress_enforced
+        s.JOB_TIME_OUT = 60 * 15
         yield s
 
 
@@ -443,6 +444,16 @@ async def test_first_pass_in_shadow_creates_nothing():
         result = await RentalProbeCheck().run(ctx)
     assert result.passed and result.event.reason_code == Msg.SKIPPED.reason
     assert result.event.what_we_saw["reason"] == "first pass"
+    assert docker.create_calls == []
+
+
+@pytest.mark.asyncio
+async def test_late_in_the_cycle_creates_nothing():
+    ctx, docker, _ = make_probe_context()
+    late = ctx.model_copy(update={"started_at_monotonic": time.monotonic() - 500})
+    result = await RentalProbeCheck().run(late)
+    assert result.passed and result.event.reason_code == Msg.SKIPPED.reason
+    assert result.event.what_we_saw["reason"] == "too little cycle time left"
     assert docker.create_calls == []
 
 
