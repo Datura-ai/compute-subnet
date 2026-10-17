@@ -141,12 +141,19 @@ def test_other_volume_writes_and_memory_writes_count():
             "pid": 4242,
             "parent": {"binary": "/usr/bin/bash", "pid": 4200},
         },
+        # an empty binary is only the unresolved copy-up when the parent is absent too
+        {
+            **_overlay_write(f"{VOLUME}/.profile"),
+            "binary": "",
+            "pid": 4243,
+            "parent": {"binary": "/usr/bin/bash", "pid": 4200},
+        },
         {**DMI_CLOAK_CP, "kind": "ProcFsWrite", "command": "procfs mem"},
         {**DMI_CLOAK_CP, "kind": "ProcessMemoryWrite", "command": "process_vm_writev"},
         # a write into a pod that is not rented here is not this rental's
         {**DMI_CLOAK_CP, "container": "pod_other", "docker": {"resolved_name": "pod_other"}},
     ]
-    assert host_write_findings(findings, ["pod-1"]) == findings[:5]
+    assert host_write_findings(findings, ["pod-1"]) == findings[:6]
 
 
 # shaped like provider 5ED8Byct's host bash loop (fleet sweep, 15,817 findings since 8 Oct)

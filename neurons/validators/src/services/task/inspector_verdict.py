@@ -347,16 +347,18 @@ def build_verdict(
 # create flow mounts `volume_<pod>` on the home dir): a write of these at the volume's top level is
 # Docker populating it, not a provider writing into the rental. The sensor drops dockerd itself, so
 # on 16 Oct the copy-ups arrived attributed to the host's init (pid 1, parent `<kernel>`) or to an
-# unresolved process (empty binary); a host shell editing `.bashrc` has neither shape and counts.
+# unresolved process (empty binary, no parent); a host shell editing `.bashrc` has neither shape
+# and counts.
 _VOLUME_COPY_UP_FILES = frozenset({".bashrc", ".profile"})
 
 
 def _is_volume_copy_up(finding: dict[str, Any]) -> bool:
-    parent = finding.get("parent") or {}
+    parent = finding.get("parent")
     writer_is_init = (
         finding.get("pid") == 1 and isinstance(parent, dict) and parent.get("binary") == "<kernel>"
     )
-    if finding.get("binary") and not writer_is_init:
+    writer_is_unresolved = not finding.get("binary") and not parent
+    if not (writer_is_init or writer_is_unresolved):
         return False
     path = str(finding.get("command") or "")
     segments = [segment for segment in path.split("/") if segment]
