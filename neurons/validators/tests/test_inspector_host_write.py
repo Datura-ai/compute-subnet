@@ -138,3 +138,31 @@ def test_other_volume_writes_and_memory_writes_count():
         {**DMI_CLOAK_CP, "container": "pod_other", "docker": {"resolved_name": "pod_other"}},
     ]
     assert host_write_findings(findings, ["pod-1"]) == findings[:3]
+
+
+# shaped like provider 5ED8Byct's host bash loop (fleet sweep, 15,817 findings since 8 Oct)
+HOST_DOCKER_UPDATE = {
+    **ARCHIVE_PUT,
+    "kind": "DockerUpdate",
+    "command": f"POST /v1.56/containers/{CTR_ID}/update",
+}
+EXECUTOR_DOCKER_UPDATE = {
+    **HOST_DOCKER_UPDATE,
+    "host": False,
+    "tags": ["tamper:docker-sock-write", "nested_from:executor-executor-1"],
+}
+
+
+@pytest.mark.asyncio
+async def test_host_docker_update_of_a_rented_pod_fails_when_on_logs_when_off(context_factory, monkeypatch, caplog):
+    with caplog.at_level(logging.WARNING, logger=inspector.logger.name):
+        off = await _run(context_factory, [HOST_DOCKER_UPDATE])
+    assert off.passed is True and "inspector_host_write_passed" not in off.updates
+    assert [log["enforced"] for log in _host_write_logs(caplog)] == [False]
+
+    monkeypatch.setattr(inspector.settings, "INSPECTOR_HOST_WRITE_ENFORCEMENT_ENABLED", True)
+    on = await _run(context_factory, [HOST_DOCKER_UPDATE])
+    assert on.passed is False and on.updates["inspector_host_write_passed"] is False
+
+    executor = await _run(context_factory, [EXECUTOR_DOCKER_UPDATE])
+    assert executor.passed is True and "inspector_host_write_passed" not in executor.updates

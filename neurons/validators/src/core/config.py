@@ -284,7 +284,7 @@ class Settings(BaseSettings):
         env="INSPECTOR_BLIND_STREAK_ENFORCEMENT_ENABLED", default=False
     )
     # DAH-4548: on, a host process writing into a rented pod (docker cp in, archive PUT, a volume
-    # write other than Docker's copy-up, a memory write) fails the Inspector check and zeroes the
+    # write other than Docker's copy-up, a memory write, a docker update) fails the Inspector check and zeroes the
     # score. Off: unchanged, logged as INSPECTOR_HOST_WRITE with enforced=false.
     INSPECTOR_HOST_WRITE_ENFORCEMENT_ENABLED: bool = Field(
         env="INSPECTOR_HOST_WRITE_ENFORCEMENT_ENABLED", default=False

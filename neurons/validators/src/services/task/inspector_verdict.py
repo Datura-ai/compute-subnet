@@ -384,7 +384,7 @@ def host_write_findings(
 ) -> list[dict[str, Any]]:
     """The provider findings in which the host wrote into a rented pod (DAH-4548): a `docker cp`
     into it, an archive PUT, a write on its volume other than Docker's copy-up, a write into its
-    processes' memory. `provider_findings` already excludes the platform's own (the executor's
+    processes' memory, a `docker update` of it. `provider_findings` already excludes the platform's own (the executor's
     `docker cp` for restores and key injection carry its ancestry; the scheduled Lium execs are
     suppressed at the sensor); anything with the executor's ancestry is dropped here too."""
     rented = set(rented_pod_ids)
@@ -401,7 +401,8 @@ def host_write_findings(
         elif kind == "OverlayFsWrite":
             hit = not _is_volume_copy_up(str(finding.get("command") or ""))
         else:
-            hit = kind == "ProcessMemoryWrite"
+            # DockerUpdate: the host changing a rented pod's limits (CLI or POST …/update)
+            hit = kind in ("ProcessMemoryWrite", "DockerUpdate")
         if hit:
             writes.append(finding)
     return writes
