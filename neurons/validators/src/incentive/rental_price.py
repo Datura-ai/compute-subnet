@@ -1110,6 +1110,21 @@ class RentalPriceIncentive(DefaultIncentive):
         job_result.spot_pay_candidate = True
         return job_result
 
+    @staticmethod
+    def _qualify_spot_node_by_the_secure_decision(job_result: JobResult) -> JobResult:
+        """A spot node that a secure node in its place would be paid for is paid, whether or
+        not a Lium filler runs on it; only the amount differs (_price_spot_node). One a secure node
+        would not be paid for takes the unrented not-paid path in calculate_executor_score."""
+        job_result.eligible_for_rental_share = False
+        job_result.mining_score = 0
+        if job_result.filler_revenue_per_gpu_hour is None:
+            job_result.record_incentive_log(
+                MinerLogLine.no_payout_because_spot_no_filler_revenue_for_gpu_config(job_result)
+            )
+            return job_result
+        job_result.spot_pay_candidate = True
+        return job_result
+
     def _price_spot_node(self, result: JobResult) -> None:
         """Spot rate per GPU = min(FILLER_REVENUE_PAY_FACTOR x filler average, the secure rate for this node).
 
@@ -1227,7 +1242,8 @@ class RentalPriceIncentive(DefaultIncentive):
             logger.info(exclusion.to_internal_log())
             job_result.record_incentive_log(exclusion)
         excluded_from_both_pools: bool = excluded_for_outdated_image or bool(exclusions)
-        if self._on_spot_pay_path(job_result):
+        on_spot_pay_path: bool = self._on_spot_pay_path(job_result)
+        if on_spot_pay_path and not settings.SPOT_IDLE_PAY_SECURE_DECISION_ENABLED:
             return self._qualify_spot_node(job_result, excluded_from_both_pools)
         if excluded_from_both_pools and job_result.gpu_model not in BASE_GPU_MAP:
             # get_base_model_for_gpu raises on a model it does not know, and nothing above this
@@ -1349,6 +1365,8 @@ class RentalPriceIncentive(DefaultIncentive):
                 1.0 if job_result.sysbox_runtime else 1 - settings.PORTION_FOR_SYSBOX_UNRENTED,
             )
 
+        if on_spot_pay_path and eligible_for_rental_share:
+            return self._qualify_spot_node_by_the_secure_decision(job_result)
         job_result.eligible_for_rental_share = eligible_for_rental_share
         if job_result.eligible_for_rental_share:
             # NOT a penalty: an unrented executor of an eligible GPU model is intentionally

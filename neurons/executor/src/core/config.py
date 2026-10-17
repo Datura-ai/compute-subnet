@@ -81,6 +81,8 @@ class Settings(BaseSettings):
     SSH_PUBLIC_PORT: Optional[int] = Field(env="SSH_PUBLIC_PORT", default=None)
 
     MINER_HOTKEY_SS58_ADDRESS: str = Field(env="MINER_HOTKEY_SS58_ADDRESS")
+    # `lium mine --register` writes the portal account's claim here; the portal requires it of a pool-hotkey node
+    MINER_ACCOUNT_CLAIM: Optional[str] = Field(env="MINER_ACCOUNT_CLAIM", default=None)
     DEFAULT_MINER_HOTKEY: str = Field(
         env="DEFAULT_MINER_HOTKEY",
         default="5D4jX4TqUkZwNwKAjjYrbk2FHFNN2U1TgFF6ZMuNPnjnKJVU"

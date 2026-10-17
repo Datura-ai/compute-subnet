@@ -23,7 +23,7 @@ from services.hardware_service import get_docker_client, get_system_metrics, get
 from services.update_status_service import ExpectedDigestCache, collect_update_status
 from core.config import settings
 
-from payloads.miner import UploadSShKeyPayload, GetPodLogsPaylod
+from payloads.miner import UploadSShKeyPayload, GetPodLogsPaylod, MinerIdentityResponse
 from payloads.backend import ContainerUtilizationPayload, SignaturePayload
 from payloads.verify import CAPABILITY as LOCAL_VERIFY_CAPABILITY, VerifyIntent
 from dependencies.auth import (
@@ -392,6 +392,32 @@ async def get_version():
     if settings.EXECUTOR_LOCAL_VERIFY_ENABLED:
         version["local_verify_port"] = settings.INTERNAL_PORT
     return version
+
+
+# A hex nonce of 16 to 64 bytes: long enough that an answer cannot be prepared before the request,
+# short enough that the echo stays small.
+MINER_IDENTITY_NONCE_PATTERN = r"^[0-9a-fA-F]{32,128}$"
+
+
+@apis_router.get("/miner-identity", response_model_exclude_none=True)
+async def get_miner_identity(
+    nonce: Annotated[str, Query(pattern=MINER_IDENTITY_NONCE_PATTERN)],
+) -> MinerIdentityResponse:
+    """
+    The miner hotkey this executor is configured for (`MINER_HOTKEY_SS58_ADDRESS`), with the
+    caller's nonce echoed back so the answer belongs to this request. Lets a service that is about
+    to list this executor under an account confirm that the machine at this address is set up for
+    that account's hotkey. Public: the hotkey is public on chain.
+
+    With `MINER_ACCOUNT_CLAIM` set (`lium mine --register` writes it), the answer also carries it as
+    `account_claim`: every node of an e-mail or Google portal account reports the same pool hotkey, so
+    the claim is what ties the node to the account that installed it. It is not a secret.
+    """
+    return MinerIdentityResponse(
+        miner_hotkey=settings.MINER_HOTKEY_SS58_ADDRESS,
+        nonce=nonce,
+        account_claim=settings.MINER_ACCOUNT_CLAIM or None,
+    )
 
 
 def _is_loopback_client(request: Request) -> bool:

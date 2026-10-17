@@ -12,6 +12,7 @@ import bittensor
 import pytest
 
 from models.executor import Executor
+from protocol.miner_portal_request import DeleteExecutorRequest, ExecutorDeleted, SyncExecutorPayload
 from services.executor_service import ExecutorService
 
 
@@ -120,3 +121,29 @@ async def test_send_pubkey_to_executor_includes_validator_signature(
 # ---------------------------------------------------------------------------
 
 
+def _payload(test_executor):
+    return SyncExecutorPayload(
+        uuid=test_executor.uuid,
+        validator=test_executor.validator,
+        address=test_executor.address,
+        port=test_executor.port,
+        price_per_gpu=0.5,
+    )
+
+
+# ---------------------------------------------------------------------------
+# A portal delete removes only the node it names (ticket-0591)
+# ---------------------------------------------------------------------------
+
+
+def test_delete_removes_the_named_node_not_another_at_its_address(executor_service, test_executor):
+    dao = executor_service.executor_dao
+    dao.delete_by_uuid.return_value = False
+
+    payload = _payload(test_executor)
+
+    result = executor_service.delete(DeleteExecutorRequest(executor=payload))
+
+    assert isinstance(result, ExecutorDeleted)
+    dao.delete_by_uuid.assert_called_once_with(payload.uuid)
+    dao.delete_by_address_port.assert_not_called()

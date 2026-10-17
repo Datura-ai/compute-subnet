@@ -24,6 +24,7 @@ from fastapi import HTTPException
 
 import consumers.validator_consumer as consumer_module
 import dependencies.auth as auth_module
+import routes.validator_interface as routes
 from consumers.validator_consumer import ValidatorConsumer
 from services.executor_service import ExecutorService
 from services.ssh_service import MinerSSHService
@@ -208,3 +209,29 @@ async def test_rest_headers_naming_another_miner_are_refused_403(
     assert refused.value.detail == "Authentication names another miner"
 
 
+def _dependency_names(dependant) -> set[str]:
+    names = {dependant.call.__name__} if dependant.call is not None else set()
+    for sub in dependant.dependencies:
+        names |= _dependency_names(sub)
+    return names
+
+
+def test_the_three_rest_routes_are_wired_to_the_miner_binding():
+    """FastAPI resolves both dependencies on each route: the signed headers and the miner hotkey they named."""
+    from fastapi.routing import APIRoute
+
+    wanted = {
+        "/api/validator/ssh-pubkey-submit",
+        "/api/validator/ssh-pubkey-remove",
+        "/api/validator/pod-logs",
+    }
+    seen = set()
+    for route in routes.validator_router.routes:
+        if isinstance(route, APIRoute) and route.path in wanted:
+            names = _dependency_names(route.dependant)
+            assert {"verify_validator_auth_from_headers", "authenticated_miner_hotkey"} <= names, (
+                route.path,
+                names,
+            )
+            seen.add(route.path)
+    assert seen == wanted
