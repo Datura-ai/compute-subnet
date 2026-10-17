@@ -137,6 +137,33 @@ async def test_a_rented_node_whose_card_reads_clean_again_stays_hidden_but_keeps
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "pods, fatal", [pytest.param((), True, id="idle"), pytest.param((4,), False, id="rented")]
+)
+async def test_an_nvml_loss_code_over_a_full_card_list_is_fatal_on_an_idle_node(
+    context_factory, pods, fatal
+):
+    redis = FakeRedis()
+
+    # every card is listed, so no later GPU check fails this cycle
+    result = await _cycle(context_factory, redis, pods=pods, scrape_error="NVMLError(999)")
+
+    assert not result.passed and _hidden(result) and _fatal(result) is fatal
+
+
+@pytest.mark.asyncio
+async def test_old_marks_without_since_still_hold(context_factory):
+    redis = FakeRedis()
+    ctx = _ctx(context_factory, redis, pods=())
+    old = {"held": True, "last_seen": "2026-10-17T00:00:00+00:00"}
+    redis.store[gpu_loss_hold._key(ctx)] = json.dumps(old)
+
+    result = await GpuLossHoldCheck().run(ctx)
+
+    assert not result.passed and _fatal(result) and result.event.what_we_saw["since"]
+
+
+@pytest.mark.asyncio
 async def test_after_the_rental_ends_the_held_node_fails_at_once(context_factory):
     redis = FakeRedis()
     await _cycle(context_factory, redis, **LOST_CARD)
@@ -233,7 +260,7 @@ async def test_another_miners_rental_on_the_same_uuid_does_not_shield_or_hold_th
     # the rental belongs to another hotkey, so this miner's node counts as idle and fails
     result = await _cycle(context_factory, redis, owner="another-hotkey")
 
-    assert _hidden(result)
+    assert _hidden(result) and _fatal(result)
     assert all(key.startswith("gpu_loss_hold:miner-hotkey:") for key in redis.store)
 
 
@@ -269,6 +296,20 @@ def test_gpu_lost_entries_do_not_count_toward_our_own_outage():
 
     assert silence_availability_errors_on_our_own_outage(results) == 0
     assert all(result.availability_errors == lost for result in results)
+
+
+def test_our_own_outage_keeps_gpu_lost_entries():
+    ssh = {
+        "reason_code": "EXECUTOR_SSH_UNREACHABLE",
+        "reach_source": "validator",
+        "reach_target": "ssh",
+    }
+    lost = {"reason_code": "GPU_LOST", "reach_source": "validator", "reach_target": "gpu"}
+    results = [JobResult.model_construct(availability_errors=[ssh]) for _ in range(9)]
+    results.append(JobResult.model_construct(availability_errors=[ssh, lost]))
+
+    assert silence_availability_errors_on_our_own_outage(results) == 10
+    assert [r.availability_errors for r in results] == [None] * 9 + [[lost]]
 
 
 @pytest.mark.parametrize(

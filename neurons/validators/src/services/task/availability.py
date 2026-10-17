@@ -244,5 +244,11 @@ def silence_availability_errors_on_our_own_outage(job_results: list[JobResult]) 
         return 0
     for result in checked_results:
         # None means "this cycle did not check": the backend leaves the stored errors alone.
-        result.availability_errors = None
+        # A lost GPU is still the node's own fault, so its entry stays and the node stays hidden.
+        lost = [
+            error
+            for error in result.availability_errors or []
+            if error.get("reason_code") == AvailabilityErrorCode.GPU_LOST
+        ]
+        result.availability_errors = lost or None
     return len(checked_results)

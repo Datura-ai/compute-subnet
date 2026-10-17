@@ -13,7 +13,8 @@ the node and refuses new rentals, and leaves `active`, billing and a rental alre
 cycle after the hold ran out carries none, and the node is listed again.
 
 The check's own verdict: a cycle that shows the fault goes on (the fatal GPU checks after it judge it as before,
-verification reset included). A clean cycle inside the hold fails: fatally on an idle node; not under a live
+verification reset included), except an NVML loss code over a full card list, which no later check fails: that is
+fatal here on an idle node. A clean cycle inside the hold fails: fatally on an idle node; not under a live
 rental, as BannedGpuCheck, so the renter's pod keeps being verified and billed.
 
 The hold is keyed by miner hotkey and executor UUID (the UUID is the miner's word, so one miner cannot hold another's
@@ -25,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from services.redis_service import GPU_ANCHOR_KEY
@@ -36,9 +38,9 @@ from ..availability import ReachSource, ReachTarget
 from ..messages import GpuLossHoldMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
-from .banned_provider import has_live_rental
 from .gpu_fingerprint import split_uuids
 from .rented_gpu_drop import (
+    FAULT_NVML_ERROR,
     GPU_DROP_REDIS_ERRORS,
     GpuDrop,
     _listed_uuids,
@@ -57,13 +59,37 @@ def _key(ctx: Context) -> str:
     return f"{GPU_LOSS_HOLD_KEY_PREFIX}:{ctx.miner_hotkey}:{ctx.executor.uuid}"
 
 
-def judge_scrape(ctx: Context) -> GpuDrop | None:
-    """The GPU fault this cycle's scrape shows, judged as RentedGpuDropCheck judges a rented node."""
+@dataclass(frozen=True)
+class DropMark:
+    """The hold as kept in Redis; stored as {"held", "since", "last_seen"}."""
+
+    is_held: bool
+    since: str
+    last_seen: str
+
+    @classmethod
+    def load(cls, raw: object) -> DropMark | None:
+        loaded = json.loads(raw) if raw else None
+        if not isinstance(loaded, dict) or not loaded.get("last_seen"):
+            return None
+        last_seen = loaded["last_seen"]
+        return cls(bool(loaded.get("held")), loaded.get("since") or last_seen, last_seen)
+
+    def dump(self) -> str:
+        return json.dumps({"held": self.is_held, "since": self.since, "last_seen": self.last_seen})
+
+
+def rented_pods(ctx: Context) -> list:
+    """This miner's pods on the executor; a rental under another hotkey is not this node's."""
     rented_data = ctx.state.rented_data
     rented = rented_data.executors.get(ctx.executor.uuid) if rented_data else None
-    pods = (
-        list(rented.pods) if rented is not None and rented.miner_hotkey == ctx.miner_hotkey else []
-    )
+    if rented is None or rented.miner_hotkey != ctx.miner_hotkey:
+        return []
+    return list(rented.pods)
+
+
+def judge_scrape(ctx: Context, pods: list) -> GpuDrop | None:
+    """The GPU fault this cycle's scrape shows, judged as RentedGpuDropCheck judges a rented node."""
     specs = ctx.state.specs or {}
     gpu_details = list(ctx.state.gpu_details or [])
     nvml_count = ctx.state.gpu_count
@@ -90,26 +116,27 @@ class GpuLossHoldCheck:
     fatal = True
 
     async def run(self, ctx: Context) -> CheckResult:
-        drop = judge_scrape(ctx)
+        pods = rented_pods(ctx)
+        drop = judge_scrape(ctx, pods)
         key = _key(ctx)
-        mark: dict | None = None
+        mark: DropMark | None = None
         try:
-            raw = await ctx.services.redis.get(key)
-            loaded = json.loads(raw) if raw else None
-            mark = loaded if isinstance(loaded, dict) and loaded.get("last_seen") else None
+            mark = DropMark.load(await ctx.services.redis.get(key))
         except (*GPU_DROP_REDIS_ERRORS, TypeError, ValueError):
             self._log_redis_unavailable(ctx, "read")
         now = datetime.now(UTC)
 
         if drop is not None:
-            held = bool(mark) or not drop.confirm_first
-            mark = {
-                "held": held,
-                "since": (mark or {}).get("since") or now.isoformat(),
-                "last_seen": now.isoformat(),
-            }
+            mark = DropMark(
+                is_held=mark is not None or not drop.confirm_first,
+                since=mark.since if mark else now.isoformat(),
+                last_seen=now.isoformat(),
+            )
             await self._save(
-                ctx, key, mark, settings.GPU_LOSS_HOLD_SECONDS if held else GPU_LOSS_CONFIRM_SECONDS
+                ctx,
+                key,
+                mark,
+                settings.GPU_LOSS_HOLD_SECONDS if mark.is_held else GPU_LOSS_CONFIRM_SECONDS,
             )
             what = {
                 "faults": drop.faults,
@@ -118,26 +145,28 @@ class GpuLossHoldCheck:
                 "expected_gpu_count": drop.expected,
                 "visible_gpu_count": drop.visible,
             }
-            if not held:
+            if not mark.is_held:
                 event = render_message(Msg.PENDING, ctx=ctx, check_id=self.check_id, what=what)
                 return CheckResult(passed=True, event=event)
-            # the fatal GPU checks after this one judge the faulty scrape itself, as before
-            return self._lost(ctx, mark, what, fatal=False)
+            # the fatal GPU checks after this one judge the faulty scrape itself, as before; an NVML
+            # loss code over a full card list fails none of them, so on an idle node it is fatal here
+            nvml_only = drop.faults == [FAULT_NVML_ERROR]
+            return self._lost(ctx, mark, what, fatal=nvml_only and not pods)
 
         if mark is None:
             return CheckResult(
                 passed=True, event=render_message(Msg.OK, ctx=ctx, check_id=self.check_id)
             )
-        if not mark.get("held"):
+        if not mark.is_held:
             # a weak sighting the next cycle did not confirm
             await self._forget(ctx, key)
             return CheckResult(
                 passed=True, event=render_message(Msg.OK, ctx=ctx, check_id=self.check_id)
             )
-        return self._lost(ctx, mark, {"faults": []}, fatal=not has_live_rental(ctx))
+        return self._lost(ctx, mark, {"faults": []}, fatal=not pods)
 
-    def _lost(self, ctx: Context, mark: dict, what: dict, *, fatal: bool) -> CheckResult:
-        last_seen = datetime.fromisoformat(mark["last_seen"])
+    def _lost(self, ctx: Context, mark: DropMark, what: dict, *, fatal: bool) -> CheckResult:
+        last_seen = datetime.fromisoformat(mark.last_seen)
         event = render_message(
             Msg.LOST,
             ctx=ctx,
@@ -147,8 +176,8 @@ class GpuLossHoldCheck:
                 "reach_target": str(ReachTarget.GPU),
                 "executor_uuid": ctx.executor.uuid,
                 **what,
-                "since": mark["since"],
-                "last_seen": mark["last_seen"],
+                "since": mark.since,
+                "last_seen": mark.last_seen,
                 "hold_until": (
                     last_seen + timedelta(seconds=settings.GPU_LOSS_HOLD_SECONDS)
                 ).isoformat(),
@@ -156,12 +185,12 @@ class GpuLossHoldCheck:
         )
         return CheckResult(passed=False, event=event, fatal=fatal)
 
-    async def _save(self, ctx: Context, key: str, mark: dict, ttl: int) -> None:
+    async def _save(self, ctx: Context, key: str, mark: DropMark, ttl: int) -> None:
         # A dry run shares Redis with the live validator, so it leaves the live hold alone.
         if settings.DRY_RUN:
             return
         try:
-            await ctx.services.redis.set(key, json.dumps(mark), ex=ttl)
+            await ctx.services.redis.set(key, mark.dump(), ex=ttl)
         except GPU_DROP_REDIS_ERRORS:
             self._log_redis_unavailable(ctx, "write")
 
