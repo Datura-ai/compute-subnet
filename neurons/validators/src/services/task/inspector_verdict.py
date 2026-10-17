@@ -344,12 +344,21 @@ def build_verdict(
 
 
 # Docker's copy-up of the image's home files into a freshly created, empty volume (the container
-# create flow mounts `volume_<pod>` on the home dir): a host write of these at the volume's top
-# level is Docker populating it, not a provider writing into the rental.
+# create flow mounts `volume_<pod>` on the home dir): a write of these at the volume's top level is
+# Docker populating it, not a provider writing into the rental. The sensor drops dockerd itself, so
+# on 16 Oct the copy-ups arrived attributed to the host's init (pid 1, parent `<kernel>`) or to an
+# unresolved process (empty binary); a host shell editing `.bashrc` has neither shape and counts.
 _VOLUME_COPY_UP_FILES = frozenset({".bashrc", ".profile"})
 
 
-def _is_volume_copy_up(path: str) -> bool:
+def _is_volume_copy_up(finding: dict[str, Any]) -> bool:
+    parent = finding.get("parent") or {}
+    writer_is_init = (
+        finding.get("pid") == 1 and isinstance(parent, dict) and parent.get("binary") == "<kernel>"
+    )
+    if finding.get("binary") and not writer_is_init:
+        return False
+    path = str(finding.get("command") or "")
     segments = [segment for segment in path.split("/") if segment]
     for index, segment in enumerate(segments[:-1]):
         if segment in ("volumes", "propagated-mount"):
@@ -399,10 +408,11 @@ def host_write_findings(
         if kind in ("DockerCp", "DockerSocketWrite"):
             hit = _is_copy_into_container(finding)
         elif kind == "OverlayFsWrite":
-            hit = not _is_volume_copy_up(str(finding.get("command") or ""))
+            hit = not _is_volume_copy_up(finding)
         else:
+            # ProcFsWrite: a `/proc/<pid>/mem` write (`procfs mem`);
             # DockerUpdate: the host changing a rented pod's limits (CLI or POST …/update)
-            hit = kind in ("ProcessMemoryWrite", "DockerUpdate")
+            hit = kind in ("ProcessMemoryWrite", "ProcFsWrite", "DockerUpdate")
         if hit:
             writes.append(finding)
     return writes

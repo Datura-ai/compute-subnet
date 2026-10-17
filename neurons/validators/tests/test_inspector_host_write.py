@@ -50,15 +50,17 @@ VOLUME = "/var/lib/docker/plugins/9f1c/propagated-mount/volume_pod-1"
 
 
 def _overlay_write(path):
+    # the writer the 16 Oct copy-ups carried: the host's init, parent <kernel>
     return {
         "category": "RuntimeInterference",
         "kind": "OverlayFsWrite",
         "severity": "critical",
         "command": path,
-        "binary": "/usr/bin/dockerd",
-        "pid": 900,
+        "binary": "/usr/bin/bash",
+        "pid": 1,
+        "cwd": "/root/executor",
         "container": None,
-        "parent": {"binary": "/usr/lib/systemd/systemd", "pid": 1},
+        "parent": {"binary": "<kernel>", "pid": 0},
         "host": True,
         "policy": "tamper-fs",
         "tags": ["tamper:fs", "rental_volume"],
@@ -115,6 +117,7 @@ async def test_host_copy_with_the_flag_off_is_only_logged(context_factory, caplo
         _overlay_write(f"{VOLUME}/.bashrc"),
         _overlay_write(f"{VOLUME}/.profile"),
         _overlay_write("/var/lib/docker/volumes/volume_pod-1/_data/.bashrc"),
+        {**_overlay_write(f"{VOLUME}/.profile"), "binary": "", "pid": 16377, "parent": None},
     ],
 )
 async def test_platform_copy_copy_out_and_volume_copy_up_pass(context_factory, monkeypatch, caplog, finding):
@@ -129,15 +132,21 @@ async def test_platform_copy_copy_out_and_volume_copy_up_pass(context_factory, m
 
 
 def test_other_volume_writes_and_memory_writes_count():
-    memory = {**DMI_CLOAK_CP, "kind": "ProcessMemoryWrite", "command": "/proc/123/mem"}
     findings = [
         _overlay_write(f"{VOLUME}/workspace/.bashrc"),
         _overlay_write(f"{VOLUME}/train.py"),
-        memory,
+        # a host shell editing the renter's .bashrc is not Docker's copy-up
+        {
+            **_overlay_write(f"{VOLUME}/.bashrc"),
+            "pid": 4242,
+            "parent": {"binary": "/usr/bin/bash", "pid": 4200},
+        },
+        {**DMI_CLOAK_CP, "kind": "ProcFsWrite", "command": "procfs mem"},
+        {**DMI_CLOAK_CP, "kind": "ProcessMemoryWrite", "command": "process_vm_writev"},
         # a write into a pod that is not rented here is not this rental's
         {**DMI_CLOAK_CP, "container": "pod_other", "docker": {"resolved_name": "pod_other"}},
     ]
-    assert host_write_findings(findings, ["pod-1"]) == findings[:3]
+    assert host_write_findings(findings, ["pod-1"]) == findings[:5]
 
 
 # shaped like provider 5ED8Byct's host bash loop (fleet sweep, 15,817 findings since 8 Oct)
