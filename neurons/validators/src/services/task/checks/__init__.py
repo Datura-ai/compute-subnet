@@ -33,6 +33,7 @@ from .rented_gpu_drop import RentedGpuDropCheck
 from .rented_machine import TenantEnforcementCheck
 from .score import ScoreCheck
 from .spec_change import SpecChangeCheck
+from .sshd_bootstrap import SshdBootstrapCheck
 from .stale_container_cleanup import StaleContainerCleanupCheck
 from .start_gpu_monitor import StartGPUMonitorCheck
 from .sysbox_required import SysboxRequiredCheck
@@ -80,6 +81,7 @@ __all__ = [
     "StartGPUMonitorCheck",
     "SysboxRequiredCheck",
     "SpecChangeCheck",
+    "SshdBootstrapCheck",
     "UploadFilesCheck",
     "VerifyXCheck",
 ]

@@ -2093,3 +2093,40 @@ class LocalVerifyMessages:
         category="transport",
         impact="The matmul and VerifyX verdicts below come from the executor's local run, judged by the validator",
     )
+
+
+SSHD_BOOTSTRAP_REMEDIATION = (
+    "sshd does not start inside containers on this node, so renters cannot SSH in. Common cause: the host's "
+    "container runtime leaves /run/sshd not owned by root or group/world-writable (sshd refuses to start: "
+    "\"/run/sshd must be owned by root and not group or world-writable\"). Fix the runtime/image setup so "
+    "a fresh container gets a root-owned /run/sshd with mode 755, then check that `docker run --rm ubuntu sh -c "
+    "'apt-get update -qq && apt-get install -y -qq openssh-server && mkdir -p /run/sshd && /usr/sbin/sshd -t'` "
+    "succeeds. The node is validated again once a new container on it starts sshd."
+)
+
+
+class SshdBootstrapMessages:
+    FAILED = MessageTemplate(
+        event="sshd does not start in containers on this node",
+        reason="SSHD_BOOTSTRAP_FAILED",
+        severity="warning",
+        category="runtime",
+        impact="Score set to 0 until sshd starts in a container on this node",
+        remediation=SSHD_BOOTSTRAP_REMEDIATION,
+    )
+    # the same finding while SSHD_BOOTSTRAP_ENFORCEMENT_ENABLED is off: logged, score unchanged
+    FAILED_OBSERVED = MessageTemplate(
+        event="sshd does not start in containers on this node (not enforced)",
+        reason="SSHD_BOOTSTRAP_FAILED_OBSERVED",
+        severity="warning",
+        category="runtime",
+        impact="None: SSHD_BOOTSTRAP_ENFORCEMENT_ENABLED is off",
+        remediation=SSHD_BOOTSTRAP_REMEDIATION,
+    )
+    OK = MessageTemplate(
+        event="No sshd start failure recorded for this node",
+        reason="SSHD_BOOTSTRAP_OK",
+        severity="info",
+        category="runtime",
+        impact="Proceed",
+    )
