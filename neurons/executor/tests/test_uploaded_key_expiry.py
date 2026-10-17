@@ -80,6 +80,32 @@ def test_an_uploaded_key_expires_after_the_ttl_and_not_before(authorized_keys):
     assert authorized_keys.read_text() == ""
 
 
+def test_remove_ssh_key_still_removes_a_key_uploaded_with_the_marker(authorized_keys):
+    # regression: /remove_ssh_key compares the whole line to the bare key, so a marked line is
+    # never matched and every validator key stays until the TTL — 15 minutes of access it did
+    # not ask for, on every job
+    key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIValidatorJobKey validator@lium"
+    authorized_keys.write_text(RENTER_KEY)
+    service = SSHService()
+    service.add_pubkey_to_host(key)
+
+    service.remove_pubkey_from_host(key)
+
+    assert authorized_keys.read_text() == RENTER_KEY
+
+
+def test_remove_ssh_key_removes_a_key_the_previous_release_wrote_without_a_marker(authorized_keys):
+    # regression: authorized_keys lives on the disk reserve (setup_disk_reserve.sh mount_ssh) and
+    # survives the restart onto this release, so a key the previous release appended (no marker)
+    # is still there when the validator asks to remove it
+    key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeyFromTheOldRelease validator@lium"
+    authorized_keys.write_text(RENTER_KEY + key + "\n")
+
+    SSHService().remove_pubkey_from_host(key)
+
+    assert authorized_keys.read_text() == RENTER_KEY
+
+
 def test_a_public_key_with_an_embedded_newline_is_refused_by_the_writer(authorized_keys):
     # regression: "key-a\nkey-b" appended verbatim puts key-b on its own unmarked line — a
     # permanent key smuggled past the TTL by whoever holds the validator hotkey

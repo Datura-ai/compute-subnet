@@ -5,16 +5,12 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from services import docker_service as docker_service_module
 from services.docker_service import (
     DockerService,
-    NoUsableLoopbackPluginError,
+    LoopbackPluginDisabledError,
     VolumeHostProbe,
 )
-from test_docker_service import (
-    _FakeRentalDockerFactory,
-    ssh_client_answering_through_run,
-)
+from test_docker_service import _FakeRentalDockerFactory
 
 
 @pytest.fixture
@@ -63,14 +59,15 @@ def _disabled_plugin_probe() -> VolumeHostProbe:
 async def test_create_local_volume_disabled_plugin_enable_error_logs_only_its_type(
     docker_service, monkeypatch
 ):
+    from services import docker_service as docker_service_module
+
     secret_text = "ssh ubuntu@10.1.2.3: token=ghp_leakme at /home/provider/.ssh/id_rsa"
     ssh_client = Mock()
-    ssh_client.run = AsyncMock(side_effect=[OSError(secret_text), TimeoutError()])
-    ssh_client = ssh_client_answering_through_run(ssh_client.run)
+    ssh_client.run = AsyncMock(side_effect=OSError(secret_text))
     warning = Mock()
     monkeypatch.setattr(docker_service_module.logger, "warning", warning)
 
-    with pytest.raises(NoUsableLoopbackPluginError) as exc_info:
+    with pytest.raises(LoopbackPluginDisabledError) as exc_info:
         await _create_volume(docker_service, ssh_client, _disabled_plugin_probe())
 
     assert "enable error: OSError" in str(exc_info.value)
@@ -78,7 +75,7 @@ async def test_create_local_volume_disabled_plugin_enable_error_logs_only_its_ty
     (logged,), _ = warning.call_args
     assert str(logged).startswith("Loopback plugin enable failed")
     assert logged.extra["error_type"] == "OSError"
-    assert logged.extra["loopback_plugin"] == "vloopback:v2"
+    assert logged.extra["loopback_plugin"] == "vloopback"
     assert "error" not in logged.extra
     full = logged.to_full_string()
     assert "10.1.2.3" not in full and "ghp_leakme" not in full and "id_rsa" not in full
