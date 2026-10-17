@@ -197,6 +197,7 @@ async def test_uuid_moved_to_another_card_fails_only_when_enforced(context_facto
     assert result.passed is (not enforce)
     assert result.event.reason_code == Msg.MISMATCH.reason
     assert result.event.what_we_saw["moved"] == {"GPU-a": "uuid_changed_identity"}
+    assert result.updates == ({"gpu_attestation_identity_passed": False} if enforce else {})
 
 
 @pytest.mark.asyncio

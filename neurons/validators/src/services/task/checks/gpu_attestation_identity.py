@@ -353,6 +353,9 @@ class GpuAttestationIdentityCheck:
                 impact=None if enforce else "Shadow observation only: score was NOT changed",
                 what=what,
             )
-            return CheckResult(passed=not enforce, event=event, fatal=not has_live_rental(ctx))
+            updates = {"gpu_attestation_identity_passed": False} if enforce else {}
+            return CheckResult(
+                passed=not enforce, event=event, fatal=not has_live_rental(ctx), updates=updates
+            )
         template = Msg.OK if verified and not unavailable else Msg.UNAVAILABLE
         return CheckResult(passed=True, event=render_message(template, ctx=ctx, check_id=self.check_id, what=what))
