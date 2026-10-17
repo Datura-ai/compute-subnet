@@ -6910,6 +6910,9 @@ class DockerService:
         # (the validator cannot end its run in the backend, so removing it reads as the provider
         # killing it), so this create removes no filler_*, lifts no GPU power cap (DAH-2356: an
         # uncapped PEARL filler) and reclaims no filler cache.
+        # Every step that removes fillers on a customer create (the sweep before `docker run`, any
+        # check after it) is gated on this, never on workload_kind alone.
+        removes_every_filler = payload.workload_kind == WorkloadKind.CUSTOMER_RENTAL and not beside_fillers
         warnings = []
         local_volume = payload.local_volume
         external_volume_info = payload.external_volume_info
@@ -7703,9 +7706,7 @@ class DockerService:
                     # DAH-3706: a customer's pod never shares the node with a filler, so its
                     # create removes every filler_* whatever the backend listed; a filler create
                     # keeps protecting its listed sibling bundle (DAH-2465).
-                    remove_every_filler=(
-                        payload.workload_kind == WorkloadKind.CUSTOMER_RENTAL and not beside_fillers
-                    ),
+                    remove_every_filler=removes_every_filler,
                     keep_every_filler=beside_fillers,
                     report=cleanup_report,
                     removed_at_ssh_connect=fillers_removed_at_ssh_connect.listed_id_by_filler_name,

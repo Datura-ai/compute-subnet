@@ -168,7 +168,7 @@ class _ProbeGate:
     standing: _Failure | None
     # the fillers the backend listed under the lock, which the probe runs beside and leaves alone
     # (RENTAL_PROBE_BESIDE_FILLERS_ENABLED); empty otherwise
-    fillers: frozenset[str] = frozenset()
+    fillers_beside: frozenset[str] = frozenset()
 
 
 class RentalProbeCheck:
@@ -227,7 +227,7 @@ class RentalProbeCheck:
         image_ref = gate.image_ref
         try:
             outcome = await _probe(
-                ctx, image_ref, gate.create_lock, beside_fillers=bool(gate.fillers)
+                ctx, image_ref, gate.create_lock, beside_fillers=bool(gate.fillers_beside)
             )
         finally:
             await gate.create_lock.release(ctx)
@@ -257,7 +257,7 @@ class RentalProbeCheck:
         # A renter may have taken the node while the probe ran: their create sweeps our container
         # away and a real rental is proof the node works. Never punish that race, and never
         # punish when the race cannot be ruled out.
-        rented_meanwhile = await _rented_meanwhile(ctx, gate.fillers)
+        rented_meanwhile = await _rented_meanwhile(ctx, gate.fillers_beside)
         if rented_meanwhile is None:
             return self._inconclusive(
                 ctx,
@@ -358,15 +358,18 @@ class RentalProbeCheck:
             return self._skipped(ctx, _RENT_IN_PROGRESS)
 
         try:
-            idle = await self._idle_under_lock(ctx, standing)
+            stop_or_fillers_beside = await self._idle_under_lock(ctx, standing)
         except BaseException:
             await create_lock.release(ctx)
             raise
-        if isinstance(idle, CheckResult):
+        if isinstance(stop_or_fillers_beside, CheckResult):
             await create_lock.release(ctx)
-            return idle
+            return stop_or_fillers_beside
         return _ProbeGate(
-            image_ref=image_ref, create_lock=create_lock, standing=standing, fillers=idle
+            image_ref=image_ref,
+            create_lock=create_lock,
+            standing=standing,
+            fillers_beside=stop_or_fillers_beside,
         )
 
     async def _idle_under_lock(
@@ -381,7 +384,8 @@ class RentalProbeCheck:
         it is creating this moment). Unknown counts as busy.
         """
         reread_started = time.monotonic()
-        busy_now, fillers = await _busy_now(ctx)
+        now = await _busy_now(ctx)
+        busy_now = now.busy
         if busy_now is None:
             return self._inconclusive(
                 ctx, "could not confirm the node is idle", steps=[], standing=standing
@@ -395,7 +399,7 @@ class RentalProbeCheck:
             return self._inconclusive(
                 ctx, "the idleness re-read overran its budget", steps=[], standing=standing
             )
-        return fillers
+        return now.fillers_beside
 
     def _failed(
         self, ctx: Context, failure: _Failure, *, what: dict[str, Any], ssh_port: int | None
@@ -539,30 +543,36 @@ _RENT_IN_PROGRESS = "a rent is being created on the node"
 _RENTED_NOW = frozenset({_RENTED_SINCE_CYCLE_START, _RENT_IN_PROGRESS})
 
 
-async def _busy_now(ctx: Context) -> tuple[str | None, frozenset[str]]:
-    """Why the node is not idle right now, "" when it is, None when that could not be read; and the
-    fillers on it the probe may run beside (only with RENTAL_PROBE_BESIDE_FILLERS_ENABLED)."""
-    no_fillers: frozenset[str] = frozenset()
+@dataclass(frozen=True)
+class _BusyNow:
+    # why the node is not idle right now, "" when it is, None when that could not be read
+    busy: str | None
+    # the fillers on it the probe may run beside (only with RENTAL_PROBE_BESIDE_FILLERS_ENABLED)
+    fillers_beside: frozenset[str] = frozenset()
+
+
+async def _busy_now(ctx: Context) -> _BusyNow:
+    """Whether the node is idle right now under the create lock, and the fillers it may run beside."""
     try:
         rented = await ctx.services.backend.get_all_rented_executors()
     except Exception:
         _read_failed(ctx, "the backend's rented executors")
-        return None, no_fillers
+        return _BusyNow(None)
     if rented is None:
-        return None, no_fillers
+        return _BusyNow(None)
     rented_executor = rented.executors.get(ctx.executor.uuid)
     if rented_executor and rented_executor.pods:
-        return _RENTED_SINCE_CYCLE_START, no_fillers
+        return _BusyNow(_RENTED_SINCE_CYCLE_START)
     fillers = frozenset(rented.get_filler_containers(ctx.executor.uuid))
     if fillers and not settings.RENTAL_PROBE_BESIDE_FILLERS_ENABLED:
-        return "filler started since the cycle started", no_fillers
+        return _BusyNow("filler started since the cycle started")
     try:
         if await ctx.services.redis.renting_in_progress(ctx.miner_hotkey, ctx.executor.uuid):
-            return _RENT_IN_PROGRESS, no_fillers
+            return _BusyNow(_RENT_IN_PROGRESS)
     except Exception:
         _read_failed(ctx, "its pending-pod marks in Redis")
-        return None, no_fillers
-    return "", fillers
+        return _BusyNow(None)
+    return _BusyNow("", fillers)
 
 
 def _missing_inputs(ctx: Context) -> str | None:
@@ -882,8 +892,6 @@ async def _step_container_start(
     when the probe ends here.
     """
     docker = ctx.services.pod_recovery
-    # passed only beside a filler, so a probe on an empty node calls create_container as before
-    beside = {"beside_fillers": True} if beside_fillers else {}
     started = time.perf_counter()
     try:
         result = await asyncio.wait_for(
@@ -892,7 +900,7 @@ async def _step_container_start(
                 ctx.executor,
                 ctx.config.validator_keypair,
                 ctx.executor_ssh_private_key_encrypted,
-                **beside,
+                beside_fillers=beside_fillers,
             ),
             timeout=_CREATE_DEADLINE_SECONDS,
         )

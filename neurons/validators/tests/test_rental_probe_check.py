@@ -614,7 +614,7 @@ async def test_the_probe_holds_the_create_lock_from_the_idleness_re_read_until_i
     events: list[str] = []
 
     class RecordingDocker(FakeDocker):
-        async def create_container(self, payload, executor_info, keypair, private_key):
+        async def create_container(self, payload, executor_info, keypair, private_key, **_):
             events.append("create")
             return await super().create_container(payload, executor_info, keypair, private_key)
 
@@ -684,7 +684,7 @@ async def test_the_create_lock_is_released_when_the_create_is_cut_short():
     its TTL, and a renter's create waits that long."""
 
     class RaisingDocker(FakeDocker):
-        async def create_container(self, payload, executor_info, keypair, private_key):
+        async def create_container(self, payload, executor_info, keypair, private_key, **_):
             raise RuntimeError("redis down")
 
     ctx, _, redis = make_probe_context(docker=RaisingDocker())
@@ -694,7 +694,7 @@ async def test_the_create_lock_is_released_when_the_create_is_cut_short():
     assert redis.create_lock_events == ["acquired", "released"]
 
     class HangingDocker(FakeDocker):
-        async def create_container(self, payload, executor_info, keypair, private_key):
+        async def create_container(self, payload, executor_info, keypair, private_key, **_):
             await asyncio.sleep(30)
 
     ctx, _, redis = make_probe_context(docker=HangingDocker())
@@ -1095,7 +1095,7 @@ async def test_the_cycles_cancellation_mid_create_still_removes_the_container_by
     mark, and the container binds the verified ports into the next cycle."""
 
     class HangingDocker(FakeDocker):
-        async def create_container(self, payload, executor_info, keypair, private_key):
+        async def create_container(self, payload, executor_info, keypair, private_key, **_):
             self.create_calls.append((payload, executor_info, keypair, private_key))
             await asyncio.sleep(30)
             return created()
@@ -1247,7 +1247,7 @@ async def test_a_create_that_hangs_is_cut_off_and_its_container_removed_by_name(
     the node."""
 
     class HangingDocker(FakeDocker):
-        async def create_container(self, payload, executor_info, keypair, private_key):
+        async def create_container(self, payload, executor_info, keypair, private_key, **_):
             self.create_calls.append((payload, executor_info, keypair, private_key))
             await asyncio.sleep(30)
             return created()
@@ -1697,12 +1697,12 @@ async def test_a_filler_node_is_probed_beside_its_filler_when_enabled():
 
 
 @pytest.mark.asyncio
-async def test_a_probe_on_a_node_without_a_filler_calls_create_as_before():
+async def test_a_probe_on_a_node_without_a_filler_creates_with_beside_fillers_off():
     ctx, docker, _ = make_probe_context()
     with probe_settings(beside_fillers=True), renter_path():
         await RentalProbeCheck().run(ctx)
 
-    assert docker.create_options == [{}]
+    assert docker.create_options == [{"beside_fillers": False}]
 
 
 @pytest.mark.asyncio

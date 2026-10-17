@@ -772,6 +772,8 @@ async def test_a_create_beside_fillers_removes_no_filler_and_lifts_no_power_cap(
         mock.assert_not_awaited()
     sweep = svc.clean_existing_containers.await_args.kwargs
     assert sweep["remove_every_filler"] is False and sweep["keep_every_filler"] is True
+    # nor does the running check after `docker run` remove a filler, should it learn to
+    assert not svc.check_container_running.await_args.kwargs.get("remove_every_filler")
 
 
 @pytest.mark.asyncio
