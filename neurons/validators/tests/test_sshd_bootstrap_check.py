@@ -14,10 +14,20 @@ from tests.helpers import FakeRedis, build_services, build_state
 
 EXECUTOR = "executor-123"
 KEY = f"{SSHD_BOOTSTRAP_FAILED_PREFIX}:{EXECUTOR}"
+FILLER = "filler_run-1"
 
 
-def _ctx(context_factory, redis, rented=False):
+def _ctx(context_factory, redis, rented=False, filler_owner=None, ssh=None, backend=None):
+    filler_fields = (
+        {
+            "all_filler_containers_by_executor": {EXECUTOR: [FILLER]},
+            "default_job_owner_by_executor": {EXECUTOR: filler_owner},
+        }
+        if filler_owner
+        else {}
+    )
     rented_data = RentedExecutorsResponse(
+        **filler_fields,
         executors={
             EXECUTOR: RentedExecutor(
                 miner_hotkey="m",
@@ -29,9 +39,8 @@ def _ctx(context_factory, redis, rented=False):
         if rented
         else {}
     )
-    return context_factory(
-        state=build_state(rented_data=rented_data), services=build_services(redis=redis)
-    )
+    services = build_services(redis=redis, **({"backend": backend} if backend else {}))
+    return context_factory(state=build_state(rented_data=rented_data), services=services, ssh=ssh)
 
 
 @pytest.mark.asyncio
@@ -41,6 +50,59 @@ async def test_a_stamped_unrented_node_fails(context_factory):
     result = await SshdBootstrapCheck().run(_ctx(context_factory, redis))
     assert result.passed is False
     assert result.event.reason_code == Msg.FAILED.reason
+
+
+@pytest.mark.asyncio
+async def test_a_stamped_node_running_our_filler_fails_and_the_filler_is_removed(context_factory):
+    # the broken nodes always run a filler (its failed create is the stamp): no exemption, the filler goes
+    redis = FakeRedis()
+    redis.store[KEY] = "1"
+    ssh = AsyncMock()
+    ssh.run.return_value = SimpleNamespace(exit_status=0, stdout="", stderr="")
+    backend = build_services().backend
+    result = await SshdBootstrapCheck().run(
+        _ctx(context_factory, redis, filler_owner="lium", ssh=ssh, backend=backend)
+    )
+    assert result.passed is False
+    assert result.event.reason_code == Msg.FAILED.reason
+    assert ssh.run.await_args.args[0] == f"/usr/bin/docker rm -fv {FILLER}"
+    backend.get_filler_run_active.assert_awaited_once_with("run-1", container_missing=True)
+    assert result.event.what_we_saw["removed_fillers"] == [FILLER]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner,remove_fillers", [("miner", True), ("lium", False)])
+async def test_a_miners_own_job_or_a_dry_run_keeps_the_filler(context_factory, owner, remove_fillers):
+    redis = FakeRedis()
+    redis.store[KEY] = "1"
+    ssh = AsyncMock()
+    result = await SshdBootstrapCheck(remove_fillers=remove_fillers).run(
+        _ctx(context_factory, redis, filler_owner=owner, ssh=ssh)
+    )
+    assert result.passed is False
+    ssh.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_filler_removal_keeps_the_verdict(context_factory):
+    redis = FakeRedis()
+    redis.store[KEY] = "1"
+    ssh = AsyncMock()
+    ssh.run.side_effect = OSError("connection lost")
+    backend = build_services().backend
+    result = await SshdBootstrapCheck().run(
+        _ctx(context_factory, redis, filler_owner="lium", ssh=ssh, backend=backend)
+    )
+    assert result.passed is False
+    assert result.event.what_we_saw["removed_fillers"] == []
+    backend.get_filler_run_active.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_redis_error_passes_the_node(context_factory):
+    result = await SshdBootstrapCheck().run(_ctx(context_factory, FakeRedis(failing=True)))
+    assert result.passed is True
+    assert result.event.reason_code == Msg.OK.reason
 
 
 @pytest.mark.asyncio

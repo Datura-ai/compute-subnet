@@ -2111,7 +2111,7 @@ class SshdBootstrapMessages:
         reason="SSHD_BOOTSTRAP_FAILED",
         severity="warning",
         category="runtime",
-        impact="Score set to 0 until sshd starts in a container on this node",
+        impact="Score set to 0 and Lium's filler on the node removed until sshd starts in a container on this node",
         remediation=SSHD_BOOTSTRAP_REMEDIATION,
     )
     # the same finding while SSHD_BOOTSTRAP_ENFORCEMENT_ENABLED is off: logged, score unchanged

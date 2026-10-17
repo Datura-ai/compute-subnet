@@ -537,7 +537,7 @@ class PipelineFactory:
                 GpuKernelCountCheck(),
                 DuplicateExecutorCheck(),
                 CollateralStatusCheck(),
-                SshdBootstrapCheck(),
+                SshdBootstrapCheck(remove_fillers=False),  # removes no filler on a dry run
                 # StaleContainerCleanupCheck(),  # SKIP: removes containers on the executor
                 PortConnectivityCheck(),
                 PortCountCheck(),
