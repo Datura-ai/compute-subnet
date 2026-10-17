@@ -46,6 +46,7 @@ from .checks import (
     GpuThermalThrottleCheck,
     GpuUsageCheck,
     GpuVramPrecheck,
+    HardwareIdentityCheck,
     InspectorRentedCheck,
     LocalVerifyCheck,
     MachineSpecScrapeCheck,
@@ -321,6 +322,8 @@ class PipelineFactory:
                 GpuFingerprintCheck(),
                 SpecChangeCheck(),
                 BannedProviderCheck(),
+                # DAH-4547: after BannedProviderCheck, which leaves the kernel GPU list in ctx.state.
+                HardwareIdentityCheck(),
                 BannedGpuCheck(),
                 DuplicateExecutorCheck(),
                 CollateralStatusCheck(),
@@ -445,6 +448,8 @@ class PipelineFactory:
                 GpuFingerprintCheck(),
                 SpecChangeCheck(),
                 BannedProviderCheck(),
+                # DAH-4547: after BannedProviderCheck, which leaves the kernel GPU list in ctx.state.
+                HardwareIdentityCheck(),
                 BannedGpuCheck(),
                 DuplicateExecutorCheck(),
                 CollateralStatusCheck(),
@@ -523,6 +528,8 @@ class PipelineFactory:
                 GpuFingerprintCheck(),
                 SpecChangeCheck(),
                 BannedProviderCheck(),
+                # DAH-4547: after BannedProviderCheck, which leaves the kernel GPU list in ctx.state.
+                HardwareIdentityCheck(),
                 BannedGpuCheck(),
                 DuplicateExecutorCheck(),
                 CollateralStatusCheck(),
