@@ -149,7 +149,13 @@ class GpuFaultProbeCheck:
 
     def _no_verdict(self, ctx: Context, what: dict[str, Any]) -> CheckResult:
         """UNKNOWN, counted. From UNKNOWN_STREAK_LIMIT cycles in a row it is logged, and under
-        GPU_FAULT_PROBE_UNKNOWN_STREAK_ENFORCEMENT_ENABLED it is judged like a fault."""
+        GPU_FAULT_PROBE_UNKNOWN_STREAK_ENFORCEMENT_ENABLED it is judged like a fault. An enforce run is a
+        second probe in the same cycle, so it does not count."""
+        if self.enforce:
+            return CheckResult(
+                passed=True,
+                event=render_message(Msg.UNKNOWN, ctx=ctx, check_id=self.check_id, what=what),
+            )
         key = (ctx.miner_hotkey, ctx.executor.uuid)
         streak = _unknown_streak.get(key, 0) + 1
         _unknown_streak[key] = streak

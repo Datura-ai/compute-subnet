@@ -26,7 +26,7 @@ class GpuModelValidCheck:
     runs before SpecChangeCheck, so the reset has to happen here; the node then leaves the market
     through the same path banned_gpu, gpu_fingerprint, duplicate_executor and spec_change use,
     rented or idle, and is verified again on the first cycle whose scrape lists every card. The drop also
-    owes a post-rental recheck, and a card that drops twice holds the node (post_rental_gpu_recheck.py).
+    owes a post-rental recheck (post_rental_gpu_recheck.py).
 
     Every card is read, not only the first (DAH-4304): each must be a supported model, and a node
     whose cards are more than one model fails with GPU_MODEL_MIXED.

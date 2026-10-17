@@ -9,17 +9,13 @@ MATMUL_ALLCARDS_* / GPU_FAULT_PROBE_* flags say. A failure fails the node and ke
 clears it. Off by default (POST_RENTAL_GPU_RECHECK_ENABLED): the cycle then only logs
 POST_RENTAL_GPU_RECHECK_WOULD_REQUIRE.
 
-A card that falls off the bus (GpuModelValidCheck's GPU_DETAILS_MISMATCH) also sets the marker, and a
-second drop of the same card UUID within REPEAT_DROP_WINDOW_SECONDS holds the node: this check fails it
-until REPEAT_DROP_HOLD_SECONDS pass with no further drop, then the usual recheck must pass. Shadow-only
-(POST_RENTAL_GPU_RECHECK_WOULD_HOLD) while the flag is off.
+A card that falls off the bus (GpuModelValidCheck's GPU_DETAILS_MISMATCH) also sets the marker.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -39,12 +35,6 @@ logger = logging.getLogger(__name__)
 # a few days: long enough to outlast a weekend rental's tail, short enough that a stale flag dies
 MARKER_TTL_SECONDS = 3 * 24 * 3600
 MAX_MARKED_CARDS = 16
-# a card dropping twice in a week is a flaky card or slot, not a one-off
-REPEAT_DROP_WINDOW_SECONDS = 7 * 24 * 3600
-# sightings closer than this are one incident: a dropped card stays missing for many cycles
-DROP_INCIDENT_GAP_SECONDS = 6 * 3600
-# a repeat dropper re-lists only after a day without a drop, and then a clean recheck
-REPEAT_DROP_HOLD_SECONDS = 24 * 3600
 
 
 def marker_key(miner_hotkey: str, executor_uuid: str) -> str:
@@ -85,61 +75,16 @@ async def record_marker(ctx: Context, source: str, health: dict[str, Any]) -> No
         )
 
 
-def drop_history_key(miner_hotkey: str, executor_uuid: str) -> str:
-    return f"{POST_RENTAL_GPU_RECHECK_PREFIX}:drops:{miner_hotkey}:{executor_uuid}"
-
-
-def hold_key(miner_hotkey: str, executor_uuid: str) -> str:
-    return f"{POST_RENTAL_GPU_RECHECK_PREFIX}:hold:{miner_hotkey}:{executor_uuid}"
-
-
 async def record_gpu_drop(ctx: Context, missing_uuids: list[str]) -> None:
-    """A card fell off the bus: owe a recheck, and hold the node when the same card dropped before in the
-    window. Never raises: the caller's verdict must not depend on Redis."""
-    missing_uuids = missing_uuids[:MAX_MARKED_CARDS]
+    """A card fell off the bus: owe a recheck. Never raises: the caller's verdict must not depend on Redis."""
     await record_marker(
         ctx,
         "gpu_details_mismatch",
         {
             "verdict": "gpu_missing",
-            "cards": [{"uuid": u, "verdict": "missing"} for u in missing_uuids],
+            "cards": [{"uuid": u, "verdict": "missing"} for u in missing_uuids[:MAX_MARKED_CARDS]],
         },
     )
-    if settings.DRY_RUN or not missing_uuids:
-        return
-    redis = ctx.services.redis
-    key = drop_history_key(ctx.miner_hotkey, ctx.executor.uuid)
-    now = time.time()
-    try:
-        raw = await redis.get(key)
-        history = json.loads(raw) if raw else {}
-        repeats: dict[str, list[float]] = {}
-        for uuid in missing_uuids:
-            seen = history.get(uuid) or {"incidents": [], "last_seen": 0}
-            if now - seen["last_seen"] > DROP_INCIDENT_GAP_SECONDS:
-                seen["incidents"] = [
-                    t for t in seen["incidents"] if now - t < REPEAT_DROP_WINDOW_SECONDS
-                ] + [now]
-            seen["last_seen"] = now
-            history[uuid] = seen
-            if len(seen["incidents"]) >= 2:
-                repeats[uuid] = seen["incidents"]
-        await redis.set(key, json.dumps(history), ex=REPEAT_DROP_WINDOW_SECONDS)
-        if repeats:
-            # rewritten on every sighting: the hold runs from the last cycle the card was missing
-            hold = {"at": datetime.now(UTC).isoformat(), "repeated_drops": repeats}
-            await redis.set(
-                hold_key(ctx.miner_hotkey, ctx.executor.uuid),
-                json.dumps(hold),
-                ex=REPEAT_DROP_HOLD_SECONDS,
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            _m(
-                "POST_RENTAL_GPU_DROP_HISTORY_FAILED",
-                extra=get_extra_info({**ctx.default_extra, "error": str(exc)}),
-            )
-        )
 
 
 class PostRentalGpuRecheckCheck:
@@ -147,9 +92,6 @@ class PostRentalGpuRecheckCheck:
     fatal = True
 
     async def run(self, ctx: Context) -> CheckResult:
-        held = await self._hold(ctx)
-        if held is not None:
-            return held
         key = marker_key(ctx.miner_hotkey, ctx.executor.uuid)
         try:
             raw = await ctx.services.redis.get(key)
@@ -187,26 +129,7 @@ class PostRentalGpuRecheckCheck:
                 ),
             )
 
-        failures: list[str] = []
-        all_cards = await ctx.services.validation._probe_all_claimed_cards(
-            ctx.ssh, ctx.executor, ctx.default_extra, ctx.state.specs or {}
-        )
-        # None: one card or an unsized model, where the capability matmul already covers the card
-        what["all_cards_matmul"] = (
-            None
-            if all_cards is None
-            else {"passed": all_cards.passed, "failure_reason": all_cards.failure_reason}
-        )
-        if all_cards is not None and not all_cards.passed:
-            failures.append(f"all-cards matmul: {all_cards.failure_reason}")
-        probe = await GpuFaultProbeCheck(enforce=True).run(ctx)
-        what["fault_probe"] = {
-            "reason": probe.event.reason_code,
-            "error": probe.event.what_we_saw.get("error"),
-        }
-        if not probe.passed:
-            failures.append(f"fault probe: {probe.event.what_we_saw.get('error')}")
-
+        failures, all_cards_probe, probe = await self._run_every_card_probes(ctx, what)
         if failures:
             what["error"] = "; ".join(failures)
             self._log(ctx, "POST_RENTAL_GPU_RECHECK_FAILED", what, logging.WARNING)
@@ -214,8 +137,12 @@ class PostRentalGpuRecheckCheck:
                 passed=False,
                 event=render_message(Msg.FAILED, ctx=ctx, check_id=self.check_id, what=what),
             )
-        if probe.event.reason_code != GpuFaultProbeMessages.PROBE_OK.reason:
-            # the probe could not run (or found a filler): not a pass, so the marker stays
+        gpu_count = ((ctx.state.specs or {}).get("gpu") or {}).get("count") or 0
+        if probe.event.reason_code != GpuFaultProbeMessages.PROBE_OK.reason or (
+            all_cards_probe is None and gpu_count > 1
+        ):
+            # a probe that could not run (or found a filler), or a multi-card node the all-cards matmul
+            # skipped: not a pass, so the marker stays
             self._log(ctx, "POST_RENTAL_GPU_RECHECK_INCONCLUSIVE", what, logging.INFO)
             return CheckResult(
                 passed=True,
@@ -232,26 +159,34 @@ class PostRentalGpuRecheckCheck:
             event=render_message(Msg.PASSED, ctx=ctx, check_id=self.check_id, what=what),
         )
 
-    async def _hold(self, ctx: Context) -> CheckResult | None:
-        """A repeat dropper's hold: the failed cycle while it lasts, None when there is none."""
-        try:
-            raw = await ctx.services.redis.get(hold_key(ctx.miner_hotkey, ctx.executor.uuid))
-        except Exception:  # noqa: BLE001 — an unreadable hold is no hold, as for the marker
-            return None
-        if raw is None:
-            return None
-        try:
-            hold = json.loads(raw)
-        except (TypeError, ValueError):
-            hold = {"raw": str(raw)[:200]}
-        what: dict[str, Any] = {"executor_uuid": ctx.executor.uuid, "hold": hold}
-        if not settings.POST_RENTAL_GPU_RECHECK_ENABLED:
-            self._log(ctx, "POST_RENTAL_GPU_RECHECK_WOULD_HOLD", what, logging.WARNING)
-            return None
-        self._log(ctx, "POST_RENTAL_GPU_RECHECK_HELD", what, logging.WARNING)
-        return CheckResult(
-            passed=False, event=render_message(Msg.HELD, ctx=ctx, check_id=self.check_id, what=what)
+    @staticmethod
+    async def _run_every_card_probes(
+        ctx: Context, what: dict[str, Any]
+    ) -> tuple[list[str], Any, CheckResult]:
+        """The all-cards matmul and the kernel-fault probe, whatever their own flags say."""
+        failures: list[str] = []
+        all_cards_probe = await ctx.services.validation._probe_all_claimed_cards(
+            ctx.ssh, ctx.executor, ctx.default_extra, ctx.state.specs or {}
         )
+        # None: one card (the capability matmul covers it) or an unsized model (inconclusive)
+        what["all_cards_matmul"] = (
+            None
+            if all_cards_probe is None
+            else {
+                "passed": all_cards_probe.passed,
+                "failure_reason": all_cards_probe.failure_reason,
+            }
+        )
+        if all_cards_probe is not None and not all_cards_probe.passed:
+            failures.append(f"all-cards matmul: {all_cards_probe.failure_reason}")
+        probe = await GpuFaultProbeCheck(enforce=True).run(ctx)
+        what["fault_probe"] = {
+            "reason": probe.event.reason_code,
+            "error": probe.event.what_we_saw.get("error"),
+        }
+        if not probe.passed:
+            failures.append(f"fault probe: {probe.event.what_we_saw.get('error')}")
+        return failures, all_cards_probe, probe
 
     @staticmethod
     def _log(ctx: Context, key: str, what: dict[str, Any], level: int) -> None:

@@ -14,6 +14,7 @@ from neurons.validators.src.services.task.checks import (
     ScoreCheck,
     TenantEnforcementCheck,
 )
+from neurons.validators.src.services.task.checks import gpu_fault_probe as probe_module
 from neurons.validators.src.services.task.checks import post_rental_gpu_recheck as module
 from neurons.validators.src.services.task.messages import PostRentalGpuRecheckMessages as Msg
 from neurons.validators.src.services.task.pipeline import ParallelStage
@@ -40,14 +41,14 @@ class FakeValidation:
         return self.all_cards
 
 
-def _idle_ctx(context_factory, runner, validation, *, marker=MARKER):
+def _idle_ctx(context_factory, runner, validation, *, marker=MARKER, gpu_count=2):
     services = build_services(validation=validation)
     if marker is not None:
         services.redis.store[KEY] = json.dumps(marker)
     return context_factory(
         services=services,
         config=build_context_config(),
-        state=build_state(specs={"gpu": {"count": 2}}),
+        state=build_state(specs={"gpu": {"count": gpu_count}}),
         runner=runner,
     )
 
@@ -180,14 +181,34 @@ async def test_on_a_pass_clears_the_marker(context_factory, recheck_on, caplog):
 
 
 @pytest.mark.asyncio
-async def test_on_a_probe_without_a_verdict_keeps_the_marker(context_factory, recheck_on):
+async def test_on_a_probe_without_a_verdict_keeps_the_marker_and_skips_the_streak(
+    context_factory, recheck_on
+):
     runner = FakeRunner("python: not found", exit_code=127)
     ctx = _idle_ctx(context_factory, runner, FakeValidation())
+    probe_module._unknown_streak.clear()
 
     result = await PostRentalGpuRecheckCheck().run(ctx)
 
     assert result.passed and result.event.reason_code == Msg.INCONCLUSIVE.reason
     assert KEY in ctx.services.redis.store
+    # the pipeline's own probe already counted this cycle
+    assert probe_module._unknown_streak == {}
+
+
+@pytest.mark.parametrize(("gpu_count", "cleared"), [(2, False), (1, True)])
+@pytest.mark.asyncio
+async def test_no_all_cards_matmul_is_inconclusive_on_a_multi_card_node(
+    context_factory, recheck_on, gpu_count, cleared
+):
+    runner = FakeRunner(probe_stdout("ok"))
+    ctx = _idle_ctx(context_factory, runner, FakeValidation(None), gpu_count=gpu_count)
+
+    result = await PostRentalGpuRecheckCheck().run(ctx)
+
+    assert result.passed
+    assert result.event.reason_code == (Msg.PASSED if cleared else Msg.INCONCLUSIVE).reason
+    assert (KEY in ctx.services.redis.store) is not cleared
 
 
 # --- placement ----------------------------------------------------------------------------------------------
@@ -223,15 +244,16 @@ def test_the_recheck_runs_unrented_after_the_gpu_probes_before_the_score(build):
 
 # --- a card that falls off the bus -------------------------------------------------------------------------
 
-HOLD_KEY = module.hold_key("miner-hotkey", default_executor().uuid)
 UUIDS = [f"GPU-{i}" for i in range(3)]
 
 
-def _dropped_ctx(context_factory, services=None):
+@pytest.mark.asyncio
+async def test_a_dropped_card_owes_a_recheck(context_factory):
     """A 3-card node whose scrape lists 2 rows: GPU-2 fell off the bus (GPU_DETAILS_MISMATCH)."""
+    services = build_services()
     details = [{"name": "NVIDIA GeForce RTX 3090", "uuid": u} for u in UUIDS[:2]]
-    return context_factory(
-        services=services or build_services(),
+    ctx = context_factory(
+        services=services,
         config=build_context_config(gpu_model_rates={"NVIDIA GeForce RTX 3090": 0.05}),
         state=build_state(
             specs={"gpu": {"count": 3, "details": details}}, gpu_count=3, gpu_details=details
@@ -239,52 +261,8 @@ def _dropped_ctx(context_factory, services=None):
         verified={"uuids": ",".join(UUIDS)},
     )
 
-
-@pytest.mark.parametrize(
-    ("hours_between", "held"),
-    # a later cycle of the same incident is not a second drop; a drop the next day is
-    [(None, False), (1, False), (30, True), (24 * 8, False)],
-    ids=["one drop", "same incident", "dropped again next day", "again after the window"],
-)
-@pytest.mark.asyncio
-async def test_a_dropped_card_owes_a_recheck_and_a_repeat_drop_holds_the_node(
-    context_factory, hours_between, held
-):
-    services = build_services()
-    now = 1_000_000_000.0
-    with patch.object(module.time, "time", return_value=now):
-        await GpuModelValidCheck().run(_dropped_ctx(context_factory, services))
-    if hours_between is not None:
-        with patch.object(module.time, "time", return_value=now + hours_between * 3600):
-            await GpuModelValidCheck().run(_dropped_ctx(context_factory, services))
+    await GpuModelValidCheck().run(ctx)
 
     marker = json.loads(services.redis.store[KEY])
     assert marker["source"] == "gpu_details_mismatch"
     assert marker["cards"] == [{"uuid": "GPU-2", "verdict": "missing"}]
-    assert (HOLD_KEY in services.redis.store) is held
-    if held:
-        assert services.redis.ttl[HOLD_KEY] == module.REPEAT_DROP_HOLD_SECONDS
-        assert list(json.loads(services.redis.store[HOLD_KEY])["repeated_drops"]) == ["GPU-2"]
-
-
-@pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.asyncio
-async def test_a_held_node_fails_until_the_hold_expires_and_only_logs_while_off(
-    context_factory, caplog, enabled
-):
-    runner, validation = FakeRunner(), FakeValidation()
-    ctx = _idle_ctx(context_factory, runner, validation)
-    ctx.services.redis.store[HOLD_KEY] = json.dumps({"repeated_drops": {"GPU-2": [1.0, 2.0]}})
-
-    with (
-        patch.object(module.settings, "POST_RENTAL_GPU_RECHECK_ENABLED", enabled),
-        caplog.at_level("WARNING", logger=module.__name__),
-    ):
-        result = await PostRentalGpuRecheckCheck().run(ctx)
-
-    if enabled:
-        assert not result.passed and result.event.reason_code == Msg.HELD.reason
-    else:
-        assert result.passed and result.event.reason_code == Msg.WOULD_REQUIRE.reason
-        assert any(r.getMessage() == "POST_RENTAL_GPU_RECHECK_WOULD_HOLD" for r in caplog.records)
-    assert runner.calls == [] and validation.calls == 0
