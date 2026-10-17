@@ -109,6 +109,8 @@ from services.cluster_fabric import WIREGUARD_LISTEN_PORT, cluster_pod_networkin
 from services.redis_service import (
     RENTAL_PROBE_FAILED_PREFIX,
     RENTAL_PROBE_OK_PREFIX,
+    SSHD_BOOTSTRAP_FAILED_PREFIX,
+    SSHD_BOOTSTRAP_FAILED_TTL_SECONDS,
     STREAMING_LOG_CHANNEL,
     RedisService,
 )
@@ -958,6 +960,10 @@ def volume_step_detail(exc: BaseException) -> str | None:
 _HOST_FAULT_CREATE_STEPS = frozenset({"volume_creation", "gpu_flags"})
 # rental_probe.STEP_CONTAINER_START: the stamp reads as that probe step failing at the create step
 _RENTAL_PROBE_CONTAINER_START_STEP = "container_start"
+
+
+# sshd_bootstrap.sh's verify_sshd line: sshd is installed but not running or listening
+_SSHD_VERIFY_FAILED_MARKER = "sshd verification failed"
 
 
 def is_host_fault_create_failure(current_step: str | None) -> bool:
@@ -4967,7 +4973,10 @@ class DockerService:
         log_tag: str,
         log_extra: dict,
         raise_if_container_gone: bool = False,
+        sshd_verdict_executor_uuid: str | None = None,
     ) -> bool:
+        # sshd_verdict_executor_uuid: a filler create (Lium's own image) records the executor's sshd
+        # verdict for SshdBootstrapCheck; a renter's image can break sshd itself, so it records nothing.
         # raise_if_container_gone: the create path wants the ContainerGoneBeforeExec (with the
         # State it carries) rather than a False it never read; the start path keeps its
         # "did not complete cleanly" warning for every failure of the first exec.
@@ -5094,9 +5103,31 @@ class DockerService:
                     }),
                 )
             )
+            # only sshd installed but not serving is the node's fault; a failed apt-get exits before that line
+            if _SSHD_VERIFY_FAILED_MARKER in f"{run_result.stdout}{run_result.stderr}":
+                await self._record_sshd_verdict(sshd_verdict_executor_uuid, failed=True, log_extra=log_extra)
             return False
 
+        await self._record_sshd_verdict(sshd_verdict_executor_uuid, failed=False, log_extra=log_extra)
         return True
+
+    async def _record_sshd_verdict(self, executor_uuid: str | None, *, failed: bool, log_extra: dict) -> None:
+        if not executor_uuid:
+            return
+        key = f"{SSHD_BOOTSTRAP_FAILED_PREFIX}:{executor_uuid}"
+        try:
+            if failed:
+                await self.redis_service.set(key, "1", ex=SSHD_BOOTSTRAP_FAILED_TTL_SECONDS)
+            else:
+                await self.redis_service.delete(key)
+        except Exception:  # noqa: BLE001 — the create's own result still goes out
+            logger.warning(
+                _m(
+                    "sshd bootstrap verdict could not be recorded",
+                    extra=get_extra_info({**log_extra, "failed": failed}),
+                ),
+                exc_info=True,
+            )
 
     async def add_ssh_public_keys_with_rental_docker(
         self,
@@ -8430,6 +8461,9 @@ class DockerService:
                         log_tag=log_tag,
                         log_extra=default_extra,
                         raise_if_container_gone=True,
+                        sshd_verdict_executor_uuid=(
+                            payload.executor_id if payload.workload_kind == WorkloadKind.FILLER else None
+                        ),
                     ):
                         soft_failed_step = current_step
 
@@ -8821,15 +8855,19 @@ class DockerService:
 
         The node then scores 0 every cycle until a rental probe passes on it; the probe's interval stamp
         is dropped so that probe runs on the next idle cycle. Without the probe there is nothing to
-        clear the stamp, so nothing is stamped while RENTAL_PROBE_ENABLED is off.
+        clear the stamp, so nothing is stamped while RENTAL_PROBE_ENABLED is off. In shadow
+        (RENTAL_PROBE_ENFORCEMENT_ENABLED off) only the interval stamp is dropped: a standing failure
+        written then is never cleared on a node a filler keeps busy, and would zero it once
+        enforcement is turned on.
         """
         if not settings.RENTAL_PROBE_ENABLED or not is_host_fault_create_failure(current_step):
             return
         try:
-            await self.redis_service.set(
-                f"{RENTAL_PROBE_FAILED_PREFIX}:{executor_uuid}",
-                f"{_RENTAL_PROBE_CONTAINER_START_STEP}:{current_step}",
-            )
+            if settings.RENTAL_PROBE_ENFORCEMENT_ENABLED:
+                await self.redis_service.set(
+                    f"{RENTAL_PROBE_FAILED_PREFIX}:{executor_uuid}",
+                    f"{_RENTAL_PROBE_CONTAINER_START_STEP}:{current_step}",
+                )
             await self.redis_service.delete(f"{RENTAL_PROBE_OK_PREFIX}:{executor_uuid}")
         except Exception:  # noqa: BLE001 — the create's own failure reply still goes out
             logger.warning(

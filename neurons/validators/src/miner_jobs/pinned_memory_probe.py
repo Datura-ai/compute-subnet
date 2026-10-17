@@ -5,9 +5,11 @@ pin_memory() and cudaHostAlloc hand out) filled with a random pattern, copied to
 with the async copy engines on a stream (what `.to("cuda", non_blocking=True)` does), and the result is
 compared byte for byte on the host. A card that cannot DMA into pinned guest memory, the TDX guest with
 the GPU outside confidential-computing mode a renter hit on 13 Oct (F-1599: "the GPU does not see pinned
-memory buffers"), returns wrong data, a CUDA error or never completes the copy: that is a fault. A probe
-that cannot start (no libcuda, cuInit, a context or allocation the driver or the container's memlock
-limit refuses) is an error, not a fault: the validator does not penalise what it could not measure.
+memory buffers"), returns wrong data, a CUDA error or never completes the copy: that is a fault. So
+is a driver-start call (init, enumeration, device, context) answering with an error that names broken
+hardware or a driver that cannot start (BROKEN_GPU_CODES): nvidia-smi lists such a card, yet no renter can run CUDA on it. Any other probe
+that cannot start (no libcuda, a context or allocation the driver or the container's memlock limit
+refuses) is an error, not a fault: the validator does not penalise what it could not measure.
 
 The report also carries what the executor says about TDX and GPU confidential computing (the cpuinfo
 `tdx_guest` flag, /dev/tdx_guest, `nvidia-smi conf-compute -f`) as evidence; the copy decides the verdict.
@@ -34,6 +36,10 @@ WORKER_BUDGET_SECONDS = 30.0
 COUNT_BUDGET_SECONDS = 20.0
 NVIDIA_SMI_TIMEOUT_SECONDS = 10
 MAX_MISMATCH_OFFSETS = 4
+# CUresult codes that mean the GPU or its driver is broken, not that the probe could not measure:
+# ECC and NVLink uncorrectable, hardware stack error, system not ready (fabric manager down), and
+# unknown (a wedged card: cuInit fails while nvidia-smi still lists it).
+BROKEN_GPU_CODES = frozenset({214, 220, 714, 802, 999})
 
 
 class ProbeError(Exception):
@@ -41,7 +47,8 @@ class ProbeError(Exception):
 
 
 class CopyFault(Exception):
-    """A copy call failed once the buffers existed, or the data did not survive the round trip."""
+    """A copy call failed once the buffers existed, the data did not survive the round trip, or a call
+    driver-start call answered with one of BROKEN_GPU_CODES."""
 
 
 class Cuda:
@@ -94,25 +101,39 @@ class Cuda:
             return name.value.decode()
         return f"CUDA_ERROR_{code}"
 
-    def call(self, fn: str, *args, raise_as_fault: bool = True) -> None:
+    def call(
+        self, fn: str, *args, raise_as_fault: bool = True, broken_gpu_is_fault: bool = False
+    ) -> None:
         code = getattr(self.lib, fn)(*args)
         if code != 0:
             message = f"{fn} -> {self.error_name(code)} ({code})"
-            raise CopyFault(message) if raise_as_fault else ProbeError(message)
+            if raise_as_fault or (broken_gpu_is_fault and code in BROKEN_GPU_CODES):
+                raise CopyFault(message)
+            raise ProbeError(message)
 
 
 def probe_device(index: int, size_mb: int, on_phase=None) -> dict:
     """Round-trip a random pattern through pinned host memory and the device; raise CopyFault if it does not survive."""
     size = size_mb * MB
     cuda = Cuda()
-    # setup: anything refused here is an error, never a fault
-    cuda.call("cuInit", 0, raise_as_fault=False)
+    # setup: a refusal is an error, not a fault, unless a driver-start call
+    # (init, device, context) names a broken GPU (BROKEN_GPU_CODES)
+    cuda.call("cuInit", 0, raise_as_fault=False, broken_gpu_is_fault=True)
     device = ctypes.c_int()
-    cuda.call("cuDeviceGet", ctypes.byref(device), index, raise_as_fault=False)
+    cuda.call(
+        "cuDeviceGet", ctypes.byref(device), index, raise_as_fault=False, broken_gpu_is_fault=True
+    )
     name = ctypes.create_string_buffer(128)
     cuda.call("cuDeviceGetName", name, 128, device, raise_as_fault=False)
     context = ctypes.c_void_p()
-    cuda.call("cuCtxCreate_v2", ctypes.byref(context), 0, device, raise_as_fault=False)
+    cuda.call(
+        "cuCtxCreate_v2",
+        ctypes.byref(context),
+        0,
+        device,
+        raise_as_fault=False,
+        broken_gpu_is_fault=True,
+    )
     stream = ctypes.c_void_p()
     cuda.call("cuStreamCreate", ctypes.byref(stream), 0, raise_as_fault=False)
     h_src = ctypes.c_void_p()
@@ -208,10 +229,14 @@ def _count_worker(conn) -> None:
     _quiet_child()
     try:
         cuda = Cuda()
-        cuda.call("cuInit", 0, raise_as_fault=False)
+        cuda.call("cuInit", 0, raise_as_fault=False, broken_gpu_is_fault=True)
         count = ctypes.c_int()
-        cuda.call("cuDeviceGetCount", ctypes.byref(count), raise_as_fault=False)
+        cuda.call(
+            "cuDeviceGetCount", ctypes.byref(count), raise_as_fault=False, broken_gpu_is_fault=True
+        )
         conn.send({"count": count.value})
+    except CopyFault as exc:
+        conn.send({"fault": str(exc)})
     except Exception as exc:  # noqa: BLE001
         conn.send({"error": str(exc)})
     conn.close()
@@ -239,6 +264,8 @@ def _device_count(mp) -> int:
     except EOFError:
         reply = {"error": "device enumeration worker died"}
     _reap(process)
+    if "fault" in reply:
+        raise CopyFault(reply["fault"])
     if "error" in reply:
         raise ProbeError(reply["error"])
     return reply["count"]
@@ -319,6 +346,12 @@ def main(argv: list[str]) -> int:
         )
         print(JSON_MARKER, json.dumps(result, sort_keys=True))
         return 2
+    except CopyFault as exc:
+        result.update(
+            status="fault", faults=[str(exc)], elapsed_s=round(time.perf_counter() - started, 2)
+        )
+        print(JSON_MARKER, json.dumps(result, sort_keys=True))
+        return 1
 
     workers = []
     for index in indices:
