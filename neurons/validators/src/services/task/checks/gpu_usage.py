@@ -214,7 +214,17 @@ class GpuUsageCheck:
         self, ctx: Context, gpu_details: list[dict], gpu_processes: list[dict]
     ) -> CheckResult:
         """The legacy guard: flag GPU load owned by live processes outside our workloads."""
+        rented_data = ctx.state.rented_data
+        # A GPU-split node runs one filler per VRAM bundle (DAH-2465): the GPU is "clean" as long as
+        # every process belongs to ONE OF the node's fillers, not a single expected container.
+        filler_containers = set(rented_data.get_filler_containers(ctx.executor.uuid)) if rented_data else set()
+        process_names = {process.get("container_name") for process in gpu_processes}
+        fillers_only = bool(filler_containers) and all(name in filler_containers for name in process_names)
+        # judged at any load: a swapped filler can hold VRAM while staying under the utilization limits
+        off_image = fillers_only and await _fillers_off_their_image(ctx, process_names)
         violation = _find_violation(gpu_details, gpu_processes)
+        if violation is None and off_image:
+            violation = {"filler_containers_off_their_image": sorted(process_names)}
 
         if violation is None:
             foreign_result = await self._judge_foreign_occupancy(ctx, gpu_details, gpu_processes)
@@ -229,17 +239,7 @@ class GpuUsageCheck:
             )
             return CheckResult(passed=True, event=event)
 
-        rented_data = ctx.state.rented_data
-        # A GPU-split node runs one filler per VRAM bundle (DAH-2465): the GPU is "clean" as long as
-        # every process belongs to ONE OF the node's fillers, not a single expected container.
-        filler_containers = set(rented_data.get_filler_containers(ctx.executor.uuid)) if rented_data else set()
-        if (
-            filler_containers
-            and all(process.get("container_name") in filler_containers for process in gpu_processes)
-            and not await _fillers_off_their_image(
-                ctx, {process.get("container_name") for process in gpu_processes}
-            )
-        ):
+        if fillers_only and not off_image:
             event = render_message(
                 Msg.USAGE_OK,
                 ctx=ctx,

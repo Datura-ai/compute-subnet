@@ -1664,6 +1664,7 @@ def test_lium_workload_containers_counts_the_pod_container_of_an_unnamed_pod():
     assert gpu_usage.lium_workload_containers(ctx) == {f"{POD_CONTAINER_PREFIX}53a68595"}
 
 
+@pytest.mark.parametrize("load", [(100, 61), (2, 3)], ids=["high_load", "low_load"])
 @pytest.mark.parametrize(
     "scraped_digest, enforced, expected_pass",
     [
@@ -1675,7 +1676,7 @@ def test_lium_workload_containers_counts_the_pod_container_of_an_unnamed_pod():
 )
 @pytest.mark.asyncio
 async def test_filler_gpu_work_counts_only_on_the_filler_image(
-    context_factory, monkeypatch, scraped_digest, enforced, expected_pass
+    context_factory, monkeypatch, scraped_digest, enforced, expected_pass, load
 ):
     from neurons.validators.src.services.redis_service import FILLER_IMAGE_DIGESTS_PREFIX
 
@@ -1684,7 +1685,7 @@ async def test_filler_gpu_work_counts_only_on_the_filler_image(
     services = build_services()
     await services.redis.set(f"{FILLER_IMAGE_DIGESTS_PREFIX}{filler_container}", '["sha256:filler"]')
     state = build_state(
-        gpu_details=[{"gpu_utilization": 100, "memory_utilization": 61}],
+        gpu_details=[{"gpu_utilization": load[0], "memory_utilization": load[1]}],
         gpu_processes=[{"pid": 3217038, "container_name": filler_container}],
         rented_data=RentedExecutorsResponse(
             executors={},
