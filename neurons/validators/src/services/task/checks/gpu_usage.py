@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,7 @@ from services.const import (
     RENTAL_CLOSE_CLOCK_SKEW_MINUTES,
     RENTAL_TEARDOWN_GRACE_MINUTES,
 )
+from services.redis_service import FILLER_IMAGE_DIGESTS_PREFIX
 from services.gpu_wedge import (
     COMPUTE_APPS_QUERY_COMMAND,
     GPU_QUERY_COMMAND,
@@ -231,8 +233,12 @@ class GpuUsageCheck:
         # A GPU-split node runs one filler per VRAM bundle (DAH-2465): the GPU is "clean" as long as
         # every process belongs to ONE OF the node's fillers, not a single expected container.
         filler_containers = set(rented_data.get_filler_containers(ctx.executor.uuid)) if rented_data else set()
-        if filler_containers and all(
-            process.get("container_name") in filler_containers for process in gpu_processes
+        if (
+            filler_containers
+            and all(process.get("container_name") in filler_containers for process in gpu_processes)
+            and not await _fillers_off_their_image(
+                ctx, {process.get("container_name") for process in gpu_processes}
+            )
         ):
             event = render_message(
                 Msg.USAGE_OK,
@@ -514,6 +520,34 @@ def _parse_gpu_memory_used_mb(gpu_query_csv: str) -> dict[str, float]:
         except ValueError:
             continue
     return memory_by_uuid
+
+
+async def _fillers_off_their_image(ctx: Context, names: set[str]) -> bool:
+    """True when enforcement is on and a filler runs another image than the one the validator
+    started it from. A filler with no recorded or no scraped digest is not judged."""
+    scraped = {
+        str(entry.get("name") or ""): str(entry.get("digest") or "")
+        for entry in ((ctx.state.specs or {}).get("docker") or {}).get("containers") or []
+        if isinstance(entry, dict)
+    }
+    off_image = []
+    for name in sorted(names):
+        try:
+            recorded = await ctx.services.redis.get(f"{FILLER_IMAGE_DIGESTS_PREFIX}{name}")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Filler image record unreadable, not judging %s: %s", name, exc)
+            continue
+        if recorded and scraped.get(name) and scraped[name] not in json.loads(recorded):
+            off_image.append(name)
+    if off_image:
+        logger.warning(
+            "FILLER_IMAGE_MISMATCH executor=%s miner=%s containers=%s enforced=%s",
+            ctx.executor.uuid,
+            ctx.miner_hotkey,
+            off_image,
+            settings.FILLER_IMAGE_IDENTITY_ENFORCEMENT_ENABLED,
+        )
+    return bool(off_image) and settings.FILLER_IMAGE_IDENTITY_ENFORCEMENT_ENABLED
 
 
 def carries_a_rental_prefix(container_name: str) -> bool:
