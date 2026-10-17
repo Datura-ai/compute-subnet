@@ -412,7 +412,6 @@ async def get_miner_identity(
     With `MINER_ACCOUNT_CLAIM` set (`lium mine --register` writes it), the answer also carries it as
     `account_claim`: every node of an e-mail or Google portal account reports the same pool hotkey, so
     the claim is what ties the node to the account that installed it. It is not a secret.
-
     """
     return MinerIdentityResponse(
         miner_hotkey=settings.MINER_HOTKEY_SS58_ADDRESS,

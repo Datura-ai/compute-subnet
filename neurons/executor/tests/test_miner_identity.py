@@ -40,7 +40,11 @@ def test_carries_the_account_claim_when_configured(monkeypatch):
 
     response = _client().get("/miner-identity", params={"nonce": NONCE})
 
-    assert response.json()["account_claim"] == "c1" * 16
+    assert response.json() == {
+        "miner_hotkey": settings.MINER_HOTKEY_SS58_ADDRESS,
+        "nonce": NONCE,
+        "account_claim": "c1" * 16,
+    }
 
 
 def test_nonce_is_required():
