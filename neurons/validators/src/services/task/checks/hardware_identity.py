@@ -9,7 +9,7 @@ from core.config import settings
 
 from ..messages import HardwareIdentityMessages as Msg, render_message
 from ..pipeline import CheckResult, Context
-from .banned_provider import kernel_gpu_view, reported_gpu_uuids
+from .banned_provider import has_live_rental, kernel_gpu_view, reported_gpu_uuids
 
 logger = logging.getLogger(__name__)
 
@@ -173,4 +173,5 @@ class HardwareIdentityCheck:
             impact=None if enforce else "Shadow observation only: score was NOT changed",
             what=what,
         )
-        return CheckResult(passed=not enforce, event=event)
+        # like the ban checks: a node with a live pod keeps being verified (TenantEnforcementCheck still runs)
+        return CheckResult(passed=not enforce, event=event, fatal=not has_live_rental(ctx))

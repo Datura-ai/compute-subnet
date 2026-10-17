@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from neurons.validators.src.services.task.checks.hardware_identity import (
@@ -13,9 +13,11 @@ from neurons.validators.src.services.task.checks.hardware_identity import (
     dmi_overlay_findings,
     gpu_sources_disagree,
 )
-from neurons.validators.src.services.task.messages import HardwareIdentityMessages as Msg
+from neurons.validators.src.services.task.messages import HardwareIdentityMessages as Msg, render_message
+from neurons.validators.src.services.task.pipeline import CheckResult, Pipeline
+from protocol.vc_protocol.compute_requests import RentedExecutor, RentedExecutorsResponse, RentedPod
 
-from tests.helpers import build_services, build_state
+from tests.helpers import build_services, build_state, default_executor
 
 SETTINGS = "neurons.validators.src.services.task.checks.hardware_identity.settings"
 SYSFS_ROW = f"{DMI_ID_PATH}/product_uuid sysfs\n{DMI_ID_PATH}/product_uuid|regular file\n"
@@ -45,7 +47,7 @@ def test_gpu_sources_disagree():
     assert gpu_sources_disagree(["GPU-a"], None) is False  # unreadable kernel list decides nothing
 
 
-def _ctx(context_factory, *, stdout, kernel=("GPU-a",), redis=None):
+def _ctx(context_factory, *, stdout, kernel=("GPU-a",), redis=None, rented_data=None, executor=None):
     async def run(cmd, *args, **kwargs):
         return SimpleNamespace(exit_status=0, stdout=stdout, stderr="")
 
@@ -53,9 +55,12 @@ def _ctx(context_factory, *, stdout, kernel=("GPU-a",), redis=None):
         gpu_uuids="GPU-a",
         kernel_gpu_uuids=list(kernel) if kernel is not None else None,
         kernel_gpu_uuids_read_attempted=True,
+        rented_data=rented_data,
     )
     services = build_services(redis=redis) if redis is not None else build_services()
-    return context_factory(state=state, ssh=SimpleNamespace(run=run), services=services)
+    return context_factory(
+        state=state, ssh=SimpleNamespace(run=run), services=services, executor=executor or default_executor()
+    )
 
 
 def _stdout(mounts=SYS_MOUNT, rows=SYSFS_ROW, values="uuid-1|serial-1|"):
@@ -115,3 +120,49 @@ async def test_unreadable_host_passes(context_factory):
     )
     result = await _run(ctx, enforce=True)
     assert result.passed is True
+
+
+class _Next:
+    check_id = "test.next"
+    fatal = True
+
+    def __init__(self):
+        self.ran = False
+
+    async def run(self, ctx):
+        self.ran = True
+        return CheckResult(passed=True, event=render_message(Msg.OK, ctx=ctx, check_id=self.check_id))
+
+
+def _rented(executor):
+    return RentedExecutorsResponse(
+        executors={
+            executor.uuid: RentedExecutor(
+                miner_hotkey="miner-hotkey",
+                executor_ip_address=executor.address,
+                executor_ip_port=str(executor.port),
+                pods=[RentedPod(pod_id="pod-1", container_name="pod_p1")],
+            )
+        },
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rented", [True, False])
+async def test_enforced_finding_is_fatal_only_without_a_live_rental(context_factory, rented):
+    executor = default_executor()
+    ctx = _ctx(
+        context_factory,
+        stdout=_stdout(rows=f"{DMI_ID_PATH}/product_uuid tmpfs\n"),
+        rented_data=_rented(executor) if rented else None,
+        executor=executor,
+    )
+    result = await _run(ctx, enforce=True)
+    assert result.passed is False
+    assert result.fatal is (not rented)
+
+    nxt = _Next()
+    with patch(SETTINGS) as s:
+        s.HARDWARE_FINGERPRINT_ENFORCEMENT_ENABLED = True
+        await Pipeline(checks=[HardwareIdentityCheck(), nxt], sink=AsyncMock()).run(ctx)
+    assert nxt.ran is rented  # with a live pod the pipeline goes on to TenantEnforcementCheck
