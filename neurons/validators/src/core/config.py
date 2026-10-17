@@ -565,13 +565,15 @@ class Settings(BaseSettings):
     # runtime quarantine, and the failed step stands in Redis until a probe passes: a later cycle with
     # no verdict of its own (filler running, image gone, inconclusive) fails the node again with it; a
     # rented node is left alone. An idle node with the image pulled is probed again every cycle until
-    # it passes. Off by default:
-    # it rents a container on every idle node every 6 h, so the team turns it on after staging.
-    RENTAL_PROBE_ENABLED: bool = Field(env="RENTAL_PROBE_ENABLED", default=False)
+    # it passes. DAH-4258: on by default, in shadow (enforcement below defaults off). Renters' most common
+    # complaint after GPU faults is a pod they cannot reach (SSH refused, "error connection"), the exact
+    # path this probe walks, and it sat dark in prod. It rents a container on every idle node every 6 h.
+    RENTAL_PROBE_ENABLED: bool = Field(env="RENTAL_PROBE_ENABLED", default=True)
     # Off: shadow mode. The probe runs on the same interval and logs RENTAL_PROBE_FAILED_OBSERVED, but a
-    # failure changes no score, job score or verified job and is not kept as a standing failure. On by
-    # default so a validator that already runs the probe keeps enforcing it.
-    RENTAL_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="RENTAL_PROBE_ENFORCEMENT_ENABLED", default=True)
+    # failure changes no score, job score or verified job and is not kept as a standing failure.
+    # DAH-4258: off by default, so turning the probe on is a shadow run. Enforcing is the owner's call
+    # on the shadow counts; a validator that already enforces sets this explicitly.
+    RENTAL_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="RENTAL_PROBE_ENFORCEMENT_ENABLED", default=False)
     RENTAL_PROBE_INTERVAL_HOURS: float = Field(env="RENTAL_PROBE_INTERVAL_HOURS", default=6.0, gt=0)
     RENTAL_PROBE_SSH_DEADLINE_SECONDS: int = Field(env="RENTAL_PROBE_SSH_DEADLINE_SECONDS", default=90, gt=0)
     # A node whose containers cannot reach the internet passed every check. CHECK runs the rental probe's
