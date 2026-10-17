@@ -1589,9 +1589,9 @@ class GpuFaultProbeMessages:
 
 
 class PinnedMemoryProbeMessages:
-    """F-1599 — the pinned-host-memory H2D/D2H round trip on every GPU. On by default with enforcement:
-    PROBE_FAILED fails the fatal check and keeps the node unrentable; without
-    PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED it is a warning and passed=True."""
+    """F-1599 — the pinned-host-memory H2D/D2H round trip on every GPU. On by default in shadow mode:
+    PROBE_FAILED is a logged warning with passed=True; with PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED it fails
+    the fatal check and keeps the node unrentable."""
 
     DISABLED = MessageTemplate(
         event="Pinned-memory copy probe disabled",
@@ -1872,6 +1872,53 @@ class CpuTruthMessages:
     )
 
 
+class GpuKernelCountMessages:
+    """Reported GPU list against the kernel's list (/proc/driver/nvidia/gpus). Shadow
+    (GPU_KERNEL_COUNT_CHECK_ENABLED without enforcement) renders COUNT_MISMATCH as a warning and
+    keeps passed=True; only GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED makes it fail the validation.
+    UUID_MISMATCH is logged only, under either flag."""
+
+    COUNT_OK = MessageTemplate(
+        event="Reported GPUs match the kernel's GPU list",
+        reason="GPU_KERNEL_COUNT_OK",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+    COUNT_MISMATCH = MessageTemplate(
+        event="Reported GPU count exceeds the kernel's GPU list",
+        reason="GPU_KERNEL_COUNT_MISMATCH",
+        severity="error",
+        category="env",
+        impact="Validation failed; score set to 0",
+        remediation=(
+            "Report only the GPUs this host has. The NVIDIA kernel driver "
+            "(/proc/driver/nvidia/gpus) lists fewer cards than the node reports."
+        ),
+    )
+    UUID_MISMATCH = MessageTemplate(
+        event="Reported GPU UUIDs are missing from the kernel's GPU list",
+        reason="GPU_KERNEL_UUID_MISMATCH",
+        severity="warning",
+        category="env",
+        impact="Shadow observation only: the validation result was NOT changed",
+    )
+    NOT_EVALUATED = MessageTemplate(
+        event="Kernel GPU list not available; reported GPU count not evaluated",
+        reason="GPU_KERNEL_COUNT_NOT_EVALUATED",
+        severity="info",
+        category="env",
+        impact="Proceed without penalty",
+    )
+    SKIPPED = MessageTemplate(
+        event="Kernel GPU count check disabled",
+        reason="GPU_KERNEL_COUNT_DISABLED",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+
+
 class ProviderSideLoadMessages:
     """DAH-2734 — the CPU/disk twin of the foreign-GPU gate: a provider who runs another
     subnet's miner on a listed machine sells capacity he already uses himself. Shadow
@@ -2092,5 +2139,42 @@ class RentedPodResourcesMessages:
         reason="RENTED_POD_RESOURCES_DISABLED",
         severity="info",
         category="policy",
+        impact="Proceed",
+    )
+
+
+SSHD_BOOTSTRAP_REMEDIATION = (
+    "sshd does not start inside containers on this node, so renters cannot SSH in. Common cause: the host's "
+    "container runtime leaves /run/sshd not owned by root or group/world-writable (sshd refuses to start: "
+    "\"/run/sshd must be owned by root and not group or world-writable\"). Fix the runtime/image setup so "
+    "a fresh container gets a root-owned /run/sshd with mode 755, then check that `docker run --rm ubuntu sh -c "
+    "'apt-get update -qq && apt-get install -y -qq openssh-server && mkdir -p /run/sshd && /usr/sbin/sshd -t'` "
+    "succeeds. The node is validated again once a new container on it starts sshd."
+)
+
+
+class SshdBootstrapMessages:
+    FAILED = MessageTemplate(
+        event="sshd does not start in containers on this node",
+        reason="SSHD_BOOTSTRAP_FAILED",
+        severity="warning",
+        category="runtime",
+        impact="Score set to 0 and Lium's filler on the node removed until sshd starts in a container on this node",
+        remediation=SSHD_BOOTSTRAP_REMEDIATION,
+    )
+    # the same finding while SSHD_BOOTSTRAP_ENFORCEMENT_ENABLED is off: logged, score unchanged
+    FAILED_OBSERVED = MessageTemplate(
+        event="sshd does not start in containers on this node (not enforced)",
+        reason="SSHD_BOOTSTRAP_FAILED_OBSERVED",
+        severity="warning",
+        category="runtime",
+        impact="None: SSHD_BOOTSTRAP_ENFORCEMENT_ENABLED is off",
+        remediation=SSHD_BOOTSTRAP_REMEDIATION,
+    )
+    OK = MessageTemplate(
+        event="No sshd start failure recorded for this node",
+        reason="SSHD_BOOTSTRAP_OK",
+        severity="info",
+        category="runtime",
         impact="Proceed",
     )

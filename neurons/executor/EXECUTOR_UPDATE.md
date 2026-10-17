@@ -34,6 +34,16 @@ docker image inspect --format '{{index .RepoDigests 0}}' "$(docker inspect execu
 
 If the two digests are equal, the node runs the current runner. If they differ, the node is behind: follow the next section.
 
+## Check the hotkey a node is set up for
+
+The executor names the miner hotkey from `MINER_HOTKEY_SS58_ADDRESS` in `.env` on request. `nonce` is any 32 to 128 hex characters; the answer echoes it back:
+
+```bash
+curl -s "http://127.0.0.1:$(grep -E '^EXTERNAL_PORT=' .env | cut -d= -f2)/miner-identity?nonce=$(openssl rand -hex 16)"
+```
+
+The answer is `{"miner_hotkey": "<ss58>", "nonce": "<the nonce sent>"}`, plus `"account_claim"` when `MINER_ACCOUNT_CLAIM` is set in `.env` (`lium mine --register` writes it). An executor older than this route answers `401`: update it as described below.
+
 ## One-time restart of a node that stopped updating
 
 If the node is behind, run this on the host. A `lium mine` installation puts the checkout at `compute-subnet` under the directory where `lium mine` was run, usually the home directory. For a manual installation, replace the first path with the directory that holds `neurons/executor/docker-compose.yml`:

@@ -41,6 +41,7 @@ from .checks import (
     GpuCountCheck,
     GpuFaultProbeCheck,
     GpuFingerprintCheck,
+    GpuKernelCountCheck,
     GpuModelValidCheck,
     GpuPowerLimitCheck,
     GpuThermalThrottleCheck,
@@ -63,6 +64,7 @@ from .checks import (
     SpecChangeCheck,
     StaleContainerCleanupCheck,
     StartGPUMonitorCheck,
+    SshdBootstrapCheck,
     SysboxRequiredCheck,
     TdxHostCheck,
     TenantEnforcementCheck,
@@ -257,6 +259,7 @@ class PipelineFactory:
                 port_public_key=public_key,
                 job_batch_id=miner_info.job_batch_id,
                 first_pass=first_pass and settings.FIRST_PASS_FAST_PATH_ENABLED,
+                express_first_pass=first_pass,
             ),
             state=ContextState(
                 upload_local_dir=encrypted_files.tmp_directory,
@@ -323,8 +326,14 @@ class PipelineFactory:
                 SpecChangeCheck(),
                 BannedProviderCheck(),
                 BannedGpuCheck(),
+                # Reported GPU count and UUIDs against the kernel's list, which BannedProviderCheck
+                # read above. Logs a verdict every cycle; fails the validation only under
+                # GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED. Before the rented short-circuit, so rented
+                # and idle nodes are judged alike.
+                GpuKernelCountCheck(),
                 DuplicateExecutorCheck(),
                 CollateralStatusCheck(),
+                SshdBootstrapCheck(),
                 # Reap orphaned (non-rented) rental containers BEFORE the port checks.
                 # A pod container that outlives its rental (e.g. BROKEN_BY_PROVIDER, which the
                 # platform deliberately does not tear down) keeps binding the rental port range.
@@ -368,7 +377,7 @@ class PipelineFactory:
                 # capability-verified population, same filler skip. Flag-gated, shadow-first, off by default.
                 GpuFaultProbeCheck(),
                 # F-1599: a pinned-host-memory H2D/D2H round trip on every GPU (a TDX guest without GPU CC
-                # passes the matmul but cannot DMA pinned memory). On and enforcing by default.
+                # passes the matmul but cannot DMA pinned memory). On by default, shadow (logged only) until enforcement is enabled.
                 PinnedMemoryProbeCheck(),
                 # DAH-2265 Plan 2: advisory, non-fatal — observes whether the executor has
                 # the recommended default image pre-pulled (DOCKER_PULL no-op). Runs here,
@@ -448,8 +457,10 @@ class PipelineFactory:
                 SpecChangeCheck(),
                 BannedProviderCheck(),
                 BannedGpuCheck(),
+                GpuKernelCountCheck(),
                 DuplicateExecutorCheck(),
                 CollateralStatusCheck(),
+                SshdBootstrapCheck(),
                 _STALE_CONTAINER_CLEANUP_SINGLETON,
                 ProviderSideLoadCheck(),
                 _CUSTOM_BUILD_ORPHAN_SWEEP_SINGLETON,
@@ -529,8 +540,10 @@ class PipelineFactory:
                 SpecChangeCheck(),
                 BannedProviderCheck(),
                 BannedGpuCheck(),
+                GpuKernelCountCheck(),
                 DuplicateExecutorCheck(),
                 CollateralStatusCheck(),
+                SshdBootstrapCheck(remove_fillers=False),  # removes no filler on a dry run
                 # StaleContainerCleanupCheck(),  # SKIP: removes containers on the executor
                 PortConnectivityCheck(),
                 PortCountCheck(),
