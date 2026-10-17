@@ -596,6 +596,13 @@ class Settings(BaseSettings):
     # Hub. Nothing guards an outage only the nodes see (a CDN region, a shared mirror), so enforcement
     # is off by default: it goes on after a 48 h log-only window with the OBSERVED rows reviewed
     # (count, outcomes, mirrors, fleet-wide pattern). Decider: taiberium; backup jam6099.
+    # A filler create runs the validator's sshd bootstrap in Lium's own image. When sshd is installed but
+    # never runs or listens there (e.g. a host runtime that leaves /run/sshd group/world-writable), no
+    # renter can SSH into any container on the node either. The connector stamps that per executor and
+    # SshdBootstrapCheck fails the unrented node (SSHD_BOOTSTRAP_FAILED, score 0) until a filler create
+    # verifies sshd again. Enforcing by default: a listed node renters cannot reach. Off = logged as
+    # SSHD_BOOTSTRAP_FAILED_OBSERVED, score unchanged.
+    SSHD_BOOTSTRAP_ENFORCEMENT_ENABLED: bool = Field(env="SSHD_BOOTSTRAP_ENFORCEMENT_ENABLED", default=True)
     REGISTRY_PULL_CHECK_ENABLED: bool = Field(env="REGISTRY_PULL_CHECK_ENABLED", default=True)
     REGISTRY_PULL_ENFORCEMENT_ENABLED: bool = Field(env="REGISTRY_PULL_ENFORCEMENT_ENABLED", default=False)
     REGISTRY_PULL_PROBE_INTERVAL_HOURS: float = Field(
