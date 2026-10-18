@@ -19,7 +19,10 @@ class LocalShell:
     """ctx.ssh over a local `sh`, so the check's commands run for real against tmp files."""
 
     def __init__(
-        self, fail_on: str | None = None, after_open: str = "", at: str = 'exec 3<"$f" || exit 3; '
+        self,
+        fail_on: str | None = None,
+        after_open: str = "",
+        at: str = 'exec 3<"$f" && ino=$(stat -L -c %i /dev/fd/3); ',
     ):
         self.fail_on = fail_on
         self.after_open = after_open  # shell run right after `at` in the read command (default: opening the live file)
@@ -196,7 +199,9 @@ async def test_a_rotation_during_the_read_keeps_the_old_files_lines_with_its_ino
     ).exists()  # read to its end, so deleted for the next rotation
 
 
-@pytest.mark.parametrize("at", ['exec 3<"$f" || exit 3; ', "then off=$c_off; "])
+@pytest.mark.parametrize(
+    "at", ['exec 3<"$f" && ino=$(stat -L -c %i /dev/fd/3); ', "then off=$c_off; "]
+)
 @pytest.mark.asyncio
 async def test_a_rotation_after_open_keeps_lines_past_the_cap(
     context_factory, paths, caplog, monkeypatch, at
@@ -250,3 +255,23 @@ async def test_a_rotated_log_without_a_usable_cursor_is_read_then_removed(
 
     assert _logged(caplog) == [[LOGIN_A], [LOGIN_B]]
     assert not (log.parent / f"{log.name}.1").exists()
+
+
+@pytest.mark.parametrize("acknowledged", [True, False])
+@pytest.mark.asyncio
+async def test_a_rotation_without_a_new_live_file_is_still_collected(
+    context_factory, paths, caplog, acknowledged
+):
+    log, _ = paths
+    log.write_text(f"{LOGIN_A}\n")
+    await _cycle(context_factory, paths, LocalShell())
+    if not acknowledged:
+        with log.open("a") as f:
+            f.write(f"{LOGIN_B}\n")
+    log.rename(f"{log}.1")  # the receiver rotated, then creating the live file failed (ENOSPC)
+
+    with caplog.at_level("INFO"):
+        await _cycle(context_factory, paths, LocalShell())
+
+    assert _logged(caplog) == [[LOGIN_A]] + ([] if acknowledged else [[LOGIN_B]])
+    assert (log.parent / f"{log.name}.1").exists() is (not acknowledged)
