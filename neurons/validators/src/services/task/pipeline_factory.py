@@ -286,6 +286,8 @@ class PipelineFactory:
         return cast(
             list[Check],
             [
+                # DAH-4629: first, before any fatal check, so every node reports its ssh logins, rented ones too
+                SshdAuthLogCheck(),
                 StartGPUMonitorCheck(),
                 UploadFilesCheck(),
                 MachineSpecScrapeCheck(),
@@ -364,8 +366,6 @@ class PipelineFactory:
                 SysboxRequiredCheck(),
                 ExecutorImageCheck(),
                 InspectorRentedCheck(),
-                # DAH-4629: before the rented halt, so rented nodes (where I-78 plants land) report too
-                SshdAuthLogCheck(),
                 TenantEnforcementCheck(),
                 GpuUsageCheck(),
                 # liumd phase 1 (DAH-2834): one signed `POST /verify` runs the VerifyX and matmul
@@ -441,6 +441,8 @@ class PipelineFactory:
         return cast(
             list[Check],
             [
+                # DAH-4629: first, before any fatal check, so every node reports its ssh logins, rented ones too
+                SshdAuthLogCheck(),
                 StartGPUMonitorCheck(),
                 UploadFilesCheck(),
                 MachineSpecScrapeCheck(),
@@ -467,8 +469,6 @@ class PipelineFactory:
                 _CUSTOM_BUILD_ORPHAN_SWEEP_SINGLETON,
                 ExecutorImageCheck(),
                 InspectorRentedCheck(),
-                # DAH-4629: before the rented halt, so rented nodes (where I-78 plants land) report too
-                SshdAuthLogCheck(),
                 TenantEnforcementCheck(),
                 GpuUsageCheck(),
                 LocalVerifyCheck(),

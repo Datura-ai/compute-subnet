@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from core.utils import _m, get_extra_info
@@ -10,15 +11,28 @@ from ..pipeline import CheckResult, Context
 
 logger = logging.getLogger(__name__)
 
-# Written by the executor's sshd (run.sh: `sshd -E`, LogLevel VERBOSE from sshd_setup.sh).
+# Written by the executor's sshd_log_receiver.py: one `Accepted ...` line per login, sshd's envelope kept.
 SSHD_AUTH_LOG = "/var/log/sshd-auth.log"
-# A cycle is ~15 min; more logins than this in one is a scanner or a loop, and the newest say enough.
+# "<inode> <byte offset>" of the first line not logged yet; moved only after the lines are logged
+SSHD_AUTH_CURSOR = "/var/log/sshd-auth.cursor"
+# A cycle is ~15 min; the rest waits for the next cycle.
 MAX_LOGINS_PER_CYCLE = 200
-# Read and empty in one command, so a line written between the two lands in the next cycle at worst.
-READ_AND_EMPTY = (
-    f'f={SSHD_AUTH_LOG}; [ -f "$f" ] || exit 3; '
-    f'grep -a "Accepted " "$f" | tail -n {MAX_LOGINS_PER_CYCLE}; : > "$f"'
-)
+SSH_TIMEOUT_SECONDS = 10
+
+
+def read_command(log: str = SSHD_AUTH_LOG, cursor: str = SSHD_AUTH_CURSOR) -> str:
+    """Prints `<inode> <offset>`, then up to MAX_LOGINS_PER_CYCLE lines from the offset. A new inode (the
+    receiver rotated the file) or a file shorter than the offset starts over at 0."""
+    return (
+        f'f={log}; [ -f "$f" ] || exit 3; ino=$(stat -c %i "$f"); off=0; '
+        f'set -- $(cat {cursor} 2>/dev/null); [ "${{1:-}}" = "$ino" ] && off=${{2:-0}}; '
+        f'[ "$off" -le "$(stat -c %s "$f")" ] 2>/dev/null || off=0; '
+        f'echo "$ino $off"; tail -c +$((off + 1)) "$f" | head -n {MAX_LOGINS_PER_CYCLE}'
+    )
+
+
+def advance_command(inode: int, offset: int, cursor: str = SSHD_AUTH_CURSOR) -> str:
+    return f'printf "%s %s\\n" {inode} {offset} > {cursor}.tmp && mv {cursor}.tmp {cursor}'
 
 
 class SshdAuthLogCheck:
@@ -26,24 +40,34 @@ class SshdAuthLogCheck:
 
     An unregistered key is appended to renters' pods from root sessions into executor containers,
     and nothing recorded which key opened those sessions. Each `Accepted publickey ... SHA256:<fp>`
-    line since the last cycle is logged here, so Loki names the key of every session, ours included
+    line not logged yet is logged here, so Loki names the key of every session, ours included
     (the validator makes a fresh key per job). Logged directly, not through the event: the sink
     drops an info event that repeats the last one to debug. Observation only: never fails or halts,
-    runs on rented nodes too.
+    runs first, so a node a fatal check stops and a rented node report too.
     """
 
     check_id = "executor.observe.sshd_auth_log"
     fatal = False
 
+    def __init__(self, log: str = SSHD_AUTH_LOG, cursor: str = SSHD_AUTH_CURSOR):
+        self.log, self.cursor = log, cursor
+
     async def run(self, ctx: Context) -> CheckResult:
         try:
-            result = await ctx.ssh.run(READ_AND_EMPTY, check=False)
-        except Exception as exc:  # noqa: BLE001 - observation only, never fatal
-            return self._unread(ctx, reason=f"ssh error: {exc}")
+            result = await self._ssh(ctx, read_command(self.log, self.cursor))
+        except Exception as exc:  # noqa: BLE001 - observation only, never fatal; a timeout lands here too
+            return self._unread(ctx, reason=f"ssh error: {exc!r}")
         if result.exit_status == 3:
             # an executor image from before DAH-4629
             return self._unread(ctx, reason="no sshd auth log on this executor")
-        logins = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+        header, _, body = (result.stdout or "").partition("\n")
+        try:
+            inode, offset = (int(part) for part in header.split())
+        except ValueError:
+            return self._unread(ctx, reason=f"unreadable cursor line {header[:80]!r}")
+        # only whole lines: a line still being written is read again next cycle
+        lines = [line for line in body.splitlines(keepends=True) if line.endswith("\n")]
+        logins = [line.strip() for line in lines if line.strip()]
         if logins:
             logger.info(
                 _m(
@@ -53,6 +77,11 @@ class SshdAuthLogCheck:
                     ),
                 )
             )
+            consumed = sum(len(line.encode("utf-8")) for line in lines)
+            try:
+                await self._ssh(ctx, advance_command(inode, offset + consumed, self.cursor))
+            except Exception as exc:  # noqa: BLE001 - the same lines are logged again next cycle
+                return self._unread(ctx, reason=f"cursor not moved: {exc!r}")
         event = render_message(
             Msg.LOGINS,
             ctx=ctx,
@@ -60,6 +89,13 @@ class SshdAuthLogCheck:
             what={"executor_uuid": ctx.executor.uuid, "login_count": len(logins)},
         )
         return CheckResult(passed=True, event=event)
+
+    @staticmethod
+    async def _ssh(ctx: Context, command: str):
+        # a stalled executor must not hold up the checks behind this one
+        return await asyncio.wait_for(
+            ctx.ssh.run(command, check=False), timeout=SSH_TIMEOUT_SECONDS
+        )
 
     def _unread(self, ctx: Context, *, reason: str) -> CheckResult:
         event = render_message(

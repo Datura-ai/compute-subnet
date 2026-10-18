@@ -21,13 +21,11 @@ fi
 
 # start ssh service
 ssh-keygen -A
-# DAH-4629: sshd logs (LogLevel VERBOSE, sshd_setup.sh) to a file instead of a syslog this container
-# does not run; the validator reads and empties it each cycle. Emptied here past 50 MB in case no
-# validator comes by (a scanner on the ssh port writes a few lines per attempt).
-SSHD_AUTH_LOG=/var/log/sshd-auth.log
-mkdir -p /run/sshd
-/usr/sbin/sshd -E "$SSHD_AUTH_LOG"
-(while sleep 600; do [ "$(stat -c %s "$SSHD_AUTH_LOG" 2>/dev/null || echo 0)" -gt 52428800 ] && : >"$SSHD_AUTH_LOG"; done) &
+# sshd logs to syslog (LogLevel VERBOSE from sshd_setup.sh names the key of each login); this container
+# runs no syslog, so sshd_log_receiver.py is /dev/log and keeps the login lines for the validator.
+python3 sshd_log_receiver.py &
+for _ in $(seq 50); do [ -S /dev/log ] && break; sleep 0.1; done
+service ssh start
 
 # run fastapi app
 pdm run python src/executor.py

@@ -1,57 +1,145 @@
 from __future__ import annotations
 
+import asyncio
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-
-from services.task.checks.sshd_auth_log import READ_AND_EMPTY, SshdAuthLogCheck
+from services.task.checks import sshd_auth_log
+from services.task.checks.sshd_auth_log import SshdAuthLogCheck
 from services.task.messages import SshdAuthLogMessages as Msg
 
-LINE = "Oct 18 06:27:30 sshd[812]: Accepted publickey for root from 203.0.113.9 port 51022 ssh2: ED25519 SHA256:abc"
+# what the executor's sshd_log_receiver.py writes: its UTC time, then sshd's syslog envelope
+LOGIN_A = "2026-10-18T06:27:30+00:00 <38>Oct 18 06:27:30 sshd[812]: Accepted publickey for root from 203.0.113.9 port 51022 ssh2: ED25519 SHA256:aaa"
+LOGIN_B = "2026-10-18T06:27:31+00:00 <38>Oct 18 06:27:31 sshd[813]: Accepted publickey for root from 203.0.113.9 port 51023 ssh2: ED25519 SHA256:bbb"
 
 
-def _ssh(stdout="", exit_status=0, error=None):
-    ssh = AsyncMock()
-    ssh.run.side_effect = error or None
-    ssh.run.return_value = SimpleNamespace(stdout=stdout, exit_status=exit_status)
-    return ssh
+class LocalShell:
+    """ctx.ssh over a local `sh`, so the check's commands run for real against tmp files."""
+
+    def __init__(self, fail_on: str | None = None):
+        self.fail_on = fail_on
+        self.commands: list[str] = []
+
+    async def run(self, command: str, check: bool = False):
+        self.commands.append(command)
+        if self.fail_on and self.fail_on in command:
+            raise OSError("connection lost")
+        done = subprocess.run(["sh", "-c", command], capture_output=True, text=True)
+        return SimpleNamespace(stdout=done.stdout, exit_status=done.returncode)
 
 
-@pytest.mark.asyncio
-async def test_logins_are_logged_and_the_log_is_emptied(context_factory, caplog):
-    ssh = _ssh(stdout=f"{LINE}\n\n")
-    with caplog.at_level("INFO"):
-        result = await SshdAuthLogCheck().run(context_factory(ssh=ssh))
-    assert result.passed is True
-    assert result.event.reason_code == Msg.LOGINS.reason
-    assert result.event.what_we_saw["login_count"] == 1
-    assert ': > "$f"' in ssh.run.call_args.args[0] == READ_AND_EMPTY
-    logged = [
-        r.msg.extra
+def _logged(caplog) -> list[list[str]]:
+    return [
+        r.msg.extra["logins"]
         for r in caplog.records
         if getattr(r.msg, "message", None) == "Executor sshd logins"
     ]
-    assert [extra["logins"] for extra in logged] == [[LINE]]
+
+
+@pytest.fixture
+def paths(tmp_path):
+    return tmp_path / "sshd-auth.log", tmp_path / "sshd-auth.cursor"
+
+
+async def _cycle(context_factory, paths, ssh):
+    log, cursor = paths
+    return await SshdAuthLogCheck(str(log), str(cursor)).run(context_factory(ssh=ssh))
 
 
 @pytest.mark.asyncio
-async def test_no_logins_logs_nothing(context_factory, caplog):
+async def test_each_login_is_logged_once_with_sshds_envelope(context_factory, paths, caplog):
+    paths[0].write_text(f"{LOGIN_A}\n")
     with caplog.at_level("INFO"):
-        result = await SshdAuthLogCheck().run(context_factory(ssh=_ssh()))
-    assert result.event.what_we_saw["login_count"] == 0
-    assert not any("Executor sshd logins" in r.getMessage() for r in caplog.records)
+        first = await _cycle(context_factory, paths, LocalShell())
+        second = await _cycle(context_factory, paths, LocalShell())
+
+    assert first.event.what_we_saw["login_count"] == 1
+    assert second.event.what_we_saw["login_count"] == 0
+    assert _logged(caplog) == [[LOGIN_A]]
+    assert paths[0].read_text() == f"{LOGIN_A}\n"  # nothing on the executor is erased
 
 
 @pytest.mark.asyncio
-async def test_an_executor_without_the_log_passes_unread(context_factory):
-    result = await SshdAuthLogCheck().run(context_factory(ssh=_ssh(exit_status=3)))
+async def test_a_login_written_after_the_read_is_logged_next_cycle(context_factory, paths, caplog):
+    paths[0].write_text(f"{LOGIN_A}\n")
+    ssh = LocalShell()
+    original = ssh.run
+
+    async def append_after_read(command, check=False):
+        result = await original(command, check=check)
+        if "tail -c" in command:
+            with paths[0].open("a") as f:
+                f.write(f"{LOGIN_B}\n")
+        return result
+
+    ssh.run = append_after_read
+    with caplog.at_level("INFO"):
+        await _cycle(context_factory, paths, ssh)
+        await _cycle(context_factory, paths, LocalShell())
+
+    assert _logged(caplog) == [[LOGIN_A], [LOGIN_B]]
+
+
+@pytest.mark.asyncio
+async def test_a_lost_connection_before_the_cursor_moves_logs_the_batch_again(
+    context_factory, paths, caplog
+):
+    paths[0].write_text(f"{LOGIN_A}\n")
+    with caplog.at_level("INFO"):
+        lost = await _cycle(context_factory, paths, LocalShell(fail_on="mv "))
+        await _cycle(context_factory, paths, LocalShell())
+
+    assert lost.passed is True and lost.event.reason_code == Msg.UNREAD.reason
+    assert _logged(caplog) == [[LOGIN_A], [LOGIN_A]]
+
+
+@pytest.mark.asyncio
+async def test_more_logins_than_a_cycle_takes_wait_for_the_next(
+    context_factory, paths, caplog, monkeypatch
+):
+    monkeypatch.setattr(sshd_auth_log, "MAX_LOGINS_PER_CYCLE", 1)
+    paths[0].write_text(f"{LOGIN_A}\n{LOGIN_B}\n")
+    with caplog.at_level("INFO"):
+        await _cycle(context_factory, paths, LocalShell())
+        await _cycle(context_factory, paths, LocalShell())
+
+    assert _logged(caplog) == [[LOGIN_A], [LOGIN_B]]
+
+
+@pytest.mark.asyncio
+async def test_a_rotated_log_is_read_from_its_start(context_factory, paths, caplog):
+    paths[0].write_text(f"{LOGIN_A}\n")
+    await _cycle(context_factory, paths, LocalShell())
+    paths[0].rename(f"{paths[0]}.1")
+    paths[0].write_text(f"{LOGIN_B}\n")
+
+    with caplog.at_level("INFO"):
+        await _cycle(context_factory, paths, LocalShell())
+
+    assert _logged(caplog) == [[LOGIN_A], [LOGIN_B]]  # B from the new file's start, A not again
+
+
+@pytest.mark.asyncio
+async def test_an_executor_without_the_log_passes_unread(context_factory, paths):
+    result = await _cycle(context_factory, paths, LocalShell())
+
     assert result.passed is True
     assert result.event.reason_code == Msg.UNREAD.reason
 
 
 @pytest.mark.asyncio
-async def test_an_ssh_error_never_fails_the_node(context_factory):
-    result = await SshdAuthLogCheck().run(context_factory(ssh=_ssh(error=OSError("closed"))))
+async def test_a_stalled_executor_times_out_unread(context_factory, paths, monkeypatch):
+    monkeypatch.setattr(sshd_auth_log, "SSH_TIMEOUT_SECONDS", 0.01)
+    ssh = AsyncMock()
+
+    async def stall(*_args, **_kwargs):
+        await asyncio.sleep(5)
+
+    ssh.run.side_effect = stall
+
+    result = await _cycle(context_factory, paths, ssh)
+
     assert result.passed is True
     assert result.event.reason_code == Msg.UNREAD.reason
