@@ -5339,9 +5339,12 @@ class DockerService:
         # DAH-2496: the kernel cannot ID-shift a FUSE mount, so under sysbox the
         # pod's root would see the bucket as nobody. s3fs keeps owner in object
         # metadata, so report the objects as owned by the pod's root instead.
-        mount_options: str = "allow_other"
+        # DAH-4636: s3fs checks access against that forced owner with the stored mode,
+        # so a non-root pod user could not reopen its own 0600 file; umask=0000 makes
+        # s3fs report and check 0777 for every object.
+        mount_options: str = "allow_other,umask=0000"
         if sysbox_subuid_base is not None:
-            mount_options = f"allow_other,uid={sysbox_subuid_base},gid={sysbox_subuid_base}"
+            mount_options = f"allow_other,umask=0000,uid={sysbox_subuid_base},gid={sysbox_subuid_base}"
 
         setup_results: list[asyncssh.SSHCompletedProcess] = (
             await self._install_s3fs_plugin_instance(
