@@ -11,6 +11,7 @@ sys.path.insert(0, str(MINER_JOBS_PATH))
 from datura.requests.miner_requests import ExecutorSSHInfo
 from services.docker_service import DockerService
 from workspace_mount import (
+    detect_volume_access,
     normalize_workspace_path,
 )
 
@@ -23,6 +24,76 @@ def test_workspace_path_normalization_rejects_escape():
     assert normalize_workspace_path("/workspace/test", "/root") == "/workspace/test"
     with pytest.raises(ValueError, match="escapes"):
         normalize_workspace_path("/root/../etc", "/root")
+
+
+def _docker_run_side_effect(
+    ps_output: str,
+    inspect_outputs: dict[str, str],
+    running: dict[str, bool] | None = None,
+    ps_all_output: str | None = None,
+    gocryptfs_conf_returncode: int = 1,
+):
+    running = running or {}
+    if ps_all_output is None:
+        ps_all_output = ps_output
+
+    def fake_run(command, **kwargs):
+        if command[:2] == ["/usr/bin/docker", "ps"]:
+            if "-a" in command:
+                return SimpleNamespace(returncode=0, stdout=ps_all_output, stderr="")
+            return SimpleNamespace(returncode=0, stdout=ps_output, stderr="")
+        if command[:3] == ["/usr/bin/docker", "inspect", "-f"]:
+            if command[3] == "{{.State.Running}}":
+                container_name = command[-1]
+                is_running = running.get(container_name, True)
+                return SimpleNamespace(
+                    returncode=0, stdout="true\n" if is_running else "false\n", stderr=""
+                )
+            container_name = command[-1]
+            return SimpleNamespace(
+                returncode=0,
+                stdout=inspect_outputs.get(container_name, ""),
+                stderr="",
+            )
+        if (
+            command[:3] == ["/usr/bin/docker", "run", "--rm"]
+            and "--entrypoint" in command
+            and command[command.index("--entrypoint") + 1] == "test"
+            and command[-2:] == ["-f", "/probe/gocryptfs.conf"]
+        ):
+            return SimpleNamespace(returncode=gocryptfs_conf_returncode, stdout="", stderr="")
+        raise AssertionError(f"unexpected docker command: {command}")
+
+    return fake_run
+
+
+def test_detect_volume_access_raises_when_stopped_container_has_cipher_mount(monkeypatch):
+    monkeypatch.setattr(
+        "workspace_mount.subprocess.run",
+        _docker_run_side_effect(
+            ps_output="",
+            ps_all_output="stopped-pod\n",
+            inspect_outputs={"stopped-pod": "source-volume\t/lium-cipher\n"},
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="encrypted.*no running container.*/lium-cipher"):
+        detect_volume_access("source-volume", "/root")
+
+
+def test_detect_volume_access_raises_when_gocryptfs_conf_present(monkeypatch):
+    monkeypatch.setattr(
+        "workspace_mount.subprocess.run",
+        _docker_run_side_effect(
+            ps_output="",
+            ps_all_output="",
+            inspect_outputs={},
+            gocryptfs_conf_returncode=0,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="gocryptfs.conf.*no running container.*/lium-cipher"):
+        detect_volume_access("source-volume", "/root")
 
 
 def _executor_info() -> ExecutorSSHInfo:
@@ -60,7 +131,9 @@ async def test_encrypted_bootstrap_restore_spec_never_carries_the_passphrase(mon
 
     master_secret = "test-master-secret-32-chars-long!!"
     monkeypatch.setattr(docker_service_module.settings, "VOLUME_MASTER_SECRET", master_secret)
-    monkeypatch.setattr(docker_service_module, "supports_storage_operation", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        docker_service_module, "supports_storage_operation", AsyncMock(return_value=True)
+    )
     start = AsyncMock(return_value={"spec": "/tmp/spec.json"})
     monkeypatch.setattr(docker_service_module, "start_storage_operation", start)
     monkeypatch.setattr(docker_service_module, "wait_for_storage_operation", AsyncMock())
@@ -104,5 +177,3 @@ async def test_encrypted_bootstrap_restore_spec_never_carries_the_passphrase(mon
     assert spec["workspace"]["requested_path"] == "/root"
     # create-time: the entrypoint may have touched the fresh mount already; the backup wins
     assert spec["workspace"]["bootstrap"] is True
-
-

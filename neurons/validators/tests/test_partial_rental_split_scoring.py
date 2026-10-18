@@ -97,6 +97,22 @@ async def test_calculate_mining_scores_pays_both_pools_and_merges_back(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_calculate_mining_scores_whole_box_when_backend_lacks_gpu_counts(monkeypatch):
+    # Arrange — same node, but the backend didn't report per-pod gpu_count.
+    job = _make_job(gpu_count=8, rented_gpu_count=None)
+    incentive = _build_incentive(job)
+    monkeypatch.setattr(incentive, "_calculate_rental_share", AsyncMock(return_value=0.1))
+
+    # Act
+    await incentive.calculate_mining_scores()
+
+    # Assert — today's behavior: the whole box is scored in the mining pool only.
+    assert incentive.job_results[MINER_HOTKEY] == [job]
+    assert job.mining_score == pytest.approx(1.0 * 0.3 * 8 / 8)
+    assert incentive.unrented_count_by_bucket == {}
+
+
+@pytest.mark.asyncio
 async def test_plain_idle_node_earns_only_in_the_unrented_pool(monkeypatch):
     # Arrange
     job = _make_job(gpu_count=8, rented_gpu_count=None, is_rented=False)
@@ -112,5 +128,3 @@ async def test_plain_idle_node_earns_only_in_the_unrented_pool(monkeypatch):
     assert job.incentive_source == "idle_incentive"
     assert job.node_state_at_cycle == "idle"
     assert job.incentive_formula_version == "rental_price_v2"
-
-
