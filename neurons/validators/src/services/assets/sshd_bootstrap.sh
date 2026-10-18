@@ -389,6 +389,25 @@ while [ "$#" -gt 0 ]; do
 done
 GRACE_SECS="$(int_or "${GRACE_SECS:-}" "" 300)"
 
+# Headless Vulkan: the NVIDIA toolkit injects the driver libraries but, on many hosts, no ICD
+# file, or only the GLX one, which needs an X server. Register the EGL library, which works
+# without one. Best effort: it never fails the bootstrap.
+ensure_vulkan_egl_icd() {
+    icd_dir="${LIUM_VULKAN_ICD_DIR:-/etc/vulkan/icd.d}"
+    for lib_dir in ${LIUM_NVIDIA_LIB_DIRS:-/usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib/aarch64-linux-gnu}; do
+        [ -e "$lib_dir/libEGL_nvidia.so.0" ] || continue
+        if grep -qs libEGL_nvidia "$icd_dir"/*.json /usr/share/vulkan/icd.d/*.json; then
+            return 0
+        fi
+        mkdir -p "$icd_dir" &&
+            printf '%s\n' '{"file_format_version":"1.0.1","ICD":{"library_path":"libEGL_nvidia.so.0","api_version":"1.3"}}' \
+                > "$icd_dir/nvidia_egl_icd.json" &&
+            log "Registered the NVIDIA EGL Vulkan driver"
+        return 0
+    done
+}
+ensure_vulkan_egl_icd || true
+
 # 1. Somebody already brought sshd up (image entrypoint won outright, or this
 #    is a re-run) — adopt it, never touch host keys.
 if is_sshd_running; then
