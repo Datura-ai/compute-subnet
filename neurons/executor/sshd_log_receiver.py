@@ -4,19 +4,23 @@ Keeps the `Accepted ...` login lines with sshd's own envelope (time and `sshd[pi
 time received in UTC, in SSHD_AUTH_LOG for the validator to read (it keeps its own cursor there)."""
 
 import os
+import re
 import socket
 from datetime import UTC, datetime
 
 DEV_LOG = "/dev/log"
 SSHD_AUTH_LOG = "/var/log/sshd-auth.log"
-# past this the file is renamed to .1; the new file is a new inode, which restarts the validator's cursor.
-# shortcut: lines the validator had not read in .1 are not read, only after 50 MB of logins unread; a cursor over .1 then
+# past this the file is renamed to .1 (the validator drains .1 from its cursor, then starts the new file)
 ROTATE_BYTES = 50 * 1024 * 1024
+# a session that authenticated; VERBOSE also logs "Accepted key ... found at" for a key merely offered
+LOGIN = re.compile(r"Accepted \S+ for ")
+# records kept while the disk refuses writes; sshd must never wait on this socket
+MAX_PENDING = 1000
 
 
 def record(message: str, log: str = SSHD_AUTH_LOG) -> None:
     line = " ".join(message.split())
-    if "Accepted " not in line:
+    if not LOGIN.search(line):
         return
     if os.path.exists(log) and os.path.getsize(log) > ROTATE_BYTES:
         os.replace(log, f"{log}.1")
@@ -30,8 +34,27 @@ def main() -> None:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     sock.bind(DEV_LOG)
     os.chmod(DEV_LOG, 0o666)
+    serve(sock)
+
+
+def serve(sock: socket.socket) -> None:
+    """A failed write (a full disk) keeps the records and retries with backoff instead of ending the receiver."""
+    pending: list[str] = []
+    delay = None
     while True:
-        record(sock.recv(16384).decode("utf-8", errors="replace"))
+        sock.settimeout(delay)
+        try:
+            pending.append(sock.recv(16384).decode("utf-8", errors="replace"))
+        except socket.timeout:
+            pass
+        try:
+            while pending:
+                record(pending[0])
+                pending.pop(0)
+            delay = None
+        except OSError:
+            del pending[:-MAX_PENDING]
+            delay = min((delay or 0.5) * 2, 60)
 
 
 if __name__ == "__main__":

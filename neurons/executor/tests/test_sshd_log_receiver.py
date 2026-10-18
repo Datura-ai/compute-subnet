@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(
     0, str(Path(__file__).resolve().parents[1])
 )  # the receiver sits beside run.sh, not in src/
@@ -22,6 +24,54 @@ def test_a_login_is_kept_with_sshds_envelope(tmp_path):
 
     lines = log.read_text().splitlines()
     assert len(lines) == 1 and lines[0].endswith(ACCEPTED)
+
+
+@pytest.mark.parametrize(
+    "offer",
+    [
+        "<38>Oct 18 06:27:29 sshd[812]: Accepted key ED25519 SHA256:aaa found at /root/.ssh/authorized_keys:3",
+        "<38>Oct 18 06:27:31 sshd[813]: Connection closed by 198.51.100.4 port 4022 [preauth]",
+    ],
+)
+def test_only_a_completed_login_is_recorded(tmp_path, offer):
+    log = tmp_path / "sshd-auth.log"
+
+    record(offer, str(log))
+
+    assert not log.exists()
+
+
+class FakeSocket:
+    """Two datagrams, then stops the loop at the next blocking recv."""
+
+    def __init__(self, datagrams):
+        self.datagrams = list(datagrams)
+
+    def settimeout(self, value):
+        pass
+
+    def recv(self, size):
+        if not self.datagrams:
+            raise KeyboardInterrupt
+        return self.datagrams.pop(0).encode()
+
+
+def test_a_failed_write_is_retried_instead_of_ending_the_receiver(tmp_path, monkeypatch):
+    log = tmp_path / "sshd-auth.log"
+    calls = []
+
+    def flaky(message, log=str(log)):
+        calls.append(message)
+        if len(calls) == 1:
+            raise OSError(28, "No space left on device")
+        record(message, log)
+
+    monkeypatch.setattr(sshd_log_receiver, "record", flaky)
+
+    with pytest.raises(KeyboardInterrupt):
+        sshd_log_receiver.serve(FakeSocket([ACCEPTED, ACCEPTED.replace("812", "814")]))
+
+    assert len(log.read_text().splitlines()) == 2
 
 
 def test_a_full_log_is_rotated_before_the_next_login(tmp_path, monkeypatch):

@@ -21,11 +21,15 @@ SSH_TIMEOUT_SECONDS = 10
 
 
 def read_command(log: str = SSHD_AUTH_LOG, cursor: str = SSHD_AUTH_CURSOR) -> str:
-    """Prints `<inode> <offset>`, then up to MAX_LOGINS_PER_CYCLE lines from the offset. A new inode (the
-    receiver rotated the file) or a file shorter than the offset starts over at 0."""
+    """Prints `<inode> <offset>`, then up to MAX_LOGINS_PER_CYCLE lines from the offset. After a rotation the
+    unread rest of the cursor's file, now `.1`, is read first; then the new file from 0. A file shorter than
+    the offset starts over at 0."""
     return (
         f'f={log}; [ -f "$f" ] || exit 3; ino=$(stat -c %i "$f"); off=0; '
-        f'set -- $(cat {cursor} 2>/dev/null); [ "${{1:-}}" = "$ino" ] && off=${{2:-0}}; '
+        f'set -- $(cat {cursor} 2>/dev/null); '
+        f'if [ "${{1:-}}" = "$ino" ]; then off=${{2:-0}}; '
+        f'elif [ -n "${{1:-}}" ] && [ "$(stat -c %i "$f.1" 2>/dev/null)" = "$1" ] '
+        f'&& [ "${{2:-0}}" -lt "$(stat -c %s "$f.1")" ] 2>/dev/null; then f="$f.1"; ino=$1; off=${{2:-0}}; fi; '
         f'[ "$off" -le "$(stat -c %s "$f")" ] 2>/dev/null || off=0; '
         f'echo "$ino $off"; tail -c +$((off + 1)) "$f" | head -n {MAX_LOGINS_PER_CYCLE}'
     )

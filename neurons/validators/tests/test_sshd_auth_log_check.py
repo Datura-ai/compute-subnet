@@ -121,6 +121,25 @@ async def test_a_rotated_log_is_read_from_its_start(context_factory, paths, capl
     assert _logged(caplog) == [[LOGIN_A], [LOGIN_B]]  # B from the new file's start, A not again
 
 
+LOGIN_C = LOGIN_B.replace("51023", "51024").replace("SHA256:bbb", "SHA256:ccc")
+
+
+@pytest.mark.asyncio
+async def test_logins_left_unread_in_a_rotated_log_are_read_before_the_new_file(context_factory, paths, caplog):
+    paths[0].write_text(f"{LOGIN_A}\n")
+    await _cycle(context_factory, paths, LocalShell())
+    with paths[0].open("a") as f:
+        f.write(f"{LOGIN_B}\n")
+    paths[0].rename(f"{paths[0]}.1")
+    paths[0].write_text(f"{LOGIN_C}\n")
+
+    with caplog.at_level("INFO"):
+        for _ in range(3):
+            await _cycle(context_factory, paths, LocalShell())
+
+    assert _logged(caplog) == [[LOGIN_A], [LOGIN_B], [LOGIN_C]]
+
+
 @pytest.mark.asyncio
 async def test_an_executor_without_the_log_passes_unread(context_factory, paths):
     result = await _cycle(context_factory, paths, LocalShell())
