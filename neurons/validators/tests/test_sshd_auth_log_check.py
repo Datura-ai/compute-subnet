@@ -18,9 +18,12 @@ LOGIN_B = "2026-10-18T06:27:31+00:00 <38>Oct 18 06:27:31 sshd[813]: Accepted pub
 class LocalShell:
     """ctx.ssh over a local `sh`, so the check's commands run for real against tmp files."""
 
-    def __init__(self, fail_on: str | None = None, after_open: str = ""):
+    def __init__(
+        self, fail_on: str | None = None, after_open: str = "", at: str = 'exec 3<"$f" || exit 3; '
+    ):
         self.fail_on = fail_on
-        self.after_open = after_open  # shell run right after the read command opens the live file
+        self.after_open = after_open  # shell run right after `at` in the read command (default: opening the live file)
+        self.at = at
         self.commands: list[str] = []
 
     async def run(self, command: str, check: bool = False):
@@ -28,9 +31,7 @@ class LocalShell:
         if self.fail_on and self.fail_on in command:
             raise OSError("connection lost")
         if self.after_open:
-            command = command.replace(
-                'exec 3<"$f" || exit 3; ', f'exec 3<"$f" || exit 3; {self.after_open}; ', 1
-            )
+            command = command.replace(self.at, f"{self.at}{self.after_open}; ", 1)
         done = subprocess.run(["sh", "-c", command], capture_output=True, text=True)
         return SimpleNamespace(stdout=done.stdout, exit_status=done.returncode)
 
@@ -195,9 +196,10 @@ async def test_a_rotation_during_the_read_keeps_the_old_files_lines_with_its_ino
     ).exists()  # read to its end, so deleted for the next rotation
 
 
+@pytest.mark.parametrize("at", ['exec 3<"$f" || exit 3; ', "then off=$c_off; "])
 @pytest.mark.asyncio
 async def test_a_rotation_after_open_keeps_lines_past_the_cap(
-    context_factory, paths, caplog, monkeypatch
+    context_factory, paths, caplog, monkeypatch, at
 ):
     monkeypatch.setattr(sshd_auth_log, "MAX_LOGINS_PER_CYCLE", 1)
     log, _ = paths
@@ -208,7 +210,7 @@ async def test_a_rotation_after_open_keeps_lines_past_the_cap(
     rotate = f'mv "{log}" "{log}.1" && : > "{log}"'
 
     with caplog.at_level("INFO"):
-        await _cycle(context_factory, paths, LocalShell(after_open=rotate))
+        await _cycle(context_factory, paths, LocalShell(after_open=rotate, at=at))
         for _ in range(2):
             await _cycle(context_factory, paths, LocalShell())
 

@@ -101,3 +101,22 @@ def test_an_unread_rotated_log_is_never_overwritten(tmp_path, monkeypatch):
 
     assert (tmp_path / "sshd-auth.log.1").read_text() == "unread\n"
     assert log.read_text().startswith("x" * 20 + "\n") and log.read_text().endswith(f"{ACCEPTED}\n")
+
+
+def test_a_full_spool_drops_logins_with_a_marker_then_a_count(tmp_path, monkeypatch):
+    log = tmp_path / "sshd-auth.log"
+    record(ACCEPTED, str(log))
+    monkeypatch.setattr(sshd_log_receiver, "MAX_SPOOL_BYTES", log.stat().st_size)
+
+    for _ in range(3):
+        record(ACCEPTED, str(log))
+    full = log.read_text().splitlines()
+    log.rename(f"{log}.1")
+    (tmp_path / "sshd-auth.log.1").unlink()  # the validator drained it
+    record(ACCEPTED, str(log))
+
+    assert len(full) == 2 and full[1].endswith("spool full, dropping logins")
+    lines = log.read_text().splitlines()
+    assert lines[0].endswith("3 logins dropped while the spool was full") and lines[1].endswith(
+        ACCEPTED
+    )
