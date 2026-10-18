@@ -23,6 +23,7 @@ RESET_VERIFIED_JOB_CHANNEL = "RESET_VERIFIED_JOB_CHANNEL"
 POD_STATES_CHANNEL = "POD_STATES_CHANNEL"
 RENTED_MACHINE_PREFIX = "rented_machines_prefix"
 PENDING_PODS_PREFIX = "pending_pods_prefix"
+GPU_RESET_PENDING_KIND = "gpu_reset"
 DUPLICATED_MACHINE_SET = "duplicated_machines"
 RENTAL_SUCCEED_MACHINE_SET = "rental_succeed_machines"
 AVAILABLE_PORT_MAPS_PREFIX = "available_port_maps"
@@ -536,11 +537,15 @@ class RedisService:
             logger.error(_m("Error getting executor uptime: {e}", extra={"error": e}), exc_info=True)
             return 0
 
-    async def add_pending_pod(self, miner_hotkey: str, executor_id: str, pod_id: str):
+    async def add_pending_pod(self, miner_hotkey: str, executor_id: str, pod_id: str, kind: str | None = None):
         pending_pods: list[dict] = await self.get_pending_pods(miner_hotkey, executor_id)
         now = int(time.time())
-        
-        pending_pods.append({"time": now, "pod_id": pod_id})
+
+        item: dict = {"time": now, "pod_id": pod_id}
+        if kind:
+            # DAH-4658: "gpu_reset" marks a renter's own GPU reset, which the rented GPU checks skip
+            item["kind"] = kind
+        pending_pods.append(item)
         await self.hset(PENDING_PODS_PREFIX, f"{miner_hotkey}:{executor_id}", json.dumps(pending_pods))
 
     async def remove_pending_pod(self, miner_hotkey: str, executor_id: str, pod_id: str):
@@ -572,6 +577,10 @@ class RedisService:
             pending_pods.append(item)
         
         return pending_pods
+
+    async def gpu_reset_in_progress(self, miner_hotkey: str, executor_id: str) -> bool:
+        pending_pods: list[dict] = await self.get_pending_pods(miner_hotkey, executor_id)
+        return any(item.get("kind") == GPU_RESET_PENDING_KIND for item in pending_pods)
 
     async def renting_in_progress(self, miner_hotkey: str, executor_id: str, pod_id: str | None = None) -> bool:
         pending_pods: list[dict] = await self.get_pending_pods(miner_hotkey, executor_id)

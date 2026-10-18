@@ -60,6 +60,7 @@ from protocol.vc_protocol.compute_requests import (
     RentedGpuDropResponse,
     RentedPod,
 )
+from services.gpu_reset import renter_gpu_reset_in_progress
 from services.redis_service import GPU_ANCHOR_KEY
 
 from core.config import settings
@@ -301,6 +302,12 @@ class RentedGpuDropCheck:
             event = render_message(
                 Msg.NOT_RENTED, ctx=ctx, check_id=self.check_id, what={"listed_pods": len(all_pods)}
             )
+            return CheckResult(passed=True, event=event)
+        # DAH-4658: a GPU missing while the renter resets it is the renter's doing (a dry run reads no Redis)
+        if not settings.DRY_RUN and await renter_gpu_reset_in_progress(
+            ctx.services.redis, ctx.miner_hotkey, ctx.executor.uuid
+        ):
+            event = render_message(Msg.GPU_RESET_IN_PROGRESS, ctx=ctx, check_id=self.check_id)
             return CheckResult(passed=True, event=event)
 
         specs = ctx.state.specs or {}

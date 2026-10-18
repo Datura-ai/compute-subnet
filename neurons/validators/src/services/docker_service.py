@@ -52,13 +52,16 @@ from payload_models.payloads import (
     FailedContainerErrorCodes,
     FailedContainerErrorTypes,
     FailedContainerRequest,
+    GpuResetErrorCode,
     InstallJupyterServerRequest,
     JupyterInstallationFailed,
     JupyterServerInstalled,
     PayloadPortMapping,
+    PodGpuResetResult,
     ProfilerStep,
     ProfilerStepName,
     RemoveSshPublicKeysRequest,
+    ResetPodGpuRequest,
     SshPubKeyAdded,
     SshPubKeyRemoved,
     VolumeEncryptionStatus,
@@ -103,10 +106,12 @@ from services.prerun_host_probe import (
     port_check_containers_command,
     prerun_host_probe_command,
 )
+from services.gpu_reset import GpuResetReport, reset_pod_gpus
 from services.gpu_wedge import cure_wedged_gpus, query_wedged_gpu_uuids
 from services.nvidia_devices import build_gpu_docker_config_for_executor
 from services.cluster_fabric import WIREGUARD_LISTEN_PORT, cluster_pod_networking
 from services.redis_service import (
+    GPU_RESET_PENDING_KIND,
     RENTAL_PROBE_FAILED_PREFIX,
     RENTAL_PROBE_OK_PREFIX,
     SSHD_BOOTSTRAP_FAILED_PREFIX,
@@ -10177,6 +10182,106 @@ class DockerService:
                 workload_kind=payload.workload_kind,
                 msg=str(log_text),
             )
+
+    async def reset_pod_gpus(
+        self,
+        payload: ResetPodGpuRequest,
+        executor_info: ExecutorSSHInfo,
+        keypair: bittensor.Keypair,
+        private_key: str,
+    ) -> PodGpuResetResult:
+        """DAH-4658: a renter's reset of their pod's GPUs (services/gpu_reset.py does the work). The
+        pending-pod mark (kind gpu_reset) is held throughout, so the rented GPU checks skip the node
+        and no verified-job reset is sent for it: a renter's reset is never a provider fault."""
+        default_extra = {
+            "miner_hotkey": payload.miner_hotkey,
+            "executor_uuid": payload.executor_id,
+            "pod_id": payload.pod_id,
+            "request_id": payload.request_id,
+            "container_name": payload.container_name,
+            "executor_ip_address": executor_info.address,
+            "executor_ssh_port": executor_info.ssh_port,
+        }
+        logger.info(_m("Reset pod GPUs", extra=get_extra_info({**default_extra, "payload": str(payload)})))
+
+        def result(report: GpuResetReport) -> PodGpuResetResult:
+            return PodGpuResetResult(
+                miner_hotkey=payload.miner_hotkey,
+                executor_id=payload.executor_id,
+                pod_id=payload.pod_id,
+                workload_kind=payload.workload_kind,
+                request_id=payload.request_id,
+                ok=report.ok,
+                error_code=report.error_code,
+                container_restarted=report.container_restarted,
+                gpus=report.gpus,
+                detail=report.detail,
+            )
+
+        private_key = self.ssh_service.decrypt_payload(keypair.ss58_address, private_key)
+        pkey = asyncssh.import_private_key(private_key)
+        try:
+            known_hosts_policy = await self._prepare_known_hosts_policy(
+                executor_info, payload.miner_hotkey, default_extra
+            )
+            require_rental_docker_ssh_host_key(executor_info)
+        except (AttestationError, RentalDockerConnectionError) as exc:
+            logger.error(_m("Reset pod GPUs: executor not trusted", extra=get_extra_info({**default_extra, "error": str(exc)})))
+            return result(GpuResetReport(ok=False, error_code=GpuResetErrorCode.ExecutorUnreachable, detail=str(exc)))
+
+        async def start_container() -> None:
+            await self.start_existing_container(
+                executor_info=executor_info,
+                private_key=private_key,
+                known_hosts_policy=known_hosts_policy,
+                container_name=payload.container_name,
+                local_volume_path=payload.local_volume_path,
+                pod_id=payload.pod_id,
+                default_extra=default_extra,
+            )
+
+        await self.redis_service.add_pending_pod(
+            payload.miner_hotkey, payload.executor_id, payload.pod_id, kind=GPU_RESET_PENDING_KIND
+        )
+        try:
+            async with asyncssh.connect(
+                host=executor_info.address,
+                port=executor_info.ssh_port,
+                **await public_host_sock(executor_info.address, executor_info.ssh_port),
+                username=executor_info.ssh_username,
+                client_keys=[pkey],
+                known_hosts=known_hosts_policy,
+            ) as ssh_client:
+                report = await reset_pod_gpus(
+                    SSHCommandRunner(ssh_client, max_retries=0),
+                    container_name=payload.container_name,
+                    backend_uuids=payload.gpu_uuids,
+                    gpu_indices=payload.gpu_indices,
+                    start_container=start_container,
+                    in_tee=bool(executor_info.tdx_quote),
+                    encrypted_volume_mount=_LIUM_CIPHER_MOUNT,
+                    local_volume_path=payload.local_volume_path,
+                )
+        except Exception as exc:
+            logger.error(_m("Reset pod GPUs failed", extra=get_extra_info({**default_extra, "error": str(exc)})), exc_info=True)
+            report = GpuResetReport(ok=False, error_code=GpuResetErrorCode.ExecutorUnreachable, detail=str(exc))
+        finally:
+            await self.redis_service.remove_pending_pod(payload.miner_hotkey, payload.executor_id, payload.pod_id)
+
+        logger.info(
+            _m(
+                "Reset pod GPUs done",
+                extra=get_extra_info({
+                    **default_extra,
+                    "ok": report.ok,
+                    "error_code": report.error_code.value if report.error_code else None,
+                    "container_restarted": report.container_restarted,
+                    "gpus": [gpu.model_dump() for gpu in report.gpus],
+                    "detail": report.detail,
+                }),
+            )
+        )
+        return result(report)
 
     async def remove_ssh_keys(
         self,

@@ -464,6 +464,13 @@ class RentedGpuDropMessages:
         category="env",
         impact="Proceed",
     )
+    GPU_RESET_IN_PROGRESS = MessageTemplate(
+        event="Rented GPU drop check skipped: the renter is resetting the pod's GPUs",
+        reason="RENTED_GPU_DROP_GPU_RESET_IN_PROGRESS",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
 
 
 class GpuPowerLimitMessages:
@@ -1074,6 +1081,13 @@ class GpuUsageMessages:
     USAGE_OK = MessageTemplate(
         event="GPU usage within limits",
         reason="GPU_USAGE_OK",
+        severity="info",
+        category="runtime",
+        impact="Proceed",
+    )
+    GPU_RESET_IN_PROGRESS = MessageTemplate(
+        event="GPU usage check skipped: the renter is resetting the pod's GPUs",
+        reason="GPU_USAGE_GPU_RESET_IN_PROGRESS",
         severity="info",
         category="runtime",
         impact="Proceed",

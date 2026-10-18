@@ -24,6 +24,7 @@ from services.const import (
     RENTAL_CLOSE_CLOCK_SKEW_MINUTES,
     RENTAL_TEARDOWN_GRACE_MINUTES,
 )
+from services.gpu_reset import renter_gpu_reset_in_progress
 from services.gpu_wedge import (
     COMPUTE_APPS_QUERY_COMMAND,
     GPU_QUERY_COMMAND,
@@ -94,6 +95,11 @@ class GpuUsageCheck:
         self.dry_run = dry_run
 
     async def run(self, ctx: Context) -> CheckResult:
+        # DAH-4658: the renter is resetting the pod's GPUs: neither judge nor cure them meanwhile
+        if await renter_gpu_reset_in_progress(ctx.services.redis, ctx.miner_hotkey, ctx.executor.uuid):
+            return CheckResult(
+                passed=True, event=render_message(Msg.GPU_RESET_IN_PROGRESS, ctx=ctx, check_id=self.check_id)
+            )
         gpu_details = ctx.state.gpu_details
         gpu_processes = ctx.state.gpu_processes
 

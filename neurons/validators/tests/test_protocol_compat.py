@@ -194,6 +194,7 @@ def test_enums_the_validator_emits_are_members_of_the_package_enums() -> None:
     assert values(payloads.VolumeEncryptionStatus) == values(v2b.VolumeEncryptionStatus)
     assert values(payloads.ContainerWarningCode) <= values(v2b.ContainerWarningCode)
     assert values(payloads.WorkloadKind) == values(lium_protocol.WorkloadKind)
+    assert values(payloads.GpuResetErrorCode) == values(v2b.GpuResetErrorCode)
 
 
 def test_the_excluded_executor_id_is_the_validators_failed_miner_uuid() -> None:

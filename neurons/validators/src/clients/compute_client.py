@@ -39,6 +39,8 @@ from payload_models.payloads import (
     DebugSshKeyAdded,
     FailedAddDebugSshKey,
     InstallJupyterServerRequest,
+    PodGpuResetResult,
+    ResetPodGpuRequest,
     JupyterServerInstalled,
     JupyterInstallationFailed,
 )
@@ -419,6 +421,27 @@ class ComputeClient:
                         async with self.lock:
                             self.message_queue.append(inspector_event)
                     elif channel == RESET_VERIFIED_JOB_CHANNEL:
+                        # DAH-4658: the renter is resetting the node's GPUs; whatever a check saw meanwhile
+                        # is the renter's doing, never the provider's fault
+                        try:
+                            resetting = await self.miner_service.redis_service.gpu_reset_in_progress(
+                                data["miner_hotkey"], data["executor_uuid"]
+                            )
+                        except Exception:
+                            resetting = False  # unreadable mark: send it, as before DAH-4658
+                        if resetting:
+                            logger.info(
+                                _m(
+                                    "Verified-job reset not sent: renter GPU reset in progress",
+                                    extra=get_extra_info({
+                                        **self.logging_extra,
+                                        "miner_hotkey": data["miner_hotkey"],
+                                        "executor_uuid": data["executor_uuid"],
+                                        "check_id": data.get("check_id"),
+                                    }),
+                                )
+                            )
+                            continue
                         reset_request = ResetVerifiedJobRequest(
                             miner_hotkey=data["miner_hotkey"],
                             validator_hotkey=validator_hotkey,
@@ -842,6 +865,7 @@ class ComputeClient:
         | BackupContainerRequest
         | RestoreContainerRequest
         | InstallJupyterServerRequest
+        | ResetPodGpuRequest
     ):
         # DAH-2728: track the create from the moment this task picks it up. The axon lookup below
         # fetches the whole miner set on a cold cache, so a delete arriving seconds later can sail
@@ -865,6 +889,7 @@ class ComputeClient:
         | BackupContainerRequest
         | RestoreContainerRequest
         | InstallJupyterServerRequest
+        | ResetPodGpuRequest
     ):
         """drive a miner client from job start to completion, then close miner connection"""
         logger.info(
@@ -1027,6 +1052,13 @@ class ComputeClient:
             response: (
                 JupyterServerInstalled | JupyterInstallationFailed
             ) = await self.miner_service.handle_container(job_request)
+
+            async with self.lock:
+                self.message_queue.append(response)
+        elif isinstance(job_request, ResetPodGpuRequest):
+            job_request.miner_address = miner_axon_info.ip
+            job_request.miner_port = miner_axon_info.port
+            response: PodGpuResetResult = await self.miner_service.handle_container(job_request)
 
             async with self.lock:
                 self.message_queue.append(response)
