@@ -80,6 +80,20 @@ def test_an_uploaded_key_expires_after_the_ttl_and_not_before(authorized_keys):
     assert authorized_keys.read_text() == ""
 
 
+def test_an_upload_onto_a_file_without_a_trailing_newline_does_not_merge_with_the_last_line(authorized_keys):
+    # regression: the upload is appended straight after a provider key that has no newline; the
+    # merged line carries the marker and the purge deletes the provider's key with ours
+    authorized_keys.write_text(RENTER_KEY.rstrip("\n"))
+    key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIUploadedAfterNoNewline validator@lium"
+
+    SSHService().add_pubkey_to_host(key)
+    assert authorized_keys.read_text().startswith(RENTER_KEY + key + " ")
+
+    assert purge_expired_uploaded_keys(TTL, now=time.time() + TTL + 5) == 1
+    assert authorized_keys.read_text() == RENTER_KEY
+
+
+
 def test_remove_ssh_key_still_removes_a_key_uploaded_with_the_marker(authorized_keys):
     # regression: /remove_ssh_key compares the whole line to the bare key, so a marked line is
     # never matched and every validator key stays until the TTL — 15 minutes of access it did

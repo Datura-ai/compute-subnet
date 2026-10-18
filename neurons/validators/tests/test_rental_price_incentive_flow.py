@@ -674,6 +674,7 @@ PCC_PER_COUNT_CAPS: dict[str, dict[int, int]] = {
 }
 
 PCC_HOURLY_RATE = 4.0
+PCC_SYSBOX_MULTIPLIER = 1.0  # sysbox_runtime=True → multiplier=1.0
 
 
 def _make_pcc_config(caps: dict[str, dict[int, int]] | None = None) -> IncentiveConfig:
@@ -843,5 +844,58 @@ async def test_rental_price_miner_default_job_unrented_earns_nothing(
 
 
 # ── DAH-2528: occupancy-aware bucket fallback for split-capable idle nodes ────
+
+PCC_2528_CAPS = {**PCC_PER_COUNT_CAPS, "B200": {1: 10, 8: 8}}
+
+
+@pytest.mark.asyncio
+async def test_pcc_2528_split_node_falls_back_when_8_bucket_over_cap(monkeypatch):
+    """The 8× bucket is over cap and the 1× tier is empty: the split-capable node
+    moves whole into the 1× tier at full multiplier; non-splitting siblings stay
+    diluted, and the source bucket's multiplier improves by the freed GPUs.
+    """
+    config = _make_pcc_config(caps=PCC_2528_CAPS)
+    jobs = {
+        "miner_a": [_make_pcc_job(
+            "exec-a", "NVIDIA B200", 8,
+            supports_gpu_splitting=True, gpu_splitting_min_count=1,
+        )],
+        "miner_b": [_make_pcc_job("exec-b", "NVIDIA B200", 8)],
+        "miner_c": [_make_pcc_job("exec-c", "NVIDIA B200", 8)],
+    }
+
+    incentive = await _run_pcc_incentive(config, jobs, monkeypatch)
+
+    # Mover: whole node (8 GPUs) rated against the 1× tier at full weight.
+    mover = jobs["miner_a"][0]
+    assert mover.count_bucket == 1
+    assert mover.max_cap == 10
+    assert mover.bucket_reassigned_from == 8
+    assert mover.bucket_reassigned_from_multiplier == pytest.approx(8 / 24)
+    assert mover.unrented_cap_multiplier == pytest.approx(1.0)
+    assert mover.effective_rate == pytest.approx(PCC_HOURLY_RATE * PCC_SYSBOX_MULTIPLIER)
+    assert mover.cap_dilution_applied is False
+    assert any("unrented_bucket_reassigned" in line for line in mover.incentive_logs)
+
+    # Bucket fills after the move: 1× holds the mover, 8× keeps the two others.
+    assert incentive.unrented_count_by_bucket[("B200", 1)] == 8
+    assert incentive.unrented_count_by_bucket[("B200", 8)] == 16
+    assert incentive.cap_multiplier_by_bucket[("B200", 1)] == pytest.approx(1.0)
+    assert incentive.cap_multiplier_by_bucket[("B200", 8)] == pytest.approx(0.5)
+
+    # Non-splitting siblings stay in the 8× bucket, diluted, and are never reassigned.
+    for hk in ("miner_b", "miner_c"):
+        stayer = jobs[hk][0]
+        assert stayer.count_bucket == 8
+        assert stayer.bucket_reassigned_from is None
+        assert stayer.effective_rate == pytest.approx(0.5 * PCC_HOURLY_RATE * PCC_SYSBOX_MULTIPLIER)
+        assert not any("unrented_bucket_reassigned" in line for line in stayer.incentive_logs)
+
+    # Snapshot persists the post-move fills, so estimates see the same state.
+    by_bucket = incentive.get_snapshot().rental.by_bucket
+    assert by_bucket["B200·1"].unrented_count == 8
+    assert by_bucket["B200·1"].cap_multiplier == pytest.approx(1.0)
+    assert by_bucket["B200·8"].unrented_count == 16
+    assert by_bucket["B200·8"].cap_multiplier == pytest.approx(0.5)
 
 
