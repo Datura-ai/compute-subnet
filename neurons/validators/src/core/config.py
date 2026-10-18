@@ -771,6 +771,8 @@ class Settings(BaseSettings):
     # 32-byte challenge per attestation event, folds it into the signed SSH-key
     # request, and requires the executor to echo it in TDX report_data[32:64].
     ENABLE_ATTESTATION_NONCE: bool = Field(env="ENABLE_ATTESTATION_NONCE", default=False)
+    # I-78: sign every SSH-key upload over a dated nonce (datura fresh_upload_nonce); see MinerService._upload_nonce
+    ENABLE_DATED_UPLOAD_NONCE: bool = Field(env="ENABLE_DATED_UPLOAD_NONCE", default=False)
     # A nonce-bound attestation event is required at most once per this interval per
     # miner (freshness = "bounded, provably recent", not "every wave") — GPU evidence
     # collection is too expensive to force fleet-wide every cycle.

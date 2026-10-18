@@ -1,5 +1,7 @@
 import enum
 import json
+import secrets
+import time
 from typing import Optional
 
 import pydantic
@@ -71,6 +73,30 @@ def ssh_pubkey_signing_blob(public_key: str, nonce: str | None = None) -> str:
     if not nonce:
         return public_key
     return f"{public_key}\nnonce:{nonce}"
+
+
+# I-78: a validator signature over an SSH key used to be good forever, so one captured upload could be
+# replayed to any executor at any time. Every upload now carries a nonce whose first bytes say when it
+# was minted; the signature covers it, and executors refuse it once stale. Still 32 hex-encoded bytes,
+# the shape the TDX report_data and GPU-evidence channels take.
+UPLOAD_NONCE_MAGIC = b"LTS1"
+
+
+def fresh_upload_nonce(now: float | None = None) -> str:
+    """32 bytes, hex: the magic, the minting time (8 bytes, big-endian unix seconds), 20 random bytes."""
+    issued_at = int(time.time() if now is None else now)
+    return (UPLOAD_NONCE_MAGIC + issued_at.to_bytes(8, "big") + secrets.token_bytes(20)).hex()
+
+
+def upload_nonce_issued_at(nonce: str | None) -> int | None:
+    """When a fresh_upload_nonce was minted, or None for any other nonce (or none)."""
+    try:
+        raw = bytes.fromhex(nonce or "")
+    except ValueError:
+        return None
+    if len(raw) != 32 or not raw.startswith(UPLOAD_NONCE_MAGIC):
+        return None
+    return int.from_bytes(raw[4:12], "big")
 
 
 # liumd phase 1 (DAH-2834): the validator's one-call verification intent, `POST /verify` on the

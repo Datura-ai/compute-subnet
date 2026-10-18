@@ -70,3 +70,18 @@ def test_sign_validator_pubkey_bytes_decodes_and_produces_verifiable_signature(
 
     # Assert — verifiable against the decoded str form (executor receives public_key as str)
     assert validator_keypair.verify(_SSH_KEY, signature)
+
+
+def test_upload_nonce_dated_only_when_enabled(miner_service, monkeypatch):
+    # I-78: dated upload nonces go out only behind ENABLE_DATED_UPLOAD_NONCE (old miners drop the field)
+    import time
+
+    from core.config import settings
+    from datura.requests.validator_requests import upload_nonce_issued_at
+    from services.attestation_service import AttestationNonce
+
+    monkeypatch.setattr(settings, "ENABLE_DATED_UPLOAD_NONCE", False)
+    assert miner_service._upload_nonce() is None
+    monkeypatch.setattr(settings, "ENABLE_DATED_UPLOAD_NONCE", True)
+    assert abs(upload_nonce_issued_at(miner_service._upload_nonce()) - time.time()) < 5
+    assert upload_nonce_issued_at(AttestationNonce.issue().value_hex) is not None

@@ -134,6 +134,9 @@ class Settings(BaseSettings):
     # nonce. Leave off until the validator fleet mints nonces (migration order:
     # executors accept optional nonce first, then validators send, then this).
     REQUIRE_ATTESTATION_NONCE: bool = Field(env="REQUIRE_ATTESTATION_NONCE", default=False)
+    # I-78: a dated upload nonce (datura fresh_upload_nonce) older or newer than this is refused, so a
+    # captured upload signature is worth at most this window. Symmetric for host clock drift.
+    UPLOAD_NONCE_MAX_AGE_SECONDS: int = Field(env="UPLOAD_NONCE_MAX_AGE_SECONDS", default=600)
     # DAH-3200: the backend signs `timestamp = int(time.time())` into every /containers/{name}
     # request (utilization and logs). A signed request older or newer than this many seconds is
     # refused, so a captured one cannot be replayed for the life of the container. Symmetric so a
