@@ -661,7 +661,7 @@ vloopback_storage_opt_unsupported() {
 
 VLOOPBACK_NOT_USED="Docker here does not accept --storage-opt, so rentals run without a disk limit and never use the plugin."
 # a renter filling an uncapped disk fills the Docker data-root and takes the host down; validators score such a node 0
-STORAGE_LIMIT_MISSING="Docker here cannot limit a container's disk (needs overlay2 on xfs mounted with pquota); one renter can fill it and take the node down, and validators reject such nodes."
+STORAGE_LIMIT_MISSING="Docker here cannot limit a container's disk (needs overlay2 on xfs mounted with pquota); one renter can fill it and take the node down, and validators will reject such nodes (not released yet)."
 STORAGE_LIMIT_FIX="sudo lium gpu-splitting setup --device <spare disk>   # guide: https://docs.lium.io/providers/nodes/docker-storage"
 
 check_vloopback() {
