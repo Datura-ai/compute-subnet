@@ -30,14 +30,14 @@ def read_command(log: str = SSHD_AUTH_LOG, cursor: str = SSHD_AUTH_CURSOR) -> st
     cursor on the live file means any `.1` left was read already. Only `.1` may exist (the receiver rotated but
     could not create the live file, e.g. a full disk): it is still read, or deleted once read, to free the space."""
     return (
-        f'f={log}; ino=; off=0; rotated=0; [ -f "$f" ] && exec 3<"$f" && ino=$(stat -L -c %i /dev/fd/3); '
+        f'f={log}; ino=; off=0; rotated=0; cleaned=; [ -f "$f" ] && exec 3<"$f" && ino=$(stat -L -c %i /dev/fd/3); '
         f"set -- $(cat {cursor} 2>/dev/null); c_ino=${{1:-}}; c_off=${{2:-0}}; "
         f"case $c_off in ''|*[!0-9]*) c_ino=; c_off=0;; esac; "
         f'if [ -n "$ino" ] && [ "$c_ino" = "$ino" ]; then off=$c_off; '
         f'elif [ -f "$f.1" ]; then o1=0; [ "$(stat -c %i "$f.1")" = "$c_ino" ] && o1=$c_off; '
         f'if [ "$o1" -lt "$(stat -c %s "$f.1")" ]; then '
-        f'exec 3<"$f.1"; ino=$(stat -L -c %i /dev/fd/3); off=$o1; rotated=1; else rm -f "$f.1"; fi; fi; '
-        f'[ -n "$ino" ] || exit 3; [ "$off" -le "$(stat -L -c %s /dev/fd/3)" ] || off=0; '
+        f'exec 3<"$f.1"; ino=$(stat -L -c %i /dev/fd/3); off=$o1; rotated=1; else rm -f "$f.1"; cleaned=1; fi; fi; '
+        f'[ -n "$ino" ] || {{ [ -n "$cleaned" ] || exit 3; echo "0 0 0"; exit 0; }}; [ "$off" -le "$(stat -L -c %s /dev/fd/3)" ] || off=0; '
         f'echo "$ino $off $rotated"; tail -c +$((off + 1)) <&3 | head -n {MAX_LOGINS_PER_CYCLE}'
     )
 

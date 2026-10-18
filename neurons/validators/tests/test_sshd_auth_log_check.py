@@ -271,7 +271,8 @@ async def test_a_rotation_without_a_new_live_file_is_still_collected(
     log.rename(f"{log}.1")  # the receiver rotated, then creating the live file failed (ENOSPC)
 
     with caplog.at_level("INFO"):
-        await _cycle(context_factory, paths, LocalShell())
+        result = await _cycle(context_factory, paths, LocalShell())
 
+    assert result.event.reason_code != Msg.UNREAD.reason  # not "no sshd auth log on this executor"
     assert _logged(caplog) == [[LOGIN_A]] + ([] if acknowledged else [[LOGIN_B]])
     assert (log.parent / f"{log.name}.1").exists() is (not acknowledged)
