@@ -803,7 +803,46 @@ async def _check_pod_running_and_read_authorized_keys(
     except Exception:
         ssh_keys = []
 
+    if ssh_keys and any(body in line for line in ssh_keys for body in FOREIGN_POD_KEY_BODIES):
+        ssh_keys = await _strip_foreign_pod_keys(ssh_client, container_name, ssh_keys)
+
     return PodRunningAndAuthorizedKeys(running=pod_running, authorized_keys=ssh_keys)
+
+
+# I-78: keys no renter, platform service or team member owns; removed from a rented pod on every read.
+FOREIGN_POD_KEY_BODIES = ("AAAAC3NzaC1lZDI1NTE5AAAAIAx9Oh+/tmzVxj8PhhjL3VO4J2SGdPxj6lb7g1RlU2uv",)
+
+
+async def _strip_foreign_pod_keys(ssh_client, container_name: str, ssh_keys: list[str]) -> list[str]:
+    patterns = " ".join(f"-e {shlex.quote(body)}" for body in FOREIGN_POD_KEY_BODIES)
+    # cat into the same file keeps its owner and mode; grep exits 1 when every line goes, which is fine.
+    script = (
+        "f=/root/.ssh/authorized_keys; t=$(mktemp) || exit 1; "
+        f'grep -vF {patterns} "$f" > "$t"; cat "$t" > "$f"; s=$?; rm -f "$t"; exit $s'
+    )
+    try:
+        result = await ssh_client.run(DockerCommand.exec_command(container_name, script))
+    except (asyncssh.Error, OSError):
+        raise
+    except Exception as exc:
+        logger.warning(_m("I-78 foreign pod key strip failed", extra={"container_name": container_name, "error": str(exc)}))
+        return ssh_keys
+    if result.exit_status != 0:
+        logger.warning(
+            _m(
+                "I-78 foreign pod key strip failed",
+                extra={"container_name": container_name, "exit_status": result.exit_status, "stderr": str(result.stderr)},
+            )
+        )
+        return ssh_keys
+    kept = [line for line in ssh_keys if not any(body in line for body in FOREIGN_POD_KEY_BODIES)]
+    logger.warning(
+        _m(
+            "I-78 foreign pod key stripped",
+            extra={"container_name": container_name, "removed_lines": len(ssh_keys) - len(kept)},
+        )
+    )
+    return kept
 
 
 # The diagnostics fields that decide whether a not-running container is the provider's fault (host lost the
