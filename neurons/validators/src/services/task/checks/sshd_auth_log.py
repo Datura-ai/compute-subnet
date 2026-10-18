@@ -24,18 +24,20 @@ def read_command(log: str = SSHD_AUTH_LOG, cursor: str = SSHD_AUTH_CURSOR) -> st
     """Prints `<inode> <offset> <1 if reading .1>`, then up to MAX_LOGINS_PER_CYCLE lines from the offset.
 
     The live file is opened first and its inode, size and lines are all read through that descriptor, so a
-    rotation during the command cannot pair the new file's lines with the old inode. When the cursor names
-    `.1` (the file rotated away), its unread rest is read first; once the cursor has read all of it, `.1` is
-    deleted, which lets the receiver rotate again. Otherwise reading starts at 0 of the live file."""
+    rotation during the command cannot pair the new file's lines with the old inode. A `.1` (the file rotated
+    away) is read before the live file: from the cursor's offset when the cursor names it, from 0 when there is
+    no usable cursor. Once it has been read to its end it is deleted, which lets the receiver rotate again. A
+    cursor on the live file means any `.1` left was read already."""
     return (
         f'f={log}; [ -f "$f" ] || exit 3; exec 3<"$f" || exit 3; '
         f"ino=$(stat -L -c %i /dev/fd/3); off=0; rotated=0; "
-        f"set -- $(cat {cursor} 2>/dev/null); "
-        f'if [ "${{1:-}}" = "$ino" ]; then off=${{2:-0}}; '
-        f'elif [ -n "${{1:-}}" ] && [ "$(stat -c %i "$f.1" 2>/dev/null)" = "$1" ]; then '
-        f'if [ "${{2:-0}}" -lt "$(stat -c %s "$f.1")" ] 2>/dev/null; then '
-        f'exec 3<"$f.1"; ino=$1; off=${{2:-0}}; rotated=1; else rm -f "$f.1"; fi; fi; '
-        f'[ "$off" -le "$(stat -L -c %s /dev/fd/3)" ] 2>/dev/null || off=0; '
+        f"set -- $(cat {cursor} 2>/dev/null); c_ino=${{1:-}}; c_off=${{2:-0}}; "
+        f"case $c_off in ''|*[!0-9]*) c_ino=; c_off=0;; esac; "
+        f'if [ "$c_ino" = "$ino" ]; then off=$c_off; rm -f "$f.1"; '
+        f'elif [ -f "$f.1" ]; then o1=0; [ "$(stat -c %i "$f.1")" = "$c_ino" ] && o1=$c_off; '
+        f'if [ "$o1" -lt "$(stat -c %s "$f.1")" ]; then '
+        f'exec 3<"$f.1"; ino=$(stat -L -c %i /dev/fd/3); off=$o1; rotated=1; else rm -f "$f.1"; fi; fi; '
+        f'[ "$off" -le "$(stat -L -c %s /dev/fd/3)" ] || off=0; '
         f'echo "$ino $off $rotated"; tail -c +$((off + 1)) <&3 | head -n {MAX_LOGINS_PER_CYCLE}'
     )
 

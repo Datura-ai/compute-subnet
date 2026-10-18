@@ -209,3 +209,22 @@ async def test_an_unread_rotated_log_is_kept(context_factory, paths, monkeypatch
     await _cycle(context_factory, paths, LocalShell())
 
     assert (log.parent / f"{log.name}.1").read_text().endswith(f"{LOGIN_C}\n")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cursor_text", [None, "garbage x\n", "999999999 12\n"])
+async def test_a_rotated_log_without_a_usable_cursor_is_read_then_removed(
+    context_factory, paths, caplog, cursor_text
+):
+    log, cursor = paths
+    (log.parent / f"{log.name}.1").write_text(f"{LOGIN_A}\n")
+    log.write_text(f"{LOGIN_B}\n")
+    if cursor_text is not None:
+        cursor.write_text(cursor_text)
+
+    with caplog.at_level("INFO"):
+        for _ in range(3):
+            await _cycle(context_factory, paths, LocalShell())
+
+    assert _logged(caplog) == [[LOGIN_A], [LOGIN_B]]
+    assert not (log.parent / f"{log.name}.1").exists()
