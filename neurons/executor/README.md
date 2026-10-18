@@ -95,6 +95,7 @@ defaults are `8001` / `8001` / `2200` (`lium mine` proposes `8080` for the servi
 - **EXTERNAL_PORT**: external expose port of your executor docker container
 - **SSH_PORT**: ssh port map into 22 of your executor docker container
 - **SSH_PUBLIC_PORT**: [Optional] ssh public access port of your executor docker container. If `SSH_PUBLIC_PORT` is equal to `SSH_PORT` then you don't have to specify this port.
+- **EXECUTOR_SSH_SOURCE_PIN**: [Optional] Set to `false` only if inbound SSH to your executor passes through a relay or tunnel, so the validator's own address never reaches the executor. By default, the validator's keys log in only from the validator's addresses.
 - **MINER_HOTKEY_SS58_ADDRESS**: your provider hotkey (SS58 address)
 - **RENTING_PORT_RANGE**: The port range that are publicly accessible. This can be empty if all ports are open. Available formats are: 
   - Range Specification(`from-to`): a range of ports, such as 2000-2005. This means ports from 2000 to 2005 will be open for the validator to select.
