@@ -89,3 +89,15 @@ def test_a_full_log_is_rotated_before_the_next_login(tmp_path, monkeypatch):
 
     assert (tmp_path / "sshd-auth.log.1").read_text() == "x" * 20 + "\n"
     assert log.read_text().endswith(f"{ACCEPTED}\n")
+
+
+def test_an_unread_rotated_log_is_never_overwritten(tmp_path, monkeypatch):
+    monkeypatch.setattr(sshd_log_receiver, "ROTATE_BYTES", 10)
+    log = tmp_path / "sshd-auth.log"
+    (tmp_path / "sshd-auth.log.1").write_text("unread\n")
+    log.write_text("x" * 20 + "\n")
+
+    record(ACCEPTED, str(log))
+
+    assert (tmp_path / "sshd-auth.log.1").read_text() == "unread\n"
+    assert log.read_text().startswith("x" * 20 + "\n") and log.read_text().endswith(f"{ACCEPTED}\n")

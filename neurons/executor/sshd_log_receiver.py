@@ -10,7 +10,8 @@ from datetime import UTC, datetime
 
 DEV_LOG = "/dev/log"
 SSHD_AUTH_LOG = "/var/log/sshd-auth.log"
-# past this the file is renamed to .1 (the validator drains .1 from its cursor, then starts the new file)
+# past this the file is renamed to .1, but only while no .1 exists: the validator deletes .1 once its cursor has
+# read all of it, so an unread .1 is never overwritten (the live file keeps growing until then)
 ROTATE_BYTES = 50 * 1024 * 1024
 # a session that authenticated, matched right after libc's syslog envelope ("<pri>Mmm dd hh:mm:ss sshd[pid]: ")
 # so a client-chosen user name inside "Invalid user ..." cannot pose as one; sshd-session is OpenSSH 9.8+.
@@ -30,7 +31,11 @@ def record(message: str, log: str = SSHD_AUTH_LOG) -> None:
     line = " ".join(message.split())
     if not LOGIN.match(line):
         return
-    if os.path.exists(log) and os.path.getsize(log) > ROTATE_BYTES:
+    if (
+        os.path.exists(log)
+        and os.path.getsize(log) > ROTATE_BYTES
+        and not os.path.exists(f"{log}.1")
+    ):
         os.replace(log, f"{log}.1")
     with open(log, "a", encoding="utf-8") as f:
         f.write(f"{datetime.now(UTC).isoformat(timespec='seconds')} {line}\n")

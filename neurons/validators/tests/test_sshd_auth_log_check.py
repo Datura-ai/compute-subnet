@@ -18,14 +18,19 @@ LOGIN_B = "2026-10-18T06:27:31+00:00 <38>Oct 18 06:27:31 sshd[813]: Accepted pub
 class LocalShell:
     """ctx.ssh over a local `sh`, so the check's commands run for real against tmp files."""
 
-    def __init__(self, fail_on: str | None = None):
+    def __init__(self, fail_on: str | None = None, after_open: str = ""):
         self.fail_on = fail_on
+        self.after_open = after_open  # shell run right after the read command opens the live file
         self.commands: list[str] = []
 
     async def run(self, command: str, check: bool = False):
         self.commands.append(command)
         if self.fail_on and self.fail_on in command:
             raise OSError("connection lost")
+        if self.after_open:
+            command = command.replace(
+                'exec 3<"$f" || exit 3; ', f'exec 3<"$f" || exit 3; {self.after_open}; ', 1
+            )
         done = subprocess.run(["sh", "-c", command], capture_output=True, text=True)
         return SimpleNamespace(stdout=done.stdout, exit_status=done.returncode)
 
@@ -166,3 +171,41 @@ async def test_a_stalled_executor_times_out_unread(context_factory, paths, monke
 
     assert result.passed is True
     assert result.event.reason_code == Msg.UNREAD.reason
+
+
+@pytest.mark.asyncio
+async def test_a_rotation_during_the_read_keeps_the_old_files_lines_with_its_inode(
+    context_factory, paths, caplog
+):
+    log, _ = paths
+    log.write_text(f"{LOGIN_A}\n")
+    await _cycle(context_factory, paths, LocalShell())
+    with log.open("a") as f:
+        f.write(f"{LOGIN_B}\n")
+    rotate = f'mv "{log}" "{log}.1" && printf "%s\\n" "{LOGIN_C}" > "{log}"'
+
+    with caplog.at_level("INFO"):
+        await _cycle(context_factory, paths, LocalShell(after_open=rotate))
+        for _ in range(2):
+            await _cycle(context_factory, paths, LocalShell())
+
+    assert _logged(caplog) == [[LOGIN_A], [LOGIN_B], [LOGIN_C]]
+    assert not (
+        log.parent / f"{log.name}.1"
+    ).exists()  # read to its end, so deleted for the next rotation
+
+
+@pytest.mark.asyncio
+async def test_an_unread_rotated_log_is_kept(context_factory, paths, monkeypatch):
+    monkeypatch.setattr(sshd_auth_log, "MAX_LOGINS_PER_CYCLE", 1)
+    log, _ = paths
+    log.write_text(f"{LOGIN_A}\n")
+    await _cycle(context_factory, paths, LocalShell())
+    with log.open("a") as f:
+        f.write(f"{LOGIN_B}\n{LOGIN_C}\n")
+    log.rename(f"{log}.1")
+    log.write_text("")
+
+    await _cycle(context_factory, paths, LocalShell())
+
+    assert (log.parent / f"{log.name}.1").read_text().endswith(f"{LOGIN_C}\n")
