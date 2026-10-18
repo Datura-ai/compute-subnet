@@ -375,11 +375,15 @@ if [ "${1:-}" = "--watchdog-loop" ]; then
 fi
 
 GRACE_SECS=""
+VULKAN_ICD_ONLY=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --grace)
             shift
             GRACE_SECS="${1:-}"
+            ;;
+        --vulkan-icd-only)
+            VULKAN_ICD_ONLY=1
             ;;
         *)
             log "Ignoring unknown argument: $1"
@@ -407,6 +411,8 @@ ensure_vulkan_egl_icd() {
     done
 }
 ensure_vulkan_egl_icd || true
+# an image that starts its own sshd gets only the ICD step (docker_service: image_manages_services)
+[ -z "${VULKAN_ICD_ONLY:-}" ] || exit 0
 
 # 1. Somebody already brought sshd up (image entrypoint won outright, or this
 #    is a re-run) — adopt it, never touch host keys.

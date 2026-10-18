@@ -406,3 +406,13 @@ def test_leaves_vulkan_alone_without_the_nvidia_egl_library_or_with_an_egl_icd(h
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert sorted(p.name for p in harness.vulkan_icd_dir.iterdir()) == ["image_icd.json"]
+
+
+def test_vulkan_icd_only_registers_the_driver_and_leaves_sshd_alone(harness):
+    (harness.nvidia_lib_dir / "libEGL_nvidia.so.0").touch()
+
+    result = harness.run("--vulkan-icd-only")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (harness.vulkan_icd_dir / "nvidia_egl_icd.json").exists()
+    assert harness.sshd_start_attempts() == []
