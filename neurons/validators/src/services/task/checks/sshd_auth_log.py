@@ -33,7 +33,7 @@ def read_command(log: str = SSHD_AUTH_LOG, cursor: str = SSHD_AUTH_CURSOR) -> st
         f"ino=$(stat -L -c %i /dev/fd/3); off=0; rotated=0; "
         f"set -- $(cat {cursor} 2>/dev/null); c_ino=${{1:-}}; c_off=${{2:-0}}; "
         f"case $c_off in ''|*[!0-9]*) c_ino=; c_off=0;; esac; "
-        f'if [ "$c_ino" = "$ino" ]; then off=$c_off; rm -f "$f.1"; '
+        f'if [ "$c_ino" = "$ino" ]; then off=$c_off; [ "$(stat -c %i "$f.1" 2>/dev/null)" = "$ino" ] || rm -f "$f.1"; '
         f'elif [ -f "$f.1" ]; then o1=0; [ "$(stat -c %i "$f.1")" = "$c_ino" ] && o1=$c_off; '
         f'if [ "$o1" -lt "$(stat -c %s "$f.1")" ]; then '
         f'exec 3<"$f.1"; ino=$(stat -L -c %i /dev/fd/3); off=$o1; rotated=1; else rm -f "$f.1"; fi; fi; '

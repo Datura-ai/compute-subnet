@@ -196,6 +196,26 @@ async def test_a_rotation_during_the_read_keeps_the_old_files_lines_with_its_ino
 
 
 @pytest.mark.asyncio
+async def test_a_rotation_after_open_keeps_lines_past_the_cap(
+    context_factory, paths, caplog, monkeypatch
+):
+    monkeypatch.setattr(sshd_auth_log, "MAX_LOGINS_PER_CYCLE", 1)
+    log, _ = paths
+    log.write_text(f"{LOGIN_A}\n")
+    await _cycle(context_factory, paths, LocalShell())
+    with log.open("a") as f:
+        f.write(f"{LOGIN_B}\n{LOGIN_C}\n")
+    rotate = f'mv "{log}" "{log}.1" && : > "{log}"'
+
+    with caplog.at_level("INFO"):
+        await _cycle(context_factory, paths, LocalShell(after_open=rotate))
+        for _ in range(2):
+            await _cycle(context_factory, paths, LocalShell())
+
+    assert _logged(caplog) == [[LOGIN_A], [LOGIN_B], [LOGIN_C]]
+
+
+@pytest.mark.asyncio
 async def test_an_unread_rotated_log_is_kept(context_factory, paths, monkeypatch):
     monkeypatch.setattr(sshd_auth_log, "MAX_LOGINS_PER_CYCLE", 1)
     log, _ = paths
