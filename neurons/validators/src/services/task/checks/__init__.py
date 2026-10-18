@@ -34,6 +34,7 @@ from .rented_machine import TenantEnforcementCheck
 from .score import ScoreCheck
 from .spec_change import SpecChangeCheck
 from .sshd_bootstrap import SshdBootstrapCheck
+from .sshd_auth_log import SshdAuthLogCheck
 from .stale_container_cleanup import StaleContainerCleanupCheck
 from .start_gpu_monitor import StartGPUMonitorCheck
 from .sysbox_required import SysboxRequiredCheck
@@ -63,6 +64,7 @@ __all__ = [
     "GpuUsageCheck",
     "GpuVramPrecheck",
     "InspectorRentedCheck",
+    "SshdAuthLogCheck",
     "LocalVerifyCheck",
     "MachineSpecScrapeCheck",
     "NvmlDigestCheck",

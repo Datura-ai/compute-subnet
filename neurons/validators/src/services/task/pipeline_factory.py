@@ -61,6 +61,7 @@ from .checks import (
     RentedGpuDropCheck,
     ScoreCheck,
     SpecChangeCheck,
+    SshdAuthLogCheck,
     StaleContainerCleanupCheck,
     StartGPUMonitorCheck,
     SshdBootstrapCheck,
@@ -363,6 +364,8 @@ class PipelineFactory:
                 SysboxRequiredCheck(),
                 ExecutorImageCheck(),
                 InspectorRentedCheck(),
+                # DAH-4629: before the rented halt, so rented nodes (where I-78 plants land) report too
+                SshdAuthLogCheck(),
                 TenantEnforcementCheck(),
                 GpuUsageCheck(),
                 # liumd phase 1 (DAH-2834): one signed `POST /verify` runs the VerifyX and matmul
@@ -464,6 +467,8 @@ class PipelineFactory:
                 _CUSTOM_BUILD_ORPHAN_SWEEP_SINGLETON,
                 ExecutorImageCheck(),
                 InspectorRentedCheck(),
+                # DAH-4629: before the rented halt, so rented nodes (where I-78 plants land) report too
+                SshdAuthLogCheck(),
                 TenantEnforcementCheck(),
                 GpuUsageCheck(),
                 LocalVerifyCheck(),
