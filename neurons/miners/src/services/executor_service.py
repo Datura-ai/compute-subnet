@@ -203,7 +203,11 @@ class ExecutorService:
     def delete(self, payload: DeleteExecutorRequest) -> Union[ExecutorDeleted, ExecutorDeleteFailed]:
         executor_uuid = payload.executor.uuid
         try:
-            self.executor_dao.delete_by_address_port(payload.executor.address, payload.executor.port)
+            # by uuid, never by address: a stale portal row at the same address:port deleted the live node there
+            # (ticket-0591); a uuid this miner does not hold has nothing to delete
+            if not self.executor_dao.delete_by_uuid(executor_uuid):
+                logger.warning("delete for executor (id=%s): not on this miner, nothing deleted", str(executor_uuid))
+                return ExecutorDeleted(executor_id=executor_uuid)
 
             logger.info("delete for executor (id=%s)", str(executor_uuid))
             return ExecutorDeleted(

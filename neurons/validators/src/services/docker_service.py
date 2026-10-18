@@ -3,6 +3,7 @@ import contextlib
 import dataclasses
 import enum
 import ipaddress
+import json
 import logging
 import math
 import random
@@ -108,6 +109,8 @@ from services.cluster_fabric import WIREGUARD_LISTEN_PORT, cluster_pod_networkin
 from services.redis_service import (
     RENTAL_PROBE_FAILED_PREFIX,
     RENTAL_PROBE_OK_PREFIX,
+    SSHD_BOOTSTRAP_FAILED_PREFIX,
+    SSHD_BOOTSTRAP_FAILED_TTL_SECONDS,
     STREAMING_LOG_CHANNEL,
     RedisService,
 )
@@ -175,6 +178,37 @@ LOG_STREAM_INTERVAL = 0.5  # 500ms — keeps build-log p95 emit→publish under 
 # but build phases emit dense progress (one line per layer) and a 5s batch
 # would violate the SSE latency requirement.
 IN_CONTAINER_SSH_BOOTSTRAP_PATH = "/tmp/lium-ssh-bootstrap.sh"
+
+# Each batch goes to the backend as one LogStreamRequest frame, and its validator socket takes at most 1 MiB per
+# frame (lium-platform F-29). A batch is budgeted by the JSON bytes of its entries, fields included, which leaves
+# half the frame for the envelope; one line (a renter's Dockerfile prints what it likes) is cut at 16 Ki characters,
+# at most 96 KiB once escaped.
+LOG_BATCH_MAX_BYTES = 512 * 1024
+LOG_LINE_MAX_CHARS = 16 * 1024
+
+
+def log_batches(
+    logs: list[dict], max_bytes: int = LOG_BATCH_MAX_BYTES, line_max_chars: int = LOG_LINE_MAX_CHARS
+) -> list[list[dict]]:
+    """The queued log entries in order, split so no batch serializes to more than max_bytes; long lines are cut."""
+    batches: list[list[dict]] = []
+    batch: list[dict] = []
+    size = 0
+    for log in logs:
+        text = log["log_text"]
+        if len(text) > line_max_chars:
+            # the mark fits inside the cap, so the cut line is no longer than the cap
+            mark = f" [cut from {len(text)} chars]"
+            log = {**log, "log_text": text[: line_max_chars - len(mark)] + mark}
+        entry_bytes = len(json.dumps(log)) + 2  # ASCII-escaped, so never smaller than the frame's UTF-8; + ", "
+        if batch and size + entry_bytes > max_bytes:
+            batches.append(batch)
+            batch, size = [], 0
+        batch.append(log)
+        size += entry_bytes
+    if batch:
+        batches.append(batch)
+    return batches
 
 # DAH-2364: SIGTERM grace window (docker stop -t semantics) given to a container before
 # forced removal. SIGKILL-only removal of GPU-heavy workloads repeatedly triggered a
@@ -926,6 +960,10 @@ def volume_step_detail(exc: BaseException) -> str | None:
 _HOST_FAULT_CREATE_STEPS = frozenset({"volume_creation", "gpu_flags"})
 # rental_probe.STEP_CONTAINER_START: the stamp reads as that probe step failing at the create step
 _RENTAL_PROBE_CONTAINER_START_STEP = "container_start"
+
+
+# sshd_bootstrap.sh's verify_sshd line: sshd is installed but not running or listening
+_SSHD_VERIFY_FAILED_MARKER = "sshd verification failed"
 
 
 def is_host_fault_create_failure(current_step: str | None) -> bool:
@@ -3328,16 +3366,20 @@ class DockerService:
                 self.logs_queue.clear()
 
             if logs_to_process:
+                batches = log_batches(logs_to_process)
+                published = 0
                 try:
-                    await self.redis_service.publish(
-                        STREAMING_LOG_CHANNEL,
-                        {
-                            "logs": logs_to_process,
-                            "miner_hotkey": miner_hotkey,
-                            "executor_uuid": executor_id,
-                            "pod_id": pod_id,
-                        },
-                    )
+                    for batch in batches:
+                        await self.redis_service.publish(
+                            STREAMING_LOG_CHANNEL,
+                            {
+                                "logs": batch,
+                                "miner_hotkey": miner_hotkey,
+                                "executor_uuid": executor_id,
+                                "pod_id": pod_id,
+                            },
+                        )
+                        published += 1
 
                     logger.info(
                         _m(
@@ -3347,9 +3389,13 @@ class DockerService:
                     )
 
                 except Exception as e:
+                    # as before batching: a failed publish is not retried and its lines are lost. The rest of the
+                    # pass is dropped too, so a Redis outage costs one publish timeout per pass, not one per batch;
+                    # a requeue would resend a batch Redis took but did not acknowledge, and nothing dedupes it
+                    dropped = sum(len(batch) for batch in batches[published:])
                     logger.error(
                         _m(
-                            "Error publishing log stream",
+                            f"Error publishing log stream; dropped {dropped} log lines",
                             extra=get_extra_info({**default_extra, "error": str(e)}),
                         ),
                         exc_info=True,
@@ -4927,7 +4973,10 @@ class DockerService:
         log_tag: str,
         log_extra: dict,
         raise_if_container_gone: bool = False,
+        sshd_verdict_executor_uuid: str | None = None,
     ) -> bool:
+        # sshd_verdict_executor_uuid: a filler create (Lium's own image) records the executor's sshd
+        # verdict for SshdBootstrapCheck; a renter's image can break sshd itself, so it records nothing.
         # raise_if_container_gone: the create path wants the ContainerGoneBeforeExec (with the
         # State it carries) rather than a False it never read; the start path keeps its
         # "did not complete cleanly" warning for every failure of the first exec.
@@ -5054,9 +5103,31 @@ class DockerService:
                     }),
                 )
             )
+            # only sshd installed but not serving is the node's fault; a failed apt-get exits before that line
+            if _SSHD_VERIFY_FAILED_MARKER in f"{run_result.stdout}{run_result.stderr}":
+                await self._record_sshd_verdict(sshd_verdict_executor_uuid, failed=True, log_extra=log_extra)
             return False
 
+        await self._record_sshd_verdict(sshd_verdict_executor_uuid, failed=False, log_extra=log_extra)
         return True
+
+    async def _record_sshd_verdict(self, executor_uuid: str | None, *, failed: bool, log_extra: dict) -> None:
+        if not executor_uuid:
+            return
+        key = f"{SSHD_BOOTSTRAP_FAILED_PREFIX}:{executor_uuid}"
+        try:
+            if failed:
+                await self.redis_service.set(key, "1", ex=SSHD_BOOTSTRAP_FAILED_TTL_SECONDS)
+            else:
+                await self.redis_service.delete(key)
+        except Exception:  # noqa: BLE001 — the create's own result still goes out
+            logger.warning(
+                _m(
+                    "sshd bootstrap verdict could not be recorded",
+                    extra=get_extra_info({**log_extra, "failed": failed}),
+                ),
+                exc_info=True,
+            )
 
     async def add_ssh_public_keys_with_rental_docker(
         self,
@@ -8390,6 +8461,9 @@ class DockerService:
                         log_tag=log_tag,
                         log_extra=default_extra,
                         raise_if_container_gone=True,
+                        sshd_verdict_executor_uuid=(
+                            payload.executor_id if payload.workload_kind == WorkloadKind.FILLER else None
+                        ),
                     ):
                         soft_failed_step = current_step
 
@@ -8781,15 +8855,19 @@ class DockerService:
 
         The node then scores 0 every cycle until a rental probe passes on it; the probe's interval stamp
         is dropped so that probe runs on the next idle cycle. Without the probe there is nothing to
-        clear the stamp, so nothing is stamped while RENTAL_PROBE_ENABLED is off.
+        clear the stamp, so nothing is stamped while RENTAL_PROBE_ENABLED is off. In shadow
+        (RENTAL_PROBE_ENFORCEMENT_ENABLED off) only the interval stamp is dropped: a standing failure
+        written then is never cleared on a node a filler keeps busy, and would zero it once
+        enforcement is turned on.
         """
         if not settings.RENTAL_PROBE_ENABLED or not is_host_fault_create_failure(current_step):
             return
         try:
-            await self.redis_service.set(
-                f"{RENTAL_PROBE_FAILED_PREFIX}:{executor_uuid}",
-                f"{_RENTAL_PROBE_CONTAINER_START_STEP}:{current_step}",
-            )
+            if settings.RENTAL_PROBE_ENFORCEMENT_ENABLED:
+                await self.redis_service.set(
+                    f"{RENTAL_PROBE_FAILED_PREFIX}:{executor_uuid}",
+                    f"{_RENTAL_PROBE_CONTAINER_START_STEP}:{current_step}",
+                )
             await self.redis_service.delete(f"{RENTAL_PROBE_OK_PREFIX}:{executor_uuid}")
         except Exception:  # noqa: BLE001 — the create's own failure reply still goes out
             logger.warning(

@@ -16,6 +16,7 @@ from protocol.miner_portal_request import (
     AddExecutorFailed,
     DeleteExecutorRequest,
     ExecutorAdded,
+    ExecutorDeleted,
     ExecutorDeleteFailed,
     ExecutorUpdateFailed,
     SyncExecutorMinerPortalFailed,
@@ -259,10 +260,28 @@ def test_a_failed_write_rolls_the_shared_session_back(executor_service, test_exe
     """ioc builds one ExecutorService on one session for the process: a failed flush left in it fails every later
     request with 'transaction has been rolled back due to a previous exception during flush'."""
     dao = executor_service.executor_dao
-    for method in (dao.update_by_uuid, dao.delete_by_address_port, dao.find_by_uuid):
+    for method in (dao.update_by_uuid, dao.delete_by_uuid, dao.find_by_uuid):
         method.side_effect = Exception("flush failed")
 
     result = call(executor_service, _payload(test_executor))
 
     assert isinstance(result, failed_type)
     dao.session.rollback.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# A portal delete removes only the node it names (ticket-0591)
+# ---------------------------------------------------------------------------
+
+
+def test_delete_removes_the_named_node_not_another_at_its_address(executor_service, test_executor):
+    dao = executor_service.executor_dao
+    dao.delete_by_uuid.return_value = False
+
+    payload = _payload(test_executor)
+
+    result = executor_service.delete(DeleteExecutorRequest(executor=payload))
+
+    assert isinstance(result, ExecutorDeleted)
+    dao.delete_by_uuid.assert_called_once_with(payload.uuid)
+    dao.delete_by_address_port.assert_not_called()

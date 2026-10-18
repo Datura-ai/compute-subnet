@@ -98,8 +98,8 @@ def make_ctx(context_factory, runner):
     )
 
 
-def test_on_and_in_shadow_by_default():
-    # a fault is logged from the first cycle; failing the node waits for a clean shadow window on real GPUs
+def test_on_but_not_enforcing_by_default():
+    # a fault is logged; failing the node waits for a review of a day of prod logs
     assert type(settings).model_fields["PINNED_MEMORY_PROBE_CHECK_ENABLED"].default is True
     assert type(settings).model_fields["PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED"].default is False
     assert PinnedMemoryProbeCheck.fatal is True
@@ -159,10 +159,16 @@ async def test_a_tdx_guest_whose_gpu_cannot_see_pinned_memory_fails_the_node(con
 
 
 @pytest.mark.asyncio
-async def test_without_enforcement_a_fault_warns_and_passes(context_factory, caplog):
-    stdout = probe_stdout(
-        "fault", faults=["gpu 0: cuStreamSynchronize -> CUDA_ERROR_ILLEGAL_ADDRESS (700)"]
-    )
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "gpu 0: cuStreamSynchronize -> CUDA_ERROR_ILLEGAL_ADDRESS (700)",
+        "cuInit -> CUDA_ERROR_UNKNOWN (999)",  # a broken-GPU code: logged as a fault, node still passes
+    ],
+    ids=["copy-fault", "cuda-broken"],
+)
+async def test_without_enforcement_a_fault_warns_and_passes(context_factory, caplog, fault):
+    stdout = probe_stdout("fault", faults=[fault])
     with probe_gate(enforce=False), caplog.at_level(logging.WARNING):
         result = await PinnedMemoryProbeCheck().run(
             make_ctx(context_factory, FakeRunner(stdout, exit_code=1))
@@ -172,6 +178,7 @@ async def test_without_enforcement_a_fault_warns_and_passes(context_factory, cap
     assert result.event.reason_code == "PINNED_MEMORY_PROBE_FAILED"
     assert result.event.severity == "warning"
     assert "NOT changed" in result.event.impact
+    assert result.event.what_we_saw["error"] == fault
     assert any("PINNED_MEMORY_PROBE_FAILED" in record.getMessage() for record in caplog.records)
 
 
@@ -266,6 +273,72 @@ def test_the_probe_on_a_host_without_libcuda_reports_an_error_not_a_fault():
     assert report["status"] == "error"
     assert report["faults"] == []
     assert "dev_tdx_guest" in report["tee"]
+
+
+def _load_probe_symbols(*names: str) -> dict[str, object]:
+    namespace: dict = {"ctypes": __import__("ctypes")}
+    kept = [
+        node
+        for node in ast.parse(PROBE_SOURCE).body
+        if (isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names)
+        or (isinstance(node, ast.Assign) and node.targets[0].id in names)
+    ]
+    exec(compile(ast.Module(body=kept, type_ignores=[]), "probe", "exec"), namespace)
+    return namespace
+
+
+def test_a_driver_error_naming_a_broken_gpu_is_a_fault_even_in_setup():
+    # a listed card whose cuInit answers CUDA_ERROR_UNKNOWN cannot run any renter's CUDA
+    probe = _load_probe_symbols("Cuda", "ProbeError", "CopyFault", "BROKEN_GPU_CODES")
+    cuda = object.__new__(probe["Cuda"])
+    codes = iter([999, 2])
+    cuda.lib = type("Lib", (), {"cuInit": staticmethod(lambda flags: next(codes))})()
+    cuda.error_name = lambda code: f"CUDA_ERROR_{code}"
+
+    with pytest.raises(probe["CopyFault"], match="cuInit -> CUDA_ERROR_999"):
+        cuda.call("cuInit", 0, raise_as_fault=False, broken_gpu_is_fault=True)
+    # out of memory in setup is still "could not measure"
+    with pytest.raises(probe["ProbeError"]):
+        cuda.call("cuInit", 0, raise_as_fault=False, broken_gpu_is_fault=True)
+    # an allocation answering a broken-GPU code is not a driver-start fault
+    codes = iter([999])
+    with pytest.raises(probe["ProbeError"]):
+        cuda.call("cuInit", 0, raise_as_fault=False)
+
+
+def test_device_enumeration_that_reports_a_broken_gpu_raises_a_fault():
+    probe = _load_probe_symbols(
+        "_device_count", "_reap", "CopyFault", "ProbeError", "COUNT_BUDGET_SECONDS"
+    )
+    probe["_count_worker"] = None  # the fake process never runs its target
+
+    class Conn:
+        def poll(self, timeout):
+            return True
+
+        def recv(self):
+            return {"fault": "cuInit -> CUDA_ERROR_UNKNOWN (999)"}
+
+        def close(self):
+            pass
+
+    class Process:
+        def __init__(self, target, args):
+            pass
+
+        def start(self):
+            pass
+
+        def join(self, timeout):
+            pass
+
+        def is_alive(self):
+            return False
+
+    mp = type("Mp", (), {"Pipe": staticmethod(lambda duplex: (Conn(), Conn())), "Process": Process})
+
+    with pytest.raises(probe["CopyFault"], match="CUDA_ERROR_UNKNOWN"):
+        probe["_device_count"](mp)
 
 
 def test_mismatches_counts_chunks_and_finds_the_first_wrong_byte():

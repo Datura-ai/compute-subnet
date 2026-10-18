@@ -154,19 +154,24 @@ def _emit_kernel_xml_disagreement(
 # is instant on a live host; the same bound CpuTruthCheck puts on its sysfs read.
 KERNEL_GPU_UUID_READ_TIMEOUT_SECONDS = 15
 
-PROC_GPU_INFO_CMD = (
-    "for f in /proc/driver/nvidia/gpus/*/information; do "
-    '[ -r "$f" ] || continue; '
-    "awk -F: '"
-    '$1 == "GPU UUID" { uuid = $2 } '
-    '$1 == "Device Minor" { minor = $2 } '
-    "END { "
-    'gsub(/^[[:space:]]+|[[:space:]]+$/, "", uuid); '
-    'gsub(/^[[:space:]]+|[[:space:]]+$/, "", minor); '
-    'if (uuid != "" && minor != "") printf "%s, %s\\n", uuid, minor; '
-    "}' \"$f\"; "
-    "done 2>/dev/null"
-)
+
+def _proc_gpu_info_cmd(root: str = "") -> str:
+    return (
+        f"for f in {root}/proc/driver/nvidia/gpus/*/information; do "
+        '[ -r "$f" ] || continue; '
+        "awk -F: '"
+        '$1 == "GPU UUID" { uuid = $2 } '
+        '$1 == "Device Minor" { minor = $2 } '
+        "END { "
+        'gsub(/^[[:space:]]+|[[:space:]]+$/, "", uuid); '
+        'gsub(/^[[:space:]]+|[[:space:]]+$/, "", minor); '
+        'if (uuid != "" && minor != "") printf "%s, %s\\n", uuid, minor; '
+        "}' \"$f\"; "
+        "done 2>/dev/null"
+    )
+
+
+PROC_GPU_INFO_CMD = _proc_gpu_info_cmd()
 
 
 async def build_gpu_flags(
@@ -375,7 +380,8 @@ def _missing_gpu_uuids(gpu_uuids: Sequence[str], uuid_to_minor: dict[str, int]) 
     return [uuid for uuid in gpu_uuids if uuid not in uuid_to_minor]
 
 
-PROC_NVIDIA_GPUS_PATH = "/proc/driver/nvidia/gpus"
+PROC_NVIDIA_PATH = "/proc/driver/nvidia"
+PROC_NVIDIA_GPUS_PATH = f"{PROC_NVIDIA_PATH}/gpus"
 PROC_GPU_INFO_GLOB = f"{PROC_NVIDIA_GPUS_PATH}/*/information"
 # One round-trip: the mounts that sit on /proc/driver/nvidia (raw /proc/self/mountinfo lines), the
 # filesystem each information file really lives on (`stat -f %T`: "proc" for procfs), then the
@@ -383,12 +389,27 @@ PROC_GPU_INFO_GLOB = f"{PROC_NVIDIA_GPUS_PATH}/*/information"
 # its UUIDs are trusted.
 KERNEL_GPU_FS_SEPARATOR = "--kernel-gpu-fs--"
 KERNEL_GPU_VIEW_SEPARATOR = "--kernel-gpu-uuids--"
-KERNEL_GPU_VIEW_CMD = (
-    "grep -F ' /proc/driver/nvidia' /proc/self/mountinfo 2>/dev/null; "
-    f"echo {KERNEL_GPU_FS_SEPARATOR}; stat -f -c '%n %T' {PROC_GPU_INFO_GLOB} 2>/dev/null; "
-    f"stat -c '%n|%F' {PROC_GPU_INFO_GLOB} 2>/dev/null; "
-    f"echo {KERNEL_GPU_VIEW_SEPARATOR}; {PROC_GPU_INFO_CMD}"
-)
+# The same files as the host's init process sees them. A container that shares the host's PID
+# namespace and is privileged can read them through /proc/1/root; elsewhere that path is the
+# container's own root or is not readable.
+HOST_PID1_ROOT = "/proc/1/root"
+HOST_PID1_MOUNTINFO = "/proc/1/mountinfo"
+
+
+def kernel_gpu_view_cmd(*, host_view: bool = False) -> str:
+    root = HOST_PID1_ROOT if host_view else ""
+    mountinfo = HOST_PID1_MOUNTINFO if host_view else "/proc/self/mountinfo"
+    glob = f"{root}{PROC_GPU_INFO_GLOB}"
+    return (
+        f"grep -F ' /proc/driver/nvidia' {mountinfo} 2>/dev/null; "
+        f"echo {KERNEL_GPU_FS_SEPARATOR}; stat -f -c '%n %T' {glob} 2>/dev/null; "
+        f"stat -c '%n|%F' {glob} 2>/dev/null; "
+        f"echo {KERNEL_GPU_VIEW_SEPARATOR}; {_proc_gpu_info_cmd(root)}"
+    )
+
+
+KERNEL_GPU_VIEW_CMD = kernel_gpu_view_cmd()
+HOST_KERNEL_GPU_VIEW_CMD = kernel_gpu_view_cmd(host_view=True)
 # procfs reports size 0 for the card's `information` node, so `stat -c %F` on a real node answers
 # "regular empty file"; a file the peer wrote into the runtime's tmpfs answers "regular file".
 INFORMATION_FILE_KINDS = ("regular file", "regular empty file")
@@ -405,7 +426,9 @@ class KernelGpuView(NamedTuple):
     foreign_mounts: list[str]  # "<path> <fstype>" per mount or file on the gpus path that is not procfs
 
 
-def foreign_mounts_over_proc_nvidia_gpus(mountinfo: str, file_fs: str = "") -> list[str]:
+def foreign_mounts_over_proc_nvidia_gpus(
+    mountinfo: str, file_fs: str = "", *, host_view: bool = False
+) -> list[str]:
     """Mounts or files at or under /proc/driver/nvidia/gpus whose filesystem is not procfs.
 
     The 2026-08-19 ban (providerban ddae45d9) recorded a tmpfs overlay on exactly this path: the
@@ -419,6 +442,10 @@ def foreign_mounts_over_proc_nvidia_gpus(mountinfo: str, file_fs: str = "") -> l
     (no -L) in the same text catch the last shape: a symlink to some other procfs file, which is on
     procfs too but is not a regular file. A `proc` mount on the gpus subtree must be the bind of
     its own path (mountinfo root == mount point without /proc), not of another procfs file.
+
+    `host_view` judges the host's own mount table (PID 1's mountinfo). A host has no reason to
+    mount anything at or under /proc/driver/nvidia, so there every such mount is foreign, the
+    runtime's tmpfs and proc binds included: with them the table is a container's, not a host's.
     """
     found: list[str] = []
     for line in mountinfo.splitlines():
@@ -430,7 +457,11 @@ def foreign_mounts_over_proc_nvidia_gpus(mountinfo: str, file_fs: str = "") -> l
         on_gpus = mount_point == PROC_NVIDIA_GPUS_PATH or mount_point.startswith(
             PROC_NVIDIA_GPUS_PATH + "/"
         )
-        if on_gpus and fstype != "proc":
+        if host_view and (
+            mount_point == PROC_NVIDIA_PATH or mount_point.startswith(PROC_NVIDIA_PATH + "/")
+        ):
+            found.append(f"{mount_point} {fstype}")
+        elif on_gpus and fstype != "proc":
             found.append(f"{mount_point} {fstype}")
         elif on_gpus and root != mount_point[len("/proc") :]:
             found.append(f"{mount_point} proc:{root}")
@@ -451,7 +482,9 @@ def foreign_mounts_over_proc_nvidia_gpus(mountinfo: str, file_fs: str = "") -> l
     return found[:FOREIGN_MOUNTS_NAMED]
 
 
-async def read_kernel_gpu_view(ssh: asyncssh.SSHClientConnection) -> KernelGpuView:
+async def read_kernel_gpu_view(
+    ssh: asyncssh.SSHClientConnection, *, host_view: bool = False
+) -> KernelGpuView:
     """GPU UUIDs as the kernel driver reports them in /proc/driver/nvidia/gpus/*/information.
 
     DAH-2662: the ban list is matched against the UUIDs the host *reports* (NVML, which an
@@ -467,10 +500,17 @@ async def read_kernel_gpu_view(ssh: asyncssh.SSHClientConnection) -> KernelGpuVi
     The read is bounded: it runs on the fatal-check path of every executor every cycle, and a
     wedged host would otherwise hold the check open for the executor's whole validation budget.
     A timeout is one more "unreadable" (None), never a failure of the host.
+
+    `host_view` reads the same files through PID 1's root (HOST_PID1_ROOT) and judges PID 1's
+    mount table instead, with the same rules plus one: no mount at or under /proc/driver/nvidia.
+    A container that was handed a subset of the cards sees only those under its own /proc; the
+    host's list is the full one. Same bound, same fail-open None.
     """
+    what = "host kernel GPU view" if host_view else "kernel GPU UUID read"
     try:
         res = await asyncio.wait_for(
-            ssh.run(KERNEL_GPU_VIEW_CMD), timeout=KERNEL_GPU_UUID_READ_TIMEOUT_SECONDS
+            ssh.run(HOST_KERNEL_GPU_VIEW_CMD if host_view else KERNEL_GPU_VIEW_CMD),
+            timeout=KERNEL_GPU_UUID_READ_TIMEOUT_SECONDS,
         )
         if res.exit_status != 0:
             raise RuntimeError(
@@ -479,7 +519,15 @@ async def read_kernel_gpu_view(ssh: asyncssh.SSHClientConnection) -> KernelGpuVi
             )
         mountinfo, _, rest = (res.stdout or "").partition(KERNEL_GPU_FS_SEPARATOR)
         file_fs, _, uuid_lines = rest.partition(KERNEL_GPU_VIEW_SEPARATOR)
+        if host_view:
+            # judged as the paths the host itself has; a row without the prefix stays as it is
+            file_fs = "\n".join(line.removeprefix(HOST_PID1_ROOT) for line in file_fs.splitlines())
     except Exception as exc:
+        if host_view:
+            logger.info(
+                "%s failed: %s", what, repr(exc)[:500], extra={"executor_peer": _ssh_peer(ssh)}
+            )
+            return KernelGpuView(uuids=None, foreign_mounts=[])
         # fail-open by design; the line is what tells ops the kernel view was missing on this host
         logger.warning(
             "kernel GPU UUID read failed, bans matched on the reported list only: %s",
@@ -487,7 +535,17 @@ async def read_kernel_gpu_view(ssh: asyncssh.SSHClientConnection) -> KernelGpuVi
             extra={"executor_peer": _ssh_peer(ssh)},
         )
         return KernelGpuView(uuids=None, foreign_mounts=[])
-    foreign_mounts = foreign_mounts_over_proc_nvidia_gpus(mountinfo, file_fs)
+    foreign_mounts = foreign_mounts_over_proc_nvidia_gpus(mountinfo, file_fs, host_view=host_view)
+    if foreign_mounts and host_view:
+        # the usual case: PID 1 is the container's own init, so this is its mount table again
+        logger.info(
+            "%s not usable, mounts over %s: %s",
+            what,
+            PROC_NVIDIA_PATH,
+            foreign_mounts,
+            extra={"executor_peer": _ssh_peer(ssh)},
+        )
+        return KernelGpuView(uuids=None, foreign_mounts=foreign_mounts)
     if foreign_mounts:
         logger.warning(
             "foreign mount over %s: %s",
@@ -502,7 +560,8 @@ async def read_kernel_gpu_view(ssh: asyncssh.SSHClientConnection) -> KernelGpuVi
     procfs_rows = [line for line in file_fs.splitlines() if line.strip().endswith(" proc")]
     if len(procfs_rows) < len(uuids):
         logger.warning(
-            "kernel GPU UUID read had no procfs evidence for every card; withheld",
+            "%s had no procfs evidence for every card; withheld",
+            what,
             extra={"executor_peer": _ssh_peer(ssh)},
         )
         return KernelGpuView(uuids=None, foreign_mounts=[])
