@@ -12,15 +12,23 @@ DEV_LOG = "/dev/log"
 SSHD_AUTH_LOG = "/var/log/sshd-auth.log"
 # past this the file is renamed to .1 (the validator drains .1 from its cursor, then starts the new file)
 ROTATE_BYTES = 50 * 1024 * 1024
-# a session that authenticated; VERBOSE also logs "Accepted key ... found at" for a key merely offered
-LOGIN = re.compile(r"Accepted \S+ for ")
+# a session that authenticated, matched right after libc's syslog envelope ("<pri>Mmm dd hh:mm:ss sshd[pid]: ")
+# so a client-chosen user name inside "Invalid user ..." cannot pose as one; sshd-session is OpenSSH 9.8+.
+# VERBOSE also logs "Accepted key ... found at" for a key merely offered, which "Accepted <method> for" skips.
+LOGIN = re.compile(
+    r"^<\d+>[A-Z][a-z]{2} \d{1,2} \d\d:\d\d:\d\d sshd(?:-session)?\[\d+\]: Accepted \S+ for "
+)
 # records kept while the disk refuses writes; sshd must never wait on this socket
 MAX_PENDING = 1000
 
 
+def is_login(message: str) -> bool:
+    return bool(LOGIN.match(" ".join(message.split())))
+
+
 def record(message: str, log: str = SSHD_AUTH_LOG) -> None:
     line = " ".join(message.split())
-    if not LOGIN.search(line):
+    if not LOGIN.match(line):
         return
     if os.path.exists(log) and os.path.getsize(log) > ROTATE_BYTES:
         os.replace(log, f"{log}.1")
@@ -44,8 +52,11 @@ def serve(sock: socket.socket) -> None:
     while True:
         sock.settimeout(delay)
         try:
-            pending.append(sock.recv(16384).decode("utf-8", errors="replace"))
-        except socket.timeout:
+            message = sock.recv(16384).decode("utf-8", errors="replace")
+            # filtered before it is kept: scanner noise during a full disk must not push a login out
+            if is_login(message):
+                pending.append(message)
+        except TimeoutError:
             pass
         try:
             while pending:

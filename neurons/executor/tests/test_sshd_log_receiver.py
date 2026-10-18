@@ -31,6 +31,9 @@ def test_a_login_is_kept_with_sshds_envelope(tmp_path):
     [
         "<38>Oct 18 06:27:29 sshd[812]: Accepted key ED25519 SHA256:aaa found at /root/.ssh/authorized_keys:3",
         "<38>Oct 18 06:27:31 sshd[813]: Connection closed by 198.51.100.4 port 4022 [preauth]",
+        # a client-chosen user name, unauthenticated
+        "<38>Oct 18 06:27:32 sshd[815]: Invalid user Accepted publickey for root from 198.51.100.4 port 4023",
+        "<38>Oct 18 06:27:32 sshd[815]: Invalid user x sshd[1]: Accepted publickey for root from 198.51.100.4",
     ],
 )
 def test_only_a_completed_login_is_recorded(tmp_path, offer):
@@ -56,20 +59,23 @@ class FakeSocket:
         return self.datagrams.pop(0).encode()
 
 
-def test_a_failed_write_is_retried_instead_of_ending_the_receiver(tmp_path, monkeypatch):
+@pytest.mark.parametrize("noise_count", [0, sshd_log_receiver.MAX_PENDING + 1])
+def test_a_failed_write_is_retried_instead_of_ending_the_receiver(
+    tmp_path, monkeypatch, noise_count
+):
     log = tmp_path / "sshd-auth.log"
-    calls = []
+    noise = "<38>Oct 18 06:27:31 sshd[813]: Connection closed by 198.51.100.4 port 4022 [preauth]"
+    sock = FakeSocket([ACCEPTED] + [noise] * noise_count + [ACCEPTED.replace("812", "814")])
 
     def flaky(message, log=str(log)):
-        calls.append(message)
-        if len(calls) == 1:
+        if sock.datagrams:  # the disk stays full until the last login has arrived
             raise OSError(28, "No space left on device")
         record(message, log)
 
     monkeypatch.setattr(sshd_log_receiver, "record", flaky)
 
     with pytest.raises(KeyboardInterrupt):
-        sshd_log_receiver.serve(FakeSocket([ACCEPTED, ACCEPTED.replace("812", "814")]))
+        sshd_log_receiver.serve(sock)
 
     assert len(log.read_text().splitlines()) == 2
 

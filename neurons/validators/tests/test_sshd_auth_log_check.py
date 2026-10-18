@@ -125,11 +125,14 @@ LOGIN_C = LOGIN_B.replace("51023", "51024").replace("SHA256:bbb", "SHA256:ccc")
 
 
 @pytest.mark.asyncio
-async def test_logins_left_unread_in_a_rotated_log_are_read_before_the_new_file(context_factory, paths, caplog):
+@pytest.mark.parametrize("tail", [f"{LOGIN_B}\n", LOGIN_B[:40]])
+async def test_logins_left_unread_in_a_rotated_log_are_read_before_the_new_file(
+    context_factory, paths, caplog, tail
+):
     paths[0].write_text(f"{LOGIN_A}\n")
     await _cycle(context_factory, paths, LocalShell())
     with paths[0].open("a") as f:
-        f.write(f"{LOGIN_B}\n")
+        f.write(tail)  # complete, or cut short by a full disk
     paths[0].rename(f"{paths[0]}.1")
     paths[0].write_text(f"{LOGIN_C}\n")
 
@@ -137,7 +140,8 @@ async def test_logins_left_unread_in_a_rotated_log_are_read_before_the_new_file(
         for _ in range(3):
             await _cycle(context_factory, paths, LocalShell())
 
-    assert _logged(caplog) == [[LOGIN_A], [LOGIN_B], [LOGIN_C]]
+    expected = [[LOGIN_A], [LOGIN_B], [LOGIN_C]] if tail.endswith("\n") else [[LOGIN_A], [LOGIN_C]]
+    assert _logged(caplog) == expected
 
 
 @pytest.mark.asyncio

@@ -21,17 +21,18 @@ SSH_TIMEOUT_SECONDS = 10
 
 
 def read_command(log: str = SSHD_AUTH_LOG, cursor: str = SSHD_AUTH_CURSOR) -> str:
-    """Prints `<inode> <offset>`, then up to MAX_LOGINS_PER_CYCLE lines from the offset. After a rotation the
+    """Prints `<inode> <offset> <1 if reading .1>`, then up to MAX_LOGINS_PER_CYCLE lines from the offset. After a rotation the
     unread rest of the cursor's file, now `.1`, is read first; then the new file from 0. A file shorter than
     the offset starts over at 0."""
     return (
         f'f={log}; [ -f "$f" ] || exit 3; ino=$(stat -c %i "$f"); off=0; '
-        f'set -- $(cat {cursor} 2>/dev/null); '
+        f"set -- $(cat {cursor} 2>/dev/null); "
         f'if [ "${{1:-}}" = "$ino" ]; then off=${{2:-0}}; '
         f'elif [ -n "${{1:-}}" ] && [ "$(stat -c %i "$f.1" 2>/dev/null)" = "$1" ] '
         f'&& [ "${{2:-0}}" -lt "$(stat -c %s "$f.1")" ] 2>/dev/null; then f="$f.1"; ino=$1; off=${{2:-0}}; fi; '
         f'[ "$off" -le "$(stat -c %s "$f")" ] 2>/dev/null || off=0; '
-        f'echo "$ino $off"; tail -c +$((off + 1)) "$f" | head -n {MAX_LOGINS_PER_CYCLE}'
+        f'rotated=0; [ "$f" = "{log}.1" ] && rotated=1; '
+        f'echo "$ino $off $rotated"; tail -c +$((off + 1)) "$f" | head -n {MAX_LOGINS_PER_CYCLE}'
     )
 
 
@@ -66,12 +67,31 @@ class SshdAuthLogCheck:
             return self._unread(ctx, reason="no sshd auth log on this executor")
         header, _, body = (result.stdout or "").partition("\n")
         try:
-            inode, offset = (int(part) for part in header.split())
+            inode, offset, rotated = (int(part) for part in header.split())
         except ValueError:
             return self._unread(ctx, reason=f"unreadable cursor line {header[:80]!r}")
-        # only whole lines: a line still being written is read again next cycle
-        lines = [line for line in body.splitlines(keepends=True) if line.endswith("\n")]
+        *complete, tail = body.split("\n")
+        # only whole lines: a line still being written to the live file is read again next cycle
+        lines = [f"{line}\n" for line in complete]
         logins = [line.strip() for line in lines if line.strip()]
+        consumed = sum(len(line.encode("utf-8")) for line in lines)
+        if rotated and tail:
+            # .1 is never written again: a cut-off last record (a write the disk cut short) is reported and
+            # passed, or the cursor would wait on it forever and never reach the live file
+            fragment = tail
+            logger.warning(
+                _m(
+                    "Executor sshd log: incomplete record skipped in the rotated file",
+                    extra=get_extra_info(
+                        {
+                            **ctx.default_extra,
+                            "executor_uuid": ctx.executor.uuid,
+                            "fragment": fragment[:300],
+                        }
+                    ),
+                )
+            )
+            consumed += len(fragment.encode("utf-8"))
         if logins:
             logger.info(
                 _m(
@@ -81,7 +101,7 @@ class SshdAuthLogCheck:
                     ),
                 )
             )
-            consumed = sum(len(line.encode("utf-8")) for line in lines)
+        if consumed:
             try:
                 await self._ssh(ctx, advance_command(inode, offset + consumed, self.cursor))
             except Exception as exc:  # noqa: BLE001 - the same lines are logged again next cycle
