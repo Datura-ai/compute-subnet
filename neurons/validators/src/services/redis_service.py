@@ -24,6 +24,8 @@ POD_STATES_CHANNEL = "POD_STATES_CHANNEL"
 RENTED_MACHINE_PREFIX = "rented_machines_prefix"
 PENDING_PODS_PREFIX = "pending_pods_prefix"
 GPU_RESET_PENDING_KIND = "gpu_reset"
+# DAH-4663: a renter's own GPU clock lock; the rented GPU checks skip it like a reset
+GPU_CLOCKS_PENDING_KIND = "gpu_clocks"
 DUPLICATED_MACHINE_SET = "duplicated_machines"
 RENTAL_SUCCEED_MACHINE_SET = "rental_succeed_machines"
 AVAILABLE_PORT_MAPS_PREFIX = "available_port_maps"
@@ -580,7 +582,7 @@ class RedisService:
 
     async def gpu_reset_in_progress(self, miner_hotkey: str, executor_id: str) -> bool:
         pending_pods: list[dict] = await self.get_pending_pods(miner_hotkey, executor_id)
-        return any(item.get("kind") == GPU_RESET_PENDING_KIND for item in pending_pods)
+        return any(item.get("kind") in (GPU_RESET_PENDING_KIND, GPU_CLOCKS_PENDING_KIND) for item in pending_pods)
 
     async def renting_in_progress(self, miner_hotkey: str, executor_id: str, pod_id: str | None = None) -> bool:
         pending_pods: list[dict] = await self.get_pending_pods(miner_hotkey, executor_id)

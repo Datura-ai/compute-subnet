@@ -58,6 +58,8 @@ class ValidatorMessageType(enum.Enum):
     JupyterInstallationFailed = "JupyterInstallationFailed"
     # 1.8.0 (DAH-4658): the answer to ResetPodGpuRequest
     PodGpuResetResult = "PodGpuResetResult"
+    # 1.9.0 (DAH-4663): the answer to LockPodGpuClocksRequest
+    PodGpuClocksResult = "PodGpuClocksResult"
 
 
 VALIDATOR_MESSAGES: Registry[ValidatorMessage] = Registry(ValidatorMessageType)
@@ -526,6 +528,8 @@ class GpuResetErrorCode(enum.Enum):
     ContainerNotFound = "ContainerNotFound"
     OperationInProgress = "OperationInProgress"
     ExecutorUnreachable = "ExecutorUnreachable"
+    # 1.9.0 (DAH-4663): sysbox or TEE pod, no supported clocks, or the driver refused the lock
+    ClockLockNotSupported = "ClockLockNotSupported"
 
 
 class GpuResetOutcome(pydantic.BaseModel):
@@ -548,3 +552,25 @@ class PodGpuResetResult(PodContainerResponse):
     container_restarted: bool = False
     gpus: list[GpuResetOutcome] = []
     detail: str | None = None
+
+
+class GpuClockOutcome(pydantic.BaseModel):
+    index: int
+    uuid: str
+    result: Literal["locked", "reset", "failed"]
+    applied_min_mhz: int | None = None
+    applied_max_mhz: int | None = None
+    detail: str | None = None
+
+
+@VALIDATOR_MESSAGES.register
+class PodGpuClocksResult(PodContainerResponse):
+    """1.9.0 (DAH-4663): the answer to `backend_to_validator.LockPodGpuClocksRequest`, same `request_id`.
+    `gpus` is one outcome per GPU touched, with the clamped range applied; empty when a precheck refused
+    before anything changed. `error_code` reuses `GpuResetErrorCode`."""
+
+    message_type: ValidatorMessageType = ValidatorMessageType.PodGpuClocksResult
+    request_id: str
+    ok: bool
+    error_code: GpuResetErrorCode | None = None
+    gpus: list[GpuClockOutcome] = []

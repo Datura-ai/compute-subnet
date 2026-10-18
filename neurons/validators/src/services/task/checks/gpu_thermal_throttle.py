@@ -23,11 +23,16 @@ only gets the warning, so this check never touches a running rental. Every other
 near-full clock, a low clock with no slowdown bit) is the non-fatal GPU_THERMAL_THROTTLE warning, score
 unchanged. It runs right after the scrape, before the rented short-circuit (TenantEnforcementCheck), so rented
 nodes are judged too. One reading per cycle; the next clean cycle passes again.
+
+A GPU whose clocks a renter locked (DAH-4663, a ``gpu_clock_lock:<uuid>`` record in Redis) is not judged: the
+lock holds its clock down on purpose. The record is read only when a GPU was flagged.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from services.gpu_clocks import clock_locked_gpu_uuids
 
 from ..messages import GpuThermalThrottleMessages as Msg
 from ..messages import render_message
@@ -115,6 +120,11 @@ class GpuThermalThrottleCheck:
             )
             if finding is not None
         ]
+        if throttled:
+            # DAH-4663: a renter's own clock lock holds the clock down on purpose (and one a failed
+            # teardown left behind is reset before the next create): not the host's fault
+            locked = await clock_locked_gpu_uuids(ctx.services.redis, [str(f["uuid"]) for f in throttled])
+            throttled = [finding for finding in throttled if finding["uuid"] not in locked]
         rented_executor = (
             ctx.state.rented_data.executors.get(ctx.executor.uuid)
             if ctx.state.rented_data

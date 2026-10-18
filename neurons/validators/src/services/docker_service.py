@@ -56,7 +56,9 @@ from payload_models.payloads import (
     InstallJupyterServerRequest,
     JupyterInstallationFailed,
     JupyterServerInstalled,
+    LockPodGpuClocksRequest,
     PayloadPortMapping,
+    PodGpuClocksResult,
     PodGpuResetResult,
     ProfilerStep,
     ProfilerStepName,
@@ -106,11 +108,18 @@ from services.prerun_host_probe import (
     port_check_containers_command,
     prerun_host_probe_command,
 )
+from services.gpu_clocks import (
+    GpuClocksReport,
+    lock_pod_gpu_clocks,
+    reset_leftover_clock_locks,
+    reset_pod_clock_locks,
+)
 from services.gpu_reset import GpuResetReport, reset_pod_gpus
 from services.gpu_wedge import cure_wedged_gpus, query_wedged_gpu_uuids
 from services.nvidia_devices import build_gpu_docker_config_for_executor
 from services.cluster_fabric import WIREGUARD_LISTEN_PORT, cluster_pod_networking
 from services.redis_service import (
+    GPU_CLOCKS_PENDING_KIND,
     GPU_RESET_PENDING_KIND,
     RENTAL_PROBE_FAILED_PREFIX,
     RENTAL_PROBE_OK_PREFIX,
@@ -8083,6 +8092,17 @@ class DockerService:
                     current_step = "cluster_overlay_port"
                     await self._assert_cluster_overlay_port_free(ssh_client, default_extra)
 
+                # DAH-4663: a GPU whose clock lock outlived its pod (teardown -rgc failed) is reset
+                # before anyone starts on it. Best-effort, never blocks the rental.
+                try:
+                    await reset_leftover_clock_locks(
+                        SSHCommandRunner(ssh_client, max_retries=0), self.redis_service, payload.gpu_uuids
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        _m("GPU clock lock safety net failed", extra=get_extra_info({**default_extra, "error": str(exc)}))
+                    )
+
                 # DAH-2356: cap GPU power for the Lium PEARL filler (only PEARL carries
                 # gpu_power_limits). Fail-closed: apply undoes any partial work on failure, and the
                 # raise records this create FAILED (12h backoff) — never run the miner uncapped.
@@ -9987,6 +10007,11 @@ class DockerService:
                     # outlives the teardown and never reaches the next renter.
                     with _best_effort_delete_step(log, "sweep_wedged_gpus"):
                         await _sweep_wedged_gpus_after_teardown(ssh_client, log)
+                # DAH-4663: give the GPUs a renter locked back their clocks (one Redis read when none)
+                with _best_effort_delete_step(log, "reset_gpu_clock_locks"):
+                    await reset_pod_clock_locks(
+                        SSHCommandRunner(ssh_client, max_retries=0), self.redis_service, payload.pod_id
+                    )
 
                 with _best_effort_delete_step(log, "prune_images"):
                     await run_logged_rental_docker_sdk_operation(
@@ -10276,6 +10301,94 @@ class DockerService:
                     "ok": report.ok,
                     "error_code": report.error_code.value if report.error_code else None,
                     "container_restarted": report.container_restarted,
+                    "gpus": [gpu.model_dump() for gpu in report.gpus],
+                    "detail": report.detail,
+                }),
+            )
+        )
+        return result(report)
+
+    async def lock_pod_gpu_clocks(
+        self,
+        payload: LockPodGpuClocksRequest,
+        executor_info: ExecutorSSHInfo,
+        keypair: bittensor.Keypair,
+        private_key: str,
+    ) -> PodGpuClocksResult:
+        """DAH-4663: a renter's lock (or reset) of their pod's GPU clocks (services/gpu_clocks.py does the
+        work). The pending-pod mark (kind gpu_clocks) is held throughout, as for a GPU reset."""
+        default_extra = {
+            "miner_hotkey": payload.miner_hotkey,
+            "executor_uuid": payload.executor_id,
+            "pod_id": payload.pod_id,
+            "request_id": payload.request_id,
+            "container_name": payload.container_name,
+            "executor_ip_address": executor_info.address,
+            "executor_ssh_port": executor_info.ssh_port,
+        }
+        logger.info(_m("Lock pod GPU clocks", extra=get_extra_info({**default_extra, "payload": str(payload)})))
+
+        def result(report: GpuClocksReport) -> PodGpuClocksResult:
+            return PodGpuClocksResult(
+                miner_hotkey=payload.miner_hotkey,
+                executor_id=payload.executor_id,
+                pod_id=payload.pod_id,
+                workload_kind=payload.workload_kind,
+                request_id=payload.request_id,
+                ok=report.ok,
+                error_code=report.error_code,
+                gpus=report.gpus,
+            )
+
+        private_key = self.ssh_service.decrypt_payload(keypair.ss58_address, private_key)
+        pkey = asyncssh.import_private_key(private_key)
+        try:
+            known_hosts_policy = await self._prepare_known_hosts_policy(
+                executor_info, payload.miner_hotkey, default_extra
+            )
+            require_rental_docker_ssh_host_key(executor_info)
+        except (AttestationError, RentalDockerConnectionError) as exc:
+            logger.error(_m("Lock pod GPU clocks: executor not trusted", extra=get_extra_info({**default_extra, "error": str(exc)})))
+            return result(GpuClocksReport(ok=False, error_code=GpuResetErrorCode.ExecutorUnreachable, detail=str(exc)))
+
+        await self.redis_service.add_pending_pod(
+            payload.miner_hotkey, payload.executor_id, payload.pod_id, kind=GPU_CLOCKS_PENDING_KIND
+        )
+        try:
+            async with asyncssh.connect(
+                host=executor_info.address,
+                port=executor_info.ssh_port,
+                **await public_host_sock(executor_info.address, executor_info.ssh_port),
+                username=executor_info.ssh_username,
+                client_keys=[pkey],
+                known_hosts=known_hosts_policy,
+            ) as ssh_client:
+                report = await lock_pod_gpu_clocks(
+                    SSHCommandRunner(ssh_client, max_retries=0),
+                    self.redis_service,
+                    container_name=payload.container_name,
+                    pod_id=payload.pod_id,
+                    executor_id=payload.executor_id,
+                    backend_uuids=payload.gpu_uuids,
+                    gpu_indices=payload.gpu_indices,
+                    min_mhz=payload.min_mhz,
+                    max_mhz=payload.max_mhz,
+                    reset=payload.reset,
+                    in_tee=bool(executor_info.tdx_quote),
+                )
+        except Exception as exc:
+            logger.error(_m("Lock pod GPU clocks failed", extra=get_extra_info({**default_extra, "error": str(exc)})), exc_info=True)
+            report = GpuClocksReport(ok=False, error_code=GpuResetErrorCode.ExecutorUnreachable, detail=str(exc))
+        finally:
+            await self.redis_service.remove_pending_pod(payload.miner_hotkey, payload.executor_id, payload.pod_id)
+
+        logger.info(
+            _m(
+                "Lock pod GPU clocks done",
+                extra=get_extra_info({
+                    **default_extra,
+                    "ok": report.ok,
+                    "error_code": report.error_code.value if report.error_code else None,
                     "gpus": [gpu.model_dump() for gpu in report.gpus],
                     "detail": report.detail,
                 }),
