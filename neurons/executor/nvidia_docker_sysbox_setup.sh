@@ -660,6 +660,9 @@ vloopback_storage_opt_unsupported() {
 }
 
 VLOOPBACK_NOT_USED="Docker here does not accept --storage-opt, so rentals run without a disk limit and never use the plugin."
+# a renter filling an uncapped disk fills the Docker data-root and takes the host down; validators score such a node 0
+STORAGE_LIMIT_MISSING="Docker here cannot limit a container's disk (needs overlay2 on xfs mounted with pquota); one renter can fill it and take the node down, and validators reject such nodes."
+STORAGE_LIMIT_FIX="sudo lium gpu-splitting setup --device <spare disk>   # guide: https://docs.lium.io/providers/nodes/docker-storage"
 
 check_vloopback() {
     # --check: report the plugin, change nothing but the test volume the mount test creates and removes
@@ -673,7 +676,7 @@ check_vloopback() {
         pf_skip "vloopback volumes — the test runs $VERIFY_IMAGE, which is not on this host yet (install mode pulls it)."
         return 0
     fi
-    ! vloopback_storage_opt_unsupported || { pf_skip "vloopback volumes — $VLOOPBACK_NOT_USED"; return 0; }
+    ! vloopback_storage_opt_unsupported || { pf_fix "$STORAGE_LIMIT_MISSING" "$STORAGE_LIMIT_FIX"; return 1; }
     state=$(vloopback_plugin_state)
     if [ "$state" = "absent" ]; then
         pf_fix "The $VLOOPBACK_PLUGIN volume plugin is not installed; the mount test cannot run until it is." \
@@ -706,7 +709,7 @@ fail_vloopback() {
 
 setup_vloopback() {
     # install mode: the plugin fix, then the mount test; on a failure the caller prints fail_vloopback
-    ! vloopback_storage_opt_unsupported || { ok "vloopback: skipped. $VLOOPBACK_NOT_USED"; return 0; }
+    ! vloopback_storage_opt_unsupported || { ok "vloopback: skipped. $VLOOPBACK_NOT_USED"; warn "$STORAGE_LIMIT_MISSING Fix: $STORAGE_LIMIT_FIX"; return 0; }
     ensure_vloopback_plugin || return 1
     [ -z "$VLOOPBACK_CHANGED" ] || ok "vloopback: $VLOOPBACK_CHANGED."
     vloopback_mount_test || return 1

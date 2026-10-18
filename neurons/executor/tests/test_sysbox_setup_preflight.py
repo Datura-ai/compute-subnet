@@ -883,12 +883,13 @@ def test_check_vloopback_is_skipped_until_the_test_image_is_pulled(tmp_path):
 
 
 @pytest.mark.parametrize("seed", ["absent", "relative"])
-def test_check_vloopback_is_skipped_where_rentals_get_no_disk_limit(tmp_path, seed):
+def test_check_asks_for_the_disk_limit_where_rentals_get_none(tmp_path, seed):
     rc, out, fix = run_check(
         tmp_path, "check_vloopback", env={"STUB_VLOOPBACK": seed, "STUB_STORAGE_OPT_UNSUPPORTED": "1"}
     )
-    assert rc == 0 and fix == 0
-    assert "SKIP vloopback volumes — Docker here does not accept --storage-opt" in out
+    assert rc == 1 and fix == 1
+    assert "FIX  Docker here cannot limit a container's disk" in out
+    assert "sudo lium gpu-splitting setup --device" in out
     assert not [call for call in _docker_calls(tmp_path) if call.startswith(("volume ", "plugin "))]
 
 
@@ -900,6 +901,7 @@ def test_install_mode_leaves_the_plugin_alone_where_rentals_get_no_disk_limit(tm
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "vloopback: skipped. Docker here does not accept --storage-opt" in proc.stdout
+    assert "Docker here cannot limit a container's disk" in proc.stdout and "lium gpu-splitting setup" in proc.stdout
     assert _plugin_changes(tmp_path) == []
     assert not [call for call in _docker_calls(tmp_path) if call.startswith("volume ")]
 
