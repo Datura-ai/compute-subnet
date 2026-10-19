@@ -24,7 +24,7 @@ from services.const import (
     RENTAL_CLOSE_CLOCK_SKEW_MINUTES,
     RENTAL_TEARDOWN_GRACE_MINUTES,
 )
-from services.gpu_reset import renter_gpu_reset_in_progress
+from services.gpu_reset import renter_gpu_resets
 from services.gpu_wedge import (
     COMPUTE_APPS_QUERY_COMMAND,
     GPU_QUERY_COMMAND,
@@ -95,13 +95,20 @@ class GpuUsageCheck:
         self.dry_run = dry_run
 
     async def run(self, ctx: Context) -> CheckResult:
-        # DAH-4658: the renter is resetting the pod's GPUs: neither judge nor cure them meanwhile
-        if await renter_gpu_reset_in_progress(ctx.services.redis, ctx.miner_hotkey, ctx.executor.uuid):
-            return CheckResult(
-                passed=True, event=render_message(Msg.GPU_RESET_IN_PROGRESS, ctx=ctx, check_id=self.check_id)
-            )
         gpu_details = ctx.state.gpu_details
         gpu_processes = ctx.state.gpu_processes
+        # DAH-4658: a renter is resetting their pod's GPUs: neither judge nor cure those meanwhile; the node's
+        # other GPUs (another tenant's) still are. A mark that names no GPU covers the whole node.
+        if resets := await renter_gpu_resets(ctx.services.redis, ctx.miner_hotkey, ctx.executor.uuid):
+            if all(mark.get("gpu_uuids") for mark in resets):
+                resetting = {uuid for mark in resets for uuid in mark["gpu_uuids"]}
+                gpu_details = [detail for detail in gpu_details if detail.get("uuid") not in resetting]
+            else:
+                gpu_details = []
+            if not gpu_details:
+                return CheckResult(
+                    passed=True, event=render_message(Msg.GPU_RESET_IN_PROGRESS, ctx=ctx, check_id=self.check_id)
+                )
 
         ghost_result = await self._detect_and_cure_ghost_gpus(ctx, gpu_details, gpu_processes)
         if ghost_result is not None:

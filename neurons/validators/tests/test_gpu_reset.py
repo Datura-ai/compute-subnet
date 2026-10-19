@@ -19,7 +19,7 @@ from services.gpu_reset import (
 from services.redis_service import RedisService
 
 from services import gpu_reset
-from tests.helpers import FakeRedis, build_services
+from tests.helpers import FakeRedis, build_services, build_state
 from tests.test_machine_spec_scrape_check import make_command_result
 
 CID = "c" * 64
@@ -183,6 +183,15 @@ async def test_every_precheck_refusal_changes_nothing(host, kwargs, code):
 
 
 @pytest.mark.asyncio
+async def test_a_mig_nvlink_peer_refuses_the_reset():
+    # pod index 1 is U[0] (bus 1B); its NVLink peer U[1] is MIG, so widening to it must refuse
+    host = FakeHost(topo=TOPO_PAIR01, mig=(1,))
+    report, start = await _reset(host, indices=[1])
+    assert report.error_code == GpuResetErrorCode.MigEnabled
+    _no_change(host, start)
+
+
+@pytest.mark.asyncio
 async def test_nvlink_peers_inside_the_pod_are_reset_together():
     host = FakeHost(topo=TOPO_PAIR01)
     report, _ = await _reset(host, indices=[1])
@@ -256,7 +265,7 @@ class PendingRedis(FakeRedis):
     get_pending_pods = RedisService.get_pending_pods
     add_pending_pod = RedisService.add_pending_pod
     remove_pending_pod = RedisService.remove_pending_pod
-    gpu_reset_in_progress = RedisService.gpu_reset_in_progress
+    gpu_reset_marks = RedisService.gpu_reset_marks
     renting_in_progress = RedisService.renting_in_progress
 
 
@@ -264,12 +273,15 @@ class PendingRedis(FakeRedis):
 async def test_the_gpu_reset_mark_is_its_own_kind_of_pending_pod():
     redis = PendingRedis()
     await redis.add_pending_pod("hk", "ex", "pod-rent")
-    assert not await redis.gpu_reset_in_progress("hk", "ex")
-    await redis.add_pending_pod("hk", "ex", "pod1", kind="gpu_reset")
-    assert await redis.gpu_reset_in_progress("hk", "ex")
+    assert not await gpu_reset.renter_gpu_reset_in_progress(redis, "hk", "ex")
+    await redis.add_pending_pod("hk", "ex", "pod1", kind="gpu_reset", gpu_uuids=U[:2])
+    assert await gpu_reset.renter_gpu_reset_in_progress(redis, "hk", "ex")
+    assert await gpu_reset.renter_gpu_reset_in_progress(redis, "hk", "ex", "pod1")
+    assert not await gpu_reset.renter_gpu_reset_in_progress(redis, "hk", "ex", "pod-rent")
+    assert (await redis.gpu_reset_marks("hk", "ex"))[0]["gpu_uuids"] == U[:2]
     assert await redis.renting_in_progress("hk", "ex", "pod1")  # a second reset or create is declined
     await redis.remove_pending_pod("hk", "ex", "pod1")
-    assert not await redis.gpu_reset_in_progress("hk", "ex")
+    assert not await gpu_reset.renter_gpu_reset_in_progress(redis, "hk", "ex")
 
 
 @pytest.mark.asyncio
@@ -295,6 +307,26 @@ async def test_the_rented_gpu_checks_skip_a_node_whose_renter_is_resetting(conte
 
 
 @pytest.mark.asyncio
+async def test_the_usage_check_skips_only_the_gpus_of_the_pod_under_reset(context_factory):
+    from services.task.checks import gpu_usage
+    from services.task.messages import GpuUsageMessages
+
+    redis = PendingRedis()
+    busy = [{"uuid": U[0], "gpu_utilization": 0, "memory_utilization": 0}, {"uuid": U[1], "gpu_utilization": 99}]
+    ctx = context_factory(services=build_services(redis=redis), state=build_state(gpu_details=busy))
+    await redis.add_pending_pod(ctx.miner_hotkey, ctx.executor.uuid, "pod1", kind="gpu_reset", gpu_uuids=[U[0]])
+
+    with patch.object(gpu_usage.GpuUsageCheck, "_detect_and_cure_ghost_gpus", AsyncMock(return_value=None)), \
+            patch.object(gpu_usage.GpuUsageCheck, "_judge_process_based_usage", AsyncMock()) as judge:
+        await gpu_usage.GpuUsageCheck().run(ctx)
+        assert judge.await_args.args[1] == busy[1:]  # the other tenant's GPU is still judged
+
+        await redis.add_pending_pod(ctx.miner_hotkey, ctx.executor.uuid, "pod2", kind="gpu_reset", gpu_uuids=[U[1]])
+        skipped = await gpu_usage.GpuUsageCheck().run(ctx)
+    assert skipped.passed and skipped.event.reason_code == GpuUsageMessages.GPU_RESET_IN_PROGRESS.reason
+
+
+@pytest.mark.asyncio
 async def test_a_redis_error_never_skips_the_checks():
     assert await gpu_reset.renter_gpu_reset_in_progress(FakeRedis(failing=True), "hk", "ex") is False
     assert await gpu_reset.renter_gpu_reset_in_progress(AsyncMock(), "hk", "ex") is False  # not a real True
@@ -308,13 +340,14 @@ async def test_no_verified_job_reset_is_sent_for_a_node_whose_renter_is_resettin
     from clients.compute_client import ComputeClient
     from services.redis_service import RESET_VERIFIED_JOB_CHANNEL
 
-    def message(executor_uuid: str) -> dict:
-        data = {"miner_hotkey": "hk", "executor_uuid": executor_uuid, "reason": 0}
+    def message(executor_uuid: str, check_id: str = "executor.validate.rented_state") -> dict:
+        data = {"miner_hotkey": "hk", "executor_uuid": executor_uuid, "reason": 0, "check_id": check_id}
         return {"channel": RESET_VERIFIED_JOB_CHANNEL.encode(), "data": json.dumps(data)}
 
     class PubSub:
         async def listen(self):
             yield message("resetting")
+            yield message("resetting", "gpu.validate.duplicate")  # not something a reset causes: still sent
             yield message("idle")
             raise asyncio.CancelledError  # ends the subscriber's reconnect loop
 
@@ -334,7 +367,7 @@ async def test_no_verified_job_reset_is_sent_for_a_node_whose_renter_is_resettin
     with pytest.raises(asyncio.CancelledError):
         await client.subscribe_mesages_from_redis()
 
-    assert [request.executor_uuid for request in client.message_queue] == ["idle"]
+    assert [request.executor_uuid for request in client.message_queue] == ["resetting", "idle"]
 
 
 @pytest.mark.asyncio

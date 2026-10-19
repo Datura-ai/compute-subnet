@@ -10406,7 +10406,11 @@ class DockerService:
             )
 
         await self.redis_service.add_pending_pod(
-            payload.miner_hotkey, payload.executor_id, payload.pod_id, kind=GPU_RESET_PENDING_KIND
+            payload.miner_hotkey,
+            payload.executor_id,
+            payload.pod_id,
+            kind=GPU_RESET_PENDING_KIND,
+            gpu_uuids=payload.gpu_uuids,
         )
         try:
             async with asyncssh.connect(
