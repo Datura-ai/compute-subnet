@@ -203,7 +203,11 @@ class ExecutorService:
     def delete(self, payload: DeleteExecutorRequest) -> Union[ExecutorDeleted, ExecutorDeleteFailed]:
         executor_uuid = payload.executor.uuid
         try:
-            self.executor_dao.delete_by_address_port(payload.executor.address, payload.executor.port)
+            # by uuid, never by address: a stale portal row at the same address:port deleted the live node there
+            # (ticket-0591); a uuid this miner does not hold has nothing to delete
+            if not self.executor_dao.delete_by_uuid(executor_uuid):
+                logger.warning("delete for executor (id=%s): not on this miner, nothing deleted", str(executor_uuid))
+                return ExecutorDeleted(executor_id=executor_uuid)
 
             logger.info("delete for executor (id=%s)", str(executor_uuid))
             return ExecutorDeleted(
@@ -313,6 +317,8 @@ class ExecutorService:
     async def send_pubkey_to_executor(
         self, executor: Executor, pubkey: str, validator_signature: str,
         nonce: str | None = None,
+        miner_hotkey: str | None = None,
+        validator_miner_signature: str | None = None,
     ) -> ExecutorSSHInfo | None:
         """TODO: Send API request to executor with pubkey
 
@@ -336,6 +342,10 @@ class ExecutorService:
         }
         if nonce is not None:
             payload["nonce"] = nonce
+        if validator_miner_signature is not None:
+            # relayed verbatim: the executor checks the validator signed this key for its own miner
+            payload["miner_hotkey"] = miner_hotkey
+            payload["validator_miner_signature"] = validator_miner_signature
         
         base_log_extra = {
             "executor_id": str(executor.uuid),
@@ -455,6 +465,7 @@ class ExecutorService:
         validator_signature: str,
         executor_id: Optional[str] = None,
         nonce: str | None = None,
+        validator_miner_signature: str | None = None,
     ) -> PubkeyRegistration:
         """Register pubkeys to executors for given validator.
 
@@ -472,7 +483,8 @@ class ExecutorService:
         tasks = [
             asyncio.create_task(
                 self.send_pubkey_to_executor(
-                    executor, pubkey.decode("utf-8"), validator_signature, nonce=nonce
+                    executor, pubkey.decode("utf-8"), validator_signature, nonce=nonce,
+                    miner_hotkey=miner_hotkey, validator_miner_signature=validator_miner_signature,
                 ),
                 name=f"{executor}.send_pubkey_to_executor",
             )

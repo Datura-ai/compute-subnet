@@ -26,6 +26,13 @@ PENDING_PODS_PREFIX = "pending_pods_prefix"
 DUPLICATED_MACHINE_SET = "duplicated_machines"
 RENTAL_SUCCEED_MACHINE_SET = "rental_succeed_machines"
 AVAILABLE_PORT_MAPS_PREFIX = "available_port_maps"
+RENTAL_PROBE_OK_PREFIX = "rental_probe_ok"
+RENTAL_PROBE_FAILED_PREFIX = "rental_probe_failed"
+# set by a filler create whose sshd never came up in the container, cleared by one where it did
+SSHD_BOOTSTRAP_FAILED_PREFIX = "sshd_bootstrap_failed"
+# prod, 24 h: failed filler creates on a broken node came 5 min to 2.7 h apart, so 6 h outlives the
+# longest gap about twice over; a stale stamp ends by itself
+SSHD_BOOTSTRAP_FAILED_TTL_SECONDS = 6 * 3600
 VERIFIED_JOB_COUNT_KEY = "verified_job_counts"
 # The anchor: the GPU UUID set of the executor's first successful verification, kept by every later write.
 GPU_ANCHOR_KEY = "uuids"
@@ -48,6 +55,8 @@ CLEANUP_SEEN_EXECUTORS_SET = "cleanup_seen_executors"
 FORCED_VALIDATION_CYCLE_KEY = "forced_validation_cycle"
 # DAH-3597: one key per executor while a DinD probe miss is on record (expires with the grace TTL).
 DIND_PROBE_MISS_PREFIX = "dind_probe_miss"
+# ticket-0494: one key per executor while its last DinD probe that reached the container found sysbox.
+SYSBOX_VERIFIED_PREFIX = "sysbox_verified"
 # One key per executor: when this validator first found it without its recommended default image
 # (epoch seconds). Opens CachedTemplateVerificationCheck's fresh-node grace.
 CACHED_TEMPLATE_FIRST_UNCACHED_PREFIX = "cached_template_first_uncached"
@@ -329,6 +338,22 @@ class RedisService:
         """Forget the recorded miss: the probe reached its container again."""
         await self.delete(self._dind_probe_miss_key(miner_hotkey, executor_id))
 
+    @staticmethod
+    def _sysbox_verified_key(miner_hotkey: str, executor_id: str) -> str:
+        return f"{SYSBOX_VERIFIED_PREFIX}:{miner_hotkey}:{executor_id}"
+
+    async def record_sysbox_verified(self, miner_hotkey: str, executor_id: str, ttl_seconds: int) -> None:
+        """A DinD probe reached its container and sysbox worked; remembered for ttl_seconds."""
+        async with self.lock:
+            await self.redis.set(self._sysbox_verified_key(miner_hotkey, executor_id), "1", ex=ttl_seconds)
+
+    async def clear_sysbox_verified(self, miner_hotkey: str, executor_id: str) -> None:
+        """A DinD probe reached its container and sysbox did not work: forget the earlier pass."""
+        await self.delete(self._sysbox_verified_key(miner_hotkey, executor_id))
+
+    async def is_sysbox_verified(self, miner_hotkey: str, executor_id: str) -> bool:
+        return await self.get(self._sysbox_verified_key(miner_hotkey, executor_id)) is not None
+
     async def first_uncached_at(self, executor_id: str, now: float, ttl_seconds: int) -> float:
         """When this validator first found the executor without its recommended image (epoch s).
 
@@ -564,7 +589,10 @@ class RedisService:
         success: bool = True,
         spec: str = '',
         uuids: str = '',
+        record_owner: str | None = None,
     ):
+        if self._log_foreign_writer_and_should_refuse(miner_hotkey, executor_id, record_owner):
+            return
         count = prev_info.get('count', 0)
         failed = prev_info.get('failed', 0)
         prev_spec = prev_info.get('spec', '')
@@ -602,7 +630,10 @@ class RedisService:
         reason: ResetVerifiedJobReason = ResetVerifiedJobReason.DEFAULT,
         evidence: dict | None = None,
         anchor_broken: bool = False,
+        record_owner: str | None = None,
     ):
+        if self._log_foreign_writer_and_should_refuse(miner_hotkey, executor_id, record_owner):
+            return
         spec = prev_info.get('spec', '')
         uuids = prev_info.get(GPU_ANCHOR_KEY, '')
 
@@ -632,6 +663,30 @@ class RedisService:
                 "evidence": evidence or None,
             },
         )
+
+    def _log_foreign_writer_and_should_refuse(
+        self, miner_hotkey: str, executor_id: str, record_owner: str | None
+    ) -> bool:
+        """`record_owner` is the backend's owner of the executor (its MinerExecutor row's miner
+        hotkey, RentedExecutorsResponse.executor_owner_hotkeys). A write by any other hotkey is
+        always logged and is refused only under VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED. No
+        owner (an executor the backend has not listed yet, or a backend that does not send the
+        map) lets the write through: a new node must still be verified."""
+        if not record_owner or record_owner == miner_hotkey:
+            return False
+        enforced = settings.VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED
+        logger.warning(
+            _m(
+                "VERIFIED_RECORD_FOREIGN_WRITER",
+                extra={
+                    "executor_uuid": executor_id,
+                    "miner_hotkey": miner_hotkey,
+                    "record_hotkey": record_owner,
+                    "enforced": enforced,
+                },
+            )
+        )
+        return enforced
 
     async def get_verified_job_info(self, executor_id: str):
         data = await self.hget(VERIFIED_JOB_COUNT_KEY, executor_id)

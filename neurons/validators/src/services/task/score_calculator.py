@@ -86,6 +86,14 @@ def calculate_scores(
         job_score = 0.0
         warning_messages.append("Provider-side workload consumes the machine's CPU or disk")
 
+    # Rental-sensor blind-streak gate (DAH-4271): same mechanics as the CPU-truth gate above,
+    # the check is non-fatal, so only this line zeroes the score, and shadow leaves the flag True.
+    # It reads only whether the sensor saw the rental at all, never what it found.
+    if not ctx.inspector_blind_streak_passed:
+        actual_score = 0.0
+        job_score = 0.0
+        warning_messages.append("Rental sensor saw nothing of the rental too many cycles in a row")
+
     # EMA verifyx download speed check — threshold enforced upstream in VerifyXCheck
     ema_verifyx_download = ((ctx.state.specs or {}).get("network") or {}).get(
         "ema_verifyx_download_speed"
