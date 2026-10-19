@@ -82,9 +82,9 @@ def ssh_pubkey_signing_blob(public_key: str, nonce: str | None = None) -> str:
 UPLOAD_NONCE_MAGIC = b"LTS1"
 
 
-def fresh_upload_nonce(now: float | None = None) -> str:
+def fresh_upload_nonce() -> str:
     """32 bytes, hex: the magic, the minting time (8 bytes, big-endian unix seconds), 20 random bytes."""
-    issued_at = int(time.time() if now is None else now)
+    issued_at = int(time.time())
     return (UPLOAD_NONCE_MAGIC + issued_at.to_bytes(8, "big") + secrets.token_bytes(20)).hex()
 
 

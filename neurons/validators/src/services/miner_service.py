@@ -393,7 +393,7 @@ class MinerService:
     def _normalize_public_key(public_key: bytes | str) -> str:
         return public_key.decode("utf-8") if isinstance(public_key, bytes) else public_key
 
-    def _upload_nonce(self) -> str | None:
+    def _dated_upload_nonce_if_enabled(self) -> str | None:
         """A dated nonce for an SSH-key upload, so a captured signature goes stale (I-78).
 
         Off until miners/executors older than the nonce field (Jul 2026) are gone: they drop or
@@ -526,7 +526,7 @@ class MinerService:
                 attestation_nonce = await self.attestation_service.maybe_issue_nonce(
                     payload.miner_hotkey
                 )
-                nonce_hex = attestation_nonce.value_hex if attestation_nonce else self._upload_nonce()
+                nonce_hex = attestation_nonce.value_hex if attestation_nonce else self._dated_upload_nonce_if_enabled()
 
                 await miner_client.send_model(
                     SSHPubKeySubmitRequest(
@@ -1488,7 +1488,7 @@ class MinerService:
                 # generate ssh key and send it to miner
                 private_key, public_key = self.ssh_service.generate_ssh_key(my_key.ss58_address)
 
-                upload_nonce = self._upload_nonce()
+                upload_nonce = self._dated_upload_nonce_if_enabled()
                 await miner_client.send_model(
                     SSHPubKeySubmitRequest(
                         public_key=public_key,
@@ -1951,7 +1951,7 @@ class MinerService:
 
             async with miner_client:
 
-                upload_nonce = self._upload_nonce()
+                upload_nonce = self._dated_upload_nonce_if_enabled()
                 await miner_client.send_model(
                     SSHPubKeySubmitRequest(
                         public_key=payload.public_key,
@@ -2494,7 +2494,7 @@ class MinerService:
             attestation_nonce = await self.attestation_service.maybe_issue_nonce(
                 payload.miner_hotkey
             )
-            nonce_hex = attestation_nonce.value_hex if attestation_nonce else self._upload_nonce()
+            nonce_hex = attestation_nonce.value_hex if attestation_nonce else self._dated_upload_nonce_if_enabled()
 
             # Prepare request
             ssh_request = SSHPubKeySubmitRequest(
@@ -2746,7 +2746,7 @@ class MinerService:
             # Generate SSH key and send it to miner
             private_key, public_key = self.ssh_service.generate_ssh_key(my_key.ss58_address)
 
-            upload_nonce = self._upload_nonce()
+            upload_nonce = self._dated_upload_nonce_if_enabled()
             ssh_request = SSHPubKeySubmitRequest(
                 public_key=public_key,
                 validator_signature=self._sign_validator_pubkey(my_key, public_key, nonce=upload_nonce),
@@ -3123,7 +3123,7 @@ class MinerService:
             headers = self._generate_auth_headers(my_key, payload.miner_hotkey)
             headers["Content-Type"] = "application/json"
             
-            upload_nonce = self._upload_nonce()
+            upload_nonce = self._dated_upload_nonce_if_enabled()
             ssh_request = SSHPubKeySubmitRequest(
                 public_key=payload.public_key,
                 validator_signature=self._sign_validator_pubkey(my_key, payload.public_key, nonce=upload_nonce),

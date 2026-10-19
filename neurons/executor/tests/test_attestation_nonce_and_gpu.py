@@ -14,10 +14,12 @@ Covers:
 
 import asyncio
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import bittensor
 import pytest
+from datura.requests import validator_requests
 from datura.requests.validator_requests import fresh_upload_nonce, ssh_pubkey_signing_blob
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -161,9 +163,13 @@ def test_require_nonce_enforcement_upload_only(
 
 
 @pytest.mark.parametrize("age, status", [(0, 200), (590, 200), (-590, 200), (610, 401), (-610, 401)])
-def test_dated_nonce_freshness(client, miner_keypair, validator_keypair, age, status):
+def test_dated_nonce_freshness(client, miner_keypair, validator_keypair, age, status, monkeypatch):
     # I-78: a captured upload signature over a dated nonce is refused once outside the window
-    payload = _build_payload(miner_keypair, validator_keypair, nonce=fresh_upload_nonce(time.time() - age))
+    minted_at = time.time() - age
+    # patch only the minting module's `time`: the executor's freshness check keeps the real clock
+    with monkeypatch.context() as m:
+        m.setattr(validator_requests, "time", SimpleNamespace(time=lambda: minted_at))
+        payload = _build_payload(miner_keypair, validator_keypair, nonce=fresh_upload_nonce())
     assert client.post("/upload_ssh_key", json=payload).status_code == status
 
 
