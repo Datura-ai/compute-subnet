@@ -69,3 +69,15 @@ async def test_strip_script_keeps_only_other_lines(lines):
         assert run.returncode == 0, run.stderr
         assert open(path).read().split() == " ".join(l for l in lines if FOREIGN_POD_KEY_BODIES[0] not in l).split()
         assert os.stat(path).st_mode & 0o777 == 0o600
+
+
+@pytest.mark.asyncio
+async def test_strip_script_leaves_the_file_alone_when_grep_errors():
+    # grep exit 2 (here: unreadable file; in a pod: a full disk) must not copy the empty temp file over the keys
+    ssh = FakeSSH([RENTER, FOREIGN])
+    await _check_pod_running_and_read_authorized_keys(ssh, "pod_x")
+    script = next(c for c in ssh.commands if "grep -vF" in c).split(" sh -c ", 1)[1]
+    with tempfile.TemporaryDirectory() as root:
+        path = os.path.join(root, "authorized_keys")
+        run = subprocess.run(["sh", "-c", f"sh -c {script}".replace("/root/.ssh/authorized_keys", path)], capture_output=True, text=True)
+        assert run.returncode != 0 and not os.path.exists(path)
