@@ -39,6 +39,7 @@ from .checks import (
     ExecutorImageCheck,
     FinalizeCheck,
     GpuCountCheck,
+    GpuAttestationIdentityCheck,
     GpuFaultProbeCheck,
     GpuMemoryHealthCheck,
     GpuFingerprintCheck,
@@ -336,6 +337,8 @@ class PipelineFactory:
                 # DAH-3457: the UUID set is the node's identity and model:count is derived from it, so the
                 # fingerprint check runs first; a missing card is then GPU_MISSING, not SPEC_CHANGED.
                 GpuFingerprintCheck(),
+                # DAH-4551: the reported UUIDs checked against each card's NVIDIA-signed identity (shadow by default).
+                GpuAttestationIdentityCheck(),
                 SpecChangeCheck(),
                 BannedProviderCheck(),
                 BannedGpuCheck(),
@@ -470,6 +473,8 @@ class PipelineFactory:
                 GpuPowerLimitCheck(),
                 NvmlDigestCheck(),
                 GpuFingerprintCheck(),
+                # DAH-4551: the reported UUIDs checked against each card's NVIDIA-signed identity (shadow by default).
+                GpuAttestationIdentityCheck(),
                 SpecChangeCheck(),
                 BannedProviderCheck(),
                 BannedGpuCheck(),
@@ -554,6 +559,8 @@ class PipelineFactory:
                 # DAH-3457: the UUID set is the node's identity and model:count is derived from it, so the
                 # fingerprint check runs first; a missing card is then GPU_MISSING, not SPEC_CHANGED.
                 GpuFingerprintCheck(),
+                # DAH-4551: the reported UUIDs checked against each card's NVIDIA-signed identity (shadow by default).
+                GpuAttestationIdentityCheck(),
                 SpecChangeCheck(),
                 BannedProviderCheck(),
                 BannedGpuCheck(),
