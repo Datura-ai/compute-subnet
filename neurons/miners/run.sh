@@ -39,6 +39,8 @@ fi
 
 if [ "$MODE" = "miner" ]; then
     # db migrate
+    # wait out a Postgres switchover before migrating
+    pdm run python -c "import sys; sys.path.insert(0, 'src'); from core.utils import wait_for_services_sync; wait_for_services_sync()"
     pdm run alembic upgrade head
     # migrate validator hotkey
     pdm run src/cli.py migrate-validator-hotkey

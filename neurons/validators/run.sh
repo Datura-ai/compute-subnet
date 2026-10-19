@@ -38,6 +38,8 @@ else
 fi
 
 if [ "$MODE" = "validator" ]; then
+    # wait out a Postgres switchover before migrating
+    pdm run python -c "import sys; sys.path.insert(0, 'src'); from core.utils import wait_for_services_sync; wait_for_services_sync()"
     pdm run alembic upgrade head
     pdm run src/validator.py
 elif [ "$MODE" = "connector" ]; then

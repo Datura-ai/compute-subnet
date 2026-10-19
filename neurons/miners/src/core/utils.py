@@ -13,26 +13,34 @@ context = contextvars.ContextVar("context", default="ValidatorService")
 context.set("ValidatorService")
 
 
-def wait_for_services_sync(timeout=30):
+def wait_for_services_sync(timeout=120):
     """Wait until PostgreSQL connections are working."""
+    import time
+
     from sqlalchemy import create_engine, text
+    from sqlalchemy.exc import OperationalError
 
     from core.config import settings
 
     logger.info("Waiting for services to be available...")
+    start_time = time.time()
 
     while True:
+        engine = create_engine(settings.SQLALCHEMY_DATABASE_URI)
         try:
-            # Check PostgreSQL connection using SQLAlchemy
-            engine = create_engine(settings.SQLALCHEMY_DATABASE_URI)
             with engine.connect() as connection:
                 connection.execute(text("SELECT 1"))
             logger.info("Connected to PostgreSQL.")
-
             break
-        except Exception as e:
-            logger.error("Failed to connect to PostgreSQL.")
-            raise e
+        # A Postgres switchover/restart refuses connections for ~40 s: wait it out.
+        except OperationalError:
+            if time.time() - start_time > timeout:
+                logger.error("Timeout while waiting for PostgreSQL.")
+                raise
+            logger.warning("PostgreSQL not available yet, retrying...")
+            time.sleep(1)
+        finally:
+            engine.dispose()
 
 
 def get_extra_info(extra: dict) -> dict:
