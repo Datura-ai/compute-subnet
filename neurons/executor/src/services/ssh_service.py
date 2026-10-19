@@ -54,14 +54,14 @@ def _split_marker(line: bytes) -> tuple[bytes, bytes | None]:
     return parts[0], parts[1][len(UPLOADED_KEY_MARKER):]
 
 
-def _source_option() -> bytes:
+def _validator_source_pin_option() -> bytes:
     """The `from="..." ` option every uploaded key gets (I-78), or b"" when there is no pin."""
     if not VALIDATOR_SSH_SOURCES or not settings.EXECUTOR_SSH_SOURCE_PIN:
         return b""
     return b'from="' + VALIDATOR_SSH_SOURCES.encode() + b'" '
 
 
-def _uploaded_key(line: bytes) -> bytes:
+def _key_without_marker_and_source_pin(line: bytes) -> bytes:
     """The key of a line without our marker and without a `from="..."` option a release put in front."""
     key = _split_marker(line)[0]
     if key.startswith(b'from="'):
@@ -210,7 +210,7 @@ class SSHService:
         if "\n" in pub_key or "\r" in pub_key:
             # a second line would be a second, unmarked key that no TTL reaches
             raise ValueError("an authorized_keys entry is one line")
-        line = _source_option() + pub_key.encode() + b" " + UPLOADED_KEY_MARKER + str(int(time.time())).encode() + b"\n"
+        line = _validator_source_pin_option() + pub_key.encode() + b" " + UPLOADED_KEY_MARKER + str(int(time.time())).encode() + b"\n"
         with _authorized_keys_lock:
             path = authorized_keys_path()
             # a last line without its newline would merge with this one, and the merged line —
@@ -226,7 +226,7 @@ class SSHService:
         # release does not — both must go when the validator asks
         with _authorized_keys_lock:
             _rewrite_authorized_keys(
-                authorized_keys_path(), lambda line: _uploaded_key(line) != wanted
+                authorized_keys_path(), lambda line: _key_without_marker_and_source_pin(line) != wanted
             )
 
     def get_current_os_user(self) -> str:
