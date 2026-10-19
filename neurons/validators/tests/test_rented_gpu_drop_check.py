@@ -356,8 +356,8 @@ async def test_a_scrape_that_lists_no_gpu_on_an_idle_node_posts_nothing(context_
 
     assert result.passed is False
     services.backend.report_rented_gpu_drop.assert_not_awaited()
-    # the scrape check's hang tracker may clear its own key; the drop check stores nothing
-    assert services.redis.store == {}
+    # only the GPU loss hold (DAH-4457) is written; the scrape hang tracker may only clear its own key
+    assert [key.split(":")[0] for key in services.redis.store] == ["gpu_loss_hold"]
 
 
 @pytest.mark.asyncio

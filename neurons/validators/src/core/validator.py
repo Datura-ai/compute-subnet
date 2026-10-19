@@ -8,7 +8,7 @@ from clients.backend_client import BackendClient, BackendRejected
 from clients.subtensor_client import ProviderPortalDataUnavailable, SubtensorClient
 from core.settlement import cycle_node_shares, share_moved, tempo_index
 from incentive.burn_service import verified_burner_hotkey
-from incentive.eligibility import is_missing_discord_after_cutoff
+from incentive.eligibility import earns_spot_rental_incentive, is_missing_discord_after_cutoff
 from incentive.factory import IncentiveFactory
 from incentive.rental_price import precompute_all_estimates
 from payload_models.payloads import MinerJobRequestPayload
@@ -32,6 +32,7 @@ from services.executor_connectivity.orchestrator import ConnectivityOrchestrator
 from services.executor_connectivity.port_probe import PortProbe
 from services.executor_connectivity.port_selector import PortSelector
 from services.executor_connectivity.port_tester import PortTester
+from services.executor_connectivity.external_probe import external_port_probe
 from services.executor_connectivity.port_verifiers import BatchVerifier, FallbackVerifier, SemiBatchVerifier
 from services.executor_connectivity_service import ExecutorConnectivityService
 from services.file_encrypt_service import FileEncryptService
@@ -110,7 +111,7 @@ def settle_cycle_results(
                 job_result.gpu_model
                 and job_result.gpu_count
                 and (job_result.score > 0 or job_result.job_score > 0)
-                and not job_result.is_spot
+                and (not job_result.is_spot or earns_spot_rental_incentive(job_result))
                 and not is_missing_discord_after_cutoff(job_result)
                 and not (
                     job_result.is_new_rentals_paused and not job_result.is_rented
@@ -175,7 +176,7 @@ class Validator:
             orchestrator=ConnectivityOrchestrator(
                 PortSelector(),
                 PortProbe(
-                    BatchVerifier(port_tester, runner),
+                    BatchVerifier(port_tester, runner, external_port_probe()),
                     SemiBatchVerifier(port_tester, runner),
                     FallbackVerifier(port_tester, runner),
                 ),
@@ -691,7 +692,6 @@ class Validator:
 
                     # PHASE 2: Calculate final weights with burning logic per cycle
                     miners = await self.subtensor_client.get_miners()
-                    last_mechanism_step_block = self.subtensor_client.get_last_mechansim_step_block()
 
                     # Current subnet epoch for the referral feed's staleness guard. This MUST use
                     # the SAME numbering as the backend feed's epoch_index — see
@@ -714,7 +714,6 @@ class Validator:
 
                     cycle_scores = await incentive.calculate_final_weights(
                         miners=miners,
-                        last_mechanism_step_block=last_mechanism_step_block,
                         current_epoch=current_epoch,
                     )
 

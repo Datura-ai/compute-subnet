@@ -39,13 +39,16 @@ class PodRecoverer(Protocol):
     # DAH-3436: the rental probe rents the node through the same two entry points a renter's pod
     # takes (miner_service hands the backend's requests to these), so there is one start path and
     # one teardown path to keep correct. `private_key` is the Fernet-encrypted key as the backend
-    # sends it; both decrypt it themselves.
+    # sends it; both decrypt it themselves. `beside_fillers`: the probe's create on a node running
+    # a filler, which leaves the filler and its GPU power cap alone.
     async def create_container(
         self,
         payload: Any,
         executor_info: ExecutorSSHInfo,
         keypair: Any,
         private_key: str,
+        *,
+        beside_fillers: bool = False,
     ) -> Any: ...
 
     async def delete_container(
@@ -104,7 +107,6 @@ class ContextConfig:
     # Driver versions already confirmed as spoofs (DAH-2451). The nvml_digest check
     # rejects these without re-reporting them to the backend for verification.
     nvml_invalid_drivers: Optional[list[str]] = None
-    verifyx_enabled: bool = False
     inspector_enabled: bool = False
     port_private_key: Optional[str] = None
     port_public_key: Optional[str] = None
@@ -117,6 +119,9 @@ class ContextConfig:
     # matmul and VerifyX right-size their probes and the bandwidth gate is deferred to the first
     # scored cycle; every other check is the same.
     first_pass: bool = False
+    # The caller's raw first_pass (the express lane), whatever FIRST_PASS_FAST_PATH_ENABLED says.
+    # The rental probe skips its shadow run on it (DAH-4258).
+    express_first_pass: bool = False
 
 
 @dataclass(frozen=True)
