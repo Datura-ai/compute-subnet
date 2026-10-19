@@ -56,13 +56,13 @@ async def test_a_record_from_before_the_release_moves_only_to_the_listed_owner(s
     legacy = {"count": 7, "failed": 0, "spec": "B300:8", "uuids": "GPU-a", GPU_ANCHOR_BROKEN_KEY: True}
     await service.redis.hset(VERIFIED_JOB_COUNT_KEY, B8717923, json.dumps(legacy))
 
-    assert await service.get_verified_job_info(OTHER_HOTKEY, B8717923, listed_owner=RUNNING_HOTKEY) == {}
+    assert await service.get_verified_job_info(OTHER_HOTKEY, B8717923, listed_owner_hotkey=RUNNING_HOTKEY) == {}
     assert await service.get_verified_job_info(RUNNING_HOTKEY, B8717923) == {}
 
-    prev = await service.get_verified_job_info(RUNNING_HOTKEY, B8717923, listed_owner=RUNNING_HOTKEY)
+    prev = await service.get_verified_job_info(RUNNING_HOTKEY, B8717923, listed_owner_hotkey=RUNNING_HOTKEY)
     assert prev == legacy
     assert await service.redis.hget(VERIFIED_JOB_COUNT_KEY, B8717923) is None
-    assert await service.get_verified_job_info(OTHER_HOTKEY, B8717923, listed_owner=OTHER_HOTKEY) == {}
+    assert await service.get_verified_job_info(OTHER_HOTKEY, B8717923, listed_owner_hotkey=OTHER_HOTKEY) == {}
     await service.set_verified_job_info(RUNNING_HOTKEY, B8717923, prev_info=prev, success=True)
 
     written = json.loads(await service.redis.hget(VERIFIED_JOB_COUNT_KEY, f"{RUNNING_HOTKEY}:{B8717923}"))

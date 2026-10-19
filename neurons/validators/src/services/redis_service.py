@@ -660,10 +660,10 @@ class RedisService:
             },
         )
 
-    async def get_verified_job_info(self, miner_hotkey: str, executor_id: str, listed_owner: str | None = None):
+    async def get_verified_job_info(self, miner_hotkey: str, executor_id: str, listed_owner_hotkey: str | None = None):
         field = _verified_job_field(miner_hotkey, executor_id)
         data = await self.hget(VERIFIED_JOB_COUNT_KEY, field)
-        if not data and listed_owner == miner_hotkey:
+        if not data and listed_owner_hotkey == miner_hotkey:
             # shortcut: a record from before the per-hotkey key moves to the hotkey the backend lists, and only
             # to it, so no other hotkey with this id inherits its GPU anchor; drop once no bare-id field is left.
             data = await self.hget(VERIFIED_JOB_COUNT_KEY, executor_id)
