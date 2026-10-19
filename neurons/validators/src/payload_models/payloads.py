@@ -863,6 +863,7 @@ class PodGpuClocksResult(ContainerBaseResponse):
     ok: bool
     error_code: GpuResetErrorCode | None = None
     gpus: list[GpuClockOutcome] = []
+    detail: str | None = None
 
 
 class GetEstimateRequest(BaseModel):

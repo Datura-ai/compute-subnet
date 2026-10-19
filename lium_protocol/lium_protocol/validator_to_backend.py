@@ -569,10 +569,11 @@ class GpuClockOutcome(pydantic.BaseModel):
 class PodGpuClocksResult(PodContainerResponse):
     """1.13.0: the answer to `backend_to_validator.LockPodGpuClocksRequest`, same `request_id`.
     `gpus` is one outcome per GPU touched, with the clamped range applied; empty when a precheck refused
-    before anything changed. `error_code` reuses `GpuResetErrorCode`."""
+    before anything changed, when `detail` says why. `error_code` reuses `GpuResetErrorCode`."""
 
     message_type: ValidatorMessageType = ValidatorMessageType.PodGpuClocksResult
     request_id: str
     ok: bool
     error_code: GpuResetErrorCode | None = None
     gpus: list[GpuClockOutcome] = []
+    detail: str | None = None

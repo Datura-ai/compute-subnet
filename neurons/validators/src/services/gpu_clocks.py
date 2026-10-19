@@ -90,7 +90,7 @@ def _parse_mhz(text: str) -> list[int]:
     return values
 
 
-async def _targets(
+async def _pod_gpus_to_lock(
     runner: SSHCommandRunner,
     *,
     container_name: str,
@@ -117,7 +117,8 @@ async def _targets(
         raise GpuResetRefused(GpuResetErrorCode.ClockLockNotSupported, "nvidia-smi listed no GPU on the host")
     host_by_uuid = {gpu.uuid: gpu for gpu in host_gpus}
     # the pod's numbering, shared with gpu_reset; only the backend's GPUs of the pod are ever touched
-    _, targets, index_by_uuid = pod_gpus(host_config.get("DeviceRequests"), host_gpus, pod_gpu_uuids, gpu_indices)
+    gpus = pod_gpus(host_config.get("DeviceRequests"), host_gpus, pod_gpu_uuids, gpu_indices)
+    targets, index_by_uuid = gpus.requested, gpus.index_by_uuid
     if not set(targets) <= set(pod_gpu_uuids):
         raise GpuResetRefused(GpuResetErrorCode.GpuNotInContainer, "a GPU to lock is not one of the pod's GPUs")
     if any(host_by_uuid[uuid].mig_enabled for uuid in targets):
@@ -168,7 +169,7 @@ async def lock_pod_gpu_clocks(
     in_tee: bool = False,
 ) -> GpuClocksReport:
     try:
-        targets, index_by_uuid = await _targets(
+        targets, index_by_uuid = await _pod_gpus_to_lock(
             runner, container_name=container_name, pod_gpu_uuids=pod_gpu_uuids, gpu_indices=gpu_indices, in_tee=in_tee
         )
     except GpuResetRefused as refused:
@@ -244,16 +245,13 @@ async def reset_pod_clock_locks(runner: SSHCommandRunner, redis, pod_id: str) ->
 
 
 async def reset_leftover_clock_locks(runner: SSHCommandRunner, redis, gpu_uuids: list[str] | None) -> int:
-    """Safety net before a create: `-rgc` any of these GPUs (None/empty = every host GPU) that still has
-    a lock record, so no renter inherits another's locked clocks; the reset count. The caller makes it
-    best-effort."""
+    """Safety net before a create: `-rgc` every GPU of the new pod (None/empty = every host GPU), with or
+    without a lock record, so a lost record never hands a renter another's locked clocks (as
+    raise_low_power_limits_to_default does for power); the reset count. The caller makes it best-effort."""
     if not gpu_uuids:
         host = await _run(runner, HOST_GPUS_COMMAND)
         gpu_uuids = [gpu.uuid for gpu in parse_host_gpus(host.stdout or "")]
-    locked = [uuid for uuid in gpu_uuids if await redis.get(_lock_key(uuid))]
-    if not locked:
-        return 0
-    failures = await _reset_gpus(runner, redis, locked)
+    failures = await _reset_gpus(runner, redis, gpu_uuids)
     return sum(1 for failure in failures.values() if failure is None)
 
 

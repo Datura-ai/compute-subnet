@@ -671,7 +671,8 @@
             "applied_max_mhz": 1755,
             "detail": "graphics clock now 1755 MHz"
           }
-        ]
+        ],
+        "detail": null
       }
     }
   ]

@@ -166,8 +166,9 @@ async def test_the_pods_delete_resets_its_locks_and_a_failed_reset_is_caught_by_
     assert "gpu_clock_lock_pod:pod1" not in redis.store and f"gpu_clock_lock:{U[0]}" in redis.store
 
     host.rgc_exit, host.commands = 0, []
-    assert await reset_leftover_clock_locks(host, redis, [U[0], U[1], U[2]]) == 2  # U[2] never locked: untouched
-    assert host.commands == [f"nvidia-smi -i {U[0]} -rgc", f"nvidia-smi -i {U[1]} -rgc"]
+    # U[2] has no record (a lost one looks the same): reset too
+    assert await reset_leftover_clock_locks(host, redis, [U[0], U[1], U[2]]) == 3
+    assert host.commands == [f"nvidia-smi -i {U[0]} -rgc", f"nvidia-smi -i {U[1]} -rgc", f"nvidia-smi -i {U[2]} -rgc"]
     assert not any(k.startswith("gpu_clock_lock:") for k in redis.store)
 
 
@@ -177,8 +178,9 @@ async def test_teardown_without_a_lock_costs_no_ssh_and_a_whole_node_create_chec
     redis = FakeRedis()
     assert await reset_pod_clock_locks(host, redis, "pod1") == 0 and host.commands == []
     redis.store[f"gpu_clock_lock:{U[3]}"] = json.dumps({"pod_id": "old"})
-    assert await reset_leftover_clock_locks(host, redis, []) == 1
-    assert host.commands[-1] == f"nvidia-smi -i {U[3]} -rgc"
+    assert await reset_leftover_clock_locks(host, redis, []) == 4
+    assert host.commands[1:] == [f"nvidia-smi -i {u} -rgc" for u in U]
+    assert f"gpu_clock_lock:{U[3]}" not in redis.store
 
 
 def test_the_clock_command_always_names_one_pod_gpu():

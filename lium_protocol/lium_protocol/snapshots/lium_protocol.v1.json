@@ -4256,8 +4256,20 @@
       "type": "object"
     },
     "PodGpuClocksResult": {
-      "description": "1.13.0: the answer to `backend_to_validator.LockPodGpuClocksRequest`, same `request_id`.\n`gpus` is one outcome per GPU touched, with the clamped range applied; empty when a precheck refused\nbefore anything changed. `error_code` reuses `GpuResetErrorCode`.",
+      "description": "1.13.0: the answer to `backend_to_validator.LockPodGpuClocksRequest`, same `request_id`.\n`gpus` is one outcome per GPU touched, with the clamped range applied; empty when a precheck refused\nbefore anything changed, when `detail` says why. `error_code` reuses `GpuResetErrorCode`.",
       "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
         "error_code": {
           "anyOf": [
             {

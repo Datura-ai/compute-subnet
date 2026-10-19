@@ -17,7 +17,7 @@ from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Any, NamedTuple
+from typing import Annotated, Any, NamedTuple, TypeVar
 from uuid import UUID, uuid4
 
 import asyncssh
@@ -179,6 +179,8 @@ from services.ssh_service import SSHService
 from services.volume_keys import VolumeKeyDeriver
 
 logger = logging.getLogger(__name__)
+# the report a pod GPU operation (reset or clock lock) returns; each caller gets its own type back
+_PodGpuReport = TypeVar("_PodGpuReport", GpuResetReport, GpuClocksReport)
 
 REPOSITORIES = [
     "daturaai/compute-subnet-executor:latest",
@@ -10429,10 +10431,10 @@ class DockerService:
         *,
         label: str,
         kind: str,
-        operate: Callable[[SSHCommandRunner, str, Any, dict], Awaitable[Any]],
-        failed: Callable[[str], Any],
+        operate: Callable[[SSHCommandRunner, str, Any, dict], Awaitable[_PodGpuReport]],
+        failed: Callable[[str], _PodGpuReport],
         gpu_uuids: list[str] | None = None,
-    ) -> Any:
+    ) -> _PodGpuReport:
         """The trust, SSH and pending-mark steps a renter's GPU reset and clock lock share. `operate(runner,
         private_key, known_hosts_policy, default_extra)` does the work while the pending-pod mark of `kind` is held;
         `failed(detail)` is the report for an executor that is not trusted or not reached."""
@@ -10600,6 +10602,7 @@ class DockerService:
             ok=report.ok,
             error_code=report.error_code,
             gpus=report.gpus,
+            detail=report.detail,
         )
 
     async def remove_ssh_keys(
