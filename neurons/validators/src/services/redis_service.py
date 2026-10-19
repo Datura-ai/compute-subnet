@@ -33,6 +33,10 @@ SSHD_BOOTSTRAP_FAILED_PREFIX = "sshd_bootstrap_failed"
 # prod, 24 h: failed filler creates on a broken node came 5 min to 2.7 h apart, so 6 h outlives the
 # longest gap about twice over; a stale stamp ends by itself
 SSHD_BOOTSTRAP_FAILED_TTL_SECONDS = 6 * 3600
+# sshd_bootstrap.sh's verify_sshd line: sshd is installed but not running or listening
+SSHD_VERIFY_FAILED_MARKER = "sshd verification failed"
+# where the sshd bootstrap script is copied in a filler container
+IN_CONTAINER_SSH_BOOTSTRAP_PATH = "/tmp/lium-ssh-bootstrap.sh"
 VERIFIED_JOB_COUNT_KEY = "verified_job_counts"
 # The anchor: the GPU UUID set of the executor's first successful verification, kept by every later write.
 GPU_ANCHOR_KEY = "uuids"

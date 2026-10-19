@@ -107,10 +107,12 @@ from services.gpu_wedge import cure_wedged_gpus, query_wedged_gpu_uuids
 from services.nvidia_devices import build_gpu_docker_config_for_executor
 from services.cluster_fabric import WIREGUARD_LISTEN_PORT, cluster_pod_networking
 from services.redis_service import (
+    IN_CONTAINER_SSH_BOOTSTRAP_PATH,
     RENTAL_PROBE_FAILED_PREFIX,
     RENTAL_PROBE_OK_PREFIX,
     SSHD_BOOTSTRAP_FAILED_PREFIX,
     SSHD_BOOTSTRAP_FAILED_TTL_SECONDS,
+    SSHD_VERIFY_FAILED_MARKER,
     STREAMING_LOG_CHANNEL,
     RedisService,
 )
@@ -177,7 +179,6 @@ LOG_STREAM_INTERVAL = 0.5  # 500ms — keeps build-log p95 emit→publish under 
 # 2000ms budget (DAH-2211). Was 5s; that was fine for slow `docker pull` lines
 # but build phases emit dense progress (one line per layer) and a 5s batch
 # would violate the SSE latency requirement.
-IN_CONTAINER_SSH_BOOTSTRAP_PATH = "/tmp/lium-ssh-bootstrap.sh"
 
 # Each batch goes to the backend as one LogStreamRequest frame, and its validator socket takes at most 1 MiB per
 # frame (lium-platform F-29). A batch is budgeted by the JSON bytes of its entries, fields included, which leaves
@@ -960,10 +961,6 @@ def volume_step_detail(exc: BaseException) -> str | None:
 _HOST_FAULT_CREATE_STEPS = frozenset({"volume_creation", "gpu_flags"})
 # rental_probe.STEP_CONTAINER_START: the stamp reads as that probe step failing at the create step
 _RENTAL_PROBE_CONTAINER_START_STEP = "container_start"
-
-
-# sshd_bootstrap.sh's verify_sshd line: sshd is installed but not running or listening
-_SSHD_VERIFY_FAILED_MARKER = "sshd verification failed"
 
 
 def is_host_fault_create_failure(current_step: str | None) -> bool:
@@ -5104,7 +5101,7 @@ class DockerService:
                 )
             )
             # only sshd installed but not serving is the node's fault; a failed apt-get exits before that line
-            if _SSHD_VERIFY_FAILED_MARKER in f"{run_result.stdout}{run_result.stderr}":
+            if SSHD_VERIFY_FAILED_MARKER in f"{run_result.stdout}{run_result.stderr}":
                 await self._record_sshd_verdict(sshd_verdict_executor_uuid, failed=True, log_extra=log_extra)
             return False
 

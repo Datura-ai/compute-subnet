@@ -3,13 +3,18 @@ from __future__ import annotations
 import base64
 import logging
 import shlex
+import time
 from pathlib import Path
 
-from core.docker_utils import DockerCommand
-from services.redis_service import SSHD_BOOTSTRAP_FAILED_PREFIX, SSHD_BOOTSTRAP_FAILED_TTL_SECONDS
-
 from core.config import settings
+from core.docker_utils import DockerCommand
 from core.utils import _m, get_extra_info
+from services.redis_service import (
+    IN_CONTAINER_SSH_BOOTSTRAP_PATH,
+    SSHD_BOOTSTRAP_FAILED_PREFIX,
+    SSHD_BOOTSTRAP_FAILED_TTL_SECONDS,
+    SSHD_VERIFY_FAILED_MARKER,
+)
 
 from ...const import DEFAULT_JOB_OWNER_LIUM, FILLER_CONTAINER_PREFIX
 from ..messages import SshdBootstrapMessages as Msg
@@ -20,13 +25,15 @@ logger = logging.getLogger(__name__)
 
 # a filler younger than this may still be bootstrapping sshd, so it is not judged
 RUNNING_FILLER_GRACE_SECONDS = 15 * 60
-# the line sshd_bootstrap.sh logs only when sshd is installed but does not serve (an apt failure exits before it)
-SSHD_VERIFY_FAILED_MARKER = "sshd verification failed"
 _BOOTSTRAP_SCRIPT = Path(__file__).resolve().parents[2] / "assets" / "sshd_bootstrap.sh"
-_IN_CONTAINER_PATH = "/tmp/lium-ssh-bootstrap.sh"
+_PROBE_TIMEOUT_SECONDS = 300
+# a probe gets no less than this; with less task time left it is skipped
+_MIN_PROBE_SECONDS = 60
+# kept free before JOB_TIME_OUT, as in rental_probe
+_TASK_TIMEOUT_MARGIN_SECONDS = 120
 
 
-def running_filler_probe(name: str) -> str:
+def running_filler_sshd_bootstrap_command(name: str) -> str:
     """One host command: re-run the create's sshd bootstrap in a filler that has run past the grace.
 
     A restarted filler loses the sshd the create started with `docker exec`; the re-run starts it again
@@ -40,7 +47,7 @@ def running_filler_probe(name: str) -> str:
         f"[ $(($(date +%s) - t)) -ge {RUNNING_FILLER_GRACE_SECONDS} ] || exit 3; "
         f"printf %s {script} | base64 -d | "
         + DockerCommand.exec_command(
-            name, f"cat > {_IN_CONTAINER_PATH} && sh {_IN_CONTAINER_PATH} --grace 0"
+            name, f"cat > {IN_CONTAINER_SSH_BOOTSTRAP_PATH} && sh {IN_CONTAINER_SSH_BOOTSTRAP_PATH} --grace 0"
         )
     )
 
@@ -60,7 +67,7 @@ class SshdBootstrapCheck:
 
     An unstamped node whose Lium filler predates any new create is probed: the sshd bootstrap is re-run in
     a filler running past RUNNING_FILLER_GRACE_SECONDS, and only its "sshd verification failed" stamps the
-    node too, as on create (an apt failure or any probe error passes).
+    node too, as on create (an apt failure or any probe error passes). A dry run does not probe.
     """
 
     check_id = "executor.validate.sshd_bootstrap"
@@ -73,43 +80,9 @@ class SshdBootstrapCheck:
         rented_data = ctx.state.rented_data
         rented_executor = rented_data.executors.get(ctx.executor.uuid) if rented_data else None
         is_rented = rented_executor is not None and len(rented_executor.pods) > 0
-        try:
-            failure_stamp = (
-                None
-                if is_rented
-                else await ctx.services.redis.get(
-                    f"{SSHD_BOOTSTRAP_FAILED_PREFIX}:{ctx.executor.uuid}"
-                )
-            )
-        except Exception:
-            # an unreadable stamp is no evidence against the node
-            logger.warning(
-                _m(
-                    "sshd bootstrap stamp could not be read",
-                    extra=get_extra_info(ctx.default_extra),
-                ),
-                exc_info=True,
-            )
-            failure_stamp = None
-        if not failure_stamp and not is_rented and await self._running_filler_fails(ctx):
-            failure_stamp = "1"
-            if self.remove_fillers and not settings.DRY_RUN:
-                try:
-                    await ctx.services.redis.set(
-                        f"{SSHD_BOOTSTRAP_FAILED_PREFIX}:{ctx.executor.uuid}",
-                        "1",
-                        ex=SSHD_BOOTSTRAP_FAILED_TTL_SECONDS,
-                    )
-                except Exception:
-                    logger.warning(
-                        _m(
-                            "sshd bootstrap stamp could not be written",
-                            extra=get_extra_info(ctx.default_extra),
-                        ),
-                        exc_info=True,
-                    )
-        what = {"sshd_bootstrap_failed": bool(failure_stamp), "is_rented": is_rented}
-        if not failure_stamp:
+        sshd_bootstrap_failed = False if is_rented else await self._sshd_bootstrap_failed(ctx)
+        what = {"sshd_bootstrap_failed": sshd_bootstrap_failed, "is_rented": is_rented}
+        if not sshd_bootstrap_failed:
             return CheckResult(
                 passed=True,
                 event=render_message(Msg.OK, ctx=ctx, check_id=self.check_id, what=what),
@@ -134,6 +107,31 @@ class SshdBootstrapCheck:
             event=render_message(Msg.FAILED, ctx=ctx, check_id=self.check_id, what=what),
         )
 
+    async def _sshd_bootstrap_failed(self, ctx: Context) -> bool:
+        """The verdict for an unrented node: its stamp, else a probe of its running filler (stamped on failure)."""
+        key = f"{SSHD_BOOTSTRAP_FAILED_PREFIX}:{ctx.executor.uuid}"
+        try:
+            if await ctx.services.redis.get(key):
+                return True
+        except Exception:
+            # an unreadable stamp is no evidence against the node
+            logger.warning(
+                _m("sshd bootstrap stamp could not be read", extra=get_extra_info(ctx.default_extra)),
+                exc_info=True,
+            )
+        # the dry-run pipeline must not start sshd in a filler
+        if not self.remove_fillers or not await self._running_filler_fails(ctx):
+            return False
+        if not settings.DRY_RUN:
+            try:
+                await ctx.services.redis.set(key, "1", ex=SSHD_BOOTSTRAP_FAILED_TTL_SECONDS)
+            except Exception:
+                logger.warning(
+                    _m("sshd bootstrap stamp could not be written", extra=get_extra_info(ctx.default_extra)),
+                    exc_info=True,
+                )
+        return True
+
     async def _running_filler_fails(self, ctx: Context) -> bool:
         """Re-run the sshd bootstrap in each listed Lium filler; True if one ends with sshd not serving."""
         rented_data = ctx.state.rented_data
@@ -143,8 +141,18 @@ class SshdBootstrapCheck:
         ):
             return False
         for name in rented_data.get_filler_containers(ctx.executor.uuid):
+            task_seconds_left = (
+                settings.JOB_TIME_OUT
+                - _TASK_TIMEOUT_MARGIN_SECONDS
+                - (time.monotonic() - ctx.started_at_monotonic)
+            )
+            if task_seconds_left < _MIN_PROBE_SECONDS:
+                return False
             try:
-                result = await ctx.ssh.run(running_filler_probe(name), timeout=300)
+                result = await ctx.ssh.run(
+                    running_filler_sshd_bootstrap_command(name),
+                    timeout=min(_PROBE_TIMEOUT_SECONDS, int(task_seconds_left)),
+                )
             except Exception:
                 continue  # our own probe failing is no evidence against the node
             if SSHD_VERIFY_FAILED_MARKER in f"{result.stdout}{result.stderr}":
@@ -156,9 +164,7 @@ class SshdBootstrapCheck:
         removed: list[str] = []
         for name in fillers:
             try:
-                result = await ctx.ssh.run(
-                    DockerCommand.remove_with_volumes(shlex.quote(name)), timeout=60
-                )
+                result = await ctx.ssh.run(DockerCommand.remove_with_volumes(shlex.quote(name)), timeout=60)
                 if result.exit_status != 0:
                     continue
                 removed.append(name)
