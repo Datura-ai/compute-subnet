@@ -28,6 +28,8 @@ from payload_models.payloads import (
     SshPubKeyRemoved,
     ContainerDeleted,
     DuplicateExecutorsResponse,
+    FailedContainerErrorCodes,
+    FailedContainerErrorTypes,
     FailedContainerRequest,
     ExecutorRentFinishedRequest,
     ForcedValidationCycleRequest,
@@ -41,6 +43,7 @@ from payload_models.payloads import (
     InstallJupyterServerRequest,
     JupyterServerInstalled,
     JupyterInstallationFailed,
+    WorkloadKind,
 )
 from protocol.vc_protocol.compute_requests import (
     Error,
@@ -93,6 +96,8 @@ logger = logging.getLogger(__name__)
 # mirrors ws_ping_* in compute-app apps/server/src/core/uvicorn_worker.py, which holds the burst.
 WS_PING_INTERVAL = 20
 WS_PING_TIMEOUT = 40
+# not an executor step, so the backend never counts it against the host
+CREATE_CUT_OFF_BY_RESTART_STEP = "validator_restarted"
 
 
 class OutgoingMessages(list[DeliveryStamps]):
@@ -193,6 +198,7 @@ class ComputeClient:
     async def run_forever(self) -> NoReturn:
         self.subtensor_client = await SubtensorClient.initialize(chain_reads_in_thread=True)
 
+        await self.fail_creates_cut_off_by_restart()
         asyncio.create_task(self.handle_send_messages())
         asyncio.create_task(self.subscribe_mesages_from_redis())
         asyncio.create_task(self.poll_rented_machines())
@@ -848,8 +854,45 @@ class ComputeClient:
         # past it and find nothing to cancel — and the create it raced then orphans its container.
         if not isinstance(job_request, ContainerCreateRequest):
             return await self._drive_miner_job(job_request)
-        with inflight_creates.track(job_request.pod_id):
-            return await self._drive_miner_job(job_request)
+        redis_service = self.miner_service.redis_service
+        await redis_service.add_inflight_backend_create(
+            job_request.pod_id, job_request.miner_hotkey, job_request.executor_id, job_request.workload_kind.value
+        )
+        try:
+            with inflight_creates.track(job_request.pod_id):
+                return await self._drive_miner_job(job_request)
+        finally:
+            await redis_service.remove_inflight_backend_create(job_request.pod_id)
+
+    async def fail_creates_cut_off_by_restart(self) -> None:
+        """DAH-4698: a create the previous connector was running when it died (every lium-io deploy recreates it) never
+        replied, so the backend kept the pod PENDING / the filler STARTING, and its pending-pod flag refused the
+        delete for 30 min. Each one is reported failed now, which frees the node, and its flag is cleared."""
+        redis_service = self.miner_service.redis_service
+        creates = await redis_service.inflight_backend_creates()
+        for pod_id, create in creates.items():
+            miner_hotkey, executor_id = create["miner_hotkey"], create["executor_id"]
+            await redis_service.remove_pending_pod(miner_hotkey, executor_id, pod_id)
+            self.message_queue.append(
+                FailedContainerRequest(
+                    miner_hotkey=miner_hotkey,
+                    executor_id=executor_id,
+                    pod_id=pod_id,
+                    workload_kind=WorkloadKind(create["workload_kind"]),
+                    error_type=FailedContainerErrorTypes.ContainerCreationFailed,
+                    error_code=FailedContainerErrorCodes.UnknownError,
+                    msg="The create was interrupted by a validator restart. Please try again.",
+                    detail=f"validator connector restarted during the create (started {create['time']})",
+                    failure_step=CREATE_CUT_OFF_BY_RESTART_STEP,
+                )
+            )
+            await redis_service.remove_inflight_backend_create(pod_id)
+            logger.warning(
+                _m(
+                    "Create cut off by a connector restart, reported failed",
+                    extra=get_extra_info({**self.logging_extra, "pod_id": pod_id, **create}),
+                )
+            )
 
     async def _drive_miner_job(
         self,
