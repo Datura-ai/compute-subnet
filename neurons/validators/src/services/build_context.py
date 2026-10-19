@@ -4,10 +4,12 @@ validator, checked, and unpacked into the build container's context directory ne
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import io
 import posixpath
 import tarfile
+import zlib
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -19,6 +21,22 @@ MAX_ARCHIVE_ENTRIES = 10_000
 
 class BuildContextError(Exception):
     """A build context that is refused; the message is renter-facing."""
+
+
+class _CappedReader:
+    """Counts the decompressed bytes tarfile reads, headers and long names included, and stops at the cap."""
+
+    def __init__(self, raw: gzip.GzipFile, cap: int, max_unpacked_bytes: int) -> None:
+        self._raw, self._cap, self._max, self._seen = raw, cap, max_unpacked_bytes, 0
+
+    def read(self, size: int = -1) -> bytes:
+        # never ask for more than the cap allows, so one huge header cannot be allocated first
+        left = self._cap - self._seen + 1
+        chunk = self._raw.read(left if size < 0 else min(size, left))
+        self._seen += len(chunk)
+        if self._seen > self._cap:
+            raise BuildContextError(f"build context unpacks to more than {self._max} bytes")
+        return chunk
 
 
 def allowed_hosts(raw: str) -> set[str]:
@@ -36,8 +54,12 @@ def check_url(url: str, hosts: set[str]) -> None:
 def check_archive(data: bytes, max_unpacked_bytes: int) -> None:
     """A gzipped tar of plain files, directories and links, every path inside the context."""
     total = 0
+    # tar headers and padding take at most 1 KiB per entry on top of the file bytes, plus the end records
+    cap = max_unpacked_bytes + (MAX_ARCHIVE_ENTRIES + 20) * 1024
+    reader = _CappedReader(gzip.GzipFile(fileobj=io.BytesIO(data)), cap, max_unpacked_bytes)
     try:
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+        # stream mode: tarfile reads the decompressed bytes only through the capped reader
+        with tarfile.open(fileobj=reader, mode="r|") as archive:
             for count, member in enumerate(archive, start=1):
                 if count > MAX_ARCHIVE_ENTRIES:
                     raise BuildContextError(
@@ -65,7 +87,7 @@ def check_archive(data: bytes, max_unpacked_bytes: int) -> None:
                     raise BuildContextError(
                         f"build context unpacks to more than {max_unpacked_bytes} bytes"
                     )
-    except (tarfile.TarError, OSError, EOFError) as exc:
+    except (tarfile.TarError, OSError, EOFError, zlib.error) as exc:
         raise BuildContextError("build context is not a gzipped tar archive") from exc
 
 

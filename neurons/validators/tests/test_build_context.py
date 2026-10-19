@@ -241,6 +241,28 @@ def test_check_archive_refuses_more_entries_than_the_cap(monkeypatch):
         build_context.check_archive(archive, 1 << 20)
 
 
+def test_check_archive_counts_a_long_name_header_against_the_cap(monkeypatch):
+    # Arrange: one GNU long-name header of 4 MiB, a member of 0 bytes
+    monkeypatch.setattr(build_context, "MAX_ARCHIVE_ENTRIES", 3)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.GNU_FORMAT) as tar:
+        tar.addfile(tarfile.TarInfo("a" * (4 << 20)), io.BytesIO(b""))
+
+    # Act / Assert
+    with pytest.raises(BuildContextError, match="unpacks to more than"):
+        build_context.check_archive(buf.getvalue(), 1 << 20)
+
+
+def test_check_archive_refuses_a_corrupt_deflate_stream():
+    # Arrange: a valid gzip header, then garbage where the deflate data should be
+    data = bytearray(_archive({"a.txt": b"hello" * 1000}))
+    data[12:40] = b"\xff" * 28
+
+    # Act / Assert
+    with pytest.raises(BuildContextError, match="not a gzipped tar"):
+        build_context.check_archive(bytes(data), 1 << 20)
+
+
 def test_check_archive_refuses_bytes_that_are_not_a_gzipped_tar():
     # Act / Assert
     with pytest.raises(BuildContextError, match="not a gzipped tar"):
@@ -281,7 +303,8 @@ async def test_custom_build_unpacks_the_context_before_the_dockerfile(svc, monke
 
 @pytest.mark.asyncio
 async def test_custom_build_with_a_context_fails_before_the_executor_when_no_host_is_allowed(
-    svc, monkeypatch  # noqa: F811
+    svc,
+    monkeypatch,  # noqa: F811
 ):
     # Arrange
     from core.config import settings
@@ -310,7 +333,8 @@ async def test_custom_build_with_a_context_fails_before_the_executor_when_no_hos
 
 @pytest.mark.asyncio
 async def test_custom_build_with_a_refused_context_never_starts_the_build_container(
-    svc, monkeypatch  # noqa: F811
+    svc,
+    monkeypatch,  # noqa: F811
 ):
     # Arrange
     from core.config import settings
