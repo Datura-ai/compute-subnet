@@ -44,24 +44,18 @@ RENTAL_OWNER = "test-miner"
 ENCRYPT_KEY = "test-encrypt-key"
 POD_ID = "pod-1"
 # repr() of the shipped scrape's NVMLError (machine_scrape.py): the class name and the nvml.h return code
-NVML_DRIVER_ERROR = "NVMLError(9)"
 
 
 def _driver_report(gpu_scrape_error: str) -> str:
     return json.dumps(
         {
             "error": "no_gpu_details",
-            "data": {
-                "data_gpu": {"gpu_count": 0, "gpu_details": []},
-                "gpu_scrape_error": gpu_scrape_error,
-            },
+            "data": {"data_gpu": {"gpu_count": 0, "gpu_details": []}, "gpu_scrape_error": gpu_scrape_error},
         }
     )
 
 
-NO_GPU_REPORT = json.dumps(
-    {"error": "no_gpu_details", "data": {"data_gpu": {"gpu_count": 0, "gpu_details": []}}}
-)
+NO_GPU_REPORT = json.dumps({"error": "no_gpu_details", "data": {"data_gpu": {"gpu_count": 0, "gpu_details": []}}})
 HEALTHY_SPECS = {
     "gpu": {"count": 1, "details": [{"name": "NVIDIA RTX 4090", "uuid": "GPU-abc123"}]},
     "gpu_processes": [],
@@ -127,9 +121,7 @@ async def _cycle(
         config=build_context_config(machine_scrape_filename="scrape.sh", obfuscation_keys={}),
         state=build_state(
             remote_dir="/remote",
-            rented_data=build_rented_data(
-                EXECUTOR, {"containers": containers, "owner_flag": False}
-            ),
+            rented_data=build_rented_data(EXECUTOR, {"containers": containers, "owner_flag": False}),
         ),
         runner=_Runner(scrape),
         ssh=DummySSHClient(pod_running=True),
@@ -151,9 +143,7 @@ async def _cycle(
 
 def _resets(service: RedisService) -> list[dict]:
     return [
-        call.args[1]
-        for call in service.publish.await_args_list
-        if call.args[0] == RESET_VERIFIED_JOB_CHANNEL
+        call.args[1] for call in service.publish.await_args_list if call.args[0] == RESET_VERIFIED_JOB_CHANNEL
     ]
 
 
@@ -161,10 +151,7 @@ async def _record(service: RedisService) -> dict:
     return json.loads(await service.redis.hget(VERIFIED_JOB_COUNT_KEY, f"hk:{EXECUTOR}"))
 
 
-HEALTHY = _scrape_result(
-    stdout=SSHService()._encrypt(ENCRYPT_KEY, json.dumps(HEALTHY_SPECS)), exit_code=0
-)
-DEAD_NVML = _scrape_result(stdout=_driver_report(NVML_DRIVER_ERROR), exit_code=1)
+HEALTHY = _scrape_result(stdout=SSHService()._encrypt(ENCRYPT_KEY, json.dumps(HEALTHY_SPECS)), exit_code=0)
 DRIVER = Msg.SCRAPE_FAILED_DRIVER.reason
 
 
@@ -172,9 +159,7 @@ DRIVER = Msg.SCRAPE_FAILED_DRIVER.reason
     ("stdout", "reason_code", "gpu_scrape_error"),
     [
         pytest.param(NO_GPU_REPORT, Msg.SCRAPE_FAILED_NO_GPU.reason, None, id="zero-gpus"),
-        pytest.param(
-            _driver_report("NVMLError(9)"), DRIVER, "NVMLError(9)", id="driver-not-loaded"
-        ),
+        pytest.param(_driver_report("NVMLError(9)"), DRIVER, "NVMLError(9)", id="driver-not-loaded"),
         pytest.param(_driver_report("NVMLError(15)"), DRIVER, "NVMLError(15)", id="gpu-lost"),
         pytest.param(_driver_report("NVMLError(16)"), DRIVER, "NVMLError(16)", id="reset-required"),
         pytest.param(_driver_report("NVMLError(28)"), DRIVER, "NVMLError(28)", id="gpu-not-found"),
@@ -188,9 +173,7 @@ async def test_a_dead_gpu_runtime_on_a_rented_node_marks_the_executor_inactive(
     ok, _, _ = await _cycle(context_factory, service, scrape=HEALTHY)
     assert ok is True and _resets(service) == []
 
-    ok, event, _ = await _cycle(
-        context_factory, service, scrape=_scrape_result(stdout=stdout, exit_code=1)
-    )
+    ok, event, ctx = await _cycle(context_factory, service, scrape=_scrape_result(stdout=stdout, exit_code=1))
 
     assert ok is False
     assert event.reason_code == reason_code
@@ -200,9 +183,17 @@ async def test_a_dead_gpu_runtime_on_a_rented_node_marks_the_executor_inactive(
     assert reset["executor_uuid"] == EXECUTOR
     assert reset["reason_code"] == reason_code
     assert reset["check_id"] == MachineSpecScrapeCheck.check_id
-    evidence = {"pod_id": POD_ID, "rented_pod_ids": [POD_ID], "scrape_error": "no_gpu_details"}
+    evidence = {
+        "pod_id": POD_ID,
+        "rented_pod_ids": [POD_ID],
+        "scrape_error": "no_gpu_details",
+        "executor_ip": ctx.executor.address,
+        "executor_port": ctx.executor.port,
+    }
     if gpu_scrape_error is not None:
         evidence["gpu_scrape_error"] = gpu_scrape_error
     assert reset["evidence"] == evidence
     record = await _record(service)
     assert (record["count"], record["uuids"]) == (0, "GPU-abc123")
+
+

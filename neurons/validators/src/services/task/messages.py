@@ -699,6 +699,26 @@ class BannedProviderMessages:
     )
 
 
+class HardwareIdentityMessages:
+    # DAH-4547: emitted as a warning in shadow; fails the node under HARDWARE_FINGERPRINT_ENFORCEMENT_ENABLED.
+    SPOOFED = MessageTemplate(
+        event="Host hardware identity does not match the hardware",
+        reason="HARDWARE_IDENTITY_SPOOFED",
+        severity="warning",
+        category="policy",
+        impact="Score set to 0 while the finding stands",
+        remediation="Remove any mount or script over /sys/class/dmi/id on the host and in the executor "
+        "container, and make sure NVML reports the same GPUs as /proc/driver/nvidia/gpus.",
+    )
+    OK = MessageTemplate(
+        event="Host hardware identity ok",
+        reason="HARDWARE_IDENTITY_OK",
+        severity="info",
+        category="policy",
+        impact="Proceed",
+    )
+
+
 class ExecutorImageMessages:
     CURRENT = MessageTemplate(
         event="Executor image is current",
@@ -2165,6 +2185,52 @@ class LocalVerifyMessages:
         severity="info",
         category="transport",
         impact="The matmul and VerifyX verdicts below come from the executor's local run, judged by the validator",
+    )
+
+
+class GpuAttestationIdentityMessages:
+    # DAH-4551: warning in shadow; fails the node under GPU_ATTESTATION_IDENTITY_ENFORCEMENT_ENABLED.
+    MISMATCH = MessageTemplate(
+        event="GPU identity does not match the NVIDIA-signed card identity",
+        reason="GPU_IDENTITY_MISMATCH",
+        severity="warning",
+        category="policy",
+        impact="Score set to 0 while the finding stands",
+        remediation="Report the GPUs the host really has: each GPU UUID must stay on the same physical card, "
+        "and nothing may intercept NVML or nvidia-smi on the host or in the executor container.",
+    )
+    # The fallback for cards that cannot attest: the same card under a new UUID (serial or slots kept).
+    SWAPPED = MessageTemplate(
+        event="GPU UUIDs were swapped: the same cards are reported under new UUIDs",
+        reason="GPU_UUID_SWAPPED",
+        severity="warning",
+        category="policy",
+        impact="Score set to 0 while the finding stands",
+        remediation="Report each GPU under its real UUID; a GPU UUID must not change while the card stays.",
+    )
+    # A UUID whose model, memory or serial changed, or one host listing several models.
+    INCONSISTENT = MessageTemplate(
+        event="GPU details are inconsistent with what this UUID reported before",
+        reason="GPU_IDENTITY_INCONSISTENT",
+        severity="warning",
+        category="policy",
+        impact="Score set to 0 while the finding stands",
+        remediation="Each GPU UUID must keep its model, memory size and serial; a node lists one GPU model.",
+    )
+    # Expected on most hosts: NVML only attests Hopper/Blackwell cards in Confidential Computing mode.
+    UNAVAILABLE = MessageTemplate(
+        event="GPU attestation not available on this node",
+        reason="GPU_ATTESTATION_UNAVAILABLE",
+        severity="info",
+        category="policy",
+        impact="Proceed",
+    )
+    OK = MessageTemplate(
+        event="GPU identity verified against NVIDIA's root",
+        reason="GPU_IDENTITY_OK",
+        severity="info",
+        category="policy",
+        impact="Proceed",
     )
 
 
