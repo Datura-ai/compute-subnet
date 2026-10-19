@@ -172,3 +172,11 @@ def test_price_above_hard_limit_zeroes_job_score_only_when_enforced(
         update={"executor": ctx.executor.model_copy(update={"price_per_gpu": 8.0})}
     )
     assert calculate_scores(ctx, rented=False)[:2] == (1.0, 1.0)
+
+
+def test_gpu_identity_flag_zeroes_a_rented_score():
+    """GpuAttestationIdentityCheck is non-fatal on a live rental: only this flag zeroes it."""
+    ctx = _ctx(500.0).model_copy(update={"gpu_attestation_identity_passed": False})
+    actual_score, _, warning = calculate_scores(ctx, rented=True)
+    assert actual_score == 0.0
+    assert "GPU identity changed" in warning

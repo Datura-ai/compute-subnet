@@ -39,13 +39,16 @@ class PodRecoverer(Protocol):
     # DAH-3436: the rental probe rents the node through the same two entry points a renter's pod
     # takes (miner_service hands the backend's requests to these), so there is one start path and
     # one teardown path to keep correct. `private_key` is the Fernet-encrypted key as the backend
-    # sends it; both decrypt it themselves.
+    # sends it; both decrypt it themselves. `beside_fillers`: the probe's create on a node running
+    # a filler, which leaves the filler and its GPU power cap alone.
     async def create_container(
         self,
         payload: Any,
         executor_info: ExecutorSSHInfo,
         keypair: Any,
         private_key: str,
+        *,
+        beside_fillers: bool = False,
     ) -> Any: ...
 
     async def delete_container(
@@ -116,6 +119,9 @@ class ContextConfig:
     # matmul and VerifyX right-size their probes and the bandwidth gate is deferred to the first
     # scored cycle; every other check is the same.
     first_pass: bool = False
+    # The caller's raw first_pass (the express lane), whatever FIRST_PASS_FAST_PATH_ENABLED says.
+    # The rental probe skips its shadow run on it (DAH-4258).
+    express_first_pass: bool = False
 
 
 @dataclass(frozen=True)
@@ -256,6 +262,9 @@ class Context(BaseModel):
     # False only once InspectorRentedCheck counts a blind streak at the limit under enforcement;
     # the score gate lives in calculate_scores for the same reason as above.
     inspector_blind_streak_passed: bool = True
+    # False only once GpuAttestationIdentityCheck finds a swap/mismatch under enforcement; the
+    # check is non-fatal on a live rental, so the score gate lives in calculate_scores.
+    gpu_attestation_identity_passed: bool = True
     # G1 — NVIDIA CC GPU attestation outcome: True/False when verified, None when
     # not performed (non-CVM node, no evidence supplied, or NRAS undeterminable).
     gpu_attestation_passed: bool | None = None

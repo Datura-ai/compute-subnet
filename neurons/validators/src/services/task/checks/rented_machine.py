@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from core.docker_utils import DockerCommand, collect_container_death_diagnostics
 from core.utils import _m, get_extra_info
-from protocol.vc_protocol.compute_requests import RentedPod
+from protocol.vc_protocol.compute_requests import RentedExecutor, RentedPod
 from protocol.vc_protocol.validator_requests import (
     ContainerState,
     PodContainerState,
@@ -97,6 +97,29 @@ def _gpu_usage_violation_details(
     }
 
 
+def _rental_of_validated_miner(
+    ctx: Context, rented_executor: RentedExecutor | None
+) -> RentedExecutor | None:
+    """The rental listed under this executor's UUID, or None when enforcement is on and it belongs
+    to another miner. The mismatch is logged either way."""
+    if not rented_executor or rented_executor.miner_hotkey == ctx.miner_hotkey:
+        return rented_executor
+    logger.warning(
+        _m(
+            "RENTED_OWNER_MISMATCH",
+            extra=get_extra_info(
+                {
+                    **ctx.default_extra,
+                    "executor_uuid": ctx.executor.uuid,
+                    "rental_miner_hotkey": rented_executor.miner_hotkey,
+                    "enforced": settings.RENTED_OWNER_MISMATCH_ENFORCEMENT_ENABLED,
+                }
+            ),
+        )
+    )
+    return None if settings.RENTED_OWNER_MISMATCH_ENFORCEMENT_ENABLED else rented_executor
+
+
 def _within_container_name_grace(pod: RentedPod) -> bool:
     """An unnamed pod is waited for only this long after it was created; a pod with no
     created_at (backend predates the field) is waited for as before."""
@@ -145,7 +168,9 @@ class TenantEnforcementCheck:
 
         # Get rented executor from context instead of Redis
         rented_data = ctx.state.rented_data
-        rented_executor = rented_data.executors.get(ctx.executor.uuid) if rented_data else None
+        rented_executor = _rental_of_validated_miner(
+            ctx, rented_data.executors.get(ctx.executor.uuid) if rented_data else None
+        )
         # EVERY filler on the node: a partially rented split node keeps one filler per free VRAM
         # bundle running beside the renter (DAH-2465/DAH-2467), and allowlisting only the first
         # makes its siblings' GPU processes read as usage outside the tenant.
@@ -200,7 +225,7 @@ class TenantEnforcementCheck:
             pod_container_name = pod.docker_container_name
             pod_id = pod.pod_id
             try:
-                pod_running, ssh_pub_keys = await _check_pod_running_and_read_authorized_keys(ctx.ssh, pod_container_name)
+                pod_running, ssh_pub_keys = await _check_pod_running_and_read_authorized_keys(ctx.ssh, pod_container_name, ctx.default_extra)
             except (asyncssh.Error, OSError) as exc:
                 return with_pod_states(
                     _executor_transport_unreachable_result(
@@ -400,7 +425,7 @@ class TenantEnforcementCheck:
                 ):
                     # Re-read the pod, so the recovered container's own SSH keys are what gets
                     # reported and a start that did not stick still lands on POD_NOT_RUNNING.
-                    pod_running, read_keys = await _check_pod_running_and_read_authorized_keys(ctx.ssh, container_name)
+                    pod_running, read_keys = await _check_pod_running_and_read_authorized_keys(ctx.ssh, container_name, ctx.default_extra)
                     ssh_pub_keys = read_keys or []
                     container_finished_at = diagnostics.get("container_finished_at")
                     if pod_running and isinstance(container_finished_at, str):
@@ -727,7 +752,7 @@ async def _every_listed_pod_stale(ctx: Context, rented_pods: list[RentedPod], st
     for other in rented_pods[1:]:
         try:
             other_state = await _check_pod_running_and_read_authorized_keys(
-                ctx.ssh, other.docker_container_name
+                ctx.ssh, other.docker_container_name, ctx.default_extra
             )
         except (asyncssh.Error, OSError):
             return False
@@ -749,7 +774,7 @@ class PodRunningAndAuthorizedKeys(NamedTuple):
 
 
 async def _check_pod_running_and_read_authorized_keys(
-    ssh_client, container_name: str
+    ssh_client, container_name: str, log_extra: dict | None = None
 ) -> PodRunningAndAuthorizedKeys:
     # asyncssh.Error / OSError mean the SSH session itself is dead -> caller must
     # treat this as "pod state unknown", not "pod down". Other exceptions are
@@ -778,7 +803,49 @@ async def _check_pod_running_and_read_authorized_keys(
     except Exception:
         ssh_keys = []
 
+    if ssh_keys and any(body in line for line in ssh_keys for body in FOREIGN_POD_KEY_BODIES):
+        ssh_keys = await _strip_foreign_pod_keys(ssh_client, container_name, ssh_keys, log_extra)
+
     return PodRunningAndAuthorizedKeys(running=pod_running, authorized_keys=ssh_keys)
+
+
+# I-78: keys no renter, platform service or team member owns; removed from a rented pod on every read.
+FOREIGN_POD_KEY_BODIES = ("AAAAC3NzaC1lZDI1NTE5AAAAIAx9Oh+/tmzVxj8PhhjL3VO4J2SGdPxj6lb7g1RlU2uv",)
+
+
+async def _strip_foreign_pod_keys(
+    ssh_client, container_name: str, ssh_keys: list[str], log_extra: dict | None = None
+) -> list[str]:
+    patterns = " ".join(f"-e {shlex.quote(body)}" for body in FOREIGN_POD_KEY_BODIES)
+    # cat into the same file keeps its owner and mode; copy only on grep exit 0 or 1 (1 = every line went), never on
+    # an error such as a full disk, which would leave an empty temp file and wipe the renter's keys.
+    script = (
+        "f=/root/.ssh/authorized_keys; t=$(mktemp) || exit 1; "
+        f'grep -vF {patterns} "$f" > "$t" || [ $? -eq 1 ] && cat "$t" > "$f"; s=$?; rm -f "$t"; exit $s'
+    )
+    try:
+        result = await ssh_client.run(DockerCommand.exec_command(container_name, script))
+    except (asyncssh.Error, OSError):
+        raise
+    except Exception as exc:
+        logger.warning(_m("I-78 foreign pod key strip failed", extra={**(log_extra or {}), "container_name": container_name, "error": str(exc)}))
+        return ssh_keys
+    if result.exit_status != 0:
+        logger.warning(
+            _m(
+                "I-78 foreign pod key strip failed",
+                extra={**(log_extra or {}), "container_name": container_name, "exit_status": result.exit_status, "stderr": str(result.stderr)},
+            )
+        )
+        return ssh_keys
+    kept = [line for line in ssh_keys if not any(body in line for body in FOREIGN_POD_KEY_BODIES)]
+    logger.warning(
+        _m(
+            "I-78 foreign pod key stripped",
+            extra={**(log_extra or {}), "container_name": container_name, "removed_lines": len(ssh_keys) - len(kept)},
+        )
+    )
+    return kept
 
 
 # The diagnostics fields that decide whether a not-running container is the provider's fault (host lost the

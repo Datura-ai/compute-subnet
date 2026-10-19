@@ -44,6 +44,15 @@ class ExecutorDao(BaseDao):
         self.session.delete(executor)
         self.session.commit()
 
+    def delete_by_uuid(self, uuid) -> bool:
+        """False when no executor has this uuid; nothing is deleted then."""
+        executor = self.find_by_uuid(uuid)
+        if not executor:
+            return False
+        self.session.delete(executor)
+        self.session.commit()
+        return True
+
     def get_executors_for_validator(self, validator_key: str, executor_id: Optional[str] = None) -> list[Executor]:
         """Get executors that opened to valdiator
 
