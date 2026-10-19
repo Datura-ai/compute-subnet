@@ -164,7 +164,7 @@ class ContainerCreateRequest(ContainerRequest):
     cluster_membership: ClusterMembership | None = None
     # DAH-2211: build from this Dockerfile on the host instead of pulling `docker_image`
     dockerfile_content: str | None = None
-    # 1.10.0: a gzipped tar of the build context for `dockerfile_content`, fetched by the validator and
+    # 1.11.0: a gzipped tar of the build context for `dockerfile_content`, fetched by the validator and
     # checked against `build_context_sha256` (hex) before the build; None builds with the Dockerfile alone
     build_context_url: str | None = None
     build_context_sha256: str | None = None

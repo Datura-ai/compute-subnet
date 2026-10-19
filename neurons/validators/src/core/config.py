@@ -488,6 +488,9 @@ class Settings(BaseSettings):
     RENTED_GPU_DROP_CHECK_ENABLED: bool = Field(env="RENTED_GPU_DROP_CHECK_ENABLED", default=False)
     # The per-pod incident mark expires this long after the last cycle that saw the fault.
     RENTED_GPU_DROP_STATE_TTL_SECONDS: int = Field(env="RENTED_GPU_DROP_STATE_TTL_SECONDS", default=86400, gt=0)
+    # DAH-4457: a node whose GPU dropped out stays hidden (GPU_LOST availability entry, no new rentals) until its
+    # cards have read clean this long after the last faulty cycle (GpuLossHoldCheck).
+    GPU_LOSS_HOLD_SECONDS: int = Field(env="GPU_LOSS_HOLD_SECONDS", default=7200, gt=0)
     # DAH-2735 — judge an idle node's GPU by WHO holds it, not by utilization: a competitor's
     # rental idling on the card (Nodexo/SN106) passes every percentage gate. CHECK_ENABLED
     # observes and logs the verdict; ENFORCEMENT additionally zeroes the score. Enforcement
@@ -507,15 +510,6 @@ class Settings(BaseSettings):
     # re-registers the node to list a different set. Off again = the mark stays in the record but is ignored.
     # Flip after reading a week of the warn-mode rows.
     GPU_ANCHOR_HARD_ENABLED: bool = Field(env="GPU_ANCHOR_HARD_ENABLED", default=False)
-    # The verified record (count, spec, GPU anchor) is keyed by executor id alone. Its owner is
-    # the backend's (RentedExecutorsResponse.executor_owner_hotkeys, the MinerExecutor row): a
-    # write or reset by another hotkey is always logged (VERIFIED_RECORD_FOREIGN_WRITER); with
-    # this on it is refused, so listing someone else's executor id no longer resets their record.
-    # A provider moves a node to a new hotkey in the portal. No owner from the backend lets the
-    # write through, so this stays off until the backend sends the map.
-    VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED: bool = Field(
-        env="VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", default=False
-    )
     PROVIDER_SIDE_LOAD_CHECK_ENABLED: bool = Field(env="PROVIDER_SIDE_LOAD_CHECK_ENABLED", default=True)
     PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED: bool = Field(
         env="PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED", default=False
@@ -583,6 +577,12 @@ class Settings(BaseSettings):
     RENTAL_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="RENTAL_PROBE_ENFORCEMENT_ENABLED", default=False)
     RENTAL_PROBE_INTERVAL_HOURS: float = Field(env="RENTAL_PROBE_INTERVAL_HOURS", default=6.0, gt=0)
     RENTAL_PROBE_SSH_DEADLINE_SECONDS: int = Field(env="RENTAL_PROBE_SSH_DEADLINE_SECONDS", default=90, gt=0)
+    # On: an idle node running a Lium filler is probed too, beside the filler: the probe's create
+    # removes no filler_*, lifts no GPU power cap and reclaims no filler cache. Off: such a node is
+    # skipped ("filler running"). Only read while RENTAL_PROBE_ENABLED is on.
+    RENTAL_PROBE_BESIDE_FILLERS_ENABLED: bool = Field(
+        env="RENTAL_PROBE_BESIDE_FILLERS_ENABLED", default=False
+    )
     # A node whose containers cannot reach the internet passed every check. CHECK runs the rental probe's
     # `egress` step, which resolves and fetches pypi.org inside its renter container; ENFORCEMENT fails the
     # probe on it with NO_OUTBOUND_INTERNET (score 0). Slow still passes. Enforcement is off by default,
