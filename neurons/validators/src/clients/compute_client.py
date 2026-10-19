@@ -198,7 +198,15 @@ class ComputeClient:
     async def run_forever(self) -> NoReturn:
         self.subtensor_client = await SubtensorClient.initialize(chain_reads_in_thread=True)
 
-        await self.fail_creates_cut_off_by_restart()
+        try:
+            await self.fail_creates_cut_off_by_restart()
+        except Exception as exc:  # the sweep is best-effort; it must never keep the connector from starting
+            logger.error(
+                _m(
+                    "Failed to report creates cut off by a connector restart",
+                    extra=get_extra_info({**self.logging_extra, "error": str(exc)}),
+                )
+            )
         asyncio.create_task(self.handle_send_messages())
         asyncio.create_task(self.subscribe_mesages_from_redis())
         asyncio.create_task(self.poll_rented_machines())
