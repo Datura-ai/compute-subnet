@@ -73,14 +73,14 @@ def _run_script(tmp_path: Path, public: str, private: str) -> subprocess.Complet
 
 
 def _spawn_fake_sshd(tmp_path: Path) -> tuple[subprocess.Popen, Path]:
-    marker = tmp_path / "hup"
+    hup_marker = tmp_path / "hup"
     proc = subprocess.Popen(
-        ["sh", "-c", f"trap 'echo hup >> {marker}' HUP; while :; do sleep 0.1; done"]
+        ["sh", "-c", f"trap 'echo hup >> {hup_marker}' HUP; while :; do sleep 0.1; done"]
     )
     (tmp_path / "run").mkdir(parents=True, exist_ok=True)
     (tmp_path / "run" / "sshd.pid").write_text(f"{proc.pid}\n")
     time.sleep(0.3)  # let the shell install its trap before anything signals it
-    return proc, marker
+    return proc, hup_marker
 
 
 def _wait_for(path: Path) -> bool:
@@ -107,12 +107,12 @@ def test_script_installs_the_host_key_with_private_permissions(tmp_path):
 def test_script_replaces_an_image_generated_key_and_reloads_sshd(tmp_path):
     old = derive_pod_ssh_host_key(SECRET, "image-generated")
     _run_script(tmp_path, old.public_openssh, old.private_openssh)
-    proc, marker = _spawn_fake_sshd(tmp_path)
+    proc, hup_marker = _spawn_fake_sshd(tmp_path)
     host_key = derive_pod_ssh_host_key(SECRET, POD_ID)
 
     try:
         result = _run_script(tmp_path, host_key.public_openssh, host_key.private_openssh)
-        reloaded = _wait_for(marker)
+        reloaded = _wait_for(hup_marker)
     finally:
         proc.send_signal(signal.SIGKILL)
         proc.wait()
@@ -125,7 +125,7 @@ def test_script_replaces_an_image_generated_key_and_reloads_sshd(tmp_path):
 def test_script_leaves_sshd_alone_when_the_key_is_already_installed(tmp_path):
     host_key = derive_pod_ssh_host_key(SECRET, POD_ID)
     _run_script(tmp_path, host_key.public_openssh, host_key.private_openssh)
-    proc, marker = _spawn_fake_sshd(tmp_path)
+    proc, hup_marker = _spawn_fake_sshd(tmp_path)
 
     try:
         result = _run_script(tmp_path, host_key.public_openssh, host_key.private_openssh)
@@ -136,7 +136,7 @@ def test_script_leaves_sshd_alone_when_the_key_is_already_installed(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert "already installed" in result.stdout
-    assert not marker.exists()
+    assert not hup_marker.exists()
 
 
 def test_script_refuses_a_public_key_that_is_not_ed25519(tmp_path):

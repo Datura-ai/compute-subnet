@@ -16,6 +16,7 @@ from protocol.miner_portal_request import (
     AddExecutorFailed,
     DeleteExecutorRequest,
     ExecutorAdded,
+    ExecutorDeleted,
     ExecutorDeleteFailed,
     ExecutorUpdateFailed,
     SyncExecutorMinerPortalFailed,
@@ -121,6 +122,22 @@ async def test_send_pubkey_to_executor_includes_validator_signature(
 
 
 @pytest.mark.asyncio
+async def test_send_pubkey_to_executor_relays_the_miner_bound_signature(executor_service, test_executor):
+    """miner_hotkey and validator_miner_signature reach the executor verbatim; absent when not sent."""
+    mock_session = _make_mock_session()
+    with patch("services.executor_service.aiohttp.ClientSession", return_value=mock_session):
+        await executor_service.send_pubkey_to_executor(
+            test_executor, _SSH_KEY, "0xaa", miner_hotkey="5Miner", validator_miner_signature="0xbb"
+        )
+        sent = mock_session.post.call_args.kwargs["json"]
+        assert (sent["miner_hotkey"], sent["validator_miner_signature"]) == ("5Miner", "0xbb")
+
+        await executor_service.send_pubkey_to_executor(test_executor, _SSH_KEY, "0xaa")
+        sent = mock_session.post.call_args.kwargs["json"]
+        assert "miner_hotkey" not in sent and "validator_miner_signature" not in sent
+
+
+@pytest.mark.asyncio
 async def test_remove_pubkey_from_executor_includes_validator_signature(
     executor_service, test_executor, validator_keypair
 ):
@@ -204,7 +221,7 @@ async def test_register_pubkey_splits_known_from_accepted(executor_service, vali
     dead = Executor(uuid=uuid4(), validator="//TestValidator", address="203.0.113.11", port=8001)
     executor_service.executor_dao.get_executors_for_validator.return_value = [reachable, dead]
 
-    async def only_the_reachable_one_answers(executor, pubkey, signature, nonce=None):
+    async def only_the_reachable_one_answers(executor, pubkey, signature, nonce=None, **_):
         return _ssh_info(executor) if executor is reachable else None
 
     executor_service.send_pubkey_to_executor = only_the_reachable_one_answers
@@ -259,10 +276,28 @@ def test_a_failed_write_rolls_the_shared_session_back(executor_service, test_exe
     """ioc builds one ExecutorService on one session for the process: a failed flush left in it fails every later
     request with 'transaction has been rolled back due to a previous exception during flush'."""
     dao = executor_service.executor_dao
-    for method in (dao.update_by_uuid, dao.delete_by_address_port, dao.find_by_uuid):
+    for method in (dao.update_by_uuid, dao.delete_by_uuid, dao.find_by_uuid):
         method.side_effect = Exception("flush failed")
 
     result = call(executor_service, _payload(test_executor))
 
     assert isinstance(result, failed_type)
     dao.session.rollback.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# A portal delete removes only the node it names (ticket-0591)
+# ---------------------------------------------------------------------------
+
+
+def test_delete_removes_the_named_node_not_another_at_its_address(executor_service, test_executor):
+    dao = executor_service.executor_dao
+    dao.delete_by_uuid.return_value = False
+
+    payload = _payload(test_executor)
+
+    result = executor_service.delete(DeleteExecutorRequest(executor=payload))
+
+    assert isinstance(result, ExecutorDeleted)
+    dao.delete_by_uuid.assert_called_once_with(payload.uuid)
+    dao.delete_by_address_port.assert_not_called()

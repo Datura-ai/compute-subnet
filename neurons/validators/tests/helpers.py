@@ -249,7 +249,6 @@ def build_context_config(**overrides) -> ContextConfig:
         max_gpu_count=None,
         gpu_model_rates={},
         nvml_digest_map={},
-        verifyx_enabled=False,
         inspector_enabled=False,
         port_private_key=None,
         port_public_key=None,

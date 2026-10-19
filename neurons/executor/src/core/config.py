@@ -81,6 +81,8 @@ class Settings(BaseSettings):
     SSH_PUBLIC_PORT: Optional[int] = Field(env="SSH_PUBLIC_PORT", default=None)
 
     MINER_HOTKEY_SS58_ADDRESS: str = Field(env="MINER_HOTKEY_SS58_ADDRESS")
+    # `lium mine --register` writes the portal account's claim here; the portal requires it of a pool-hotkey node
+    MINER_ACCOUNT_CLAIM: Optional[str] = Field(env="MINER_ACCOUNT_CLAIM", default=None)
     DEFAULT_MINER_HOTKEY: str = Field(
         env="DEFAULT_MINER_HOTKEY",
         default="5D4jX4TqUkZwNwKAjjYrbk2FHFNN2U1TgFF6ZMuNPnjnKJVU"
@@ -132,6 +134,10 @@ class Settings(BaseSettings):
     # nonce. Leave off until the validator fleet mints nonces (migration order:
     # executors accept optional nonce first, then validators send, then this).
     REQUIRE_ATTESTATION_NONCE: bool = Field(env="REQUIRE_ATTESTATION_NONCE", default=False)
+    # Refuse an SSH-key upload unless the validator signed it for this executor's
+    # MINER_HOTKEY_SS58_ADDRESS. Off: a missing or different miner hotkey is only logged
+    # ("ssh_key_miner_binding"). Turn on once the validator, miner and executor fleet send it.
+    REQUIRE_MINER_BOUND_SSH_KEY: bool = Field(env="REQUIRE_MINER_BOUND_SSH_KEY", default=False)
     # DAH-3200: the backend signs `timestamp = int(time.time())` into every /containers/{name}
     # request (utilization and logs). A signed request older or newer than this many seconds is
     # refused, so a captured one cannot be replayed for the life of the container. Symmetric so a
@@ -160,6 +166,12 @@ class Settings(BaseSettings):
     LOCAL_VERIFY_MAX_DEADLINE_SECONDS: int = Field(env="LOCAL_VERIFY_MAX_DEADLINE_SECONDS", default=600)
     # How far the intent's issued_at may be from this host's clock (seconds, either way).
     LOCAL_VERIFY_INTENT_WINDOW_SECONDS: int = Field(env="LOCAL_VERIFY_INTENT_WINDOW_SECONDS", default=120)
+
+    # Signed node heartbeat (services/heartbeat_service.py): POST {COMPUTE_REST_API_URL}/v1/node-heartbeat every
+    # interval, signed with this host's SSH ed25519 host key. Off by default.
+    NODE_HEARTBEAT_ENABLED: bool = Field(env="NODE_HEARTBEAT_ENABLED", default=False)
+    # No lower bound here: a bad value must never stop the executor. The service clamps it to 10 with a warning.
+    NODE_HEARTBEAT_INTERVAL_SECONDS: int = Field(env="NODE_HEARTBEAT_INTERVAL_SECONDS", default=60)
 
 
 settings = Settings()

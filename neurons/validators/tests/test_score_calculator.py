@@ -115,3 +115,11 @@ def test_executor_without_deposit_scores_in_full(gpu_model):
     assert actual_score == 1.0
     assert job_score == 1.0
     assert warning == ""
+
+
+def test_inspector_blind_streak_flag_zeroes_a_rented_score():
+    """InspectorRentedCheck is non-fatal: only this flag, set under enforcement, zeroes it."""
+    ctx = _ctx(500.0).model_copy(update={"inspector_blind_streak_passed": False})
+    actual_score, _, warning = calculate_scores(ctx, rented=True)
+    assert actual_score == 0.0
+    assert "Rental sensor saw nothing of the rental" in warning
