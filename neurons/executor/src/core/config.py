@@ -76,7 +76,8 @@ VALIDATOR_HOTKEYS_SS58: dict[str, str] = _validator_hotkeys(VALIDATOR_HOTKEY_SS5
 # I-78: the addresses the prod validator reaches executors from (the prod VPC's two NAT gateways).
 # A key uploaded through /upload_ssh_key logs in only from these, so a copy of the hotkey can no
 # longer buy a root shell from anywhere else. Fixed by the image like the hotkeys; a non-prod build
-# names its own in config_override (_VALIDATOR_SSH_SOURCES; absent or "" = no pin).
+# names its own in config_override (_VALIDATOR_SSH_SOURCES, written by docker_build.sh from
+# VALIDATOR_SSH_SOURCES; absent or "" = no pin).
 _BUILTIN_VALIDATOR_SSH_SOURCES = "54.163.250.18,13.223.237.157"
 
 
