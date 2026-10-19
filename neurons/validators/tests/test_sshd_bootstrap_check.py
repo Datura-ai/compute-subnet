@@ -5,16 +5,17 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from protocol.vc_protocol.compute_requests import RentedExecutor, RentedExecutorsResponse, RentedPod
-
 from services.docker_service import DockerService
 from services.redis_service import SSHD_BOOTSTRAP_FAILED_PREFIX, SSHD_BOOTSTRAP_FAILED_TTL_SECONDS
 from services.task.checks.sshd_bootstrap import SshdBootstrapCheck
 from services.task.messages import SshdBootstrapMessages as Msg
+
 from tests.helpers import FakeRedis, build_services, build_state
 
 EXECUTOR = "executor-123"
 KEY = f"{SSHD_BOOTSTRAP_FAILED_PREFIX}:{EXECUTOR}"
 FILLER = "filler_run-1"
+FAILED_RUN = "sshd verification failed after 15s\n(running=yes, listening=no)\n"
 
 
 def _ctx(context_factory, redis, rented=False, filler_owner=None, ssh=None, backend=None):
@@ -189,14 +190,14 @@ async def test_other_failures_and_renter_creates_stamp_nothing():
     assert KEY not in redis.store
 
 
-def _probe_ctx(context_factory, redis, exit_status=None, error=None, rented=False):
+def _probe_ctx(context_factory, redis, stdout="", error=None, rented=False):
     ssh = AsyncMock()
     if error:
         ssh.run.side_effect = error
     else:
         # the probe answers first; any later call is the filler removal
         ssh.run.side_effect = [
-            SimpleNamespace(exit_status=exit_status, stdout="", stderr=""),
+            SimpleNamespace(exit_status=1 if stdout else 0, stdout=stdout, stderr=""),
             SimpleNamespace(exit_status=0, stdout="", stderr=""),
         ]
     backend = build_services().backend
@@ -209,7 +210,7 @@ async def test_a_running_filler_without_sshd_past_the_grace_fails_stamps_and_is_
     context_factory,
 ):
     redis = FakeRedis()
-    ctx, ssh, backend = _probe_ctx(context_factory, redis, exit_status=10)
+    ctx, ssh, backend = _probe_ctx(context_factory, redis, stdout=FAILED_RUN)
     result = await SshdBootstrapCheck().run(ctx)
     assert result.passed is False
     assert result.event.reason_code == Msg.FAILED.reason
@@ -217,7 +218,7 @@ async def test_a_running_filler_without_sshd_past_the_grace_fails_stamps_and_is_
     assert redis.ttl[KEY] == SSHD_BOOTSTRAP_FAILED_TTL_SECONDS
     probe = ssh.run.await_args_list[0].args[0]
     assert f"inspect -f '{{{{.State.Running}}}} {{{{.State.StartedAt}}}}' {FILLER}" in probe
-    assert f"/usr/bin/docker exec -u 0 -i {FILLER} sh -c" in probe
+    assert f"| base64 -d | /usr/bin/docker exec -u 0 -i {FILLER} sh -c" in probe
     assert ssh.run.await_args_list[1].args[0] == f"/usr/bin/docker rm -fv {FILLER}"
     backend.get_filler_run_active.assert_awaited_once_with("run-1", container_missing=True)
 
@@ -225,7 +226,7 @@ async def test_a_running_filler_without_sshd_past_the_grace_fails_stamps_and_is_
 @pytest.mark.asyncio
 async def test_a_dry_run_judges_a_running_filler_without_writing_or_removing(context_factory):
     redis = FakeRedis()
-    ctx, ssh, _ = _probe_ctx(context_factory, redis, exit_status=10)
+    ctx, ssh, _ = _probe_ctx(context_factory, redis, stdout=FAILED_RUN)
     result = await SshdBootstrapCheck(remove_fillers=False).run(ctx)
     assert result.passed is False
     assert KEY not in redis.store
@@ -234,13 +235,18 @@ async def test_a_dry_run_judges_a_running_filler_without_writing_or_removing(con
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "exit_status,error",
-    [(0, None), (3, None), (255, None), (None, OSError("connection lost"))],
-    ids=["listening", "young-or-not-running", "probe-error", "ssh-error"],
+    "stdout,error",
+    [
+        ("sshd already running; adopting existing daemon\n", None),
+        ("", None),
+        ("E: Unable to locate package openssh-server\n", None),
+        (None, OSError("connection lost")),
+    ],
+    ids=["serving", "young-or-not-running", "apt-failed", "ssh-error"],
 )
-async def test_a_listening_young_or_unprobed_filler_passes(context_factory, exit_status, error):
+async def test_a_serving_young_apt_failed_or_unprobed_filler_passes(context_factory, stdout, error):
     redis = FakeRedis()
-    ctx, _, backend = _probe_ctx(context_factory, redis, exit_status=exit_status, error=error)
+    ctx, _, backend = _probe_ctx(context_factory, redis, stdout=stdout or "", error=error)
     result = await SshdBootstrapCheck().run(ctx)
     assert result.passed is True
     assert result.event.reason_code == Msg.OK.reason
@@ -251,36 +257,32 @@ async def test_a_listening_young_or_unprobed_filler_passes(context_factory, exit
 @pytest.mark.asyncio
 async def test_a_rented_node_is_not_probed(context_factory):
     redis = FakeRedis()
-    ctx, ssh, _ = _probe_ctx(context_factory, redis, exit_status=10, rented=True)
+    ctx, ssh, _ = _probe_ctx(context_factory, redis, stdout=FAILED_RUN, rented=True)
     result = await SshdBootstrapCheck().run(ctx)
     assert result.passed is True
     ssh.run.assert_not_awaited()
 
 
-def test_the_listening_test_matches_the_bootstrap_script(tmp_path):
+def test_the_probe_reruns_the_bootstrap_only_past_the_grace(tmp_path):
     import subprocess
 
-    from services.task.checks.sshd_bootstrap import _LISTENING_TEST, running_filler_probe
+    from services.task.checks.sshd_bootstrap import _BOOTSTRAP_SCRIPT, running_filler_probe
 
-    listen = "   0: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000\n"
-    other = "   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000\n"
-    for rows, want in [(listen, 0), (other, 10)]:
-        (tmp_path / "tcp").write_text("  sl  local_address rem_address   st\n" + rows)
-        script = _LISTENING_TEST.replace(
-            "/proc/net/tcp /proc/net/tcp6", f"{tmp_path}/tcp {tmp_path}/none"
-        )
-        assert subprocess.run(["sh", "-c", script]).returncode == want
-    # the whole probe against a fake docker: only a filler past the grace gets the exec verdict
+    # a fake docker: inspect reports the start time, exec saves the script it is fed on stdin
     docker = tmp_path / "docker"
-    for minutes_ago, exec_rc, want in [(20, 10, 10), (20, 0, 0), (5, 10, 3)]:
+    fed = tmp_path / "fed.sh"
+    for minutes_ago, want in [(5, 3), (20, 0)]:
+        fed.unlink(missing_ok=True)
         started = subprocess.run(
             ["date", "-u", "-d", f"-{minutes_ago} min", "+%Y-%m-%dT%H:%M:%S.123456789Z"],
             capture_output=True,
             text=True,
         ).stdout.strip()
         docker.write_text(
-            f'#!/bin/sh\nif [ "$1" = inspect ]; then echo "true {started}"; else exit {exec_rc}; fi\n'
+            f'#!/bin/sh\nif [ "$1" = inspect ]; then echo "true {started}"; else cat > {fed}; fi\n'
         )
         docker.chmod(0o755)
         probe = running_filler_probe("filler_x").replace("/usr/bin/docker", str(docker))
         assert subprocess.run(["sh", "-c", probe], timeout=10).returncode == want
+        assert fed.exists() is (want == 0)
+    assert fed.read_bytes() == _BOOTSTRAP_SCRIPT.read_bytes()
