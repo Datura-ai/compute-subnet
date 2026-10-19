@@ -57,6 +57,9 @@ RENTAL_PRICES_PER_HOUR.update({
     "NVIDIA GeForce RTX 2080 Ti": 0.08,
     "NVIDIA Tesla V100 Tensor Core GPU": 0.10,
     "NVIDIA RTX PRO 5000 Blackwell": 0.53,
+    # PRO 4500 (32 GB) = PRO 5000 (48 GB) x 32/48 memory ratio; the Server Edition is the same card.
+    "NVIDIA RTX PRO 4500 Blackwell": 0.35,
+    "NVIDIA RTX PRO 4500 Blackwell Server Edition": 0.35,
     "NVIDIA RTX PRO 6000D Blackwell Workstation Edition": 0.93,
     "NVIDIA RTX 6000D": 0.93,
     "NVIDIA GeForce RTX 4080": 0.20,
@@ -133,7 +136,7 @@ MAX_UNRENTED_GPUS_BY_TYPE: dict[str, dict[int, int]] = {
     "RTX 4060": {},
     "RTX PRO 2000": {},
     "RTX PRO 4000": {},
-    "RTX PRO 4500": {},
+    "RTX PRO 4500": {1: 10, 8: 64},
     "RTX PRO 5000": {1: 10, 8: 64},
     "RTX PRO 6000D": {1: 10, 8: 64},
     "RTX 4500 Ada Generation": {},

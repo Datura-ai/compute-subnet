@@ -62,6 +62,8 @@ def test_overrides_change_only_the_server_edition_and_b300_entries():
         "NVIDIA GeForce RTX 2080 Ti",
         "NVIDIA Tesla V100 Tensor Core GPU",
         "NVIDIA RTX PRO 5000 Blackwell",
+        "NVIDIA RTX PRO 4500 Blackwell",
+        "NVIDIA RTX PRO 4500 Blackwell Server Edition",
         "NVIDIA RTX PRO 6000D Blackwell Workstation Edition",
         "NVIDIA RTX 6000D",
         "NVIDIA GeForce RTX 4080",
