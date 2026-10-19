@@ -1155,6 +1155,10 @@ class MinerService:
         reach (DAH-3338). Rented ones are left to ``_build_not_listed_rented_results``; only the
         cycle's whole-miner request reports, as there. A miner that predates the field sends None
         and gets nothing. Flag off: [].
+
+        A miner that reached fewer than 1 in 10 of its known nodes is down itself (its own network,
+        a restart), not its nodes: that wave writes none of these rows, so one miner-side blip does
+        not mark every node down (Pixel, 19 Oct). The zero-executor wave then fails as before.
         """
         if (
             not settings.UNREACHABLE_EXECUTOR_REPORT_ENABLED
@@ -1162,12 +1166,27 @@ class MinerService:
             or executor_id is not None
         ):
             return []
+        known = list(dict.fromkeys(str(uuid).lower() for uuid in msg.known_executor_ids))
         skip = {str(executor.uuid).lower() for executor in msg.executors}
+        if len(skip & set(known)) * 10 < len(known):
+            if log:
+                logger.warning(
+                    _m(
+                        "Miner reached almost none of its known executors; no unreachable rows this wave",
+                        extra=get_extra_info({
+                            "job_batch_id": payload.job_batch_id,
+                            "miner_hotkey": payload.miner_hotkey,
+                            "reached": len(skip & set(known)),
+                            "known": len(known),
+                        }),
+                    )
+                )
+            return []
         if rented_data:
             skip |= {str(uuid).lower() for uuid in rented_data.executors}
             skip |= {str(uuid).lower() for uuid in (rented_data.manual_rental_executors or {})}
         results = []
-        for executor_uuid in dict.fromkeys(str(uuid).lower() for uuid in msg.known_executor_ids):
+        for executor_uuid in known:
             if executor_uuid in skip:
                 continue
             event = build_executor_unreachable_by_miner_event(
