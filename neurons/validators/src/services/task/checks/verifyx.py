@@ -31,6 +31,12 @@ _EMA_KEYS = ("ema_verifyx_download_speed", "ema_verifyx_upload_speed")
 # Keyed by (miner hotkey, executor uuid): two miners can list the same executor uuid.
 MAX_KEPT_UPLOAD_PROBES = 8
 _kept_upload_probes: dict[tuple[str, str], int] = {}
+# The same host can make the Cloudflare download fail too (block speed.cloudflare.com), and then
+# the gated number is the package download, a fixed file a LAN cache can serve. Probes in a row
+# gated on the package reading are counted the same way; past this many each one is logged, and
+# the missing capacity reading is fed as the 0 it is.
+MAX_PACKAGE_FALLBACK_PROBES = 8
+_package_fallback_probes: dict[tuple[str, str], int] = {}
 
 
 @dataclass(frozen=True)
@@ -46,11 +52,11 @@ class ColdSampleRetry:
 
 
 class VerifyXCheck:
-    """Run the optional VerifyX hardware probe and update specs with its findings.
+    """Run the VerifyX hardware probe and update specs with its findings.
 
-    This preserves the legacy feature flag behaviour: when VerifyX is enabled we block on
-    its success, otherwise the check becomes a no-op. Documenting it here lets us debate
-    the value of the external probe independently from the rest of the pipeline.
+    The check blocks on the probe's success. It always runs (DAH-4328 removed the
+    ENABLE_VERIFYX setting, on everywhere since Sep 2025); only an idle filler-only node
+    skips it, keeping its last known EMA.
     """
 
     check_id = "gpu.validate.verifyx"
@@ -63,13 +69,6 @@ class VerifyXCheck:
         return result.error
 
     async def run(self, ctx: Context) -> CheckResult:
-        if not ctx.config.verifyx_enabled:
-            event = render_message(
-                Msg.DISABLED,
-                ctx=ctx,
-                check_id=self.check_id,
-            )
-            return CheckResult(passed=True, event=event)
         verifyx_service = ctx.services.verifyx
         specs = ctx.state.specs
         if not specs:
@@ -194,6 +193,10 @@ class VerifyXCheck:
                 updated_specs["network"] = {}
             download_speed = verifyx_network.get("download_speed")
             cloudflare_fallback = bool(verifyx_network.get("cloudflare_fallback"))
+            package_gated = _is_package_reading_gated(ctx, cloudflare_fallback)
+            if cloudflare_fallback and not package_gated:
+                capacity = verifyx_network.get("capacity_download_speed")
+                download_speed = capacity if _is_positive_number(capacity) else 0.0
             upload_blocked = _upload_kept_within_cap(
                 ctx, bool(verifyx_network.get("cloudflare_upload_fallback"))
             )
@@ -205,7 +208,7 @@ class VerifyXCheck:
                 download_speed,
                 prev_ema.ema_verifyx_download_speed if prev_ema else None,
                 unavailable_readings,
-                keep_previous_on_none=cloudflare_fallback,
+                keep_previous_on_none=package_gated,
             )
             _feed_ema(
                 ctx,
@@ -414,6 +417,26 @@ def _upload_kept_within_cap(ctx: Context, upload_blocked: bool) -> bool:
         _m(
             "VerifyX upload EMA kept too many probes in a row on Cloudflare's 429, feeding the 0",
             extra=get_extra_info({**ctx.default_extra, "kept_upload_probes": kept}),
+        )
+    )
+    return False
+
+
+def _is_package_reading_gated(ctx: Context, cloudflare_fallback: bool) -> bool:
+    """Whether this probe's package reading is the gated one: `cloudflare_fallback`, except past
+    MAX_PACKAGE_FALLBACK_PROBES in a row. A probe Cloudflare answered starts the count again."""
+    key = (ctx.miner_hotkey, ctx.executor.uuid)
+    if not cloudflare_fallback:
+        _package_fallback_probes.pop(key, None)
+        return False
+    probes = _package_fallback_probes.get(key, 0) + 1
+    _package_fallback_probes[key] = probes
+    if probes <= MAX_PACKAGE_FALLBACK_PROBES:
+        return True
+    logger.warning(
+        _m(
+            "VERIFYX_PACKAGE_FALLBACK_STREAK",
+            extra=get_extra_info({**ctx.default_extra, "package_fallback_probes": probes}),
         )
     )
     return False

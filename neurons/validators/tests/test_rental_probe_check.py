@@ -85,6 +85,7 @@ def probe_settings(
         s.RENTAL_PROBE_SSH_DEADLINE_SECONDS = deadline
         s.NO_OUTBOUND_INTERNET_CHECK_ENABLED = egress_check
         s.NO_OUTBOUND_INTERNET_ENFORCEMENT_ENABLED = egress_enforced
+        s.JOB_TIME_OUT = 60 * 15
         yield s
 
 
@@ -258,6 +259,7 @@ def make_probe_context(
     image_present: bool = True,
     images=(IMAGE,),
     rented_now=None,
+    first_pass: bool = False,
 ):
     docker = docker or FakeDocker()
     redis = redis or FakeRedis()
@@ -291,7 +293,9 @@ def make_probe_context(
     ctx = make_context(
         services=services,
         state=state,
-        config=build_context_config(validator_keypair=object()),
+        config=build_context_config(
+            validator_keypair=object(), express_first_pass=first_pass
+        ),
         ssh=ssh,
         executor_ssh_private_key_encrypted="gAAAAA-encrypted-executor-key",
         miner_hotkey=MINER,
@@ -407,10 +411,10 @@ def renter_path(
 
 
 @pytest.mark.asyncio
-async def test_off_by_default_rents_nothing():
-    """Regression: a validator that did not opt in rents a container on every idle node each cycle, either
-    because the check ignores the flag or because the setting's default was flipped to True."""
-    assert type(module.settings).model_fields["RENTAL_PROBE_ENABLED"].default is False
+async def test_off_rents_nothing():
+    """Regression: a validator that turned the probe off still rents a container on every idle node each
+    cycle because the check ignores the flag. DAH-4258: on by default, in shadow."""
+    assert type(module.settings).model_fields["RENTAL_PROBE_ENABLED"].default is True
     ctx, docker, _ = make_probe_context()
     with probe_settings(enabled=False):
         result = await RentalProbeCheck().run(ctx)
@@ -435,6 +439,34 @@ async def test_never_rents_beside_a_renter_or_a_filler(rented, expected_reason):
     assert result.passed and result.event.reason_code == Msg.SKIPPED.reason
     assert result.event.what_we_saw["reason"] == expected_reason
     assert docker.create_calls == []
+
+
+@pytest.mark.asyncio
+async def test_first_pass_in_shadow_creates_nothing():
+    ctx, docker, _ = make_probe_context(first_pass=True)
+    with probe_settings(enforced=False):
+        result = await RentalProbeCheck().run(ctx)
+    assert result.passed and result.event.reason_code == Msg.SKIPPED.reason
+    assert result.event.what_we_saw["reason"] == "first pass"
+    assert docker.create_calls == []
+
+
+@pytest.mark.asyncio
+async def test_late_in_the_cycle_creates_nothing():
+    ctx, docker, _ = make_probe_context()
+    late = ctx.model_copy(update={"started_at_monotonic": time.monotonic() - 500})
+    result = await RentalProbeCheck().run(late)
+    assert result.passed and result.event.reason_code == Msg.SKIPPED.reason
+    assert result.event.what_we_saw["reason"] == "too little cycle time left"
+    assert docker.create_calls == []
+
+
+@pytest.mark.asyncio
+async def test_first_pass_under_enforcement_probes():
+    ctx, docker, _ = make_probe_context(first_pass=True)
+    with probe_settings(enforced=True), renter_path():
+        result = await RentalProbeCheck().run(ctx)
+    assert result.event.reason_code == Msg.PROBE_OK.reason
 
 
 @pytest.mark.asyncio
@@ -1443,10 +1475,10 @@ async def test_pipeline_carries_the_failed_step_to_the_reset_evidence():
     ]
 
 
-def test_enforcement_is_on_by_default():
-    """Regression: a validator that already runs the probe silently stops enforcing it after an upgrade
-    because the new setting's default is off."""
-    assert type(module.settings).model_fields["RENTAL_PROBE_ENFORCEMENT_ENABLED"].default is True
+def test_enforcement_is_off_by_default():
+    """DAH-4258: the probe is on by default, so its default verdict must be shadow: a failure logs
+    RENTAL_PROBE_FAILED_OBSERVED and zeroes nothing until the owner turns enforcement on."""
+    assert type(module.settings).model_fields["RENTAL_PROBE_ENFORCEMENT_ENABLED"].default is False
 
 
 @pytest.mark.asyncio

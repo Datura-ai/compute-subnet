@@ -651,8 +651,8 @@ async def test_remove_s3fs_volume_plugin_ignores_unsafe_volume_name(
     [
         # Sysbox cannot ID-shift a FUSE mount, so s3fs must report the objects as
         # owned by the host uid sysbox maps container root to.
-        (231072, "allow_other,uid=231072,gid=231072"),
-        (None, "allow_other"),
+        (231072, "allow_other,umask=0000,uid=231072,gid=231072"),
+        (None, "allow_other,umask=0000"),
     ],
 )
 async def test_create_s3fs_volume_mount_options(

@@ -49,7 +49,7 @@ def _known(download: float) -> RentedExecutorsResponse:
 def _ctx(context_factory, service, rented_data):
     return context_factory(
         services=build_services(verifyx=service),
-        config=build_context_config(verifyx_enabled=True),
+        config=build_context_config(),
         state=build_state(specs={"gpu": {"count": 1}}, rented_data=rented_data),
     )
 

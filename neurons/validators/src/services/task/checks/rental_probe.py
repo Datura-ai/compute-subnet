@@ -106,6 +106,10 @@ _CREATE_DEADLINE_SECONDS = 300
 # the idleness re-read runs under the per-executor create lock; the lock's TTL (redis_service.py) covers
 # this budget plus the create deadline, so a re-read that overruns it gives the lock back instead
 _IDLENESS_REREAD_BUDGET_SECONDS = 30
+# the executor task is cancelled at JOB_TIME_OUT - 120 (miner_service), and a cancel there drops the
+# miner's whole result; a probe starts only while a stuck create plus a usual teardown still fit
+_MIN_TASK_SECONDS_LEFT = _CREATE_DEADLINE_SECONDS + 60
+_TASK_TIMEOUT_MARGIN_SECONDS = 120
 # the outer cap on delete_container (DAH-3467, review): a stop with its 30 s grace, a `rm -f` that
 # outlives the Docker SDK's 60 s read timeout, the 60 s inspect window plus one 15 s inspect past
 # it, and six "volume is in use" retries 5 s apart come to about 190 s on the inspect-confirmed
@@ -127,6 +131,9 @@ _REDIS_FAILED_PREFIX = RENTAL_PROBE_FAILED_PREFIX
 # the OK stamp expires: a deregistered executor's stamp ages out, and an expired stamp only makes the
 # probe run again on the next idle cycle
 _REDIS_STAMP_TTL_SECONDS = 30 * 24 * 3600
+# A node whose probe has not passed for this many probe intervals and is skipped for a state of its own
+# Docker is logged as RENTAL_PROBE_LONG_UNPROBED.
+_LONG_UNPROBED_INTERVALS = 4
 
 
 @dataclass
@@ -328,6 +335,8 @@ class RentalProbeCheck:
             )
         image_present = await _image_present_on_host(ctx, image_ref)
         if image_present is None:
+            if standing is None:
+                await _log_if_long_unprobed(ctx, "could not read the node's image list")
             return self._inconclusive(
                 ctx,
                 "could not read the node's image list",
@@ -338,6 +347,8 @@ class RentalProbeCheck:
         if not image_present:
             # a pull would put minutes of Docker Hub traffic inside the validation cycle; the
             # cached-template check already reports a node that has not pre-pulled the image
+            if standing is None:
+                await _log_if_long_unprobed(ctx, "default renter image is not pulled on the node")
             return self._skipped(
                 ctx,
                 "default renter image is not pulled on the node",
@@ -513,6 +524,14 @@ async def _skip_reason(ctx: Context) -> tuple[str | None, dict[str, Any]]:
     filler_containers = rented_data.get_filler_containers(ctx.executor.uuid) if rented_data else []
     if filler_containers and not settings.RENTAL_PROBE_BESIDE_FILLERS_ENABLED:
         return "filler running", {"filler_containers": filler_containers}
+    if ctx.config.express_first_pass and not settings.RENTAL_PROBE_ENFORCEMENT_ENABLED:
+        # a shadow verdict cannot fail the node, so the container create waits for the next cycle
+        return "first pass", {}
+    task_seconds_left = (
+        settings.JOB_TIME_OUT - _TASK_TIMEOUT_MARGIN_SECONDS - (time.monotonic() - ctx.started_at_monotonic)
+    )
+    if task_seconds_left < _MIN_TASK_SECONDS_LEFT:
+        return "too little cycle time left", {"task_seconds_left": int(task_seconds_left)}
 
     try:
         last_ok = await _last_ok_at(ctx)
@@ -624,6 +643,30 @@ async def _image_present_on_host(ctx: Context, image_ref: str) -> bool | None:
     except (TimeoutError, asyncssh.Error, OSError):
         return None
     return result.exit_status == 0 and bool((result.stdout or "").strip())
+
+
+async def _log_if_long_unprobed(ctx: Context, reason: str) -> None:
+    """Both reasons are states of the node's own Docker, and both end the cycle without a verdict, so a
+    node can stay unprobed for as long as it keeps one of them. Log only: nothing is decided here."""
+    try:
+        last_ok = await _last_ok_at(ctx)
+    except Exception:
+        return
+    hours = None if last_ok is None else (time.time() - last_ok) / 3600
+    if hours is not None and hours < _LONG_UNPROBED_INTERVALS * settings.RENTAL_PROBE_INTERVAL_HOURS:
+        return
+    logger.warning(
+        _m(
+            "RENTAL_PROBE_LONG_UNPROBED",
+            extra=get_extra_info(
+                {
+                    **ctx.default_extra,
+                    "reason": reason,
+                    "hours_since_last_probe_stamp": None if hours is None else round(hours, 1),
+                }
+            ),
+        )
+    )
 
 
 async def _last_ok_at(ctx: Context) -> float | None:

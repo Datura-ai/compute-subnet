@@ -1523,8 +1523,13 @@ def test_rental_ssh_adapter_sets_a_keepalive_on_its_transport(monkeypatch, tmp_p
         known_hosts_path=known_hosts_path,
     )
     # Through docker-py's own constructor: SSHHTTPAdapter.__init__ is what calls _connect, so the
-    # hook the fix relies on is pinned here, not assumed.
+    # hook the fix relies on is pinned here, not assumed. The adapter defers that connect until the
+    # builder has released the adapter-swap lock.
     adapter = adapter_class("ssh://root@127.0.0.1:2222")
+    assert adapter.ssh_client.connected_with is None
+    assert keepalives == []
+
+    adapter.connect_deferred()
 
     assert adapter.ssh_client.connected_with["hostname"] == "127.0.0.1"
     assert keepalives == [RENTAL_DOCKER_SSH_KEEPALIVE_INTERVAL_SEC]
@@ -1620,10 +1625,11 @@ def _executor_info_named(address: str) -> ExecutorSSHInfo:
 @pytest.mark.asyncio
 async def test_factory_refuses_a_hostname_with_a_private_address_before_building_a_client(monkeypatch):
     # Arrange
-    async def private(self, host, port, **kwargs):
+    # the rental connect resolves in node_host's pool (socket.getaddrinfo), not via loop.getaddrinfo
+    def private(host, port, **kwargs):
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", port))]
 
-    monkeypatch.setattr("asyncio.BaseEventLoop.getaddrinfo", private)
+    monkeypatch.setattr(socket, "getaddrinfo", private)
     api_client_factory = Mock()
     factory = RentalDockerSdkClientFactory(api_client_factory=api_client_factory)
 

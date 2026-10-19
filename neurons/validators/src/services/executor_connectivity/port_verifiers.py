@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 import uuid
 
 import aiohttp
@@ -7,6 +8,7 @@ from asyncssh import SSHClientConnection
 
 from core.utils import _m, get_extra_info
 from services.executor_connectivity.container_runner import ContainerRunner
+from services.executor_connectivity.external_probe import ExternalPortProbe
 from services.executor_connectivity.models import BatchResult, PortPair
 from services.executor_connectivity.netcat_script import NetcatScript
 from services.executor_connectivity.port_tester import PortTester
@@ -15,12 +17,20 @@ from services.node_host import public_host_connector
 logger = logging.getLogger(__name__)
 
 
+# DAH-4537: ports fetched from outside first; each netcat listener answers once, so these are not
+# fetched again by the validator unless the outside fetch missed them
+EXTERNAL_PROBE_SAMPLE = 3
+
+
 class BatchVerifier:
     """Verifies ports using --network=host in batches."""
 
-    def __init__(self, port_tester: PortTester, runner: ContainerRunner):
+    def __init__(
+        self, port_tester: PortTester, runner: ContainerRunner, external_probe: ExternalPortProbe | None = None
+    ):
         self.port_tester = port_tester
         self.runner = runner
+        self.external_probe = external_probe
 
     async def verify(
         self,
@@ -29,12 +39,11 @@ class BatchVerifier:
         ssh_client,
         host: str,
         log_ctx: dict | None = None,
-        max_attempts: int = 2,
     ) -> BatchResult:
-        """Verify ports with retries, and say whether any attempt got as far as testing them."""
+        """Verify ports with retries."""
         log_ctx = log_ctx or {}
         timeout_sec = 60
-        completed = False
+        max_attempts = 2
 
         for attempt in range(1, max_attempts + 1):
             token = uuid.uuid4().hex
@@ -52,8 +61,6 @@ class BatchVerifier:
                     self._attempt(ports, token, container_name, ssh_client, host, log_ctx),
                     timeout=timeout_sec
                 )
-                completed = completed or attempt_result.completed
-
                 if attempt_result.successful:
                     logger.info(
                         _m(
@@ -61,7 +68,7 @@ class BatchVerifier:
                             extra=get_extra_info(log_ctx),
                         )
                     )
-                    return BatchResult(attempt_result.successful, attempt_result.failed, completed)
+                    return attempt_result
 
                 if attempt < max_attempts:
                     logger.debug(
@@ -90,7 +97,7 @@ class BatchVerifier:
         # attempts and tiers on the way there are DEBUG. An exception inside an attempt keeps
         # ERROR above: that is the validator's own failure, not the node's ports.
         logger.debug(_m(f"all {max_attempts} attempts failed", extra=get_extra_info(log_ctx)))
-        return BatchResult([], ports, completed)
+        return BatchResult([], ports)
 
     async def _attempt(
         self,
@@ -112,18 +119,31 @@ class BatchVerifier:
                     extra=get_extra_info(log_ctx),
                 )
             )
-            return BatchResult([], ports, completed=False)
+            return BatchResult([], ports)
 
         try:
+            sample = random.sample(ports, min(EXTERNAL_PROBE_SAMPLE, len(ports))) if self.external_probe else []
+            reached = await self.external_probe.reached(host, sample, token) if sample else None
             async with aiohttp.ClientSession(connector=public_host_connector(limit=0)) as session:
-                successful, failed = await self.port_tester.test_many(session, host, ports, token, log_ctx)
+                remaining = [p for p in ports if p not in (reached or [])]
+                successful, failed = (
+                    await self.port_tester.test_many(session, host, remaining, token, log_ctx) if remaining else ([], [])
+                )
                 logger.info(
                     _m(f"progress: {len(successful)}/{len(ports)} verified", extra=get_extra_info(log_ctx))
                 )
         finally:
             await self.runner.cleanup(ssh_client, name)
 
-        return BatchResult(successful, failed, completed=True)
+        external_blocked = reached == [] and all(p in successful for p in sample)
+        if external_blocked:
+            logger.warning(
+                _m(
+                    f"ports {[p.external for p in sample]} answer the validator but not the outside prober",
+                    extra=get_extra_info(log_ctx),
+                )
+            )
+        return BatchResult((reached or []) + successful, failed, external_blocked)
 
 
 class FallbackVerifier:
