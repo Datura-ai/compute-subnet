@@ -1,4 +1,5 @@
 #!/bin/sh -e
+set -e
 
 # Set mode (default: miner)
 MODE=${1:-miner}

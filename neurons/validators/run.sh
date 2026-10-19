@@ -1,4 +1,5 @@
 #!/bin/sh -e
+set -e
 
 # Set mode (default: validator)
 MODE=${1:-validator}
