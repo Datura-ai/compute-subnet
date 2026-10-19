@@ -9,7 +9,7 @@ from ..messages import GpuMemoryHealthMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
 from .banned_provider import has_live_rental
-from .gpu_fault_probe import MAX_FAULT_LINES, OUTPUT_TAIL_CHARS, PROBE_SOURCE, _cap, _parse_report
+from .gpu_fault_probe import OUTPUT_TAIL_CHARS, PROBE_SOURCE, _cap, _parse_report
 
 # one NVML snapshot in a fork with its own 10 s deadline (miner_jobs/gpu_fault_probe.py), plus SSH
 TIMEOUT_SECONDS = 30
@@ -41,7 +41,7 @@ class GpuMemoryHealthCheck:
         status = report.get("status")
         if status == "flagged":
             flags = _cap(report.get("flags"))
-            what["flags"] = flags[:MAX_FAULT_LINES] if isinstance(flags, list) else []
+            what["flags"] = flags if isinstance(flags, list) else []
             if settings.GPU_MEMORY_HEALTH_ENFORCEMENT_ENABLED:
                 event = render_message(Msg.FAILED, ctx=ctx, check_id=self.check_id, what=what)
                 return CheckResult(

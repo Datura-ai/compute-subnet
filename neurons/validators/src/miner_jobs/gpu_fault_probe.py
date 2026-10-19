@@ -912,9 +912,10 @@ def nvml_health(snapshot: dict) -> list[str]:
             )
         rows = gpu.get("remapped_rows")
         if rows and len(rows) >= 4:
-            if rows[2]:
+            _, _, is_pending, has_failed = rows[:4]
+            if is_pending:
                 flags.append(f"{name}: row remap pending (needs a GPU reset)")
-            if rows[3]:
+            if has_failed:
                 flags.append(f"{name}: row remap failed")
         action = gpu.get("recovery_action")
         if action:
@@ -1041,6 +1042,15 @@ def _exit_code(process):
     return process.exitcode
 
 
+def print_nvml_health_report(mp) -> None:
+    """The `--nvml-only` verdict: one NVML snapshot and its standing memory faults."""
+    snapshot = nvml_snapshot_forked(mp)
+    flags = nvml_health(snapshot)
+    status = "error" if not snapshot.get("available") else "flagged" if flags else "ok"
+    report = {"status": status, "flags": flags, "nvml": snapshot}
+    print(JSON_MARKER, json.dumps(report, sort_keys=True))
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -1065,11 +1075,7 @@ def main(argv: list[str]) -> int:
     # in the driver takes the worker, not the verdict, and the parent never initialises CUDA itself
     mp = multiprocessing.get_context("fork")
     if args.nvml_only:
-        snapshot = nvml_snapshot_forked(mp)
-        flags = nvml_health(snapshot)
-        status = "error" if not snapshot.get("available") else "flagged" if flags else "ok"
-        report = {"status": status, "flags": flags, "nvml": snapshot}
-        print(JSON_MARKER, json.dumps(report, sort_keys=True))
+        print_nvml_health_report(mp)
         return 0
     try:
         indices = args.device if args.device else list(range(_device_count(mp)))
