@@ -10373,16 +10373,22 @@ class DockerService:
                 msg=str(log_text),
             )
 
-    async def reset_pod_gpus(
+    async def _pod_gpu_operation(
         self,
-        payload: ResetPodGpuRequest,
+        payload: ResetPodGpuRequest | LockPodGpuClocksRequest,
         executor_info: ExecutorSSHInfo,
         keypair: bittensor.Keypair,
         private_key: str,
-    ) -> PodGpuResetResult:
-        """DAH-4658: a renter's reset of their pod's GPUs (services/gpu_reset.py does the work). The
-        pending-pod mark (kind gpu_reset) is held throughout, so the rented GPU checks skip the node
-        and no verified-job reset is sent for it: a renter's reset is never a provider fault."""
+        *,
+        label: str,
+        kind: str,
+        operate: Callable[[SSHCommandRunner, str, Any, dict], Awaitable[Any]],
+        failed: Callable[[str], Any],
+        gpu_uuids: list[str] | None = None,
+    ) -> Any:
+        """The trust, SSH and pending-mark steps a renter's GPU reset and clock lock share. `operate(runner,
+        private_key, known_hosts_policy, default_extra)` does the work while the pending-pod mark of `kind` is held;
+        `failed(detail)` is the report for an executor that is not trusted or not reached."""
         default_extra = {
             "miner_hotkey": payload.miner_hotkey,
             "executor_uuid": payload.executor_id,
@@ -10392,21 +10398,7 @@ class DockerService:
             "executor_ip_address": executor_info.address,
             "executor_ssh_port": executor_info.ssh_port,
         }
-        logger.info(_m("Reset pod GPUs", extra=get_extra_info({**default_extra, "payload": str(payload)})))
-
-        def result(report: GpuResetReport) -> PodGpuResetResult:
-            return PodGpuResetResult(
-                miner_hotkey=payload.miner_hotkey,
-                executor_id=payload.executor_id,
-                pod_id=payload.pod_id,
-                workload_kind=payload.workload_kind,
-                request_id=payload.request_id,
-                ok=report.ok,
-                error_code=report.error_code,
-                container_restarted=report.container_restarted,
-                gpus=report.gpus,
-                detail=report.detail,
-            )
+        logger.info(_m(label, extra=get_extra_info({**default_extra, "payload": str(payload)})))
 
         private_key = self.ssh_service.decrypt_payload(keypair.ss58_address, private_key)
         pkey = asyncssh.import_private_key(private_key)
@@ -10416,26 +10408,11 @@ class DockerService:
             )
             require_rental_docker_ssh_host_key(executor_info)
         except (AttestationError, RentalDockerConnectionError) as exc:
-            logger.error(_m("Reset pod GPUs: executor not trusted", extra=get_extra_info({**default_extra, "error": str(exc)})))
-            return result(GpuResetReport(ok=False, error_code=GpuResetErrorCode.ExecutorUnreachable, detail=str(exc)))
-
-        async def start_container() -> None:
-            await self.start_existing_container(
-                executor_info=executor_info,
-                private_key=private_key,
-                known_hosts_policy=known_hosts_policy,
-                container_name=payload.container_name,
-                local_volume_path=payload.local_volume_path,
-                pod_id=payload.pod_id,
-                default_extra=default_extra,
-            )
+            logger.error(_m(f"{label}: executor not trusted", extra=get_extra_info({**default_extra, "error": str(exc)})))
+            return failed(str(exc))
 
         await self.redis_service.add_pending_pod(
-            payload.miner_hotkey,
-            payload.executor_id,
-            payload.pod_id,
-            kind=GPU_RESET_PENDING_KIND,
-            gpu_uuids=payload.gpu_uuids,
+            payload.miner_hotkey, payload.executor_id, payload.pod_id, kind=kind, gpu_uuids=gpu_uuids
         )
         try:
             async with asyncssh.connect(
@@ -10446,36 +10423,89 @@ class DockerService:
                 client_keys=[pkey],
                 known_hosts=known_hosts_policy,
             ) as ssh_client:
-                report = await reset_pod_gpus(
-                    SSHCommandRunner(ssh_client, max_retries=0),
-                    container_name=payload.container_name,
-                    backend_uuids=payload.gpu_uuids,
-                    gpu_indices=payload.gpu_indices,
-                    start_container=start_container,
-                    in_tee=bool(executor_info.tdx_quote),
-                    encrypted_volume_mount=_LIUM_CIPHER_MOUNT,
-                    local_volume_path=payload.local_volume_path,
+                report = await operate(
+                    SSHCommandRunner(ssh_client, max_retries=0), private_key, known_hosts_policy, default_extra
                 )
         except Exception as exc:
-            logger.error(_m("Reset pod GPUs failed", extra=get_extra_info({**default_extra, "error": str(exc)})), exc_info=True)
-            report = GpuResetReport(ok=False, error_code=GpuResetErrorCode.ExecutorUnreachable, detail=str(exc))
+            logger.error(_m(f"{label} failed", extra=get_extra_info({**default_extra, "error": str(exc)})), exc_info=True)
+            report = failed(str(exc))
         finally:
             await self.redis_service.remove_pending_pod(payload.miner_hotkey, payload.executor_id, payload.pod_id)
 
         logger.info(
             _m(
-                "Reset pod GPUs done",
+                f"{label} done",
                 extra=get_extra_info({
                     **default_extra,
                     "ok": report.ok,
                     "error_code": report.error_code.value if report.error_code else None,
-                    "container_restarted": report.container_restarted,
+                    "container_restarted": getattr(report, "container_restarted", None),
                     "gpus": [gpu.model_dump() for gpu in report.gpus],
                     "detail": report.detail,
                 }),
             )
         )
-        return result(report)
+        return report
+
+    async def reset_pod_gpus(
+        self,
+        payload: ResetPodGpuRequest,
+        executor_info: ExecutorSSHInfo,
+        keypair: bittensor.Keypair,
+        private_key: str,
+    ) -> PodGpuResetResult:
+        """DAH-4658: a renter's reset of their pod's GPUs (services/gpu_reset.py does the work). The
+        pending-pod mark (kind gpu_reset) is held throughout, so the rented GPU checks skip the pod
+        and no verified-job reset it can cause is sent: a renter's reset is never a provider fault."""
+
+        async def operate(runner: SSHCommandRunner, private_key: str, known_hosts_policy, default_extra: dict):
+            async def start_container() -> None:
+                await self.start_existing_container(
+                    executor_info=executor_info,
+                    private_key=private_key,
+                    known_hosts_policy=known_hosts_policy,
+                    container_name=payload.container_name,
+                    local_volume_path=payload.local_volume_path,
+                    pod_id=payload.pod_id,
+                    default_extra=default_extra,
+                )
+
+            return await reset_pod_gpus(
+                runner,
+                container_name=payload.container_name,
+                backend_uuids=payload.gpu_uuids,
+                gpu_indices=payload.gpu_indices,
+                start_container=start_container,
+                in_tee=bool(executor_info.tdx_quote),
+                encrypted_volume_mount=_LIUM_CIPHER_MOUNT,
+                local_volume_path=payload.local_volume_path,
+            )
+
+        report: GpuResetReport = await self._pod_gpu_operation(
+            payload,
+            executor_info,
+            keypair,
+            private_key,
+            label="Reset pod GPUs",
+            kind=GPU_RESET_PENDING_KIND,
+            operate=operate,
+            failed=lambda detail: GpuResetReport(
+                ok=False, error_code=GpuResetErrorCode.ExecutorUnreachable, detail=detail
+            ),
+            gpu_uuids=payload.gpu_uuids,
+        )
+        return PodGpuResetResult(
+            miner_hotkey=payload.miner_hotkey,
+            executor_id=payload.executor_id,
+            pod_id=payload.pod_id,
+            workload_kind=payload.workload_kind,
+            request_id=payload.request_id,
+            ok=report.ok,
+            error_code=report.error_code,
+            container_restarted=report.container_restarted,
+            gpus=report.gpus,
+            detail=report.detail,
+        )
 
     async def lock_pod_gpu_clocks(
         self,
@@ -10485,85 +10515,45 @@ class DockerService:
         private_key: str,
     ) -> PodGpuClocksResult:
         """DAH-4663: a renter's lock (or reset) of their pod's GPU clocks (services/gpu_clocks.py does the
-        work). The pending-pod mark (kind gpu_clocks) is held throughout, as for a GPU reset."""
-        default_extra = {
-            "miner_hotkey": payload.miner_hotkey,
-            "executor_uuid": payload.executor_id,
-            "pod_id": payload.pod_id,
-            "request_id": payload.request_id,
-            "container_name": payload.container_name,
-            "executor_ip_address": executor_info.address,
-            "executor_ssh_port": executor_info.ssh_port,
-        }
-        logger.info(_m("Lock pod GPU clocks", extra=get_extra_info({**default_extra, "payload": str(payload)})))
+        work). The pending-pod mark (kind gpu_clocks) is held throughout, so a second operation is declined."""
 
-        def result(report: GpuClocksReport) -> PodGpuClocksResult:
-            return PodGpuClocksResult(
-                miner_hotkey=payload.miner_hotkey,
-                executor_id=payload.executor_id,
+        async def operate(runner: SSHCommandRunner, _private_key: str, _known_hosts_policy, _default_extra: dict):
+            return await lock_pod_gpu_clocks(
+                runner,
+                self.redis_service,
+                container_name=payload.container_name,
                 pod_id=payload.pod_id,
-                workload_kind=payload.workload_kind,
-                request_id=payload.request_id,
-                ok=report.ok,
-                error_code=report.error_code,
-                gpus=report.gpus,
+                executor_id=payload.executor_id,
+                backend_uuids=payload.gpu_uuids,
+                gpu_indices=payload.gpu_indices,
+                min_mhz=payload.min_mhz,
+                max_mhz=payload.max_mhz,
+                reset=payload.reset,
+                in_tee=bool(executor_info.tdx_quote),
             )
 
-        private_key = self.ssh_service.decrypt_payload(keypair.ss58_address, private_key)
-        pkey = asyncssh.import_private_key(private_key)
-        try:
-            known_hosts_policy = await self._prepare_known_hosts_policy(
-                executor_info, payload.miner_hotkey, default_extra
-            )
-            require_rental_docker_ssh_host_key(executor_info)
-        except (AttestationError, RentalDockerConnectionError) as exc:
-            logger.error(_m("Lock pod GPU clocks: executor not trusted", extra=get_extra_info({**default_extra, "error": str(exc)})))
-            return result(GpuClocksReport(ok=False, error_code=GpuResetErrorCode.ExecutorUnreachable, detail=str(exc)))
-
-        await self.redis_service.add_pending_pod(
-            payload.miner_hotkey, payload.executor_id, payload.pod_id, kind=GPU_CLOCKS_PENDING_KIND
+        report: GpuClocksReport = await self._pod_gpu_operation(
+            payload,
+            executor_info,
+            keypair,
+            private_key,
+            label="Lock pod GPU clocks",
+            kind=GPU_CLOCKS_PENDING_KIND,
+            operate=operate,
+            failed=lambda detail: GpuClocksReport(
+                ok=False, error_code=GpuResetErrorCode.ExecutorUnreachable, detail=detail
+            ),
         )
-        try:
-            async with asyncssh.connect(
-                host=executor_info.address,
-                port=executor_info.ssh_port,
-                **await public_host_sock(executor_info.address, executor_info.ssh_port),
-                username=executor_info.ssh_username,
-                client_keys=[pkey],
-                known_hosts=known_hosts_policy,
-            ) as ssh_client:
-                report = await lock_pod_gpu_clocks(
-                    SSHCommandRunner(ssh_client, max_retries=0),
-                    self.redis_service,
-                    container_name=payload.container_name,
-                    pod_id=payload.pod_id,
-                    executor_id=payload.executor_id,
-                    backend_uuids=payload.gpu_uuids,
-                    gpu_indices=payload.gpu_indices,
-                    min_mhz=payload.min_mhz,
-                    max_mhz=payload.max_mhz,
-                    reset=payload.reset,
-                    in_tee=bool(executor_info.tdx_quote),
-                )
-        except Exception as exc:
-            logger.error(_m("Lock pod GPU clocks failed", extra=get_extra_info({**default_extra, "error": str(exc)})), exc_info=True)
-            report = GpuClocksReport(ok=False, error_code=GpuResetErrorCode.ExecutorUnreachable, detail=str(exc))
-        finally:
-            await self.redis_service.remove_pending_pod(payload.miner_hotkey, payload.executor_id, payload.pod_id)
-
-        logger.info(
-            _m(
-                "Lock pod GPU clocks done",
-                extra=get_extra_info({
-                    **default_extra,
-                    "ok": report.ok,
-                    "error_code": report.error_code.value if report.error_code else None,
-                    "gpus": [gpu.model_dump() for gpu in report.gpus],
-                    "detail": report.detail,
-                }),
-            )
+        return PodGpuClocksResult(
+            miner_hotkey=payload.miner_hotkey,
+            executor_id=payload.executor_id,
+            pod_id=payload.pod_id,
+            workload_kind=payload.workload_kind,
+            request_id=payload.request_id,
+            ok=report.ok,
+            error_code=report.error_code,
+            gpus=report.gpus,
         )
-        return result(report)
 
     async def remove_ssh_keys(
         self,

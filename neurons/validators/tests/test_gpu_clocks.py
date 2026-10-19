@@ -3,7 +3,7 @@
 Every refusal, and the hard invariants: the GPUs touched are inside BOTH the container's own
 DeviceRequests and the backend's GPUs, `-lgc`/`-rgc` never run without `-i`, `-pl` never runs, nothing
 is read from inside the pod; the range is clamped to the supported clocks; the pod's delete and the
-next create reset the lock; the thermal-throttle check skips a locked GPU.
+next create reset the lock; the thermal-throttle check spares a locked GPU only its low clock.
 """
 
 import json
@@ -126,6 +126,8 @@ async def test_a_backend_subset_of_a_whole_host_container_touches_only_the_backe
     host = FakeHost(device_ids=(), count=-1)
     report, _ = await _lock(host, backend=(U[2], U[3]))
     assert report.ok and {g.uuid for g in report.gpus} == {U[2], U[3]}
+    # numbered as gpu_reset numbers them: the container's GPUs by bus id (U[1], U[0], U[2], U[3])
+    assert [(g.index, g.uuid) for g in report.gpus] == [(2, U[2]), (3, U[3])]
 
 
 @pytest.mark.asyncio
@@ -184,8 +186,8 @@ def test_the_clock_command_always_names_one_pod_gpu():
         with pytest.raises(ValueError):
             build_clock_command("reset", bad)
     with pytest.raises(ValueError):
-        build_clock_command("lock", U[2], allowed={U[0]}, min_mhz=1, max_mhz=2)
-    assert build_clock_command("lock", U[0], allowed={U[0]}, min_mhz=1, max_mhz=2) == f"nvidia-smi -i {U[0]} -lgc 1,2"
+        build_clock_command("lock", U[2], pod_gpu_uuids={U[0]}, min_mhz=1, max_mhz=2)
+    assert build_clock_command("lock", U[0], pod_gpu_uuids={U[0]}, min_mhz=1, max_mhz=2) == f"nvidia-smi -i {U[0]} -lgc 1,2"
 
 
 # --- the checks ---------------------------------------------------------------------------------
@@ -215,6 +217,12 @@ async def test_the_thermal_throttle_check_skips_a_locked_gpu(context_factory):
     none = await GpuThermalThrottleCheck().run(ctx)
     assert none.passed and none.event.reason_code == Msg.OK.reason
 
+    # a heat fault on a locked GPU is still judged: on an idle node it collapses, lock or not
+    hot = [{**row, "clocks_event_reasons": 0x40} for row in rows]
+    hot_ctx = context_factory(state=build_state(gpu_details=hot), services=build_services(redis=redis))
+    collapsed = await GpuThermalThrottleCheck().run(hot_ctx)
+    assert not collapsed.passed and collapsed.event.reason_code == Msg.COLLAPSED.reason
+
 
 @pytest.mark.asyncio
 async def test_a_redis_error_or_a_mock_never_skips_the_throttle_check():
@@ -223,15 +231,15 @@ async def test_a_redis_error_or_a_mock_never_skips_the_throttle_check():
 
 
 @pytest.mark.asyncio
-async def test_the_clock_lock_mark_skips_the_rented_gpu_checks_like_a_reset():
+async def test_the_clock_lock_mark_declines_a_second_operation_but_skips_no_check():
+    from services.gpu_reset import renter_gpu_reset_in_progress
+
     from tests.test_gpu_reset import PendingRedis
 
     redis = PendingRedis()
     await redis.add_pending_pod("hk", "ex", "pod1", kind="gpu_clocks")
-    assert await redis.gpu_reset_in_progress("hk", "ex")
     assert await redis.renting_in_progress("hk", "ex", "pod1")  # a second operation is declined
-    await redis.remove_pending_pod("hk", "ex", "pod1")
-    assert not await redis.gpu_reset_in_progress("hk", "ex")
+    assert not await renter_gpu_reset_in_progress(redis, "hk", "ex")  # the pod keeps running: checks run
 
 
 def test_a_lock_that_never_reached_the_executor_answers_with_a_clocks_result():

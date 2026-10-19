@@ -28,8 +28,8 @@ from services.gpu_reset import (
     GpuResetRefused,
     _run,
     _tail,
-    container_gpu_uuids,
     parse_host_gpus,
+    pod_gpus,
 )
 
 if TYPE_CHECKING:
@@ -59,14 +59,14 @@ def build_clock_command(
     action: Literal["lock", "reset"],
     uuid: str,
     *,
-    allowed: set[str] | None = None,
+    pod_gpu_uuids: set[str] | None = None,
     min_mhz: int | None = None,
     max_mhz: int | None = None,
 ) -> str:
-    """The one place `-lgc` / `-rgc` are spelled: always with `-i <one GPU>`, only on an allowed GPU."""
+    """The one place `-lgc` / `-rgc` are spelled: always with `-i <one GPU>`, only on one of the pod's GPUs."""
     if not uuid.startswith("GPU-"):
         raise ValueError(f"refusing a clock change without -i <GPU uuid>: {uuid!r}")
-    if allowed is not None and uuid not in allowed:
+    if pod_gpu_uuids is not None and uuid not in pod_gpu_uuids:
         raise ValueError("refusing to change the clocks of a GPU outside the pod")
     if action == "reset":
         return f"nvidia-smi -i {shlex.quote(uuid)} -rgc"
@@ -116,21 +116,10 @@ async def _targets(
     if host.exit_code != 0 or not host_gpus:
         raise GpuResetRefused(GpuResetErrorCode.ClockLockNotSupported, "nvidia-smi listed no GPU on the host")
     host_by_uuid = {gpu.uuid: gpu for gpu in host_gpus}
-    container_uuids = [u for u in container_gpu_uuids(host_config.get("DeviceRequests"), host_gpus) if u in host_by_uuid]
-    missing = [uuid for uuid in backend_uuids if uuid not in container_uuids]
-    if not container_uuids or not backend_uuids or missing:
-        raise GpuResetRefused(
-            GpuResetErrorCode.GpuNotInContainer, f"GPUs not given to the container: {missing or backend_uuids}"
-        )
-    # pod GPU index = the pod's GPUs by host PCI bus id, as in gpu_reset
-    ordered = sorted((u for u in container_uuids if u in backend_uuids), key=lambda u: host_by_uuid[u].bus_id)
-    index_by_uuid = {uuid: index for index, uuid in enumerate(ordered)}
-    if gpu_indices is None:
-        targets = ordered
-    elif any(index < 0 or index >= len(ordered) for index in gpu_indices):
-        raise GpuResetRefused(GpuResetErrorCode.GpuNotInContainer, f"no pod GPU at index {gpu_indices}")
-    else:
-        targets = [ordered[index] for index in sorted(set(gpu_indices))]
+    # the pod's numbering, shared with gpu_reset; only the backend's GPUs of the pod are ever touched
+    _, targets, index_by_uuid = pod_gpus(host_config.get("DeviceRequests"), host_gpus, backend_uuids, gpu_indices)
+    if not set(targets) <= set(backend_uuids):
+        raise GpuResetRefused(GpuResetErrorCode.GpuNotInContainer, "a GPU to lock is not one of the pod's GPUs")
     if any(host_by_uuid[uuid].mig_enabled for uuid in targets):
         raise GpuResetRefused(GpuResetErrorCode.MigEnabled, "MIG is enabled on a GPU")
     return targets, index_by_uuid
@@ -152,11 +141,13 @@ async def _forget(redis, uuids: list[str]) -> None:
             await redis.delete(_pod_key(pod_id))
 
 
-async def _reset_gpus(runner: SSHCommandRunner, redis, uuids: list[str], allowed: set[str] | None = None) -> dict[str, str | None]:
+async def _reset_gpus(
+    runner: SSHCommandRunner, redis, uuids: list[str], pod_gpu_uuids: set[str] | None = None
+) -> dict[str, str | None]:
     """`-rgc` each GPU; the record goes only once its reset succeeded. uuid -> failure (None = reset)."""
     failures: dict[str, str | None] = {}
     for uuid in uuids:
-        result = await _run(runner, build_clock_command("reset", uuid, allowed=allowed))
+        result = await _run(runner, build_clock_command("reset", uuid, pod_gpu_uuids=pod_gpu_uuids))
         failures[uuid] = None if result.exit_code == 0 else _tail(result.stdout or result.stderr) or "nvidia-smi -rgc failed"
     await _forget(redis, [uuid for uuid, failure in failures.items() if failure is None])
     return failures
@@ -182,10 +173,10 @@ async def lock_pod_gpu_clocks(
         )
     except GpuResetRefused as refused:
         return GpuClocksReport(ok=False, error_code=refused.code, detail=refused.detail)
-    allowed = set(targets)
+    pod_gpu_uuids = set(targets)
 
     if reset:
-        failures = await _reset_gpus(runner, redis, targets, allowed)
+        failures = await _reset_gpus(runner, redis, targets, pod_gpu_uuids)
         gpus = [
             GpuClockOutcome(index=index_by_uuid[u], uuid=u, result="failed" if f else "reset", detail=f)
             for u, f in failures.items()
@@ -201,35 +192,45 @@ async def lock_pod_gpu_clocks(
         await redis.set(_lock_key(uuid), json.dumps(record))
     await redis.set(_pod_key(pod_id), json.dumps(pod_uuids))
 
-    gpus: list[GpuClockOutcome] = []
-    for uuid in targets:
-        outcome = GpuClockOutcome(index=index_by_uuid[uuid], uuid=uuid, result="failed")
-        gpus.append(outcome)
-        # best-effort, as in gpu_power_limit: without persistence the driver drops the lock on an idle GPU
-        await _run(runner, f"nvidia-smi -i {shlex.quote(uuid)} -pm 1")
-        supported = await _run(
-            runner, f"nvidia-smi -i {shlex.quote(uuid)} --query-supported-clocks=graphics --format=csv,noheader,nounits"
-        )
-        supported_mhz = _parse_mhz(supported.stdout or "") if supported.exit_code == 0 else []
-        if not supported_mhz:
-            outcome.detail = "the GPU reports no supported graphics clocks"
-            continue
-        low, high = clamp_range(min_mhz, max_mhz, supported_mhz)
-        locked = await _run(
-            runner, build_clock_command("lock", uuid, allowed=allowed, min_mhz=low, max_mhz=high)
-        )
-        if locked.exit_code != 0:
-            outcome.detail = _tail(locked.stdout or locked.stderr) or "nvidia-smi -lgc failed"
-            continue
-        readback = await _run(
-            runner, f"nvidia-smi -i {shlex.quote(uuid)} --query-gpu=clocks.gr --format=csv,noheader,nounits"
-        )
-        current = _parse_mhz(readback.stdout or "") if readback.exit_code == 0 else []
-        outcome.result, outcome.applied_min_mhz, outcome.applied_max_mhz = "locked", low, high
-        outcome.detail = f"graphics clock now {current[0]} MHz" if current else "graphics clock unreadable"
+    gpus = [
+        await _lock_one_gpu(runner, uuid, index_by_uuid[uuid], pod_gpu_uuids, min_mhz, max_mhz) for uuid in targets
+    ]
     # a failed lock keeps its record: the pod's delete still runs -rgc on it, which is harmless
     ok = all(gpu.result == "locked" for gpu in gpus)
     return GpuClocksReport(ok=ok, error_code=None if ok else GpuResetErrorCode.ClockLockNotSupported, gpus=gpus)
+
+
+async def _lock_one_gpu(
+    runner: SSHCommandRunner,
+    uuid: str,
+    index: int,
+    pod_gpu_uuids: set[str],
+    min_mhz: int | None,
+    max_mhz: int | None,
+) -> GpuClockOutcome:
+    """-pm 1, clamp to the GPU's supported clocks, -lgc, read the clock back."""
+    outcome = GpuClockOutcome(index=index, uuid=uuid, result="failed")
+    # best-effort, as in gpu_power_limit: without persistence the driver drops the lock on an idle GPU
+    await _run(runner, f"nvidia-smi -i {shlex.quote(uuid)} -pm 1")
+    supported = await _run(
+        runner, f"nvidia-smi -i {shlex.quote(uuid)} --query-supported-clocks=graphics --format=csv,noheader,nounits"
+    )
+    supported_mhz = _parse_mhz(supported.stdout or "") if supported.exit_code == 0 else []
+    if not supported_mhz:
+        outcome.detail = "the GPU reports no supported graphics clocks"
+        return outcome
+    low, high = clamp_range(min_mhz, max_mhz, supported_mhz)
+    locked = await _run(runner, build_clock_command("lock", uuid, pod_gpu_uuids=pod_gpu_uuids, min_mhz=low, max_mhz=high))
+    if locked.exit_code != 0:
+        outcome.detail = _tail(locked.stdout or locked.stderr) or "nvidia-smi -lgc failed"
+        return outcome
+    readback = await _run(
+        runner, f"nvidia-smi -i {shlex.quote(uuid)} --query-gpu=clocks.gr --format=csv,noheader,nounits"
+    )
+    current = _parse_mhz(readback.stdout or "") if readback.exit_code == 0 else []
+    outcome.result, outcome.applied_min_mhz, outcome.applied_max_mhz = "locked", low, high
+    outcome.detail = f"graphics clock now {current[0]} MHz" if current else "graphics clock unreadable"
+    return outcome
 
 
 async def reset_pod_clock_locks(runner: SSHCommandRunner, redis, pod_id: str) -> int:

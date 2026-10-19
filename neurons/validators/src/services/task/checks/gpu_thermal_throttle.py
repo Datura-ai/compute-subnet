@@ -24,8 +24,9 @@ near-full clock, a low clock with no slowdown bit) is the non-fatal GPU_THERMAL_
 unchanged. It runs right after the scrape, before the rented short-circuit (TenantEnforcementCheck), so rented
 nodes are judged too. One reading per cycle; the next clean cycle passes again.
 
-A GPU whose clocks a renter locked (DAH-4663, a ``gpu_clock_lock:<uuid>`` record in Redis) is not judged: the
-lock holds its clock down on purpose. The record is read only when a GPU was flagged.
+A GPU whose clocks a renter locked (DAH-4663, a ``gpu_clock_lock:<uuid>`` record in Redis) is spared only the
+low-clock finding: the lock holds its clock down on purpose, but a thermal or hardware slowdown is still judged.
+The record is read only when a GPU was flagged.
 """
 
 from __future__ import annotations
@@ -121,10 +122,14 @@ class GpuThermalThrottleCheck:
             if finding is not None
         ]
         if throttled:
-            # DAH-4663: a renter's own clock lock holds the clock down on purpose (and one a failed
-            # teardown left behind is reset before the next create): not the host's fault
+            # DAH-4663: a renter's own clock lock holds the clock down on purpose: its low clock alone is not the
+            # host's fault, a slowdown bit still is (a record a failed -rgc left behind hides no heat fault)
             locked = await clock_locked_gpu_uuids(ctx.services.redis, [str(f["uuid"]) for f in throttled])
-            throttled = [finding for finding in throttled if finding["uuid"] not in locked]
+            throttled = [
+                finding
+                for finding in throttled
+                if finding["uuid"] not in locked or finding["reasons"] != ["clock_below_half_of_max"]
+            ]
         rented_executor = (
             ctx.state.rented_data.executors.get(ctx.executor.uuid)
             if ctx.state.rented_data
