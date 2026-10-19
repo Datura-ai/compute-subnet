@@ -166,15 +166,14 @@ def test_each_fault_counter_names_its_reason():
         "remapped_rows_pending",
         "remapped_rows_failed",
         "recovery_action",
-        "xid_79",
     ]
 
 
-def test_card_flags_name_a_reset_a_hung_card_and_a_narrowed_link():
-    # one card broke under a rental: NVML asks for a reset, the clocks sit at max with nothing running
-    # and the link trained down; GeForce cards have no ECC counters to show it
+def test_card_flags_name_a_hung_card_a_narrowed_link_and_old_xids():
+    # one card broke under a rental: the clocks sit at max with nothing running, the link trained down
+    # and dmesg still holds an Xid; GeForce cards have no ECC counters to show it
     broken = _healthy(0) | {
-        "recovery_action": 1,
+        "hardware_xids": [79],
         "gfx_clock_mhz": 2820,
         "gfx_clock_max_mhz": 3105,
         "util_pct": 0,
@@ -182,7 +181,7 @@ def test_card_flags_name_a_reset_a_hung_card_and_a_narrowed_link():
         "pcie_width_max": 16,
     }
 
-    assert card_flags(broken) == ["recovery_action", "clocks_high_at_idle", "pcie_width_drop"]
+    assert card_flags(broken) == ["clocks_high_at_idle", "pcie_width_drop", "xid_79"]
 
 
 @pytest.mark.parametrize(
@@ -224,7 +223,7 @@ async def test_flags_are_logged_per_card_and_never_fail(context_factory, enabled
 def test_extra_cards_beyond_the_rental_are_not_missing():
     verdict = judge_health({"available": True, "count": 8, "gpus": [_healthy(i) for i in range(8)]}, 4)
 
-    assert verdict["verdict"] == "ok" and verdict["faulty_card_count"] == 0
+    assert verdict.verdict == "ok" and verdict.faulty_card_count == 0
 
 
 @pytest.mark.parametrize(
@@ -291,8 +290,8 @@ def test_health_mode_lists_a_lost_card_and_keeps_reading_the_rest(monkeypatch):
     nvml = _fake_pynvml(lost_index=1, pending_index=2)
     monkeypatch.setitem(sys.modules, "pynvml", nvml)
     nvml_health = _probe_namespace(
-        "nvml_health", "_read_counters", "nvml_recovery_action", "FI_GPU_RECOVERY_ACTION"
-    )["nvml_health"]
+        "nvml_health_snapshot", "_read_counters", "nvml_recovery_action", "FI_GPU_RECOVERY_ACTION"
+    )["nvml_health_snapshot"]
 
     snapshot = nvml_health()
 
@@ -313,8 +312,8 @@ def test_a_failed_signal_read_is_unknown_not_a_read_error(monkeypatch):
     nvml = _fake_pynvml(lost_index=1, pending_index=0)
     monkeypatch.setitem(sys.modules, "pynvml", nvml)
     nvml_health = _probe_namespace(
-        "nvml_health", "_read_counters", "nvml_recovery_action", "FI_GPU_RECOVERY_ACTION"
-    )["nvml_health"]
+        "nvml_health_snapshot", "_read_counters", "nvml_recovery_action", "FI_GPU_RECOVERY_ACTION"
+    )["nvml_health_snapshot"]
 
     card = nvml_health()["gpus"][0]
 
@@ -324,7 +323,7 @@ def test_a_failed_signal_read_is_unknown_not_a_read_error(monkeypatch):
 def test_health_report_gives_each_card_only_its_own_hardware_xids():
     namespace = _probe_namespace("health_report", "parse_xid", "pci_key", "HEALTH_XIDS")
     namespace["re"] = re
-    namespace["nvml_health"] = None
+    namespace["nvml_health_snapshot"] = None
     namespace["xid_lines"] = lambda: {
         "available": True,
         "count": 3,

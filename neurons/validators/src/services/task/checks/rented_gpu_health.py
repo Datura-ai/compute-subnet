@@ -13,6 +13,7 @@ import logging
 import shlex
 from typing import Any
 
+from pydantic import BaseModel
 from services.redis_service import GPU_ANCHOR_KEY
 
 from core.config import settings
@@ -44,7 +45,6 @@ REASON_RECOVERY_ACTION = "recovery_action"
 
 # log-only flags beside the verdict: GeForce cards have no ECC or row-remap counters, so a card that
 # broke under a rental shows only here
-FLAG_RECOVERY_ACTION = "recovery_action"
 FLAG_CLOCKS_HIGH_IDLE = "clocks_high_at_idle"
 FLAG_PCIE_WIDTH_DROP = "pcie_width_drop"
 CLOCKS_HIGH_RATIO = 0.9
@@ -63,17 +63,19 @@ def _int(value: Any) -> int | None:
 
 
 def card_flags(gpu: dict[str, Any]) -> list[str]:
-    """Hung-card and link signals; a rented card idling at high clocks can be legitimate, so these never
-    fail anything. A lower link generation is not flagged: an idle card drops to Gen1 to save power."""
+    """Hung-card, link and kernel-log signals; a rented card idling at high clocks can be legitimate, so
+    these never fail anything. A lower link generation is not flagged: an idle card drops to Gen1 to save
+    power. Xids are flags because dmesg keeps lines from days ago, so a recovered card still shows them."""
     flags: list[str] = []
-    if _int(gpu.get("recovery_action")):
-        flags.append(FLAG_RECOVERY_ACTION)
     clock, top = _int(gpu.get("gfx_clock_mhz")), _int(gpu.get("gfx_clock_max_mhz"))
     if clock is not None and top and gpu.get("util_pct") == 0 and clock >= CLOCKS_HIGH_RATIO * top:
         flags.append(FLAG_CLOCKS_HIGH_IDLE)
     width, width_max = _int(gpu.get("pcie_width")), _int(gpu.get("pcie_width_max"))
     if width is not None and width_max and width < width_max:
         flags.append(FLAG_PCIE_WIDTH_DROP)
+    xids = gpu.get("hardware_xids")
+    if isinstance(xids, list):
+        flags.extend(f"xid_{xid}" for xid in xids if isinstance(xid, int))
     return flags
 
 
@@ -84,8 +86,7 @@ def judge_card(gpu: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
     if gpu.get("read_errors"):
         reasons.append(REASON_READ_ERROR)
-    ecc = gpu.get("ecc_uncorrected")
-    if isinstance(ecc, int) and not isinstance(ecc, bool) and ecc > 0:
+    if (_int(gpu.get("ecc_uncorrected")) or 0) > 0:
         reasons.append(REASON_ECC_UNCORRECTED)
     if gpu.get("retired_pages_pending") is True:
         reasons.append(REASON_RETIRED_PAGES_PENDING)
@@ -98,16 +99,40 @@ def judge_card(gpu: dict[str, Any]) -> list[str]:
             reasons.append(REASON_REMAP_FAILED)
     if gpu.get("recovery_action"):
         reasons.append(REASON_RECOVERY_ACTION)
-    xids = gpu.get("hardware_xids")
-    if isinstance(xids, list):
-        reasons.extend(f"xid_{xid}" for xid in xids if isinstance(xid, int))
     return reasons
 
 
-def judge_health(nvml: dict[str, Any], expected: int) -> dict[str, Any]:
+class CardHealth(BaseModel):
+    """One card's verdict; dumped with exclude_unset so only the keys a card has reach the log."""
+
+    index: Any = None
+    uuid: Any = None
+    verdict: str
+    recovery_action: int | None = None
+    gfx_clock_mhz: int | None = None
+    gfx_clock_max_mhz: int | None = None
+    util_pct: int | None = None
+    pcie_width: int | None = None
+    pcie_width_max: int | None = None
+    flags: list[str] = []
+    reasons: list[str] = []
+    error: str | None = None
+    read_errors: Any = None
+
+
+class NodeHealth(BaseModel):
+    verdict: str
+    expected_gpu_count: int
+    nvml_gpu_count: int
+    faulty_card_count: int
+    flagged_card_count: int
+    cards: list[CardHealth]
+
+
+def judge_health(nvml: dict[str, Any], expected: int) -> NodeHealth:
     """Per-card verdicts and the node verdict from the probe's `nvml` block."""
     raw = nvml.get("gpus") if isinstance(nvml.get("gpus"), list) else []
-    cards: list[dict[str, Any]] = []
+    cards: list[CardHealth] = []
     for gpu in raw[:MAX_NVML_GPUS]:
         if not isinstance(gpu, dict):
             continue
@@ -125,20 +150,30 @@ def judge_health(nvml: dict[str, Any], expected: int) -> dict[str, Any]:
                 card["error"] = str(gpu["error"])[:MAX_ERROR_CHARS]
             if gpu.get("read_errors"):
                 card["read_errors"] = _cap(gpu["read_errors"])
-        cards.append(card)
-    count = nvml.get("count")
-    visible = count if isinstance(count, int) and not isinstance(count, bool) else len(cards)
+        cards.append(CardHealth(**card))
+    visible = _int(nvml.get("count"))
+    visible = len(cards) if visible is None else visible
     missing = max(expected - visible, 0)
-    cards.extend({"index": None, "verdict": CARD_MISSING} for _ in range(min(missing, MAX_NVML_GPUS)))
-    faulty = [card for card in cards if card["verdict"] != CARD_OK]
-    return {
-        "verdict": "fault" if faulty else CARD_OK,
-        "expected_gpu_count": expected,
-        "nvml_gpu_count": visible,
-        "faulty_card_count": len(faulty),
-        "flagged_card_count": sum(1 for card in cards if card.get("flags")),
-        "cards": cards,
-    }
+    cards.extend(CardHealth(index=None, verdict=CARD_MISSING) for _ in range(min(missing, MAX_NVML_GPUS)))
+    faulty = [card for card in cards if card.verdict != CARD_OK]
+    return NodeHealth(
+        verdict="fault" if faulty else CARD_OK,
+        expected_gpu_count=expected,
+        nvml_gpu_count=visible,
+        faulty_card_count=len(faulty),
+        flagged_card_count=sum(1 for card in cards if card.flags),
+        cards=cards,
+    )
+
+
+def _rental_pods(ctx: Context) -> list[Any]:
+    """This node's rental pods; empty when the rental is held under another hotkey."""
+    rented_data = ctx.state.rented_data
+    rented_executor = rented_data.executors.get(ctx.executor.uuid) if rented_data else None
+    # the executor UUID is miner-reported: a rental held under another hotkey is not this node's
+    if rented_executor is None or rented_executor.miner_hotkey != ctx.miner_hotkey:
+        return []
+    return list(rented_executor.pods)
 
 
 class RentedGpuHealthShadowCheck:
@@ -153,12 +188,7 @@ class RentedGpuHealthShadowCheck:
                 passed=True, event=render_message(Msg.DISABLED, ctx=ctx, check_id=self.check_id)
             )
 
-        rented_data = ctx.state.rented_data
-        rented_executor = rented_data.executors.get(ctx.executor.uuid) if rented_data else None
-        # the executor UUID is miner-reported: a rental held under another hotkey is not this node's
-        if rented_executor is not None and rented_executor.miner_hotkey != ctx.miner_hotkey:
-            rented_executor = None
-        all_pods = list(rented_executor.pods) if rented_executor else []
+        all_pods = _rental_pods(ctx)
         if not any(pod.status in (None, POD_STATUS_RUNNING) for pod in all_pods):
             return CheckResult(
                 passed=True, event=render_message(Msg.NOT_RENTED, ctx=ctx, check_id=self.check_id)
@@ -190,7 +220,7 @@ class RentedGpuHealthShadowCheck:
                 event=render_message(Msg.SHADOW_UNKNOWN, ctx=ctx, check_id=self.check_id, what=what),
             )
 
-        what.update(judge_health(nvml, expected))
+        what.update(judge_health(nvml, expected).model_dump(exclude_unset=True))
         xid = report.get("xid") if isinstance(report.get("xid"), dict) else {}
         what["xid_readable"] = bool(xid.get("available"))
         if what["verdict"] == CARD_OK:

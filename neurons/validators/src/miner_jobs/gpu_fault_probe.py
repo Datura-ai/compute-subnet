@@ -818,7 +818,7 @@ def nvml_snapshot() -> dict:
     return {"available": True, "gpus": gpus}
 
 
-def nvml_health() -> dict:
+def nvml_health_snapshot() -> dict:
     """`--health`: the same counters per card plus retired pages pending, clocks, use and PCIe link width,
     no CUDA. A card NVML cannot open (GPU is lost) is listed with its error instead of ending the read."""
     try:
@@ -1009,7 +1009,7 @@ def health_report(mp) -> dict:
         pci, code = parse_xid(line)
         if code in HEALTH_XIDS:
             hardware.append({"pci": pci, "xid": code, "line": line[:200]})
-    nvml = nvml_snapshot_forked(mp, nvml_health)
+    nvml = nvml_snapshot_forked(mp, nvml_health_snapshot)
     # dmesg is host-wide: each card gets only the lines naming its own PCI id
     for gpu in nvml.get("gpus") or []:
         bus = pci_key(gpu.get("pci_bus_id"))
