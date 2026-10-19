@@ -52,11 +52,11 @@ class ColdSampleRetry:
 
 
 class VerifyXCheck:
-    """Run the optional VerifyX hardware probe and update specs with its findings.
+    """Run the VerifyX hardware probe and update specs with its findings.
 
-    This preserves the legacy feature flag behaviour: when VerifyX is enabled we block on
-    its success, otherwise the check becomes a no-op. Documenting it here lets us debate
-    the value of the external probe independently from the rest of the pipeline.
+    The check blocks on the probe's success. It always runs (DAH-4328 removed the
+    ENABLE_VERIFYX setting, on everywhere since Sep 2025); only an idle filler-only node
+    skips it, keeping its last known EMA.
     """
 
     check_id = "gpu.validate.verifyx"
@@ -69,13 +69,6 @@ class VerifyXCheck:
         return result.error
 
     async def run(self, ctx: Context) -> CheckResult:
-        if not ctx.config.verifyx_enabled:
-            event = render_message(
-                Msg.DISABLED,
-                ctx=ctx,
-                check_id=self.check_id,
-            )
-            return CheckResult(passed=True, event=event)
         verifyx_service = ctx.services.verifyx
         specs = ctx.state.specs
         if not specs:
