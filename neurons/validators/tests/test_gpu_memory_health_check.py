@@ -46,27 +46,51 @@ def _report(status: str, **extra) -> str:
 def test_the_standing_faults_of_a_broken_card_are_each_flagged():
     nvml_health = _probe_namespace("nvml_health", "RECOVERY_ACTIONS")["nvml_health"]
 
-    flags = nvml_health({"available": True, "gpus": [HEALTHY, BROKEN]})
+    flags, warnings = nvml_health({"available": True, "gpus": [HEALTHY, BROKEN]})
 
     assert flags == [
         "gpu 2 (GPU-2): 1 uncorrected ECC error(s) since the driver loaded",
         "gpu 2 (GPU-2): row remap pending (needs a GPU reset)",
         "gpu 2 (GPU-2): NVML recovery action DRAIN_AND_RESET required",
     ]
+    assert warnings == []
+
+
+@pytest.mark.parametrize(
+    "gpu, failed",
+    [
+        # pending only from correctable rows: the card still works (review)
+        ({"ecc_uncorrected": 0, "remapped_rows": [3, 0, 1, 0], "recovery_action": 0}, False),
+        ({"ecc_uncorrected": 0, "remapped_rows": [0, 2, 1, 0], "recovery_action": 0}, True),
+        ({"ecc_uncorrected": 0, "remapped_rows": [0, 0, 0, 0], "recovery_action": 1}, False),
+        ({"ecc_uncorrected": 2, "remapped_rows": [0, 0, 0, 0], "recovery_action": 1}, True),
+        ({"ecc_uncorrected": 0, "remapped_rows": [3, 0, 0, 1], "recovery_action": 0}, True),
+    ],
+)
+def test_pending_remap_or_recovery_action_fails_only_with_uncorrectable_errors(gpu, failed):
+    nvml_health = _probe_namespace("nvml_health", "RECOVERY_ACTIONS")["nvml_health"]
+
+    flags, warnings = nvml_health(
+        {"available": True, "gpus": [{"index": 1, "uuid": "GPU-1", **gpu}]}
+    )
+
+    assert (bool(flags), bool(warnings)) == (failed, not failed)
 
 
 def test_a_card_whose_reads_are_not_supported_is_not_flagged():
     nvml_health = _probe_namespace("nvml_health", "RECOVERY_ACTIONS")["nvml_health"]
     consumer = {"index": 0, "ecc_uncorrected": None, "remapped_rows": None, "recovery_action": None}
 
-    assert nvml_health({"available": True, "gpus": [consumer]}) == []
+    assert nvml_health({"available": True, "gpus": [consumer]}) == ([], [])
 
 
 def test_the_snapshot_reads_the_recovery_action_through_field_value_230(monkeypatch):
     # released bindings have no nvmlDeviceGetGpuRecoveryAction; the action is field 230 (review)
     from types import ModuleType, SimpleNamespace
 
-    namespace = _probe_namespace("nvml_snapshot", "nvml_recovery_action", "FI_GPU_RECOVERY_ACTION")
+    namespace = _probe_namespace(
+        "nvml_snapshot", "nvml_recovery_action", "NVML_FI_DEV_GET_GPU_RECOVERY_ACTION"
+    )
     asked = []
 
     def field_values(handle, ids):
@@ -185,6 +209,7 @@ async def test_with_enforcement_off_a_broken_card_is_only_flagged(context_factor
     "stdout, reason",
     [
         (_report("ok", flags=[]), Msg.OK.reason),
+        (_report("ok", flags=[], warnings=["gpu 1 (GPU-1): row remap pending"]), Msg.OK.reason),
         (_report("error", flags=[], nvml={"available": False}), Msg.UNKNOWN.reason),
         ("no marker", Msg.UNKNOWN.reason),
     ],

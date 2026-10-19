@@ -754,14 +754,13 @@ def _device_count(mp) -> int:
     return reply["count"]
 
 
-# NVML_FI_DEV_GET_GPU_RECOVERY_ACTION (nvml.h); no released binding has a getter for it
-FI_GPU_RECOVERY_ACTION = 230
+NVML_FI_DEV_GET_GPU_RECOVERY_ACTION = 230
 
 
 def nvml_recovery_action(handle):
     import pynvml
 
-    field = pynvml.nvmlDeviceGetFieldValues(handle, [FI_GPU_RECOVERY_ACTION])[0]
+    field = pynvml.nvmlDeviceGetFieldValues(handle, [NVML_FI_DEV_GET_GPU_RECOVERY_ACTION])[0]
     if field.nvmlReturn != pynvml.NVML_SUCCESS:
         raise pynvml.NVMLError(field.nvmlReturn)  # driver older than R570 or card without the field
     return field.value.uiVal
@@ -896,14 +895,24 @@ def nvml_faults(before: dict, after: dict) -> list[str]:
 
 
 # nvmlDeviceGpuRecoveryAction_t (nvml.h); 0 is none
-RECOVERY_ACTIONS = {1: "GPU_RESET", 2: "NODE_REBOOT", 3: "DRAIN_P2P", 4: "DRAIN_AND_RESET"}
+RECOVERY_ACTIONS = {
+    1: "GPU_RESET",
+    2: "NODE_REBOOT",
+    3: "DRAIN_P2P",
+    4: "DRAIN_AND_RESET",
+    5: "RECOVER_IMEX_DOMAIN",
+    6: "BUS_RESET",
+    7: "SYSTEM_REBOOT",
+}
 
 
-def nvml_health(snapshot: dict) -> list[str]:
+def nvml_health(snapshot: dict) -> tuple[list[str], list[str]]:
     """The standing memory faults of each card in one snapshot (`--nvml-only`), not changes across
-    a run: uncorrected ECC since the driver loaded, a pending or failed row remap, a required
-    recovery action."""
-    flags = []
+    a run, as (flags, warnings). Flags: uncorrected ECC since the driver loaded, a failed row remap,
+    and a pending remap or recovery action on a card with uncorrectable remapped rows or uncorrected
+    ECC. A pending remap or recovery action from correctable errors alone is only a warning: that
+    card still works."""
+    flags, warnings = [], []
     for gpu in snapshot.get("gpus") or []:
         name = f"gpu {gpu.get('index')} ({gpu.get('uuid')})"
         if gpu.get("ecc_uncorrected"):
@@ -911,17 +920,21 @@ def nvml_health(snapshot: dict) -> list[str]:
                 f"{name}: {gpu['ecc_uncorrected']} uncorrected ECC error(s) since the driver loaded"
             )
         rows = gpu.get("remapped_rows")
+        uncorrectable = bool(gpu.get("ecc_uncorrected")) or bool(
+            rows and len(rows) >= 2 and rows[1]
+        )
+        needs_reset = flags if uncorrectable else warnings
         if rows and len(rows) >= 4:
             _, _, is_pending, has_failed = rows[:4]
             if is_pending:
-                flags.append(f"{name}: row remap pending (needs a GPU reset)")
+                needs_reset.append(f"{name}: row remap pending (needs a GPU reset)")
             if has_failed:
                 flags.append(f"{name}: row remap failed")
         action = gpu.get("recovery_action")
         if action:
             name_of_action = RECOVERY_ACTIONS.get(action, action)
-            flags.append(f"{name}: NVML recovery action {name_of_action} required")
-    return flags
+            needs_reset.append(f"{name}: NVML recovery action {name_of_action} required")
+    return flags, warnings
 
 
 def xid_lines() -> dict:
@@ -1045,9 +1058,9 @@ def _exit_code(process):
 def print_nvml_health_report(mp) -> None:
     """The `--nvml-only` verdict: one NVML snapshot and its standing memory faults."""
     snapshot = nvml_snapshot_forked(mp)
-    flags = nvml_health(snapshot)
+    flags, warnings = nvml_health(snapshot)
     status = "error" if not snapshot.get("available") else "flagged" if flags else "ok"
-    report = {"status": status, "flags": flags, "nvml": snapshot}
+    report = {"status": status, "flags": flags, "warnings": warnings, "nvml": snapshot}
     print(JSON_MARKER, json.dumps(report, sort_keys=True))
 
 

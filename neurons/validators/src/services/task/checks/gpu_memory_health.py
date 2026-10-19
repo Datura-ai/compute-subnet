@@ -17,8 +17,9 @@ TIMEOUT_SECONDS = 30
 
 class GpuMemoryHealthCheck:
     """Flag a card whose memory NVML reports broken (DAH-3110): uncorrected ECC errors since the
-    driver loaded, a pending or failed row remap, a required recovery action (what `nvidia-smi -q
-    -d ECC,ROW_REMAPPER` shows). The fault probe sees these only as changes across its own run, and
+    driver loaded, a failed row remap, or a pending remap / required recovery action on a card with
+    uncorrectable remapped rows or uncorrected ECC (what `nvidia-smi -q -d ECC,ROW_REMAPPER` shows);
+    a pending remap or recovery action from correctable errors alone is only a warning. The fault probe sees these only as changes across its own run, and
     only on an idle node; this is one NVML read and no CUDA, so it runs before the rented
     short-circuit, for rented and idle executors alike.
 
@@ -52,6 +53,10 @@ class GpuMemoryHealthCheck:
                 )
             message = Msg.FLAGGED
         elif status == "ok":
+            # a pending remap from correctable errors only: reported, the card still works
+            warnings = _cap(report.get("warnings"))
+            if isinstance(warnings, list) and warnings:
+                what["warnings"] = warnings
             message = Msg.OK
         else:
             # no NVML binding, NVML that would not start, SSH: not a reading of the cards
