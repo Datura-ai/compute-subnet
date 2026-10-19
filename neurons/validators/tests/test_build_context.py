@@ -244,6 +244,7 @@ def test_check_archive_refuses_more_entries_than_the_cap(monkeypatch):
 def test_check_archive_counts_a_long_name_header_against_the_cap(monkeypatch):
     # Arrange: one GNU long-name header of 4 MiB, a member of 0 bytes
     monkeypatch.setattr(build_context, "MAX_ARCHIVE_ENTRIES", 3)
+    monkeypatch.setattr(build_context, "MAX_META_HEADER_BYTES", 8 << 20)
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.GNU_FORMAT) as tar:
         tar.addfile(tarfile.TarInfo("a" * (4 << 20)), io.BytesIO(b""))
@@ -251,6 +252,18 @@ def test_check_archive_counts_a_long_name_header_against_the_cap(monkeypatch):
     # Act / Assert
     with pytest.raises(BuildContextError, match="unpacks to more than"):
         build_context.check_archive(buf.getvalue(), 1 << 20)
+
+
+@pytest.mark.parametrize("fmt", [tarfile.GNU_FORMAT, tarfile.PAX_FORMAT])
+def test_check_archive_refuses_a_long_name_or_pax_header_past_64_kib(fmt):
+    # Arrange: a 128 KiB name, well under the unpacked cap, stored as a GNU long-name or a PAX header
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz", format=fmt) as tar:
+        tar.addfile(tarfile.TarInfo("a" * (128 << 10)), io.BytesIO(b""))
+
+    # Act / Assert
+    with pytest.raises(BuildContextError, match="header is larger than"):
+        build_context.check_archive(buf.getvalue(), 1 << 30)
 
 
 def test_check_archive_refuses_a_corrupt_deflate_stream():
@@ -303,8 +316,8 @@ async def test_custom_build_unpacks_the_context_before_the_dockerfile(svc, monke
 
 @pytest.mark.asyncio
 async def test_custom_build_with_a_context_fails_before_the_executor_when_no_host_is_allowed(
-    svc,
-    monkeypatch,  # noqa: F811
+    svc,  # noqa: F811
+    monkeypatch,
 ):
     # Arrange
     from core.config import settings
@@ -333,8 +346,8 @@ async def test_custom_build_with_a_context_fails_before_the_executor_when_no_hos
 
 @pytest.mark.asyncio
 async def test_custom_build_with_a_refused_context_never_starts_the_build_container(
-    svc,
-    monkeypatch,  # noqa: F811
+    svc,  # noqa: F811
+    monkeypatch,
 ):
     # Arrange
     from core.config import settings

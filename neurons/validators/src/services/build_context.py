@@ -17,6 +17,15 @@ import aiohttp
 _FETCH_TIMEOUT_SECONDS = 120
 # tarfile keeps every member it has read, so cap the count, not only the bytes
 MAX_ARCHIVE_ENTRIES = 10_000
+# tarfile reads a long-name or PAX header whole into memory, and copies it while decoding
+MAX_META_HEADER_BYTES = 64 << 10
+_META_TYPES = (
+    tarfile.GNUTYPE_LONGNAME,
+    tarfile.GNUTYPE_LONGLINK,
+    tarfile.XHDTYPE,
+    tarfile.XGLTYPE,
+    tarfile.SOLARIS_XHDTYPE,
+)
 
 
 class BuildContextError(Exception):
@@ -39,6 +48,17 @@ class _CappedReader:
         return chunk
 
 
+class _BoundedTarInfo(tarfile.TarInfo):
+    """Refuses an oversized long-name or PAX header before tarfile reads its payload."""
+
+    def _proc_member(self, tarfile_):
+        if self.type in _META_TYPES and self.size > MAX_META_HEADER_BYTES:
+            raise BuildContextError(
+                f"build context entry header is larger than {MAX_META_HEADER_BYTES} bytes"
+            )
+        return super()._proc_member(tarfile_)
+
+
 def allowed_hosts(raw: str) -> set[str]:
     return {host.strip().lower() for host in (raw or "").split(",") if host.strip()}
 
@@ -59,7 +79,7 @@ def check_archive(data: bytes, max_unpacked_bytes: int) -> None:
     reader = _CappedReader(gzip.GzipFile(fileobj=io.BytesIO(data)), cap, max_unpacked_bytes)
     try:
         # stream mode: tarfile reads the decompressed bytes only through the capped reader
-        with tarfile.open(fileobj=reader, mode="r|") as archive:
+        with tarfile.open(fileobj=reader, mode="r|", tarinfo=_BoundedTarInfo) as archive:
             for count, member in enumerate(archive, start=1):
                 if count > MAX_ARCHIVE_ENTRIES:
                     raise BuildContextError(
