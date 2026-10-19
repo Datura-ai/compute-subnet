@@ -26,12 +26,24 @@ PENDING_PODS_PREFIX = "pending_pods_prefix"
 DUPLICATED_MACHINE_SET = "duplicated_machines"
 RENTAL_SUCCEED_MACHINE_SET = "rental_succeed_machines"
 AVAILABLE_PORT_MAPS_PREFIX = "available_port_maps"
+RENTAL_PROBE_OK_PREFIX = "rental_probe_ok"
+RENTAL_PROBE_FAILED_PREFIX = "rental_probe_failed"
+# set by a filler create whose sshd never came up in the container, cleared by one where it did
+SSHD_BOOTSTRAP_FAILED_PREFIX = "sshd_bootstrap_failed"
+# prod, 24 h: failed filler creates on a broken node came 5 min to 2.7 h apart, so 6 h outlives the
+# longest gap about twice over; a stale stamp ends by itself
+SSHD_BOOTSTRAP_FAILED_TTL_SECONDS = 6 * 3600
+# sshd_bootstrap.sh's verify_sshd line: sshd is installed but not running or listening
+SSHD_VERIFY_FAILED_MARKER = "sshd verification failed"
+# where the sshd bootstrap script is copied in a filler container
+IN_CONTAINER_SSH_BOOTSTRAP_PATH = "/tmp/lium-ssh-bootstrap.sh"
 VERIFIED_JOB_COUNT_KEY = "verified_job_counts"
 # The anchor: the GPU UUID set of the executor's first successful verification, kept by every later write.
 GPU_ANCHOR_KEY = "uuids"
 # DAH-3457: field of a verified-job record, set once by GpuFingerprintCheck under GPU_ANCHOR_HARD_ENABLED and kept by
 # every later write; read back by the same check, which then fails the node without comparing the sets.
 GPU_ANCHOR_BROKEN_KEY = "anchor_broken"
+
 EXECUTORS_UPTIME_PREFIX = "executors_uptime"
 NORMALIZED_SCORE_CHANNEL = "normalized_score_channel"
 REVENUE_PER_GPU_TYPE_SET = "revenue_per_gpu_type"
@@ -48,6 +60,8 @@ CLEANUP_SEEN_EXECUTORS_SET = "cleanup_seen_executors"
 FORCED_VALIDATION_CYCLE_KEY = "forced_validation_cycle"
 # DAH-3597: one key per executor while a DinD probe miss is on record (expires with the grace TTL).
 DIND_PROBE_MISS_PREFIX = "dind_probe_miss"
+# ticket-0494: one key per executor while its last DinD probe that reached the container found sysbox.
+SYSBOX_VERIFIED_PREFIX = "sysbox_verified"
 # One key per executor: when this validator first found it without its recommended default image
 # (epoch seconds). Opens CachedTemplateVerificationCheck's fresh-node grace.
 CACHED_TEMPLATE_FIRST_UNCACHED_PREFIX = "cached_template_first_uncached"
@@ -155,6 +169,12 @@ class RedisWrites:
 
     def __len__(self) -> int:
         return len(self.ops)
+
+
+def _verified_job_field(miner_hotkey: str, executor_id: str) -> str:
+    """The verified record is per (miner hotkey, executor id): an executor id is unique only per hotkey, so a
+    hotkey that lists another's executor id writes, resets and marks only its own record."""
+    return f"{miner_hotkey}:{executor_id}"
 
 
 class RedisService:
@@ -328,6 +348,22 @@ class RedisService:
     async def clear_dind_probe_miss(self, miner_hotkey: str, executor_id: str) -> None:
         """Forget the recorded miss: the probe reached its container again."""
         await self.delete(self._dind_probe_miss_key(miner_hotkey, executor_id))
+
+    @staticmethod
+    def _sysbox_verified_key(miner_hotkey: str, executor_id: str) -> str:
+        return f"{SYSBOX_VERIFIED_PREFIX}:{miner_hotkey}:{executor_id}"
+
+    async def record_sysbox_verified(self, miner_hotkey: str, executor_id: str, ttl_seconds: int) -> None:
+        """A DinD probe reached its container and sysbox worked; remembered for ttl_seconds."""
+        async with self.lock:
+            await self.redis.set(self._sysbox_verified_key(miner_hotkey, executor_id), "1", ex=ttl_seconds)
+
+    async def clear_sysbox_verified(self, miner_hotkey: str, executor_id: str) -> None:
+        """A DinD probe reached its container and sysbox did not work: forget the earlier pass."""
+        await self.delete(self._sysbox_verified_key(miner_hotkey, executor_id))
+
+    async def is_sysbox_verified(self, miner_hotkey: str, executor_id: str) -> bool:
+        return await self.get(self._sysbox_verified_key(miner_hotkey, executor_id)) is not None
 
     async def first_uncached_at(self, executor_id: str, now: float, ttl_seconds: int) -> float:
         """When this validator first found the executor without its recommended image (epoch s).
@@ -592,7 +628,7 @@ class RedisService:
         if prev_info.get(GPU_ANCHOR_BROKEN_KEY):
             data[GPU_ANCHOR_BROKEN_KEY] = True
 
-        await self.hset(VERIFIED_JOB_COUNT_KEY, executor_id, json.dumps(data))
+        await self.hset(VERIFIED_JOB_COUNT_KEY, _verified_job_field(miner_hotkey, executor_id), json.dumps(data))
 
     async def clear_verified_job_info(
         self,
@@ -614,7 +650,7 @@ class RedisService:
         }
         if anchor_broken or prev_info.get(GPU_ANCHOR_BROKEN_KEY):
             data[GPU_ANCHOR_BROKEN_KEY] = True
-        await self.hset(VERIFIED_JOB_COUNT_KEY, executor_id, json.dumps(data))
+        await self.hset(VERIFIED_JOB_COUNT_KEY, _verified_job_field(miner_hotkey, executor_id), json.dumps(data))
 
         # DAH-3386: the check that cleared the job and what it saw ride along; the backend puts them on the
         # penalty row (lium-platform DAH-3385). Optional on the wire: an older backend ignores the keys.
@@ -633,8 +669,16 @@ class RedisService:
             },
         )
 
-    async def get_verified_job_info(self, executor_id: str):
-        data = await self.hget(VERIFIED_JOB_COUNT_KEY, executor_id)
+    async def get_verified_job_info(self, miner_hotkey: str, executor_id: str, listed_owner_hotkey: str | None = None):
+        field = _verified_job_field(miner_hotkey, executor_id)
+        data = await self.hget(VERIFIED_JOB_COUNT_KEY, field)
+        if not data and listed_owner_hotkey == miner_hotkey:
+            # shortcut: a record from before the per-hotkey key moves to the hotkey the backend lists, and only
+            # to it, so no other hotkey with this id inherits its GPU anchor; drop once no bare-id field is left.
+            data = await self.hget(VERIFIED_JOB_COUNT_KEY, executor_id)
+            if data:
+                await self.hset(VERIFIED_JOB_COUNT_KEY, field, data)
+                await self.hdel(VERIFIED_JOB_COUNT_KEY, executor_id)
         if not data:
             return {}
 

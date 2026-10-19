@@ -90,6 +90,8 @@ async def test_context_first_pass_needs_the_flag_and_the_caller(monkeypatch, fla
     )
 
     assert ctx.config.first_pass is expected
+    # the raw express-lane flag reaches the context whatever the fast-path flag says (DAH-4258)
+    assert ctx.config.express_first_pass is first_pass
 
 
 def test_context_config_default_is_not_a_first_pass():
@@ -209,7 +211,7 @@ def _probe(download: float | None) -> MockVerifyXResponse:
 def _ctx(context_factory, service, *, first_pass: bool, rented_data=None):
     return context_factory(
         services=build_services(verifyx=service),
-        config=build_context_config(verifyx_enabled=True, first_pass=first_pass),
+        config=build_context_config(first_pass=first_pass),
         state=build_state(specs={"gpu": {"count": 1}}, rented_data=rented_data),
     )
 

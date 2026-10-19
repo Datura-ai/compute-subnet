@@ -15,6 +15,7 @@ from payload_models.payloads import (
     FailedContainerRequest,
     ContainerStartRequest,
     ContainerStopRequest,
+    ContainerWarningCode,
     CustomOptions,
     ExternalVolumeInfo,
     PayloadPortMapping,
@@ -118,7 +119,7 @@ class RecordingRentalDockerClient:
             oom_killed=False,
         )
 
-    async def start(self, *, container_name: str) -> None:
+    async def start(self, *, container_name: str, network: str | None = None) -> None:
         self.started_containers.append(container_name)
 
     async def stop(self, *, container_name: str, stop_grace_seconds: int | None = None) -> None:
@@ -146,6 +147,7 @@ class RecordingRentalDockerClient:
         driver: str | None = None,
         driver_opts: dict[str, str] | None = None,
         timeout: int | None = None,
+        labels: dict[str, str] | None = None,
     ) -> None:
         self.created_volumes.append(
             {
@@ -496,7 +498,7 @@ async def test_create_container_drops_sysbox_when_subuid_base_is_unusable(
         ),
     )
 
-    await docker_service.create_container(
+    result = await docker_service.create_container(
         payload=payload,
         executor_info=executor_info,
         keypair=keypair,
@@ -505,6 +507,8 @@ async def test_create_container_drops_sysbox_when_subuid_base_is_unusable(
 
     run_spec = docker_service.rental_docker_client_factory.client.run_specs[0]
     assert run_spec.runtime is None
+    # the backend reads this to refuse a rental that asked for nested Docker
+    assert ContainerWarningCode.DockerInDockerDisabled in result.warnings
     streamed_messages = [
         call.args[0] for call in docker_service.stream_log.await_args_list
     ]
@@ -650,8 +654,8 @@ async def test_remove_s3fs_volume_plugin_ignores_unsafe_volume_name(
     [
         # Sysbox cannot ID-shift a FUSE mount, so s3fs must report the objects as
         # owned by the host uid sysbox maps container root to.
-        (231072, "allow_other,uid=231072,gid=231072"),
-        (None, "allow_other"),
+        (231072, "allow_other,umask=0000,uid=231072,gid=231072"),
+        (None, "allow_other,umask=0000"),
     ],
 )
 async def test_create_s3fs_volume_mount_options(

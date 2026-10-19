@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, RootModel, ValidationError, field_validator
 
-from services.const import FILLER_CONTAINER_PREFIX
+from services.const import FILLER_CONTAINER_PREFIX, POD_CONTAINER_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,23 @@ class RentedPod(BaseModel):
     # pod with an ssh_port whatever its status, and counts only RUNNING (or None = backend predates
     # the field) pods towards the our-own-outage share.
     status: str | None = None
+
+    @field_validator("container_name", mode="before")
+    @classmethod
+    def _container_name_not_null(cls, value: Any) -> Any:
+        # DAH-4315: the backend lists a new pod before it records the container's name.
+        return "" if value is None else value
+
+    @property
+    def container_name_pending(self) -> bool:
+        """True while the backend has not recorded the pod's container name yet."""
+        return not self.container_name.strip()
+
+    @property
+    def docker_container_name(self) -> str:
+        """The pod's container on the node: the recorded name, else the `pod_<pod_id>` it is
+        created as (DAH-4315). Never empty, so it is safe in a `docker ps -f name=` filter."""
+        return self.container_name.strip() or f"{POD_CONTAINER_PREFIX}{self.pod_id}"
 
     @field_validator("ssh_port")
     @classmethod
@@ -150,8 +167,8 @@ class RentedExecutorsResponse(BaseModel):
     gpu_splitting_config: dict[str, int] = {}  # executor_id → min_gpu_count_for_rental
     network_ema: dict[str, NetworkEMA] = {}  # executor_id → EMA network speeds, all active executors
     spot_executor_ids: list[str] = []  # executor_ids in spot tier (no incentive, no penalty)
-    # The subset of spot_executor_ids whose provider chose the Spot tier: no demotion, force-spot
-    # hotkey, pin or no-incentive rental put it there. Only these may take spot-node pay. Defaults
+    # The subset of spot_executor_ids that may take spot-node pay: set to Spot by the provider, or
+    # demoted for penalties; never a banned hotkey, pin or no-incentive rental. Defaults
     # to empty so a backend that does not send it pays no spot node.
     provider_spot_executor_ids: list[str] = []
     new_rentals_paused_executor_ids: list[str] = []  # executor_ids paused from unrented incentives
@@ -160,14 +177,13 @@ class RentedExecutorsResponse(BaseModel):
     # probe has nothing to check. Additive with an empty default: an older backend penalizes nobody.
     filler_create_kill_executor_ids: list[str] = []
     provider_discord_connected_executor_ids: list[str] | None = None  # executor_ids whose provider has connected Discord
+    # executor_ids the backend keeps unlisted until the provider confirms an e-mail address. Such a node has
+    # no listing, so it is also absent from the Discord list above; the validator reports both reasons.
+    # Additive with an empty default: an older backend names nobody.
+    provider_email_held_executor_ids: list[str] = []
     # executor_id → "miner" | "lium"; absent = no default job. Parsed leniently as str for
     # forward-compatibility (a future owner value must not break parsing of the whole response).
     default_job_owner_by_executor: dict[str, str] = {}
-    # gpu_uuid → "miner" | "lium" for the GPUs an active default job runs on. The same GPUs can be
-    # reported under more than one executor id, and the job runs under only one of them, so the
-    # power-limit exemption reads this map. Empty for a backend that predates the field: the
-    # executor-keyed map above still applies.
-    default_job_owner_by_gpu: dict[str, str] = {}
     # executor_id → specs to force-pass against. Present only for executors carrying a pod flagged
     # as a special manual (bare-metal) rental. Defaults to empty so an older backend that omits the
     # field force-passes nobody (fail-closed) rather than everybody.
@@ -175,6 +191,9 @@ class RentedExecutorsResponse(BaseModel):
     # Average filler revenue per GPU configuration: what the spot-node pay and the secure floor are
     # measured against. Defaults to empty so an older backend pays spot nodes nothing, as before.
     filler_revenue_by_gpu_config: list[FillerRevenueByGpuConfig] = []
+    # executor_id → the hotkey the backend lists the executor under. Only that hotkey may take over a
+    # verified record stored under the bare executor id (RedisService.get_verified_job_info).
+    executor_owner_hotkeys: dict[str, str] = {}
 
     def get_filler_revenue_per_gpu_hour(
         self, base_model: str | None, gpu_count: int, min_gpu_hours: float
@@ -280,9 +299,6 @@ class RentedExecutorsResponse(BaseModel):
 
     def get_default_job_owner(self, executor_uuid: str) -> str | None:
         return self.default_job_owner_by_executor.get(str(executor_uuid))
-
-    def get_gpu_default_job_owner(self, gpu_uuid: str) -> str | None:
-        return self.default_job_owner_by_gpu.get(str(gpu_uuid))
 
     def get_manual_rental_info(self, executor_uuid: str) -> "ManualRentalInfo | None":
         """Specs to force-pass this executor against, or None if it is not a manual rental."""

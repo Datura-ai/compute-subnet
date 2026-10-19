@@ -31,6 +31,8 @@ class ReachTarget(StrEnum):
     EXECUTOR_SSH = "executor_ssh"
     # The executor's HTTP API, the miner's side of the node.
     EXECUTOR_API = "executor_api"
+    # A card on the node (GpuLossHoldCheck): the validator cannot reach it through NVML.
+    GPU = "gpu"
 
 
 # The longest peer-supplied text a reading may keep: the node writes it, the portal shows it.
@@ -49,6 +51,8 @@ class AvailabilityErrorCode(StrEnum):
     EXECUTOR_SSH_UNREACHABLE = "EXECUTOR_SSH_UNREACHABLE"
     # DAH-3558: the backend lists the executor as rented, the miner answered the wave without it.
     RENTED_EXECUTOR_NOT_LISTED = "RENTED_EXECUTOR_NOT_LISTED"
+    # DAH-4457: a GPU dropped out of NVML within the hold window (GpuLossHoldCheck).
+    GPU_LOST = "GPU_LOST"
 
 
 def build_availability_event(
@@ -114,8 +118,25 @@ def availability_errors(events: list[ValidationEvent] | None) -> list[Availabili
     return list(errors.values())
 
 
+# The executor reports its own sshd's host key and the validator pins it to this address and port,
+# so an untrusted key means a different sshd answered there: in practice the host's own sshd
+# (a provider on Discord, 11 Oct 2026: the node SSH port was the host's SSH port). Firewall advice
+# misleads. The key is re-read from the miner every cycle, so a recreated executor (new key, same
+# port) fails one check and then passes. A repeat usually means the port; rarely the executor's
+# sshd still serves a key it no longer reports (host-key files rotated without a reload).
+SSH_HOST_KEY_MISMATCH_REMEDIATION = (
+    "If this repeats every check, the SSH server on this port is not presenting the host key the "
+    "executor reports. Usually another SSH server answers the port (the host's own sshd, or a "
+    "port forward to another machine): set the node SSH port (and the public SSH port forward, if "
+    "any) to a port that reaches the executor container, not the host's SSH port, then re-run "
+    "`lium mine`. If the port already reaches the executor, restart the executor container so its "
+    "SSH server loads the key it reports. A single failure while the executor container was being "
+    "recreated clears by itself on the next check."
+)
+
+
 def build_ssh_unreachable_event(
-    *, executor_uuid: str, host: str, port: int | None, error: str
+    *, executor_uuid: str, host: str, port: int | None, error: str, host_key_mismatch: bool = False
 ) -> ValidationEvent:
     return build_availability_event(
         code=AvailabilityErrorCode.EXECUTOR_SSH_UNREACHABLE,
@@ -123,7 +144,9 @@ def build_ssh_unreachable_event(
         reach_target=ReachTarget.EXECUTOR_SSH,
         event_text="Validator cannot open SSH to this node",
         impact="The node is hidden from the market and cannot take new rentals until a check succeeds.",
-        remediation=(
+        remediation=SSH_HOST_KEY_MISMATCH_REMEDIATION
+        if host_key_mismatch
+        else (
             "Check that sshd on the node accepts the validator on its management port, "
             "and that no firewall or rate limit rejects the connection."
         ),
@@ -208,10 +231,24 @@ def silence_availability_errors_on_our_own_outage(job_results: list[JobResult]) 
     are silenced (``_is_the_validators_own_reading``).
     """
     checked_results = [result for result in job_results if _is_the_validators_own_reading(result)]
-    unreachable_results = [result for result in checked_results if result.availability_errors]
+    # a lost GPU is the node's own fault, never a sign of our outage, so it does not count toward the share
+    unreachable_results = [
+        result
+        for result in checked_results
+        if any(
+            error.get("reason_code") != AvailabilityErrorCode.GPU_LOST
+            for error in result.availability_errors or []
+        )
+    ]
     if not is_our_own_outage(len(unreachable_results), len(checked_results)):
         return 0
     for result in checked_results:
         # None means "this cycle did not check": the backend leaves the stored errors alone.
-        result.availability_errors = None
+        # A lost GPU is still the node's own fault, so its entry stays and the node stays hidden.
+        lost = [
+            error
+            for error in result.availability_errors or []
+            if error.get("reason_code") == AvailabilityErrorCode.GPU_LOST
+        ]
+        result.availability_errors = lost or None
     return len(checked_results)

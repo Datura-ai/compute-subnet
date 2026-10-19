@@ -71,6 +71,11 @@ class SettledWeightsResult(BaseModel):
     inclusion_block: int | None = None
 
 
+class LiveWeightsReceipt(BaseModel):
+    inclusion_block: int
+    created: bool
+
+
 # the 4xx answers that mean the request itself is wrong; a 401/403 (a clock past the signature window) or a 429
 # is the moment, not the request, and the report is kept for the next replay
 DEFINITIVE_REJECTIONS = (400, 404, 422)
@@ -324,12 +329,15 @@ class BackendClient:
         stop=stop_after_attempt(3),
         wait=wait_fixed(30),
         retry=retry_if_result(lambda x: x is None),
+        # without this, tenacity raises RetryError after the last None
+        retry_error_callback=lambda retry_state: None,
     )
     async def get_all_rented_executors(self) -> RentedExecutorsResponse | None:
         """Fetch all rented executors with their ports from the backend.
 
         Retried three times, 30 s apart: this is the cycle's snapshot, and a cycle without it
-        cannot start. A check that asks mid-cycle uses `get_rented_executors_now` instead.
+        cannot start. None when all three fail. A check that asks mid-cycle uses
+        `get_rented_executors_now` instead.
         """
         return await self.get_rented_executors_now()
 
@@ -609,6 +617,17 @@ class BackendClient:
         """The vector to submit this tempo; None when the backend is unreachable."""
         path = f"/validator/{self.keypair.ss58_address}/settled-weights?tempo_index={tempo_index}&tempo_blocks={tempo_blocks}"
         return await self._signed_request("GET", path, SettledWeights)
+
+    async def report_live_weights(self, inclusion_block: int, cycle_ids: list[str]) -> LiveWeightsReceipt | None:
+        """Live weights this validator put on chain (settlement shadow or off) and the cycles summed into them, so the
+        backend credits the epochs they pay to those cycles, not to the last settled window."""
+        return await self._signed_request(
+            "POST",
+            f"/validator/{self.keypair.ss58_address}/live-weights",
+            LiveWeightsReceipt,
+            json_data={"inclusion_block": inclusion_block, "cycle_ids": cycle_ids},
+            raise_on_4xx=True,
+        )
 
     async def report_settled_weights_result(self, tempo_index: int, inclusion_block: int) -> SettledWeightsResult | None:
         path = f"/validator/{self.keypair.ss58_address}/settled-weights/{tempo_index}/result"

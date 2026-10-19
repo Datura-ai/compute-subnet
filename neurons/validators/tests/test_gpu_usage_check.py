@@ -301,13 +301,20 @@ async def test_with_the_deferral_off_the_renter_ending_mid_run_scores_0_as_befor
 
 
 @pytest.mark.parametrize(
-    "pod_rental",
-    [_closed(minutes_ago=10), PodRentalActiveResponse(active=True, executor_id=default_executor().uuid)],
+    "make_pod_rental",
+    [
+        lambda: _closed(minutes_ago=10),
+        lambda: PodRentalActiveResponse(active=True, executor_id=default_executor().uuid),
+    ],
     ids=["ended-10-min-ago", "started-mid-run"],
 )
 @pytest.mark.asyncio
-async def test_with_the_deferral_off_every_pod_container_is_the_orphan_zero(context_factory, pod_rental):
-    ctx = _unrented_ctx(context_factory, pod_rental=pod_rental, rented_data=_snapshot_with_pod())
+async def test_with_the_deferral_off_every_pod_container_is_the_orphan_zero(
+    context_factory, make_pod_rental
+):
+    ctx = _unrented_ctx(
+        context_factory, pod_rental=make_pod_rental(), rented_data=_snapshot_with_pod()
+    )
 
     result = await GpuUsageCheck().run(ctx)
 
@@ -597,18 +604,21 @@ async def test_a_rental_that_started_mid_run_is_not_an_orphan(context_factory):
 
 @pytest.mark.parametrize("deferral_enabled", [True, False], ids=["flag-on", "flag-off"])
 @pytest.mark.parametrize(
-    "pod_rental",
-    [_closed(minutes_ago=1), PodRentalActiveResponse(active=True, executor_id=default_executor().uuid)],
+    "make_pod_rental",
+    [
+        lambda: _closed(minutes_ago=1),
+        lambda: PodRentalActiveResponse(active=True, executor_id=default_executor().uuid),
+    ],
     ids=["ending", "started-mid-run"],
 )
 @pytest.mark.asyncio
 async def test_a_foreign_process_beside_a_renters_pod_never_gets_advice_to_stop_the_pod(
-    context_factory, deferral_enabled, pod_rental
+    context_factory, deferral_enabled, make_pod_rental
 ):
     foreign = {"pid": 4242, "container_name": "nodexo-rental-1cd1ba2b"}
     ctx = _unrented_ctx(
         context_factory,
-        pod_rental=pod_rental,
+        pod_rental=make_pod_rental(),
         rented_data=_snapshot_with_pod(),
         gpu_processes=[_pod_process(), foreign],
     )
@@ -1632,3 +1642,23 @@ async def test_a_close_time_that_arrives_with_a_timezone_is_still_read(context_f
 
     assert result.passed is True
     assert result.event.reason_code == Msg.USAGE_OK.reason
+
+
+def test_lium_workload_containers_counts_the_pod_container_of_an_unnamed_pod():
+    # DAH-4315: the backend lists a new pod before it records the container name
+    rented_data = RentedExecutorsResponse(
+        executors={
+            "executor-123": RentedExecutor(
+                miner_hotkey="miner-hotkey",
+                executor_ip_address="127.0.0.1",
+                executor_ip_port="8080",
+                pods=[RentedPod(pod_id="53a68595", container_name="")],
+            )
+        },
+        banned_guids=[],
+    )
+    ctx = MagicMock()
+    ctx.executor = default_executor()
+    ctx.state.rented_data = rented_data
+
+    assert gpu_usage.lium_workload_containers(ctx) == {f"{POD_CONTAINER_PREFIX}53a68595"}
