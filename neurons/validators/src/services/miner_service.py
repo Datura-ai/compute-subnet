@@ -28,6 +28,7 @@ from datura.requests.validator_requests import (
     SSHPubKeySubmitRequest,
     GetPodLogsRequest,
     AuthenticationPayload,
+    fresh_upload_nonce,
     ssh_pubkey_signing_blob,
 )
 from fastapi import Depends
@@ -392,6 +393,14 @@ class MinerService:
     def _normalize_public_key(public_key: bytes | str) -> str:
         return public_key.decode("utf-8") if isinstance(public_key, bytes) else public_key
 
+    def _dated_upload_nonce_if_enabled(self) -> str | None:
+        """A dated nonce for an SSH-key upload, so a captured signature goes stale (I-78).
+
+        Off until miners/executors older than the nonce field (Jul 2026) are gone: they drop or
+        mis-verify it and the upload fails.
+        """
+        return fresh_upload_nonce() if settings.ENABLE_DATED_UPLOAD_NONCE else None
+
     def _sign_validator_pubkey(
         self,
         keypair: bittensor.Keypair,
@@ -518,7 +527,7 @@ class MinerService:
                 attestation_nonce = await self.attestation_service.maybe_issue_nonce(
                     payload.miner_hotkey
                 )
-                nonce_hex = attestation_nonce.value_hex if attestation_nonce else None
+                nonce_hex = attestation_nonce.value_hex if attestation_nonce else self._dated_upload_nonce_if_enabled()
 
                 await miner_client.send_model(
                     SSHPubKeySubmitRequest(
@@ -1483,16 +1492,18 @@ class MinerService:
                 # generate ssh key and send it to miner
                 private_key, public_key = self.ssh_service.generate_ssh_key(my_key.ss58_address)
 
+                upload_nonce = self._dated_upload_nonce_if_enabled()
                 await miner_client.send_model(
                     SSHPubKeySubmitRequest(
                         public_key=public_key,
-                        validator_signature=self._sign_validator_pubkey(my_key, public_key),
+                        validator_signature=self._sign_validator_pubkey(my_key, public_key, nonce=upload_nonce),
                         validator_miner_signature=self._sign_validator_pubkey(
-                            my_key, public_key, miner_hotkey=payload.miner_hotkey
+                            my_key, public_key, nonce=upload_nonce, miner_hotkey=payload.miner_hotkey
                         ),
                         executor_id=payload.executor_id,
                         is_rental_request=isinstance(payload, ContainerCreateRequest),
-                        miner_hotkey=payload.miner_hotkey
+                        miner_hotkey=payload.miner_hotkey,
+                        nonce=upload_nonce,
                     )
                 )
 
@@ -1947,16 +1958,18 @@ class MinerService:
 
             async with miner_client:
 
+                upload_nonce = self._dated_upload_nonce_if_enabled()
                 await miner_client.send_model(
                     SSHPubKeySubmitRequest(
                         public_key=payload.public_key,
-                        validator_signature=self._sign_validator_pubkey(my_key, payload.public_key),
+                        validator_signature=self._sign_validator_pubkey(my_key, payload.public_key, nonce=upload_nonce),
                         validator_miner_signature=self._sign_validator_pubkey(
-                            my_key, payload.public_key, miner_hotkey=payload.miner_hotkey
+                            my_key, payload.public_key, nonce=upload_nonce, miner_hotkey=payload.miner_hotkey
                         ),
                         executor_id=payload.executor_id,
                         is_rental_request=False,
                         miner_hotkey=payload.miner_hotkey,
+                        nonce=upload_nonce,
                     )
                 )
 
@@ -2499,7 +2512,7 @@ class MinerService:
             attestation_nonce = await self.attestation_service.maybe_issue_nonce(
                 payload.miner_hotkey
             )
-            nonce_hex = attestation_nonce.value_hex if attestation_nonce else None
+            nonce_hex = attestation_nonce.value_hex if attestation_nonce else self._dated_upload_nonce_if_enabled()
 
             # Prepare request
             ssh_request = SSHPubKeySubmitRequest(
@@ -2754,15 +2767,17 @@ class MinerService:
             # Generate SSH key and send it to miner
             private_key, public_key = self.ssh_service.generate_ssh_key(my_key.ss58_address)
 
+            upload_nonce = self._dated_upload_nonce_if_enabled()
             ssh_request = SSHPubKeySubmitRequest(
                 public_key=public_key,
-                validator_signature=self._sign_validator_pubkey(my_key, public_key),
+                validator_signature=self._sign_validator_pubkey(my_key, public_key, nonce=upload_nonce),
                 validator_miner_signature=self._sign_validator_pubkey(
-                    my_key, public_key, miner_hotkey=payload.miner_hotkey
+                    my_key, public_key, nonce=upload_nonce, miner_hotkey=payload.miner_hotkey
                 ),
                 executor_id=payload.executor_id,
                 is_rental_request=isinstance(payload, ContainerCreateRequest),
-                miner_hotkey=payload.miner_hotkey
+                miner_hotkey=payload.miner_hotkey,
+                nonce=upload_nonce,
             )
 
             logger.info(
@@ -3132,15 +3147,17 @@ class MinerService:
             headers = self._generate_auth_headers(my_key, payload.miner_hotkey)
             headers["Content-Type"] = "application/json"
             
+            upload_nonce = self._dated_upload_nonce_if_enabled()
             ssh_request = SSHPubKeySubmitRequest(
                 public_key=payload.public_key,
-                validator_signature=self._sign_validator_pubkey(my_key, payload.public_key),
+                validator_signature=self._sign_validator_pubkey(my_key, payload.public_key, nonce=upload_nonce),
                 validator_miner_signature=self._sign_validator_pubkey(
-                    my_key, payload.public_key, miner_hotkey=payload.miner_hotkey
+                    my_key, payload.public_key, nonce=upload_nonce, miner_hotkey=payload.miner_hotkey
                 ),
                 executor_id=payload.executor_id,
                 is_rental_request=False,
                 miner_hotkey=payload.miner_hotkey,
+                nonce=upload_nonce,
             )
 
             logger.info(

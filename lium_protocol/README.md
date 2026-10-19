@@ -53,6 +53,7 @@ Consumers pin a tag `lium-protocol-v<PROTOCOL_VERSION>` of this repository. The 
 - `1.6.0` — `RentedExecutorsResponse.executor_owner_hotkeys` (optional, default empty): executor_id → the hotkey the executor is listed under (the pool hotkey for a custodied account, else the miner hotkey of its MinerExecutor row), for every listed executor, rented or not. The validator keys each verified-job record by (miner hotkey, executor_id) and reads this map only to move a record stored under the bare executor_id to the listed hotkey; any other hotkey starts a fresh record.
 - `1.7.0` — `RentedExecutorsResponse.provider_email_held_executor_ids` (optional; the nodes the backend keeps unlisted until the provider confirms an e-mail address).
 - `1.8.0` — `BackupContainerRequest.exclude_patterns` (optional, default empty): restic `--exclude` patterns for the backup; the default backup of a new pod sends its cache and key paths.
+- `1.9.0` — `ContainerWarningCode.DockerInDockerDisabled`: the container was created with its external volume attached, but without nested Docker on this node. A reader that requires nested Docker can refuse the container instead of handing it over without it.
 - `1.0.0` — first release.
 
 ## Tests

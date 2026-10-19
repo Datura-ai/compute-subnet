@@ -7,9 +7,14 @@ by bittensor — matching the format expected by the executor's
 _validate_validator_signature check.
 """
 
+import time
+
 import bittensor
 import pytest
+from datura.requests.validator_requests import upload_nonce_issued_at
 
+from core.config import settings
+from services.attestation_service import AttestationNonce
 from services.miner_service import MinerService
 
 
@@ -54,3 +59,10 @@ def test_sign_validator_pubkey_str_produces_verifiable_signature(miner_service, 
     assert validator_keypair.verify(public_key, signature)
 
 
+def test_upload_nonce_dated_only_when_enabled(miner_service, monkeypatch):
+    # I-78: dated upload nonces go out only behind ENABLE_DATED_UPLOAD_NONCE (old miners drop the field)
+    monkeypatch.setattr(settings, "ENABLE_DATED_UPLOAD_NONCE", False)
+    assert miner_service._dated_upload_nonce_if_enabled() is None
+    monkeypatch.setattr(settings, "ENABLE_DATED_UPLOAD_NONCE", True)
+    assert abs(upload_nonce_issued_at(miner_service._dated_upload_nonce_if_enabled()) - time.time()) < 5
+    assert upload_nonce_issued_at(AttestationNonce.issue().value_hex) is not None
