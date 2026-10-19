@@ -369,8 +369,11 @@ TDX_WHITELIST = {
             # DAH-2834, three settings added to init_script.sh; executor-v1.128 to v1.130 and main).
             # Missing here from 2026-09-14 to this entry, so every CVM created from those releases
             # would score zero with the whitelist on. Version 5; DAH-2780's pre_launch_script.sh
-            # rewrite (lium-io#1266) takes 6.
+            # rewrite (lium-io#1266) takes the next free version.
             "87d3430000bb7046a19eeaa6efe074fd8b5f7856bbfe2906addab238174c542d": 5,
+            # DAH-4631 — the same runner digest with EXECUTOR_SSH_SOURCE_PIN added to init_script.sh
+            # (lium-io#1677). Version 6.
+            "ae7ff74c04eb0626f7cd16822693298f2202650eba9e59b9daebe77a4e018c52": 6,
             # Version 3 (ab4d1433…, July runner sha256:f85b948b…) is gone and its number burned:
             # that runner bakes the STAGING validator hotkey via config_override.py and answers every
             # prod validator with 401. Removed, not demoted: TDX_MINIMUM_COMPOSE_VERSION defaults to 0.

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .models import build_msg
+from .models import AVAILABILITY_CATEGORY, build_msg
 
 if TYPE_CHECKING:  # pragma: no cover
     from .pipeline import Context
@@ -460,6 +460,36 @@ class RentedGpuDropMessages:
     DISABLED = MessageTemplate(
         event="Rented GPU drop check disabled",
         reason="RENTED_GPU_DROP_DISABLED",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+
+
+class GpuLossHoldMessages:
+    LOST = MessageTemplate(
+        event="A GPU dropped out on this node",
+        reason="GPU_LOST",
+        severity="error",
+        # an availability error: the backend hides the node and refuses new rentals, a rental on it runs on
+        category=AVAILABILITY_CATEGORY,
+        impact="The node is hidden and takes no new rentals until its GPUs read clean for the hold window "
+        "(see hold_until); an idle node scores 0 meanwhile, a rental already on it is not touched",
+        remediation="A card fell out of NVML (see faults, missing_uuids, nvml_error_code). Run `nvidia-smi` and "
+        "`dmesg | grep -i xid` on the host; 'Unknown Error' or Xid 79 ('fallen off the bus') means the card must "
+        "be reseated, reset or replaced. The node is listed again once every card has read clean for the hold "
+        "window.",
+    )
+    PENDING = MessageTemplate(
+        event="A GPU may have dropped out; judged again next cycle",
+        reason="GPU_LOST_PENDING",
+        severity="warning",
+        category="env",
+        impact="Proceed; the node is hidden if the next cycle shows it again",
+    )
+    OK = MessageTemplate(
+        event="Every GPU is listed",
+        reason="GPU_LOST_NONE",
         severity="info",
         category="env",
         impact="Proceed",
@@ -1531,6 +1561,49 @@ class CapabilityMessages:
             "The matrix-multiplication probe did not finish in time. Check nvidia-smi for "
             "stuck processes or leftover containers holding VRAM on the executor."
         ),
+    )
+
+
+class GpuMemoryHealthMessages:
+    FAILED = MessageTemplate(
+        event="GPU memory reported broken by NVML",
+        reason="GPU_MEMORY_HEALTH_FAILED",
+        severity="error",
+        category="gpu",
+        impact="Node not rentable until the card is reset or replaced (a running rental is kept)",
+        remediation="NVML reports uncorrected ECC errors, a pending or failed row remap, or a "
+        "required recovery action on the card(s) in flags; a rented card in this state faults the "
+        "renter's jobs. Check `nvidia-smi -q -d ECC,ROW_REMAPPER`: a pending remap or a "
+        "DRAIN_AND_RESET / GPU_RESET action needs the card drained and reset (`nvidia-smi -r` with "
+        "no process on it, or a host reboot); a failed remap, or uncorrected errors that return "
+        "after a reset, mean the card must be replaced. The node passes again on the first "
+        "validation after NVML reads the card clean.",
+    )
+    FLAGGED = MessageTemplate(
+        event="GPU memory reported broken by NVML",
+        reason="GPU_MEMORY_HEALTH_FLAGGED",
+        severity="warning",
+        category="gpu",
+        impact="Proceed; score not changed (GPU_MEMORY_HEALTH_ENFORCEMENT_ENABLED is off)",
+        remediation="NVML reports uncorrected ECC errors, a pending or failed row remap, or a "
+        "required recovery action on the card(s) in flags. Check `nvidia-smi -q -d "
+        "ECC,ROW_REMAPPER`: a pending remap or a DRAIN_AND_RESET / GPU_RESET action needs the card "
+        "drained and reset (`nvidia-smi -r` with no process on it, or a host reboot); a failed "
+        "remap, or uncorrected errors that return after a reset, mean the card should be replaced.",
+    )
+    UNKNOWN = MessageTemplate(
+        event="GPU memory health not read",
+        reason="GPU_MEMORY_HEALTH_UNKNOWN",
+        severity="info",
+        category="gpu",
+        impact="Proceed",
+    )
+    OK = MessageTemplate(
+        event="GPU memory health ok",
+        reason="GPU_MEMORY_HEALTH_OK",
+        severity="info",
+        category="gpu",
+        impact="Proceed",
     )
 
 

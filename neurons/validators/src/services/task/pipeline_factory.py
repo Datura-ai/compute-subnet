@@ -40,8 +40,10 @@ from .checks import (
     FinalizeCheck,
     GpuCountCheck,
     GpuFaultProbeCheck,
+    GpuMemoryHealthCheck,
     GpuFingerprintCheck,
     GpuKernelCountCheck,
+    GpuLossHoldCheck,
     GpuModelValidCheck,
     GpuPowerLimitCheck,
     GpuThermalThrottleCheck,
@@ -178,7 +180,9 @@ class PipelineFactory:
         """
         runner = SSHCommandRunner(shell.ssh_client, max_retries=1)
         verified_job_info = await self.redis_service.get_verified_job_info(
-            executor_info.uuid
+            miner_info.miner_hotkey,
+            executor_info.uuid,
+            rented_data.executor_owner_hotkeys.get(str(executor_info.uuid)) if rented_data else None,
         )
 
         default_extra = {
@@ -292,6 +296,9 @@ class PipelineFactory:
                 # GPU checks below (DETAILS_MISMATCH, GPU_MISSING), which halt the cycle before
                 # TenantEnforcementCheck; this reports it to the backend on that same cycle.
                 RentedGpuDropCheck(),
+                # DAH-4457: a node whose GPU dropped out is hidden until its cards stay back; before the fatal GPU
+                # checks and the rented short-circuit, so rented and idle nodes are held alike.
+                GpuLossHoldCheck(),
                 # ticket-0492: pure data. A busy GPU held below its clock by a thermal/hardware slowdown is a
                 # warning; below half its clock with a slowdown bit it fails an unrented node (score 0) until
                 # fixed. Before the rented short-circuit, so rented nodes get the warning too.
@@ -312,6 +319,10 @@ class PipelineFactory:
                 # short-circuit so a rented host that has just lost its disk is reported too. The
                 # score is not changed until the reading is proven on live executors.
                 DiskHealthCheck(),
+                # one NVML read, no CUDA: a card with uncorrected ECC or a pending row remap fails
+                # the node like a GPU ban (not fatal under a live pod), so it sits before the rented
+                # short-circuit
+                GpuMemoryHealthCheck(),
                 # DAH-2671 item 2a: non-fatal, observe-only CPU-count corroboration. Placed right
                 # after the GPU spec-check group (and before the rented short-circuit) so it reads
                 # advertised specs already populated by the scrape; it only reads over SSH, mutates
@@ -442,12 +453,14 @@ class PipelineFactory:
                 UploadFilesCheck(),
                 MachineSpecScrapeCheck(),
                 RentedGpuDropCheck(),
+                GpuLossHoldCheck(),
                 GpuThermalThrottleCheck(),
                 TdxHostCheck(),
                 GpuCountCheck(),
                 GpuModelValidCheck(),
                 GpuVramPrecheck(),
                 DiskHealthCheck(),
+                GpuMemoryHealthCheck(),
                 CpuTruthCheck(),
                 GpuPowerLimitCheck(),
                 NvmlDigestCheck(),
@@ -512,6 +525,8 @@ class PipelineFactory:
                 MachineSpecScrapeCheck(),
                 # RentedGpuDropCheck: same place as in build_checks(); under DRY_RUN it logs and posts nothing.
                 RentedGpuDropCheck(),
+                # DAH-4457: same place as in build_checks(); under DRY_RUN it reads the hold and writes none.
+                GpuLossHoldCheck(),
                 # ticket-0492: pure data, same place as in build_checks().
                 GpuThermalThrottleCheck(),
                 # DAH-3484: before the rented halt, same as build_checks().
@@ -521,6 +536,8 @@ class PipelineFactory:
                 GpuVramPrecheck(),
                 # DAH-2928: pure-data report on specs.disk_health, same place as in build_checks.
                 DiskHealthCheck(),
+                # one NVML read, no CUDA: safe in dry run, and a broken card is not rented out
+                GpuMemoryHealthCheck(),
                 # DAH-2671 item 2a: read-only SSH corroboration, safe in dry run (mutates nothing).
                 CpuTruthCheck(),
                 # DAH-2734: specs arithmetic plus a read-only SSH reading — safe in dry run.

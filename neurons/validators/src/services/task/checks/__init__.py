@@ -11,8 +11,10 @@ from .executor_image import ExecutorImageCheck
 from .finalize import FinalizeCheck
 from .gpu_count import GpuCountCheck
 from .gpu_fault_probe import GpuFaultProbeCheck
+from .gpu_memory_health import GpuMemoryHealthCheck
 from .gpu_fingerprint import GpuFingerprintCheck
 from .gpu_kernel_count import GpuKernelCountCheck
+from .gpu_loss_hold import GpuLossHoldCheck
 from .gpu_model_valid import GpuModelValidCheck
 from .gpu_power_limit import GpuPowerLimitCheck
 from .gpu_thermal_throttle import GpuThermalThrottleCheck
@@ -55,8 +57,10 @@ __all__ = [
     "FinalizeCheck",
     "GpuCountCheck",
     "GpuFaultProbeCheck",
+    "GpuMemoryHealthCheck",
     "GpuFingerprintCheck",
     "GpuKernelCountCheck",
+    "GpuLossHoldCheck",
     "GpuModelValidCheck",
     "GpuPowerLimitCheck",
     "GpuThermalThrottleCheck",
