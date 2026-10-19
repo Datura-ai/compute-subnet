@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .models import build_msg
+from .models import AVAILABILITY_CATEGORY, build_msg
 
 if TYPE_CHECKING:  # pragma: no cover
     from .pipeline import Context
@@ -403,6 +403,17 @@ class GpuThermalThrottleMessages:
         "PERFORMANCE,TEMPERATURE`, the fans, airflow and the datacenter cooling; the renter is getting a "
         "fraction of the card's speed.",
     )
+    COLLAPSED = MessageTemplate(
+        event="GPU clock collapsed by thermal throttling",
+        reason="GPU_THERMAL_COLLAPSE",
+        severity="error",
+        category="env",
+        impact="Job skipped; score set to 0 until a busy GPU holds at least half its max clock",
+        remediation="A busy GPU runs below half its max clock with a thermal or hardware slowdown set (see "
+        "gpus[]: temperature_c, graphics_clock_mhz, max_graphics_clock_mhz, reasons). Fix the cooling (fans, "
+        "airflow, datacenter temperature; `nvidia-smi -q -d PERFORMANCE,TEMPERATURE`); the node passes again "
+        "on the next validation once the clock recovers.",
+    )
     OK = MessageTemplate(
         event="GPU clocks not thermally throttled",
         reason="GPU_THERMAL_THROTTLE_OK",
@@ -449,6 +460,36 @@ class RentedGpuDropMessages:
     DISABLED = MessageTemplate(
         event="Rented GPU drop check disabled",
         reason="RENTED_GPU_DROP_DISABLED",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+
+
+class GpuLossHoldMessages:
+    LOST = MessageTemplate(
+        event="A GPU dropped out on this node",
+        reason="GPU_LOST",
+        severity="error",
+        # an availability error: the backend hides the node and refuses new rentals, a rental on it runs on
+        category=AVAILABILITY_CATEGORY,
+        impact="The node is hidden and takes no new rentals until its GPUs read clean for the hold window "
+        "(see hold_until); an idle node scores 0 meanwhile, a rental already on it is not touched",
+        remediation="A card fell out of NVML (see faults, missing_uuids, nvml_error_code). Run `nvidia-smi` and "
+        "`dmesg | grep -i xid` on the host; 'Unknown Error' or Xid 79 ('fallen off the bus') means the card must "
+        "be reseated, reset or replaced. The node is listed again once every card has read clean for the hold "
+        "window.",
+    )
+    PENDING = MessageTemplate(
+        event="A GPU may have dropped out; judged again next cycle",
+        reason="GPU_LOST_PENDING",
+        severity="warning",
+        category="env",
+        impact="Proceed; the node is hidden if the next cycle shows it again",
+    )
+    OK = MessageTemplate(
+        event="Every GPU is listed",
+        reason="GPU_LOST_NONE",
         severity="info",
         category="env",
         impact="Proceed",
@@ -729,13 +770,6 @@ class SysboxRequiredMessages:
     SYSBOX_OK = MessageTemplate(
         event="Sysbox requirement satisfied",
         reason="SYSBOX_REQUIRED_OK",
-        severity="info",
-        category="policy",
-        impact="Proceed",
-    )
-    DISABLED = MessageTemplate(
-        event="Sysbox requirement disabled",
-        reason="SYSBOX_REQUIRED_DISABLED",
         severity="info",
         category="policy",
         impact="Proceed",
@@ -1341,13 +1375,6 @@ def _verify_failed(label: str, reason_suffix: str, remediation: str) -> MessageT
 
 
 class VerifyXMessages:
-    DISABLED = MessageTemplate(
-        event="VerifyX validation skipped",
-        reason="VERIFYX_DISABLED",
-        severity="info",
-        category="env",
-        impact="Proceed",
-    )
     FILLER_SKIPPED = MessageTemplate(
         event="VerifyX validation skipped",
         reason="VERIFYX_SKIPPED_ACTIVE_FILLER",
@@ -1537,6 +1564,49 @@ class CapabilityMessages:
     )
 
 
+class GpuMemoryHealthMessages:
+    FAILED = MessageTemplate(
+        event="GPU memory reported broken by NVML",
+        reason="GPU_MEMORY_HEALTH_FAILED",
+        severity="error",
+        category="gpu",
+        impact="Node not rentable until the card is reset or replaced (a running rental is kept)",
+        remediation="NVML reports uncorrected ECC errors, a pending or failed row remap, or a "
+        "required recovery action on the card(s) in flags; a rented card in this state faults the "
+        "renter's jobs. Check `nvidia-smi -q -d ECC,ROW_REMAPPER`: a pending remap or a "
+        "DRAIN_AND_RESET / GPU_RESET action needs the card drained and reset (`nvidia-smi -r` with "
+        "no process on it, or a host reboot); a failed remap, or uncorrected errors that return "
+        "after a reset, mean the card must be replaced. The node passes again on the first "
+        "validation after NVML reads the card clean.",
+    )
+    FLAGGED = MessageTemplate(
+        event="GPU memory reported broken by NVML",
+        reason="GPU_MEMORY_HEALTH_FLAGGED",
+        severity="warning",
+        category="gpu",
+        impact="Proceed; score not changed (GPU_MEMORY_HEALTH_ENFORCEMENT_ENABLED is off)",
+        remediation="NVML reports uncorrected ECC errors, a pending or failed row remap, or a "
+        "required recovery action on the card(s) in flags. Check `nvidia-smi -q -d "
+        "ECC,ROW_REMAPPER`: a pending remap or a DRAIN_AND_RESET / GPU_RESET action needs the card "
+        "drained and reset (`nvidia-smi -r` with no process on it, or a host reboot); a failed "
+        "remap, or uncorrected errors that return after a reset, mean the card should be replaced.",
+    )
+    UNKNOWN = MessageTemplate(
+        event="GPU memory health not read",
+        reason="GPU_MEMORY_HEALTH_UNKNOWN",
+        severity="info",
+        category="gpu",
+        impact="Proceed",
+    )
+    OK = MessageTemplate(
+        event="GPU memory health ok",
+        reason="GPU_MEMORY_HEALTH_OK",
+        severity="info",
+        category="gpu",
+        impact="Proceed",
+    )
+
+
 class GpuFaultProbeMessages:
     """DAH-3035 — the kernel-fault probe that follows the matmul. Shadow (GPU_FAULT_PROBE_CHECK_ENABLED
     without enforcement) emits PROBE_FAILED as a warning and keeps passed=True; only
@@ -1555,6 +1625,13 @@ class GpuFaultProbeMessages:
         severity="info",
         category="policy",
         impact="Active filler runtime preserved; the probe would compete for VRAM.",
+    )
+    FIRST_PASS_SKIPPED = MessageTemplate(
+        event="GPU kernel-fault probe skipped on the first pass",
+        reason="GPU_FAULT_PROBE_SKIPPED_FIRST_PASS",
+        severity="info",
+        category="policy",
+        impact="Proceed; in shadow the verdict changes nothing, so the probe waits for the next cycle.",
     )
     PROBE_OK = MessageTemplate(
         event="GPU kernel-fault probe passed",
@@ -1585,9 +1662,9 @@ class GpuFaultProbeMessages:
 
 
 class PinnedMemoryProbeMessages:
-    """F-1599 — the pinned-host-memory H2D/D2H round trip on every GPU. On by default with enforcement:
-    PROBE_FAILED fails the fatal check and keeps the node unrentable; without
-    PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED it is a warning and passed=True."""
+    """F-1599 — the pinned-host-memory H2D/D2H round trip on every GPU. On by default in shadow mode:
+    PROBE_FAILED is a logged warning with passed=True; with PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED it fails
+    the fatal check and keeps the node unrentable."""
 
     DISABLED = MessageTemplate(
         event="Pinned-memory copy probe disabled",
@@ -1868,6 +1945,53 @@ class CpuTruthMessages:
     )
 
 
+class GpuKernelCountMessages:
+    """Reported GPU list against the kernel's list (/proc/driver/nvidia/gpus). Shadow
+    (GPU_KERNEL_COUNT_CHECK_ENABLED without enforcement) renders COUNT_MISMATCH as a warning and
+    keeps passed=True; only GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED makes it fail the validation.
+    UUID_MISMATCH is logged only, under either flag."""
+
+    COUNT_OK = MessageTemplate(
+        event="Reported GPUs match the kernel's GPU list",
+        reason="GPU_KERNEL_COUNT_OK",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+    COUNT_MISMATCH = MessageTemplate(
+        event="Reported GPU count exceeds the kernel's GPU list",
+        reason="GPU_KERNEL_COUNT_MISMATCH",
+        severity="error",
+        category="env",
+        impact="Validation failed; score set to 0",
+        remediation=(
+            "Report only the GPUs this host has. The NVIDIA kernel driver "
+            "(/proc/driver/nvidia/gpus) lists fewer cards than the node reports."
+        ),
+    )
+    UUID_MISMATCH = MessageTemplate(
+        event="Reported GPU UUIDs are missing from the kernel's GPU list",
+        reason="GPU_KERNEL_UUID_MISMATCH",
+        severity="warning",
+        category="env",
+        impact="Shadow observation only: the validation result was NOT changed",
+    )
+    NOT_EVALUATED = MessageTemplate(
+        event="Kernel GPU list not available; reported GPU count not evaluated",
+        reason="GPU_KERNEL_COUNT_NOT_EVALUATED",
+        severity="info",
+        category="env",
+        impact="Proceed without penalty",
+    )
+    SKIPPED = MessageTemplate(
+        event="Kernel GPU count check disabled",
+        reason="GPU_KERNEL_COUNT_DISABLED",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+
+
 class ProviderSideLoadMessages:
     """DAH-2734 — the CPU/disk twin of the foreign-GPU gate: a provider who runs another
     subnet's miner on a listed machine sells capacity he already uses himself. Shadow
@@ -2041,4 +2165,58 @@ class LocalVerifyMessages:
         severity="info",
         category="transport",
         impact="The matmul and VerifyX verdicts below come from the executor's local run, judged by the validator",
+    )
+
+
+SSHD_BOOTSTRAP_REMEDIATION = (
+    "sshd does not start inside containers on this node, so renters cannot SSH in. Common cause: the host's "
+    "container runtime leaves /run/sshd not owned by root or group/world-writable (sshd refuses to start: "
+    "\"/run/sshd must be owned by root and not group or world-writable\"). Fix the runtime/image setup so "
+    "a fresh container gets a root-owned /run/sshd with mode 755, then check that `docker run --rm ubuntu sh -c "
+    "'apt-get update -qq && apt-get install -y -qq openssh-server && mkdir -p /run/sshd && /usr/sbin/sshd -t'` "
+    "succeeds. The node is validated again once a new container on it starts sshd."
+)
+
+
+class SshdBootstrapMessages:
+    FAILED = MessageTemplate(
+        event="sshd does not start in containers on this node",
+        reason="SSHD_BOOTSTRAP_FAILED",
+        severity="warning",
+        category="runtime",
+        impact="Score set to 0 and Lium's filler on the node removed until sshd starts in a container on this node",
+        remediation=SSHD_BOOTSTRAP_REMEDIATION,
+    )
+    # the same finding while SSHD_BOOTSTRAP_ENFORCEMENT_ENABLED is off: logged, score unchanged
+    FAILED_OBSERVED = MessageTemplate(
+        event="sshd does not start in containers on this node (not enforced)",
+        reason="SSHD_BOOTSTRAP_FAILED_OBSERVED",
+        severity="warning",
+        category="runtime",
+        impact="None: SSHD_BOOTSTRAP_ENFORCEMENT_ENABLED is off",
+        remediation=SSHD_BOOTSTRAP_REMEDIATION,
+    )
+    OK = MessageTemplate(
+        event="No sshd start failure recorded for this node",
+        reason="SSHD_BOOTSTRAP_OK",
+        severity="info",
+        category="runtime",
+        impact="Proceed",
+    )
+
+
+class SshdAuthLogMessages:
+    LOGINS = MessageTemplate(
+        event="Executor sshd logins since the last cycle",
+        reason="SSHD_AUTH_LOGINS",
+        severity="info",
+        category="runtime",
+        impact="Proceed; observation only",
+    )
+    UNREAD = MessageTemplate(
+        event="Executor sshd logins not read",
+        reason="SSHD_AUTH_LOG_UNREAD",
+        severity="info",
+        category="runtime",
+        impact="Proceed; observation only",
     )

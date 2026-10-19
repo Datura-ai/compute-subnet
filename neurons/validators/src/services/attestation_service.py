@@ -3,7 +3,6 @@ import binascii
 import hashlib
 import json
 import logging
-import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Annotated, Any
@@ -11,6 +10,7 @@ from typing import Annotated, Any
 import aiohttp
 import asyncssh
 from datura.requests.miner_requests import ExecutorSSHInfo
+from datura.requests.validator_requests import fresh_upload_nonce
 from fastapi import Depends
 
 from core.config import settings
@@ -53,7 +53,8 @@ class AttestationNonce:
 
     @classmethod
     def issue(cls) -> "AttestationNonce":
-        return cls(value_hex=secrets.token_hex(32))
+        # dated, so the executor can refuse it once stale (I-78); still 32 hex bytes for the TDX channel
+        return cls(value_hex=fresh_upload_nonce())
 
     @property
     def value_bytes(self) -> bytes:
