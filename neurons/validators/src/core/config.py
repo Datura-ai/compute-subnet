@@ -502,9 +502,10 @@ class Settings(BaseSettings):
     # glitch waits one more); observation only, no score change. Off by default.
     RENTED_GPU_DROP_CHECK_ENABLED: bool = Field(env="RENTED_GPU_DROP_CHECK_ENABLED", default=False)
     # DAH-4564 — read a rented pod's cpuset, CPU quota and init oom_score_adj and flag a host that
-    # pinned or throttled the renter below what was deployed. CHECK_ENABLED observes; ENFORCEMENT
-    # additionally zeroes the score. A raised oom_score_adj is recorded only, never scored.
-    RENTED_POD_RESOURCES_CHECK_ENABLED: bool = Field(env="RENTED_POD_RESOURCES_CHECK_ENABLED", default=False)
+    # pinned or throttled the renter below 95% of its advertised cores. CHECK_ENABLED observes and
+    # reports (on); ENFORCEMENT additionally zeroes the score (off: penalty owners decide). A raised
+    # oom_score_adj is recorded only, never scored.
+    RENTED_POD_RESOURCES_CHECK_ENABLED: bool = Field(env="RENTED_POD_RESOURCES_CHECK_ENABLED", default=True)
     RENTED_POD_RESOURCES_ENFORCEMENT_ENABLED: bool = Field(
         env="RENTED_POD_RESOURCES_ENFORCEMENT_ENABLED", default=False
     )

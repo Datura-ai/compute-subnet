@@ -20,11 +20,13 @@ from tests.helpers import build_state
 SETTINGS = "neurons.validators.src.services.task.checks.rented_pod_resources.settings"
 
 
-def _container(cpuset="", nano=8_000_000_000, oom=500, label="8"):
+def _container(cpuset="", nano=8_000_000_000, oom=500, label="8", quota=0, period=0):
     return {
         "name": "/pod_1",
         "cpuset": cpuset,
         "nano": nano,
+        "quota": quota,
+        "period": period,
         "oom": oom,
         "pid": 4242,
         "labels": {RENTAL_CPU_COUNT_LABEL: label} if label else None,
@@ -129,9 +131,49 @@ async def test_inability_to_measure_passes(context_factory, ssh):
 
 
 @pytest.mark.asyncio
-async def test_disabled_by_default_skips(context_factory):
-    result = await RentedPodResourcesCheck().run(
-        _ctx(context_factory, _ssh(_container(cpuset="2")))
-    )
+async def test_disabled_skips(context_factory):
+    ctx = _ctx(context_factory, _ssh(_container(cpuset="2")))
+    with patch(SETTINGS) as s:
+        s.RENTED_POD_RESOURCES_CHECK_ENABLED = False
+        result = await RentedPodResourcesCheck().run(ctx)
     assert result.passed is True
     assert result.event.reason_code == Msg.SKIPPED.reason
+
+
+def test_reporting_on_and_enforcement_off_by_default():
+    from core.config import Settings
+
+    fields = Settings.model_fields
+    assert fields["RENTED_POD_RESOURCES_CHECK_ENABLED"].default is True
+    assert fields["RENTED_POD_RESOURCES_ENFORCEMENT_ENABLED"].default is False
+
+
+# 100 advertised cores; the owner's floor is 95% (MIN_RENTAL_CPU_SHARE) in both cpuset and quota.
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "container, findings",
+    [
+        (_container(cpuset="0-99", nano=0, label="100"), []),
+        (_container(cpuset="0-95", nano=0, label="100"), []),
+        (_container(cpuset="0-94", nano=0, label="100"), []),
+        (_container(cpuset="0-93", nano=0, label="100"), ["cpuset_pinned"]),
+        (_container(nano=100_000_000_000, label="100"), []),
+        (_container(nano=96_000_000_000, label="100"), []),
+        (_container(nano=95_000_000_000, label="100"), []),
+        (_container(nano=94_000_000_000, label="100"), ["cpu_quota_reduced"]),
+        (_container(nano=0, quota=9_600_000, period=100_000, label="100"), []),
+        (_container(nano=0, quota=9_500_000, period=100_000, label="100"), []),
+        (_container(nano=0, quota=9_400_000, period=100_000, label="100"), ["cpu_quota_reduced"]),
+        (_container(nano=0, quota=4_700_000, label="100"), ["cpu_quota_reduced"]),  # default period
+        (_container(nano=0, quota=-1, period=100_000, label="100"), []),  # unlimited
+        (_container(nano=0, quota=0, label="100"), []),  # unlimited
+        (
+            _container(cpuset="0-93", nano=94_000_000_000, label="100"),
+            ["cpuset_pinned", "cpu_quota_reduced"],
+        ),
+    ],
+)
+async def test_95_percent_floor(context_factory, container, findings):
+    result = await _run(_ctx(context_factory, _ssh(container)), enforce=True)
+    assert _findings(result) == findings
+    assert result.passed is (not findings)

@@ -18,16 +18,21 @@ from .rented_gpu_drop import POD_STATUS_RUNNING
 READ_TIMEOUT_SECONDS = 30
 _INSPECT_FORMAT = (
     '{"name":{{json .Name}},"cpuset":{{json .HostConfig.CpusetCpus}},'
-    '"nano":{{json .HostConfig.NanoCpus}},"oom":{{json .HostConfig.OomScoreAdj}},'
+    '"nano":{{json .HostConfig.NanoCpus}},"quota":{{json .HostConfig.CpuQuota}},'
+    '"period":{{json .HostConfig.CpuPeriod}},"oom":{{json .HostConfig.OomScoreAdj}},'
     '"pid":{{json .State.Pid}},"labels":{{json .Config.Labels}}}'
 )
 # The failing findings; oom_priority_raised is recorded only, a root renter can raise it themselves.
 SCORED_FINDINGS = ("cpuset_pinned", "cpu_quota_reduced")
+# Owner (19 Oct): a host may keep a little CPU back, but the rental must keep at least this share of
+# its advertised cores, in both the cpuset and the CPU quota.
+MIN_RENTAL_CPU_SHARE = 0.95
+_DEFAULT_CPU_PERIOD_US = 100_000
 
 
 class RentedPodResourcesCheck:
     """Read each running rented pod's HostConfig and init oom_score_adj and flag a host that
-    `docker update`d the renter below what the validator deployed.
+    `docker update`d the renter below MIN_RENTAL_CPU_SHARE of its advertised cores (cpuset or quota).
 
     The validator never sets a cpuset and records the --cpus it deployed in an immutable label
     (RENTAL_CPU_COUNT_LABEL). Non-fatal: shadow always passes, and only
@@ -137,16 +142,23 @@ def judge_pod(pod: dict, init_oom: int | None, host_cpus: int | None) -> dict:
     except (TypeError, ValueError):
         deployed = None
     nano = pod.get("nano") if isinstance(pod.get("nano"), int) else 0
+    quota = pod.get("quota") if isinstance(pod.get("quota"), int) else 0
+    period = pod.get("period") if isinstance(pod.get("period"), int) and pod["period"] > 0 else 0
+    # CPUs the quota allows: NanoCpus (--cpus) or CpuQuota/CpuPeriod (--cpu-quota); 0 or -1 = unlimited
+    limits = [nano / 1e9] if nano > 0 else []
+    if quota > 0:
+        limits.append(quota / (period or _DEFAULT_CPU_PERIOD_US))
+    quota_cpus = min(limits) if limits else None
     cpuset = pod.get("cpuset") or ""
-    # Entitlement: the deployed --cpus, else the current quota (a pod created before the label),
+    # Advertised cores: the deployed --cpus, else the current quota (a pod created before the label),
     # else the whole host (no --cpus, e.g. CVM). None left: any cpuset is foreign, we never set one.
-    entitled = deployed or (math.ceil(nano / 1e9) if nano else None) or host_cpus
+    entitled = deployed or (math.ceil(quota_cpus) if quota_cpus else None) or host_cpus
+    floor = MIN_RENTAL_CPU_SHARE * entitled if entitled else None
     cpuset_cpus = _count_cpu_list(cpuset)
     findings = []
-    if cpuset_cpus is not None and (entitled is None or cpuset_cpus < entitled):
+    if cpuset_cpus is not None and (floor is None or cpuset_cpus < floor - 1e-9):
         findings.append("cpuset_pinned")
-    # NanoCpus 0 means no limit, never a cut
-    if deployed and 0 < nano < deployed * 1_000_000_000:
+    if floor is not None and quota_cpus is not None and quota_cpus < floor - 1e-9:
         findings.append("cpu_quota_reduced")
     deployed_oom = pod.get("oom")
     if init_oom is not None and isinstance(deployed_oom, int) and init_oom > deployed_oom:
@@ -156,7 +168,11 @@ def judge_pod(pod: dict, init_oom: int | None, host_cpus: int | None) -> dict:
         "cpuset": cpuset,
         "cpuset_cpus": cpuset_cpus,
         "nano_cpus": nano,
+        "cpu_quota": quota,
+        "cpu_period": period,
+        "quota_cpus": quota_cpus,
         "deployed_cpus": deployed,
+        "min_cpus": round(floor, 2) if floor else None,
         "oom_score_adj_deployed": deployed_oom,
         "oom_score_adj_init": init_oom,
         "findings": findings,
