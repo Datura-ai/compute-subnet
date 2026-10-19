@@ -12,6 +12,7 @@ from .finalize import FinalizeCheck
 from .gpu_count import GpuCountCheck
 from .gpu_fault_probe import GpuFaultProbeCheck
 from .gpu_fingerprint import GpuFingerprintCheck
+from .gpu_kernel_count import GpuKernelCountCheck
 from .gpu_model_valid import GpuModelValidCheck
 from .gpu_power_limit import GpuPowerLimitCheck
 from .gpu_thermal_throttle import GpuThermalThrottleCheck
@@ -32,6 +33,7 @@ from .rented_gpu_drop import RentedGpuDropCheck
 from .rented_machine import TenantEnforcementCheck
 from .score import ScoreCheck
 from .spec_change import SpecChangeCheck
+from .sshd_bootstrap import SshdBootstrapCheck
 from .stale_container_cleanup import StaleContainerCleanupCheck
 from .start_gpu_monitor import StartGPUMonitorCheck
 from .sysbox_required import SysboxRequiredCheck
@@ -54,6 +56,7 @@ __all__ = [
     "GpuCountCheck",
     "GpuFaultProbeCheck",
     "GpuFingerprintCheck",
+    "GpuKernelCountCheck",
     "GpuModelValidCheck",
     "GpuPowerLimitCheck",
     "GpuThermalThrottleCheck",
@@ -78,6 +81,7 @@ __all__ = [
     "StartGPUMonitorCheck",
     "SysboxRequiredCheck",
     "SpecChangeCheck",
+    "SshdBootstrapCheck",
     "UploadFilesCheck",
     "VerifyXCheck",
 ]

@@ -73,6 +73,13 @@ class GpuFaultProbeCheck:
                 passed=True, event=render_message(Msg.DISABLED, ctx=ctx, check_id=self.check_id)
             )
 
+        if ctx.config.first_pass and not settings.GPU_FAULT_PROBE_ENFORCEMENT_ENABLED:
+            # a shadow verdict cannot fail the node, so it does not delay a new node's first verification
+            return CheckResult(
+                passed=True,
+                event=render_message(Msg.FIRST_PASS_SKIPPED, ctx=ctx, check_id=self.check_id),
+            )
+
         filler_container = _get_filler_only_container(ctx)
         if filler_container:
             event = render_message(
