@@ -11,7 +11,7 @@ from services.inspector_validation_service import InspectorValidationResponse
 
 from core.config import settings
 
-from ..inspector_verdict import InspectorVerdict, build_verdict
+from ..inspector_verdict import InspectorVerdict, build_verdict, host_write_findings
 from ..messages import InspectorMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
@@ -237,8 +237,45 @@ class InspectorRentedCheck:
     ) -> CheckResult:
         """A provider-origin verdict becomes the MALICIOUS event and the inspector event that
         carries its evidence. It is a record only: the check passes, nothing reaches the score
-        and no renter or backend is asked to act."""
-        if verdict.affected_pod_ids:
+        and no renter or backend is asked to act — except the sensor's rental-interference verdict
+        of a host write into a rented pod under INSPECTOR_HOST_WRITE_ENFORCEMENT_ENABLED
+        (DAH-4548), which fails the check and the score. A read is logged only."""
+        interference = host_write_findings(
+            report, verdict.provider_findings, [p.pod_id for p in rented_pods]
+        )
+        if interference is None:
+            writes, reads = [], []
+            logger.info(
+                _m(
+                    "INSPECTOR_INTERFERENCE_UNSUPPORTED",
+                    extra=get_extra_info(
+                        {**ctx.default_extra, "provider_findings": len(verdict.provider_findings)}
+                    ),
+                )
+            )
+        else:
+            writes, reads = interference
+        enforced = bool(writes) and settings.INSPECTOR_HOST_WRITE_ENFORCEMENT_ENABLED
+        if writes or reads:
+            logger.warning(
+                _m(
+                    "INSPECTOR_HOST_WRITE" if writes else "INSPECTOR_HOST_READ",
+                    extra=get_extra_info(
+                        {
+                            **ctx.default_extra,
+                            "enforced": enforced,
+                            "host_writes": len(writes),
+                            "host_reads": len(reads),
+                            "commands": [
+                                str(f.get("command"))[:160] for f in (writes + reads)[:5]
+                            ],
+                        }
+                    ),
+                )
+            )
+        if enforced:
+            impact = "The host wrote into a rented pod (Inspector verdict); node failed"
+        elif verdict.affected_pod_ids:
             impact = "Provider-origin access to a rented pod recorded; score unchanged"
         else:
             impact = "Provider-origin finding on a container that is not a rented pod recorded; score unchanged"
@@ -263,11 +300,12 @@ class InspectorRentedCheck:
             ctx, event, rented_pods, result, outcome="MALICIOUS", report=report, verdict=verdict
         )
         return CheckResult(
-            passed=True,
+            passed=not enforced,
             event=event,
             updates={
                 "default_extra": extra,
                 "state": replace(ctx.state, inspector_event=inspector_event),
+                **({"inspector_host_write_passed": False} if enforced else {}),
             },
         )
 
