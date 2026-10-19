@@ -39,9 +39,9 @@ class BackendMessageType(enum.Enum):
     ForcedValidationCycleRequest = "ForcedValidationCycleRequest"
     # ask the validator for an exact rental estimate; it answers with EstimateResponse
     GetEstimateRequest = "GetEstimateRequest"
-    # 1.8.0 (DAH-4658): reset a running pod's GPUs; the validator answers with PodGpuResetResult
+    # 1.9.0: reset a running pod's GPUs; the validator answers with PodGpuResetResult
     ResetPodGpuRequest = "ResetPodGpuRequest"
-    # 1.9.0 (DAH-4663): lock or reset a running pod's GPU clocks; the validator answers with PodGpuClocksResult
+    # 1.10.0: lock or reset a running pod's GPU clocks; the validator answers with PodGpuClocksResult
     LockPodGpuClocksRequest = "LockPodGpuClocksRequest"
 
 
@@ -251,6 +251,8 @@ class BackupContainerRequest(ContainerRequest):
     repository_pod_id: str | None = None
     repository_password: str | None = pydantic.Field(default=None, repr=False)
     failure_timeout_seconds: int = pydantic.Field(default=STORAGE_OPERATION_REPORTING_FAILURE_TIMEOUT_SECONDS, gt=0)
+    # 1.8.0: restic --exclude patterns (the default backup skips caches and keys); an older validator ignores them.
+    exclude_patterns: list[str] = []
 
 
 @BACKEND_MESSAGES.register
@@ -290,7 +292,7 @@ class InstallJupyterServerRequest(ContainerRequest):
 
 @BACKEND_MESSAGES.register
 class ResetPodGpuRequest(ContainerRequest):
-    """1.8.0 (DAH-4658): the renter asked to reset the GPUs of their running pod. `gpu_uuids` is every GPU
+    """1.9.0: the renter asked to reset the GPUs of their running pod. `gpu_uuids` is every GPU
     the backend holds for the pod; `gpu_indices` picks some of them by pod index (the pod's GPUs sorted by
     host PCI bus id, the 0..n-1 order `nvidia-smi` shows inside the pod), None for all of them. Answered by
     `validator_to_backend.PodGpuResetResult` with the same `request_id`."""
@@ -306,7 +308,7 @@ class ResetPodGpuRequest(ContainerRequest):
 
 @BACKEND_MESSAGES.register
 class LockPodGpuClocksRequest(ContainerRequest):
-    """1.9.0 (DAH-4663): the renter asked to lock the graphics clocks of their running pod's GPUs to
+    """1.10.0: the renter asked to lock the graphics clocks of their running pod's GPUs to
     `[min_mhz, max_mhz]` (None = the GPU's own bound; clamped to its supported clocks), or with `reset`
     to give them back to the driver. `gpu_uuids` and `gpu_indices` as in `ResetPodGpuRequest`. Answered
     by `validator_to_backend.PodGpuClocksResult` with the same `request_id`."""

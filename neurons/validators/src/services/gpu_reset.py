@@ -240,34 +240,10 @@ async def _precheck(
             raise GpuResetRefused(GpuResetErrorCode.GpuNotInContainer, f"no pod GPU at index {gpu_indices}")
         requested = [ordered[index] for index in sorted(set(gpu_indices))]
 
-    if any(host_by_uuid[uuid].mig_enabled for uuid in requested):
+    targets = await _widen_targets_to_nvlink_peers(runner, requested, ordered, host_gpus)
+    # on the final set: an NVLink peer reset with the requested GPUs must not be MIG either
+    if any(host_by_uuid[uuid].mig_enabled for uuid in targets):
         raise GpuResetRefused(GpuResetErrorCode.MigEnabled, "MIG is enabled on a GPU to reset")
-
-    nvswitch = await _run(runner, NVSWITCH_COMMAND)
-    if (nvswitch.stdout or "").strip():
-        # NVSwitch fabrics reset as one: only a pod that owns every host GPU, and then all of them
-        if set(container_uuids) != set(host_by_uuid):
-            raise GpuResetRefused(
-                GpuResetErrorCode.NvlinkPeersOutsidePod, "NVSwitch node shared with GPUs outside the pod"
-            )
-        targets = list(ordered)
-    else:
-        topology = await _run(runner, TOPOLOGY_COMMAND)
-        if topology.exit_code != 0:
-            raise GpuResetRefused(GpuResetErrorCode.ResetNotSupported, "could not read the GPU topology")
-        peers = parse_nvlink_peers(topology.stdout or "", host_gpus)
-        targets_set = set(requested)
-        frontier = list(requested)
-        while frontier:
-            for peer in peers.get(frontier.pop(), set()):
-                if peer not in container_uuids:
-                    raise GpuResetRefused(
-                        GpuResetErrorCode.NvlinkPeersOutsidePod, "a GPU to reset has NVLink peers outside the pod"
-                    )
-                if peer not in targets_set:
-                    targets_set.add(peer)
-                    frontier.append(peer)
-        targets = [uuid for uuid in ordered if uuid in targets_set]
 
     if not set(targets) <= set(backend_uuids):
         raise GpuResetRefused(GpuResetErrorCode.GpuNotInContainer, "an NVLink peer is not one of the pod's GPUs")
@@ -278,6 +254,36 @@ async def _precheck(
             GpuResetErrorCode.GpuInUseOutsidePod, f"processes outside the pod use the GPUs: {outside}"
         )
     return _Plan(container_id, container_uuids, targets, index_by_uuid, widened=set(targets) != set(requested))
+
+
+async def _widen_targets_to_nvlink_peers(
+    runner: SSHCommandRunner, requested: list[str], ordered: list[str], host_gpus: list[HostGpu]
+) -> list[str]:
+    """The requested GPUs plus every NVLink peer they reach (in pod order); refuses a peer outside the pod."""
+    nvswitch = await _run(runner, NVSWITCH_COMMAND)
+    if (nvswitch.stdout or "").strip():
+        # NVSwitch fabrics reset as one: only a pod that owns every host GPU, and then all of them
+        if set(ordered) != {gpu.uuid for gpu in host_gpus}:
+            raise GpuResetRefused(
+                GpuResetErrorCode.NvlinkPeersOutsidePod, "NVSwitch node shared with GPUs outside the pod"
+            )
+        return list(ordered)
+    topology = await _run(runner, TOPOLOGY_COMMAND)
+    if topology.exit_code != 0:
+        raise GpuResetRefused(GpuResetErrorCode.ResetNotSupported, "could not read the GPU topology")
+    peers = parse_nvlink_peers(topology.stdout or "", host_gpus)
+    targets = set(requested)
+    frontier = list(requested)
+    while frontier:
+        for peer in peers.get(frontier.pop(), set()):
+            if peer not in ordered:
+                raise GpuResetRefused(
+                    GpuResetErrorCode.NvlinkPeersOutsidePod, "a GPU to reset has NVLink peers outside the pod"
+                )
+            if peer not in targets:
+                targets.add(peer)
+                frontier.append(peer)
+    return [uuid for uuid in ordered if uuid in targets]
 
 
 async def _processes_outside(runner: SSHCommandRunner, targets: list[str], container_id: str | None) -> list[int]:
@@ -329,15 +335,17 @@ async def reset_pod_gpus(
         if stopped.exit_code != 0:
             raise GpuResetRefused(GpuResetErrorCode.ResetNotSupported, f"docker stop failed: {_tail(stopped.stderr)}")
         # docker stop killed every process of the pod: anything still on the targets is someone else's
-        left: list[int] = []
+        pids_still_on_targets: list[int] = []
         for attempt in range(3):
-            left = await _processes_outside(runner, plan.targets, None)
-            if not left:
+            pids_still_on_targets = await _processes_outside(runner, plan.targets, None)
+            if not pids_still_on_targets:
                 break
             if attempt < 2:
                 await asyncio.sleep(settle_seconds)
-        if left:
-            raise GpuResetRefused(GpuResetErrorCode.GpuInUseOutsidePod, f"processes left on the GPUs: {left}")
+        if pids_still_on_targets:
+            raise GpuResetRefused(
+                GpuResetErrorCode.GpuInUseOutsidePod, f"processes left on the GPUs: {pids_still_on_targets}"
+            )
 
         reset = await _run(
             runner,
@@ -378,9 +386,27 @@ async def reset_pod_gpus(
     return report
 
 
-async def renter_gpu_reset_in_progress(redis, miner_hotkey: str, executor_id: str) -> bool:
-    """The rented GPU checks' skip: True only on a readable gpu_reset mark (a Redis error proceeds)."""
+# the checks a renter's own reset can trip (the pod is stopped, its GPUs drop out for a moment); a reset of
+# the verified job by any other check (a GPU swap, a duplicate node) is still sent during the reset
+RESET_CAUSED_CHECK_IDS = frozenset({
+    "executor.validate.rented_state",
+    "executor.validate.rental_probe",
+    "executor.validate.rental_verification",
+    "gpu.scrape.machine_spec",
+    "gpu.validate.rented_gpu_drop",
+})
+
+
+async def renter_gpu_resets(redis, miner_hotkey: str, executor_id: str) -> list[dict]:
+    """The node's readable gpu_reset marks; a Redis error (or anything but a list) is none, so the checks run."""
     try:
-        return await redis.gpu_reset_in_progress(miner_hotkey, executor_id) is True
+        marks = await redis.gpu_reset_marks(miner_hotkey, executor_id)
     except Exception:
-        return False
+        return []
+    return marks if isinstance(marks, list) else []
+
+
+async def renter_gpu_reset_in_progress(redis, miner_hotkey: str, executor_id: str, pod_id: str | None = None) -> bool:
+    """True on a readable gpu_reset mark on the node, or on that pod when pod_id is given."""
+    marks = await renter_gpu_resets(redis, miner_hotkey, executor_id)
+    return any(pod_id is None or mark.get("pod_id") == pod_id for mark in marks)

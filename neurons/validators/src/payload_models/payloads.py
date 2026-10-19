@@ -422,7 +422,7 @@ class InstallJupyterServerRequest(ContainerBaseRequest):
 
 
 class ResetPodGpuRequest(ContainerBaseRequest):
-    """DAH-4658: reset the GPUs of a running pod; answered by PodGpuResetResult (lium_protocol 1.8.0)."""
+    """DAH-4658: reset the GPUs of a running pod; answered by PodGpuResetResult (lium_protocol 1.9.0)."""
 
     message_type: ContainerRequestType = ContainerRequestType.ResetPodGpuRequest
     container_name: str
@@ -436,7 +436,7 @@ class ResetPodGpuRequest(ContainerBaseRequest):
 
 class LockPodGpuClocksRequest(ContainerBaseRequest):
     """DAH-4663: lock (or with reset, release) a running pod's GPU clocks; answered by PodGpuClocksResult
-    (lium_protocol 1.9.0)."""
+    (lium_protocol 1.10.0)."""
 
     message_type: ContainerRequestType = ContainerRequestType.LockPodGpuClocksRequest
     container_name: str
@@ -480,6 +480,7 @@ class BackupContainerRequest(ContainerBaseRequest):
     repository_pod_id: str | None = None
     repository_password: str | None = Field(default=None, repr=False)
     failure_timeout_seconds: int = Field(default=600, gt=0)
+    exclude_patterns: list[str] = []
 
 
 class RestoreContainerRequest(ContainerBaseRequest):

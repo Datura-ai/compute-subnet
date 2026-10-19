@@ -317,6 +317,8 @@ class ExecutorService:
     async def send_pubkey_to_executor(
         self, executor: Executor, pubkey: str, validator_signature: str,
         nonce: str | None = None,
+        miner_hotkey: str | None = None,
+        validator_miner_signature: str | None = None,
     ) -> ExecutorSSHInfo | None:
         """TODO: Send API request to executor with pubkey
 
@@ -340,6 +342,10 @@ class ExecutorService:
         }
         if nonce is not None:
             payload["nonce"] = nonce
+        if validator_miner_signature is not None:
+            # relayed verbatim: the executor checks the validator signed this key for its own miner
+            payload["miner_hotkey"] = miner_hotkey
+            payload["validator_miner_signature"] = validator_miner_signature
         
         base_log_extra = {
             "executor_id": str(executor.uuid),
@@ -459,6 +465,7 @@ class ExecutorService:
         validator_signature: str,
         executor_id: Optional[str] = None,
         nonce: str | None = None,
+        validator_miner_signature: str | None = None,
     ) -> PubkeyRegistration:
         """Register pubkeys to executors for given validator.
 
@@ -476,7 +483,8 @@ class ExecutorService:
         tasks = [
             asyncio.create_task(
                 self.send_pubkey_to_executor(
-                    executor, pubkey.decode("utf-8"), validator_signature, nonce=nonce
+                    executor, pubkey.decode("utf-8"), validator_signature, nonce=nonce,
+                    miner_hotkey=miner_hotkey, validator_miner_signature=validator_miner_signature,
                 ),
                 name=f"{executor}.send_pubkey_to_executor",
             )

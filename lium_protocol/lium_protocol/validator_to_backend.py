@@ -56,9 +56,9 @@ class ValidatorMessageType(enum.Enum):
     FailedAddDebugSshKey = "FailedAddDebugSshKey"
     JupyterServerInstalled = "JupyterServerInstalled"
     JupyterInstallationFailed = "JupyterInstallationFailed"
-    # 1.8.0 (DAH-4658): the answer to ResetPodGpuRequest
+    # 1.9.0: the answer to ResetPodGpuRequest
     PodGpuResetResult = "PodGpuResetResult"
-    # 1.9.0 (DAH-4663): the answer to LockPodGpuClocksRequest
+    # 1.10.0: the answer to LockPodGpuClocksRequest
     PodGpuClocksResult = "PodGpuClocksResult"
 
 
@@ -518,7 +518,7 @@ class JupyterInstallationFailed(PodContainerResponse):
 
 
 class GpuResetErrorCode(enum.Enum):
-    """1.8.0 (DAH-4658): why a pod GPU reset did not run, or did not finish."""
+    """1.9.0: why a pod GPU reset did not run, or did not finish."""
 
     MigEnabled = "MigEnabled"
     NvlinkPeersOutsidePod = "NvlinkPeersOutsidePod"
@@ -528,7 +528,7 @@ class GpuResetErrorCode(enum.Enum):
     ContainerNotFound = "ContainerNotFound"
     OperationInProgress = "OperationInProgress"
     ExecutorUnreachable = "ExecutorUnreachable"
-    # 1.9.0 (DAH-4663): sysbox or TEE pod, no supported clocks, or the driver refused the lock
+    # 1.10.0: sysbox or TEE pod, no supported clocks, or the driver refused the lock
     ClockLockNotSupported = "ClockLockNotSupported"
 
 
@@ -541,7 +541,7 @@ class GpuResetOutcome(pydantic.BaseModel):
 
 @VALIDATOR_MESSAGES.register
 class PodGpuResetResult(PodContainerResponse):
-    """1.8.0 (DAH-4658): the answer to `backend_to_validator.ResetPodGpuRequest`, same `request_id`. `gpus` is
+    """1.9.0: the answer to `backend_to_validator.ResetPodGpuRequest`, same `request_id`. `gpus` is
     one outcome per GPU the validator reset (possibly more than asked: NVLink peers inside the pod are
     reset together); empty when a precheck refused before anything changed."""
 
@@ -565,7 +565,7 @@ class GpuClockOutcome(pydantic.BaseModel):
 
 @VALIDATOR_MESSAGES.register
 class PodGpuClocksResult(PodContainerResponse):
-    """1.9.0 (DAH-4663): the answer to `backend_to_validator.LockPodGpuClocksRequest`, same `request_id`.
+    """1.10.0: the answer to `backend_to_validator.LockPodGpuClocksRequest`, same `request_id`.
     `gpus` is one outcome per GPU touched, with the clamped range applied; empty when a precheck refused
     before anything changed. `error_code` reuses `GpuResetErrorCode`."""
 

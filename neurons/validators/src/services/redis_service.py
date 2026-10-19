@@ -24,7 +24,7 @@ POD_STATES_CHANNEL = "POD_STATES_CHANNEL"
 RENTED_MACHINE_PREFIX = "rented_machines_prefix"
 PENDING_PODS_PREFIX = "pending_pods_prefix"
 GPU_RESET_PENDING_KIND = "gpu_reset"
-# DAH-4663: a renter's own GPU clock lock; the rented GPU checks skip it like a reset
+# DAH-4663: a renter's own GPU clock lock in progress (a second lock, reset or create is declined meanwhile)
 GPU_CLOCKS_PENDING_KIND = "gpu_clocks"
 DUPLICATED_MACHINE_SET = "duplicated_machines"
 RENTAL_SUCCEED_MACHINE_SET = "rental_succeed_machines"
@@ -539,7 +539,14 @@ class RedisService:
             logger.error(_m("Error getting executor uptime: {e}", extra={"error": e}), exc_info=True)
             return 0
 
-    async def add_pending_pod(self, miner_hotkey: str, executor_id: str, pod_id: str, kind: str | None = None):
+    async def add_pending_pod(
+        self,
+        miner_hotkey: str,
+        executor_id: str,
+        pod_id: str,
+        kind: str | None = None,
+        gpu_uuids: list[str] | None = None,
+    ):
         pending_pods: list[dict] = await self.get_pending_pods(miner_hotkey, executor_id)
         now = int(time.time())
 
@@ -547,6 +554,8 @@ class RedisService:
         if kind:
             # DAH-4658: "gpu_reset" marks a renter's own GPU reset, which the rented GPU checks skip
             item["kind"] = kind
+        if gpu_uuids:
+            item["gpu_uuids"] = list(gpu_uuids)
         pending_pods.append(item)
         await self.hset(PENDING_PODS_PREFIX, f"{miner_hotkey}:{executor_id}", json.dumps(pending_pods))
 
@@ -580,9 +589,9 @@ class RedisService:
         
         return pending_pods
 
-    async def gpu_reset_in_progress(self, miner_hotkey: str, executor_id: str) -> bool:
+    async def gpu_reset_marks(self, miner_hotkey: str, executor_id: str) -> list[dict]:
         pending_pods: list[dict] = await self.get_pending_pods(miner_hotkey, executor_id)
-        return any(item.get("kind") in (GPU_RESET_PENDING_KIND, GPU_CLOCKS_PENDING_KIND) for item in pending_pods)
+        return [item for item in pending_pods if item.get("kind") == GPU_RESET_PENDING_KIND]
 
     async def renting_in_progress(self, miner_hotkey: str, executor_id: str, pod_id: str | None = None) -> bool:
         pending_pods: list[dict] = await self.get_pending_pods(miner_hotkey, executor_id)
