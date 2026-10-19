@@ -100,6 +100,23 @@ async def _status(reader, gpu_model=GPU_MODEL, gpu_count=GPU_COUNT):
     )
 
 
+def test_the_storage_keys_are_the_ones_finney_answers_for_the_1_0_2_contract():
+    """Executor 65af4497-… has open reclaim request 22 on the 1.0.2 contract. On finney, state_getStorage at these
+    keys answered the same words as executorToMiner() and collaterals() for it."""
+    contract = "0x8A4023FdD1eaA7b242F3723a7d096B6CC693c7C6"
+    executor = "65af4497-335c-4528-8523-0441735e665d"
+    prefix = (
+        "0x1da53b775b270400e7e61ed5cbc5a146ab1160471b1418779239ba8e2b847e42"
+        "81e8cde4a494fd9b81dba034e0b8913d8a4023fdd1eaa7b242f3723a7d096b6cc693c7c6"
+    )
+    assert evm_storage_key(contract, mapping_slot(executor, EXECUTOR_TO_MINER_SLOT)) == prefix + (
+        "cc6a004345680850ecc4e3472c55acf28c408095c99a96eaa467d8913efe65457673a96dd0a6537c0319b06a05e04cdd"
+    )
+    assert evm_storage_key(contract, mapping_slot(executor, COLLATERALS_SLOT)) == prefix + (
+        "f7079d893e7f92eba7c2eaf578e3e6109d265339201d214e81869ea6bc9dae1f3d0dd728b994e3535a7e56a2b22da043"
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "owner, evm, collateral, gpu_model, deposited, error_part",
@@ -166,6 +183,21 @@ async def test_state_off_the_finalized_block_is_never_read(route, at_block, in_s
     expected = (at_block[0] == MINER_EVM, False) if route == "one-backend" else (False, True)
     assert (status.deposited, status.read_failed) == expected
     assert cached is False
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_keeps_the_last_answer_and_names_only_the_error_class():
+    clock = Clock()
+    rpc = FakeRpc(MINER_EVM, Decimal(9))
+    reader = _reader(rpc, clock=clock)
+    await _status(reader)
+
+    clock.now += settings.COLLATERAL_STATUS_CACHE_SECONDS + 1
+    rpc.fail = ConnectionError("https://rpc.example/key-in-path")
+    status, cached = await _status(reader)
+
+    assert (status.deposited, status.contract_version, status.read_failed, cached) == (True, "1.0.2", True, True)
+    assert status.error_message == "Collateral read failed: ConnectionError"
 
 
 @pytest.mark.asyncio

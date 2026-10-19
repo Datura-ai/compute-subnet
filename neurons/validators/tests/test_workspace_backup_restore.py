@@ -8,14 +8,70 @@ import pytest
 MINER_JOBS_PATH = Path(__file__).resolve().parents[1] / "src" / "miner_jobs"
 sys.path.insert(0, str(MINER_JOBS_PATH))
 
+import restore_storage
+import workspace_mount as workspace_mount_module
 from datura.requests.miner_requests import ExecutorSSHInfo
 from services.docker_service import DockerService
 from workspace_mount import (
+    VolumeAccess,
     detect_volume_access,
     normalize_workspace_path,
 )
 
 from services import docker_service as docker_service_module
+
+
+def _restore_args() -> SimpleNamespace:
+    return SimpleNamespace(
+        target_volume="target-volume",
+        target_volume_path="/root",
+        backup_volume_iam_user_access_key="access",
+        backup_volume_iam_user_secret_key="secret",
+        backup_volume_name="bucket",
+        backup_source_path="backup.tar.gz",
+        restore_path="/root/test",
+        restore_log_id="restore-log",
+        api_url="https://api.example",
+        auth_token="token",
+    )
+
+
+def test_encrypted_restore_hands_the_target_dir_back_to_the_renter(monkeypatch):
+    # mkdir runs as uid 0 and tar --strip-components=1 drops the archive's top
+    # entry, so without an explicit chown the renter cannot write there
+    run_commands: list[list[str]] = []
+
+    monkeypatch.setattr(
+        restore_storage,
+        "run_command_args",
+        lambda command, command_label=None: run_commands.append(command),
+    )
+    monkeypatch.setattr(
+        workspace_mount_module.subprocess,
+        "run",
+        lambda command, **_: SimpleNamespace(returncode=0, stdout="renter\n", stderr=""),
+    )
+    access = VolumeAccess("vol", "/root", encrypted=True, container_name="rental-pod")
+
+    restore_storage.ensure_restore_path(_restore_args(), access, "/root/restored")
+
+    chown_commands = [command for command in run_commands if "chown" in command]
+    assert chown_commands, f"no chown issued: {run_commands}"
+    assert chown_commands[0][-2:] == ["renter", "/root/restored"]
+
+
+def test_unreadable_image_user_fails_the_restore_instead_of_skipping_chown(monkeypatch):
+    # returning None here would look exactly like a root image and silently skip
+    # the hand-back, leaving the renter with an unwritable restore target
+    monkeypatch.setattr(
+        workspace_mount_module.subprocess,
+        "run",
+        lambda command, **_: SimpleNamespace(returncode=1, stdout="", stderr="no such container"),
+    )
+    access = VolumeAccess("vol", "/root", encrypted=True, container_name="rental-pod")
+
+    with pytest.raises(RuntimeError, match="Could not read the image USER"):
+        access.container_image_user()
 
 
 def test_workspace_path_normalization_rejects_escape():
