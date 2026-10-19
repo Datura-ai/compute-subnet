@@ -135,11 +135,11 @@ def parse_compute_apps(csv: str) -> list[tuple[int, str]]:
     return apps
 
 
-def build_reset_command(uuids: list[str], *, container_uuids: list[str], backend_uuids: list[str]) -> str:
+def build_reset_command(uuids: list[str], *, container_uuids: list[str], pod_gpu_uuids: list[str]) -> str:
     """The one place `nvidia-smi -r` is spelled: always with `-i`, only on the pod's own GPUs."""
     if not uuids:
         raise ValueError("refusing nvidia-smi -r without -i: no GPU to reset")
-    if not set(uuids) <= set(container_uuids) or not set(uuids) <= set(backend_uuids):
+    if not set(uuids) <= set(container_uuids) or not set(uuids) <= set(pod_gpu_uuids):
         raise ValueError("refusing to reset a GPU outside the pod")
     return f"nvidia-smi -r -i {shlex.quote(','.join(uuids))}"
 
@@ -181,7 +181,7 @@ async def _precheck(
     runner: SSHCommandRunner,
     *,
     container_name: str,
-    backend_uuids: list[str],
+    pod_gpu_uuids: list[str],
     gpu_indices: list[int] | None,
     in_tee: bool,
     encrypted_volume_mount: str | None,
@@ -225,10 +225,10 @@ async def _precheck(
     host_by_uuid = {gpu.uuid: gpu for gpu in host_gpus}
 
     container_uuids = [uuid for uuid in container_gpu_uuids(device_requests, host_gpus) if uuid in host_by_uuid]
-    missing = [uuid for uuid in backend_uuids if uuid not in container_uuids]
+    missing = [uuid for uuid in pod_gpu_uuids if uuid not in container_uuids]
     if not container_uuids or missing:
         raise GpuResetRefused(
-            GpuResetErrorCode.GpuNotInContainer, f"GPUs not given to the container: {missing or backend_uuids}"
+            GpuResetErrorCode.GpuNotInContainer, f"GPUs not given to the container: {missing or pod_gpu_uuids}"
         )
     # pod GPU index = the container's GPUs by host PCI bus id: the 0..n-1 order nvidia-smi shows in the pod
     ordered = sorted(container_uuids, key=lambda uuid: host_by_uuid[uuid].bus_id)
@@ -245,7 +245,7 @@ async def _precheck(
     if any(host_by_uuid[uuid].mig_enabled for uuid in targets):
         raise GpuResetRefused(GpuResetErrorCode.MigEnabled, "MIG is enabled on a GPU to reset")
 
-    if not set(targets) <= set(backend_uuids):
+    if not set(targets) <= set(pod_gpu_uuids):
         raise GpuResetRefused(GpuResetErrorCode.GpuNotInContainer, "an NVLink peer is not one of the pod's GPUs")
 
     outside = await _processes_outside(runner, targets, container_id)
@@ -303,7 +303,7 @@ async def reset_pod_gpus(
     runner: SSHCommandRunner,
     *,
     container_name: str,
-    backend_uuids: list[str],
+    pod_gpu_uuids: list[str],
     gpu_indices: list[int] | None,
     start_container: Callable[[], Awaitable[None]],
     in_tee: bool = False,
@@ -315,7 +315,7 @@ async def reset_pod_gpus(
         plan = await _precheck(
             runner,
             container_name=container_name,
-            backend_uuids=backend_uuids,
+            pod_gpu_uuids=pod_gpu_uuids,
             gpu_indices=gpu_indices,
             in_tee=in_tee,
             encrypted_volume_mount=encrypted_volume_mount,
@@ -349,7 +349,7 @@ async def reset_pod_gpus(
 
         reset = await _run(
             runner,
-            build_reset_command(plan.targets, container_uuids=plan.container_uuids, backend_uuids=backend_uuids),
+            build_reset_command(plan.targets, container_uuids=plan.container_uuids, pod_gpu_uuids=pod_gpu_uuids),
             timeout=_RESET_TIMEOUT_SECONDS,
         )
         if reset.exit_code == 0:
@@ -395,6 +395,21 @@ RESET_CAUSED_CHECK_IDS = frozenset({
     "gpu.scrape.machine_spec",
     "gpu.validate.rented_gpu_drop",
 })
+# these two also clear the job for a card swap or a mixed node: only their missing-card reasons are the reset's
+RESET_CAUSED_REASON_CODES = {
+    "gpu.validate.fingerprint": frozenset({"GPU_MISSING"}),
+    "gpu.validate.model": frozenset({"GPU_DETAILS_MISMATCH"}),
+}
+
+
+def reset_caused(check_id: str | None, reason_code: str | None, evidence: dict | None) -> bool:
+    """True when a verified-job reset by this check and reason is one a renter's GPU reset can cause."""
+    if check_id in RESET_CAUSED_CHECK_IDS:
+        return True
+    if reason_code in RESET_CAUSED_REASON_CODES.get(check_id, ()):
+        return True
+    # warn mode reports a missing card as GPU_UUID_CHANGED, with the hard verdict in the evidence
+    return check_id == "gpu.validate.fingerprint" and (evidence or {}).get("anchor_hard_would_be") == "GPU_MISSING"
 
 
 async def renter_gpu_resets(redis, miner_hotkey: str, executor_id: str) -> list[dict]:

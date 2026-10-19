@@ -10471,7 +10471,7 @@ class DockerService:
                 report = await reset_pod_gpus(
                     SSHCommandRunner(ssh_client, max_retries=0),
                     container_name=payload.container_name,
-                    backend_uuids=payload.gpu_uuids,
+                    pod_gpu_uuids=payload.gpu_uuids,
                     gpu_indices=payload.gpu_indices,
                     start_container=start_container,
                     in_tee=bool(executor_info.tdx_quote),
