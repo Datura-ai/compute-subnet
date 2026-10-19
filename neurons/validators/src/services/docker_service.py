@@ -7011,6 +7011,7 @@ class DockerService:
         ssh_connect: AbstractAsyncContextManager[asyncssh.SSHClientConnection],
         docker_connect: AbstractAsyncContextManager[RentalDockerSdkClient],
         on_ssh_connected: Callable[[asyncssh.SSHClientConnection], None] | None = None,
+        log_extra: dict | None = None,
     ) -> tuple[asyncssh.SSHClientConnection, RentalDockerSdkClient]:
         """DAH-3004: enter both connection contexts at once on the caller's exit stack.
 
@@ -7019,19 +7020,40 @@ class DockerService:
         the stack closes it on the way out and nothing is leaked, which a bare ``gather`` (one
         coroutine still connecting while the exception propagates) would not guarantee.
         ``on_ssh_connected`` runs as soon as the SSH session is up, while Docker still connects.
+        DAH-4677: with ``log_extra``, one line gives each leg's own connect time, since the step
+        waits for the slower one and only that one is worth making faster (DAH-4210).
         """
+        started_ms = now_ms()
+        leg_ms: dict[str, int] = {}
 
         async def enter_ssh() -> asyncssh.SSHClientConnection:
-            ssh_client = await connections.enter_async_context(ssh_connect)
+            try:
+                ssh_client = await connections.enter_async_context(ssh_connect)
+            finally:
+                leg_ms["ssh_connect_ms"] = now_ms() - started_ms
             if on_ssh_connected is not None:
                 on_ssh_connected(ssh_client)
             return ssh_client
 
-        ssh_outcome, docker_outcome = await asyncio.gather(
-            enter_ssh(),
-            connections.enter_async_context(docker_connect),
-            return_exceptions=True,
-        )
+        async def enter_docker() -> RentalDockerSdkClient:
+            try:
+                return await connections.enter_async_context(docker_connect)
+            finally:
+                leg_ms["docker_connect_ms"] = now_ms() - started_ms
+
+        ssh_outcome, docker_outcome = await asyncio.gather(enter_ssh(), enter_docker(), return_exceptions=True)
+        if log_extra is not None:
+            logger.info(
+                _m(
+                    "Create SSH legs timed",
+                    extra=get_extra_info({
+                        **log_extra,
+                        **leg_ms,
+                        "ssh_connected": not isinstance(ssh_outcome, BaseException),
+                        "docker_connected": not isinstance(docker_outcome, BaseException),
+                    }),
+                )
+            )
         if isinstance(ssh_outcome, BaseException):
             if isinstance(docker_outcome, BaseException):
                 # both sides failed: the SSH error is raised, the Docker one rides along as its cause
@@ -7474,6 +7496,7 @@ class DockerService:
                         private_key=private_key,
                     ),
                     on_ssh_connected=start_early_probes,
+                    log_extra=default_extra,
                 )
                 # DAH-2740: undoes a failed edit while this SSH session is still open
                 edit_swap = await connections.enter_async_context(
