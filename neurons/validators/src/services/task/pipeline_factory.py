@@ -63,6 +63,7 @@ from .checks import (
     RentedGpuDropCheck,
     ScoreCheck,
     SpecChangeCheck,
+    SshdAuthLogCheck,
     StaleContainerCleanupCheck,
     StartGPUMonitorCheck,
     SshdBootstrapCheck,
@@ -289,6 +290,8 @@ class PipelineFactory:
         return cast(
             list[Check],
             [
+                # DAH-4629: first, before any fatal check, so every node reports its ssh logins, rented ones too
+                SshdAuthLogCheck(),
                 StartGPUMonitorCheck(),
                 UploadFilesCheck(),
                 MachineSpecScrapeCheck(),
@@ -449,6 +452,8 @@ class PipelineFactory:
         return cast(
             list[Check],
             [
+                # DAH-4629: first, before any fatal check, so every node reports its ssh logins, rented ones too
+                SshdAuthLogCheck(),
                 StartGPUMonitorCheck(),
                 UploadFilesCheck(),
                 MachineSpecScrapeCheck(),

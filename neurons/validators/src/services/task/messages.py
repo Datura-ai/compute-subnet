@@ -2203,3 +2203,20 @@ class SshdBootstrapMessages:
         category="runtime",
         impact="Proceed",
     )
+
+
+class SshdAuthLogMessages:
+    LOGINS = MessageTemplate(
+        event="Executor sshd logins since the last cycle",
+        reason="SSHD_AUTH_LOGINS",
+        severity="info",
+        category="runtime",
+        impact="Proceed; observation only",
+    )
+    UNREAD = MessageTemplate(
+        event="Executor sshd logins not read",
+        reason="SSHD_AUTH_LOG_UNREAD",
+        severity="info",
+        category="runtime",
+        impact="Proceed; observation only",
+    )
