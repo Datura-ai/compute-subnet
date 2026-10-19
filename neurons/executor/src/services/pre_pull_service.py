@@ -203,7 +203,7 @@ def _pull_pinned(
         timeout=(CONNECT_TIMEOUT_SECONDS, STREAM_READ_TIMEOUT_SECONDS),
     )
     stop = threading.Event()
-    verdict: list[tuple[str, str]] = []
+    watcher_stop_outcome: list[tuple[str, str]] = []
 
     def watch() -> None:
         next_check = started + ACTIVITY_CHECK_SECONDS
@@ -223,7 +223,7 @@ def _pull_pinned(
                 logger.info(f"pre-pull idle check failed, retrying: {type(e).__name__}")
                 continue
             if reason and not stop.is_set():
-                verdict.append(reason)
+                watcher_stop_outcome.append(reason)
                 _abort_stream(api, response)
                 return
 
@@ -232,17 +232,17 @@ def _pull_pinned(
         api._raise_for_status(response)
         watcher.start()
         for event in api._stream_helper(response, decode=True) or ():
-            if verdict:
+            if watcher_stop_outcome:
                 break
             if isinstance(event, dict) and event.get("error"):
                 return "pull_failed", str(event["error"])
     except (requests.exceptions.Timeout, urllib3.exceptions.TimeoutError):
-        if not verdict:
+        if not watcher_stop_outcome:
             # docker-py reads the chunked stream off `response.raw`, so a silent stream surfaces
             # as urllib3's ReadTimeoutError, not requests' (requests only remaps inside iter_content).
             return "timeout", f"no stream event for {STREAM_READ_TIMEOUT_SECONDS}s"
     except Exception:
-        if not verdict:
+        if not watcher_stop_outcome:
             raise
         # reading a stream the watcher shut down raises whatever the transport raises
     finally:
@@ -251,8 +251,8 @@ def _pull_pinned(
             watcher.join()
         # closing the stream is what makes the daemon abandon an unfinished pull
         response.close()
-    if verdict:
-        return verdict[0]
+    if watcher_stop_outcome:
+        return watcher_stop_outcome[0]
     # A digest pull leaves the tag untouched; rentals look the image up by repo:tag.
     client.images.get(f"{repo}@{digest}").tag(repo, tag)
     return "pull_ok", None

@@ -690,7 +690,7 @@ def test_filler_and_infra_containers_do_not_count():
 
 @pytest.mark.parametrize("status", ["exited", "dead"])
 def test_a_stopped_rental_counts_until_its_container_is_removed(quiet_node, status):
-    # fresh read of 941e5ace: a stopped rental's container is `exited` and can start again
+    # a stopped rental's container is `exited` and can start again
     client = _client(containers=[_container("pod_stopped", status=status)])
 
     assert rental_activity(client) == "rental container pod_stopped"
