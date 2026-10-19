@@ -675,6 +675,7 @@ class ValidationService:
                     dim_k=verifier_params.dim_k,
                 )
         except Exception as e:
+            # only the executor's answer is read here, so a failure is theirs, not a validator_error
             error_msg = f"Error during UUID verification: {str(e)}"
             logger.error(_m(error_msg, extra=get_extra_info(log_extra)))
             return ValidationResult(
@@ -684,7 +685,6 @@ class ValidationService:
                 stdout=stdout,
                 stderr=stderr,
                 error_message=error_msg,
-                validator_error=True,
             )
 
     def _answer_was_sealed(self, sealed_blob: str) -> bool:
