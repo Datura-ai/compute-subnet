@@ -1155,6 +1155,11 @@ class MinerService:
         reach (DAH-3338). Rented ones are left to ``_build_not_listed_rented_results``; only the
         cycle's whole-miner request reports, as there. A miner that predates the field sends None
         and gets nothing. Flag off: [].
+
+        A miner that reached none of its nodes is down itself (its own network, a restart), not its
+        nodes: that wave writes none of these rows, so one miner-side blip does not mark every node
+        down (Pixel, 19 Oct). Manual rentals are left out, as the miner cannot reach them anyway. The
+        zero-executor wave then fails as before.
         """
         if (
             not settings.UNREACHABLE_EXECUTOR_REPORT_ENABLED
@@ -1162,12 +1167,28 @@ class MinerService:
             or executor_id is not None
         ):
             return []
-        skip = {str(executor.uuid).lower() for executor in msg.executors}
+        known = list(dict.fromkeys(str(uuid).lower() for uuid in msg.known_executor_ids))
+        reached = {str(executor.uuid).lower() for executor in msg.executors}
+        manual = {str(uuid).lower() for uuid in ((rented_data and rented_data.manual_rental_executors) or {})}
+        reachable = set(known) - manual
+        if reachable and not reached & reachable:
+            if log:
+                logger.warning(
+                    _m(
+                        "Miner reached none of its known executors; no unreachable rows this wave",
+                        extra=get_extra_info({
+                            "job_batch_id": payload.job_batch_id,
+                            "miner_hotkey": payload.miner_hotkey,
+                            "known": len(reachable),
+                        }),
+                    )
+                )
+            return []
+        skip = reached | manual
         if rented_data:
             skip |= {str(uuid).lower() for uuid in rented_data.executors}
-            skip |= {str(uuid).lower() for uuid in (rented_data.manual_rental_executors or {})}
         results = []
-        for executor_uuid in dict.fromkeys(str(uuid).lower() for uuid in msg.known_executor_ids):
+        for executor_uuid in known:
             if executor_uuid in skip:
                 continue
             event = build_executor_unreachable_by_miner_event(
