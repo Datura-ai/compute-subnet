@@ -142,6 +142,28 @@ def test_probe_agrees_with_the_builder():
     assert service._has_not_listed_rented_executors(make_payload(), None, [], None) is False
 
 
+def test_one_cycle_grace_reports_a_rented_node_from_its_second_consecutive_miss(monkeypatch):
+    """5GN5FgYk/aad247c2, 19 Oct 14:16Z: left out of one answer, back in the next. 86 of 347 rows that day."""
+    monkeypatch.setattr("services.miner_service.settings.RENTED_NOT_LISTED_ONE_CYCLE_GRACE", True)
+    service = make_service()
+    rented_data = RentedExecutorsResponse(executors={MISSING: rented(), LISTED: rented()})
+
+    first = build(service, rented_data)
+    back = build(service, rented_data, listed_ids=(LISTED, MISSING))
+    missed_again = build(service, rented_data)
+    second = build(service, rented_data)
+
+    assert first == [] and back == [] and missed_again == []
+    assert [r.executor_info.uuid for r in second] == [MISSING]
+
+
+def test_one_cycle_grace_off_reports_the_first_miss(monkeypatch):
+    monkeypatch.setattr("services.miner_service.settings.RENTED_NOT_LISTED_ONE_CYCLE_GRACE", False)
+    rented_data = RentedExecutorsResponse(executors={MISSING: rented(), LISTED: rented()})
+
+    assert [r.executor_info.uuid for r in build(make_service(), rented_data)] == [MISSING]
+
+
 # --- the DAH-2748 outage silencer ------------------------------------------------------------
 
 

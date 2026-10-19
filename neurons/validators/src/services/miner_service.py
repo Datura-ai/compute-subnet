@@ -278,6 +278,9 @@ class MinerService:
         # wave's list of the node's miner, or the wave could verify and publish the node again
         # under the same id once the lane let go of it. Stays empty with the flag off.
         self.miners_awaiting_wave_list: dict[str, str] = {}
+        # rented executor uuids its miner left out of the previous cycle's answer (RENTED_NOT_LISTED_ONE_CYCLE_GRACE).
+        # shortcut: in memory, so a restart costs one extra cycle before a real outage is reported.
+        self.rented_missed_last_cycle: set[str] = set()
 
     def start_awaiting_wave_lists(self, job_batch_id: str, miner_hotkeys: list[str]) -> None:
         """Validator.sync(), in the same step that publishes the cycle's inputs to the lane."""
@@ -978,7 +981,7 @@ class MinerService:
 
         return results
 
-    def _iter_not_listed_rented(
+    def _missing_rented(
         self,
         payload: MinerJobRequestPayload,
         rented_data: RentedExecutorsResponse | None,
@@ -1013,6 +1016,22 @@ class MinerService:
                 continue
             yield executor_uuid, rented_executor
 
+    def _iter_not_listed_rented(
+        self,
+        payload: MinerJobRequestPayload,
+        rented_data: RentedExecutorsResponse | None,
+        miner_returned_executors: list[ExecutorSSHInfo],
+        executor_id: str | None,
+    ) -> Iterator[tuple[str, RentedExecutor]]:
+        """The missing rented executors that get a row: with RENTED_NOT_LISTED_ONE_CYCLE_GRACE only those the
+        miner also left out of its previous answer."""
+        for executor_uuid, rented_executor in self._missing_rented(
+            payload, rented_data, miner_returned_executors, executor_id
+        ):
+            if settings.RENTED_NOT_LISTED_ONE_CYCLE_GRACE and executor_uuid not in self.rented_missed_last_cycle:
+                continue
+            yield executor_uuid, rented_executor
+
     def _has_not_listed_rented_executors(
         self,
         payload: MinerJobRequestPayload,
@@ -1025,8 +1044,9 @@ class MinerService:
         A miner whose only executors are rented and down answers with zero executors; that used to
         end as one miner-level failure row and nothing about the nodes.
         """
+        # the raw list, not the graced one: a first miss must still reach the build, which records it
         return any(
-            self._iter_not_listed_rented(
+            self._missing_rented(
                 payload, rented_data, miner_returned_executors, executor_id
             )
         )
@@ -1062,6 +1082,19 @@ class MinerService:
                 payload, rented_data, miner_returned_executors, executor_id
             )
         ]
+        if settings.RENTED_NOT_LISTED_ONE_CYCLE_GRACE and rented_data and executor_id is None:
+            # this miner's misses become the next cycle's; a node it returned again starts over
+            self.rented_missed_last_cycle -= {
+                str(raw_uuid).lower()
+                for raw_uuid, rented_executor in rented_data.executors.items()
+                if rented_executor.miner_hotkey == payload.miner_hotkey
+            }
+            self.rented_missed_last_cycle |= {
+                executor_uuid
+                for executor_uuid, _ in self._missing_rented(
+                    payload, rented_data, miner_returned_executors, executor_id
+                )
+            }
         if results:
             logger.info(
                 _m(
