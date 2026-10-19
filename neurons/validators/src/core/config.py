@@ -368,6 +368,21 @@ class Settings(BaseSettings):
     # `GET /version` (connect, and twice this as its whole budget) and the tunnel's local bind and
     # connect; the direct-tcpip channel open on the executor runs inside the whole-call budget.
     LOCAL_VERIFY_CONNECT_TIMEOUT_SECONDS: int = Field(env="LOCAL_VERIFY_CONNECT_TIMEOUT_SECONDS", default=5)
+    # The liumd shadow: after the pipeline has produced the node's result, run the same
+    # GPU steps again through `liumd run` on an SSH exec channel of the same session and log one
+    # `[liumd_shadow] comparison` line per node (per-step verdicts, agreement, durations). Nothing
+    # it finds is scored or stored: the result is built before it starts. Off: nothing new runs.
+    VALIDATOR_LIUMD_SHADOW: bool = Field(env="VALIDATOR_LIUMD_SHADOW", default=False)
+    # The shadow's whole-call budget (seconds), clipped to what the executor task has left; the
+    # intent's `deadline_s` is this − 30. Sized for a scored cycle, where VerifyX (p90 about 150 s)
+    # and the matmul (at most 120 s) run one after the other.
+    LIUMD_SHADOW_TIMEOUT_SECONDS: int = Field(env="LIUMD_SHADOW_TIMEOUT_SECONDS", default=330)
+    # The only executors the shadow runs on: reserved, non-rentable dev executors, as
+    # comma-separated `miner_hotkey/executor_uuid/address/ssh_port` entries. A pod or filler started
+    # after the cycle's snapshot is not seen, so on a rentable node the shadow could run its
+    # GPU/RAM/disk/network probe next to a workload. Executor UUIDs are miner-chosen, so an entry
+    # matches only that miner's executor at that SSH endpoint. Empty = none.
+    LIUMD_SHADOW_RESERVED_EXECUTORS: str = Field(env="LIUMD_SHADOW_RESERVED_EXECUTORS", default="")
     # DAH-2667: measure a RoCE fabric with ib_write_bw between the free hosts of one segment, rather
     # than inferring it from the addresses alone. The backend reads a flag of the SAME name to decide
     # whether a fabric must be measured before it is sold, so the feature has one switch across both
@@ -488,6 +503,9 @@ class Settings(BaseSettings):
     RENTED_GPU_DROP_CHECK_ENABLED: bool = Field(env="RENTED_GPU_DROP_CHECK_ENABLED", default=False)
     # The per-pod incident mark expires this long after the last cycle that saw the fault.
     RENTED_GPU_DROP_STATE_TTL_SECONDS: int = Field(env="RENTED_GPU_DROP_STATE_TTL_SECONDS", default=86400, gt=0)
+    # DAH-4457: a node whose GPU dropped out stays hidden (GPU_LOST availability entry, no new rentals) until its
+    # cards have read clean this long after the last faulty cycle (GpuLossHoldCheck).
+    GPU_LOSS_HOLD_SECONDS: int = Field(env="GPU_LOSS_HOLD_SECONDS", default=7200, gt=0)
     # DAH-2735 — judge an idle node's GPU by WHO holds it, not by utilization: a competitor's
     # rental idling on the card (Nodexo/SN106) passes every percentage gate. CHECK_ENABLED
     # observes and logs the verdict; ENFORCEMENT additionally zeroes the score. Enforcement
@@ -507,15 +525,6 @@ class Settings(BaseSettings):
     # re-registers the node to list a different set. Off again = the mark stays in the record but is ignored.
     # Flip after reading a week of the warn-mode rows.
     GPU_ANCHOR_HARD_ENABLED: bool = Field(env="GPU_ANCHOR_HARD_ENABLED", default=False)
-    # The verified record (count, spec, GPU anchor) is keyed by executor id alone. Its owner is
-    # the backend's (RentedExecutorsResponse.executor_owner_hotkeys, the MinerExecutor row): a
-    # write or reset by another hotkey is always logged (VERIFIED_RECORD_FOREIGN_WRITER); with
-    # this on it is refused, so listing someone else's executor id no longer resets their record.
-    # A provider moves a node to a new hotkey in the portal. No owner from the backend lets the
-    # write through, so this stays off until the backend sends the map.
-    VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED: bool = Field(
-        env="VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", default=False
-    )
     PROVIDER_SIDE_LOAD_CHECK_ENABLED: bool = Field(env="PROVIDER_SIDE_LOAD_CHECK_ENABLED", default=True)
     PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED: bool = Field(
         env="PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED", default=False
@@ -546,6 +555,12 @@ class Settings(BaseSettings):
     # are read and the owner decides.
     GPU_FAULT_PROBE_CHECK_ENABLED: bool = Field(env="GPU_FAULT_PROBE_CHECK_ENABLED", default=True)
     GPU_FAULT_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="GPU_FAULT_PROBE_ENFORCEMENT_ENABLED", default=False)
+    # DAH-3110 — a card NVML reports broken (uncorrected ECC since the driver loaded, a pending or failed
+    # row remap, a required recovery action) fails the node like a GPU ban until the host resets or
+    # replaces it. On: a broken card faults renters' jobs. Off is the kill switch back to flag-only.
+    GPU_MEMORY_HEALTH_ENFORCEMENT_ENABLED: bool = Field(
+        env="GPU_MEMORY_HEALTH_ENFORCEMENT_ENABLED", default=True
+    )
     # F-1599 — a 64 MB pinned-host-memory H2D/D2H round trip on every GPU of an idle node, compared on the host.
     # A TDX guest whose GPUs are not in CC mode passed every check yet could not DMA pinned memory (8x H200,
     # 13 Oct). CHECK runs it; ENFORCEMENT lets wrong data, a copy error or a hung copy fail the node. CHECK is
@@ -583,6 +598,12 @@ class Settings(BaseSettings):
     RENTAL_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="RENTAL_PROBE_ENFORCEMENT_ENABLED", default=False)
     RENTAL_PROBE_INTERVAL_HOURS: float = Field(env="RENTAL_PROBE_INTERVAL_HOURS", default=6.0, gt=0)
     RENTAL_PROBE_SSH_DEADLINE_SECONDS: int = Field(env="RENTAL_PROBE_SSH_DEADLINE_SECONDS", default=90, gt=0)
+    # On: an idle node running a Lium filler is probed too, beside the filler: the probe's create
+    # removes no filler_*, lifts no GPU power cap and reclaims no filler cache. Off: such a node is
+    # skipped ("filler running"). Only read while RENTAL_PROBE_ENABLED is on.
+    RENTAL_PROBE_BESIDE_FILLERS_ENABLED: bool = Field(
+        env="RENTAL_PROBE_BESIDE_FILLERS_ENABLED", default=False
+    )
     # A node whose containers cannot reach the internet passed every check. CHECK runs the rental probe's
     # `egress` step, which resolves and fetches pypi.org inside its renter container; ENFORCEMENT fails the
     # probe on it with NO_OUTBOUND_INTERNET (score 0). Slow still passes. Enforcement is off by default,
@@ -822,6 +843,23 @@ class Settings(BaseSettings):
 
     def get_allowed_advisory_ids(self) -> set[str]:
         return {s.strip() for s in self.TDX_ALLOWED_ADVISORY_IDS.split(",") if s.strip()}
+
+    def get_liumd_shadow_reserved_executors(self) -> set[tuple[str, str, str, int]]:
+        """`LIUMD_SHADOW_RESERVED_EXECUTORS` as (miner_hotkey, executor_uuid, address, ssh_port).
+        A malformed entry raises ValueError rather than being dropped."""
+        reserved = set()
+        for entry in self.LIUMD_SHADOW_RESERVED_EXECUTORS.split(","):
+            if not entry.strip():
+                continue
+            fields = [f.strip() for f in entry.split("/")]
+            if len(fields) != 4 or not all(fields) or not fields[3].isdigit():
+                raise ValueError(
+                    "LIUMD_SHADOW_RESERVED_EXECUTORS entry is not "
+                    f"miner_hotkey/executor_uuid/address/ssh_port: {entry.strip()!r}"
+                )
+            hotkey, uuid, address, ssh_port = fields
+            reserved.add((hotkey, uuid, address, int(ssh_port)))
+        return reserved
 
     def get_allowed_gpu_hwmodels(self) -> set[str]:
         return {s.strip() for s in self.GPU_ATTESTATION_ALLOWED_HWMODELS.split(",") if s.strip()}

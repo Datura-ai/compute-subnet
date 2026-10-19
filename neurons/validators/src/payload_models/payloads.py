@@ -421,7 +421,7 @@ class InstallJupyterServerRequest(ContainerBaseRequest):
 
 
 class ResetPodGpuRequest(ContainerBaseRequest):
-    """DAH-4658: reset the GPUs of a running pod; answered by PodGpuResetResult (lium_protocol 1.9.0)."""
+    """DAH-4658: reset the GPUs of a running pod; answered by PodGpuResetResult (lium_protocol 1.12.0)."""
 
     message_type: ContainerRequestType = ContainerRequestType.ResetPodGpuRequest
     container_name: str
@@ -529,6 +529,7 @@ class BaseValidatorResponse(BaseRequest, DeliveryStamps):
 
 class ContainerWarningCode(enum.Enum):
     ExternalVolumeFailed = "ExternalVolumeFailed"
+    DockerInDockerDisabled = "DockerInDockerDisabled"
 
 
 class VolumeEncryptionStatus(str, enum.Enum):
