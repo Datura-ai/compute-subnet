@@ -94,7 +94,7 @@ async def _targets(
     runner: SSHCommandRunner,
     *,
     container_name: str,
-    backend_uuids: list[str],
+    pod_gpu_uuids: list[str],
     gpu_indices: list[int] | None,
     in_tee: bool,
 ) -> tuple[list[str], dict[str, int]]:
@@ -117,8 +117,8 @@ async def _targets(
         raise GpuResetRefused(GpuResetErrorCode.ClockLockNotSupported, "nvidia-smi listed no GPU on the host")
     host_by_uuid = {gpu.uuid: gpu for gpu in host_gpus}
     # the pod's numbering, shared with gpu_reset; only the backend's GPUs of the pod are ever touched
-    _, targets, index_by_uuid = pod_gpus(host_config.get("DeviceRequests"), host_gpus, backend_uuids, gpu_indices)
-    if not set(targets) <= set(backend_uuids):
+    _, targets, index_by_uuid = pod_gpus(host_config.get("DeviceRequests"), host_gpus, pod_gpu_uuids, gpu_indices)
+    if not set(targets) <= set(pod_gpu_uuids):
         raise GpuResetRefused(GpuResetErrorCode.GpuNotInContainer, "a GPU to lock is not one of the pod's GPUs")
     if any(host_by_uuid[uuid].mig_enabled for uuid in targets):
         raise GpuResetRefused(GpuResetErrorCode.MigEnabled, "MIG is enabled on a GPU")
@@ -160,7 +160,7 @@ async def lock_pod_gpu_clocks(
     container_name: str,
     pod_id: str,
     executor_id: str,
-    backend_uuids: list[str],
+    pod_gpu_uuids: list[str],
     gpu_indices: list[int] | None,
     min_mhz: int | None,
     max_mhz: int | None,
@@ -169,7 +169,7 @@ async def lock_pod_gpu_clocks(
 ) -> GpuClocksReport:
     try:
         targets, index_by_uuid = await _targets(
-            runner, container_name=container_name, backend_uuids=backend_uuids, gpu_indices=gpu_indices, in_tee=in_tee
+            runner, container_name=container_name, pod_gpu_uuids=pod_gpu_uuids, gpu_indices=gpu_indices, in_tee=in_tee
         )
     except GpuResetRefused as refused:
         return GpuClocksReport(ok=False, error_code=refused.code, detail=refused.detail)

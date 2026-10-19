@@ -100,7 +100,7 @@ async def _reset(host: FakeHost, *, backend=(U[0], U[1]), indices=None, start=No
     report = await reset_pod_gpus(
         host,
         container_name=NAME,
-        backend_uuids=list(backend),
+        pod_gpu_uuids=list(backend),
         gpu_indices=indices,
         start_container=start,
         settle_seconds=0,
@@ -244,12 +244,12 @@ async def test_a_failed_start_is_reported():
 
 def test_reset_command_always_names_its_gpus_and_only_the_pods():
     with pytest.raises(ValueError):
-        build_reset_command([], container_uuids=U, backend_uuids=U)
+        build_reset_command([], container_uuids=U, pod_gpu_uuids=U)
     with pytest.raises(ValueError):  # in the backend's list but not the container's
-        build_reset_command([U[2]], container_uuids=U[:2], backend_uuids=U)
+        build_reset_command([U[2]], container_uuids=U[:2], pod_gpu_uuids=U)
     with pytest.raises(ValueError):  # in the container but not the backend's list
-        build_reset_command([U[2]], container_uuids=U, backend_uuids=U[:2])
-    assert build_reset_command([U[0]], container_uuids=U, backend_uuids=U) == f"nvidia-smi -r -i {U[0]}"
+        build_reset_command([U[2]], container_uuids=U, pod_gpu_uuids=U[:2])
+    assert build_reset_command([U[0]], container_uuids=U, pod_gpu_uuids=U) == f"nvidia-smi -r -i {U[0]}"
 
 
 def test_topology_parse_reads_nvlink_cells_only():
@@ -307,6 +307,25 @@ async def test_the_rented_gpu_checks_skip_a_node_whose_renter_is_resetting(conte
 
 
 @pytest.mark.asyncio
+async def test_the_drop_check_skips_only_when_every_missing_gpu_is_under_reset(context_factory):
+    from services.task.checks.rented_gpu_drop import RentedGpuDropCheck
+    from services.task.messages import RentedGpuDropMessages
+
+    from tests.test_rented_gpu_drop_check import UUIDS, _ctx, rented_gpu_drop
+
+    redis = PendingRedis()
+    ctx = _ctx(context_factory, build_services(redis=redis), listed=UUIDS[1:], count=7)
+    await redis.add_pending_pod(ctx.miner_hotkey, ctx.executor.uuid, "pod1", kind="gpu_reset", gpu_uuids=UUIDS[1:2])
+    with patch.object(rented_gpu_drop.settings, "RENTED_GPU_DROP_CHECK_ENABLED", True):
+        other_tenant = await RentedGpuDropCheck().run(ctx)  # UUIDS[0] is missing and not under reset
+        await redis.add_pending_pod(ctx.miner_hotkey, ctx.executor.uuid, "pod2", kind="gpu_reset", gpu_uuids=UUIDS[:1])
+        skipped = await RentedGpuDropCheck().run(ctx)
+
+    assert other_tenant.event.reason_code != RentedGpuDropMessages.GPU_RESET_IN_PROGRESS.reason
+    assert skipped.passed and skipped.event.reason_code == RentedGpuDropMessages.GPU_RESET_IN_PROGRESS.reason
+
+
+@pytest.mark.asyncio
 async def test_the_usage_check_skips_only_the_gpus_of_the_pod_under_reset(context_factory):
     from services.task.checks import gpu_usage
     from services.task.messages import GpuUsageMessages
@@ -340,14 +359,18 @@ async def test_no_verified_job_reset_is_sent_for_a_node_whose_renter_is_resettin
     from clients.compute_client import ComputeClient
     from services.redis_service import RESET_VERIFIED_JOB_CHANNEL
 
-    def message(executor_uuid: str, check_id: str = "executor.validate.rented_state") -> dict:
-        data = {"miner_hotkey": "hk", "executor_uuid": executor_uuid, "reason": 0, "check_id": check_id}
+    def message(executor_uuid: str, check_id: str = "executor.validate.rented_state", reason_code=None, evidence=None):
+        data = {"miner_hotkey": "hk", "executor_uuid": executor_uuid, "reason": 0, "check_id": check_id,
+                "reason_code": reason_code, "evidence": evidence}
         return {"channel": RESET_VERIFIED_JOB_CHANNEL.encode(), "data": json.dumps(data)}
 
     class PubSub:
         async def listen(self):
             yield message("resetting")
             yield message("resetting", "gpu.validate.duplicate")  # not something a reset causes: still sent
+            yield message("resetting", "gpu.validate.fingerprint", "GPU_MISSING")
+            yield message("resetting", "gpu.validate.fingerprint", "GPU_UUID_CHANGED")  # a swap: still sent
+            yield message("resetting", evidence={"pod_id": "pod-other"})  # another pod on the node: still sent
             yield message("idle")
             raise asyncio.CancelledError  # ends the subscriber's reconnect loop
 
@@ -367,7 +390,12 @@ async def test_no_verified_job_reset_is_sent_for_a_node_whose_renter_is_resettin
     with pytest.raises(asyncio.CancelledError):
         await client.subscribe_mesages_from_redis()
 
-    assert [request.executor_uuid for request in client.message_queue] == ["resetting", "idle"]
+    assert [(request.executor_uuid, request.check_id) for request in client.message_queue] == [
+        ("resetting", "gpu.validate.duplicate"),
+        ("resetting", "gpu.validate.fingerprint"),
+        ("resetting", "executor.validate.rented_state"),
+        ("idle", "executor.validate.rented_state"),
+    ]
 
 
 @pytest.mark.asyncio

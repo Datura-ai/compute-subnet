@@ -70,7 +70,7 @@ def _assert_invariants(host: FakeHost, allowed) -> None:
 async def _lock(host, redis=None, *, backend=(U[0], U[1]), indices=None, lo=1200, hi=1500, reset=False, **kw):
     redis = redis if redis is not None else FakeRedis()
     report = await lock_pod_gpu_clocks(
-        host, redis, container_name=NAME, pod_id="pod1", executor_id="ex", backend_uuids=list(backend),
+        host, redis, container_name=NAME, pod_id="pod1", executor_id="ex", pod_gpu_uuids=list(backend),
         gpu_indices=indices, min_mhz=lo, max_mhz=hi, reset=reset, **kw,
     )
     container = set(json.loads(host.inspect)["HostConfig"]["DeviceRequests"][0]["DeviceIDs"] or U)

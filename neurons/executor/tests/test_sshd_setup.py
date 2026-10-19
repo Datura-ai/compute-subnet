@@ -31,6 +31,7 @@ if grep -qi '^PerSourcePenalties no' "$SSHD_CONFIG_DIR"/*.conf 2>/dev/null; then
 else
     echo "persourcepenalties crash:90 authfail:5 noauth:1 grace-exceeded:20 max:600 min:15"
 fi
+if grep -qi '^LogLevel VERBOSE' "$SSHD_CONFIG_DIR"/*.conf 2>/dev/null; then echo "loglevel VERBOSE"; else echo "loglevel INFO"; fi
 """
 SSHD_MODERN_WITHOUT_INCLUDE = """#!/bin/sh
 case " $* " in *" PerSourcePenalties="*) exit 0;; esac
@@ -43,6 +44,15 @@ case " $* " in *" PerSourcePenalties="*)
     exit 255;;
 esac
 echo "port 22"
+if grep -qi '^LogLevel VERBOSE' "$SSHD_CONFIG_DIR"/*.conf 2>/dev/null; then echo "loglevel VERBOSE"; else echo "loglevel INFO"; fi
+"""
+SSHD_WITHOUT_INCLUDE_OLD = """#!/bin/sh
+case " $* " in *" PerSourcePenalties="*)
+    echo "command-line line 0: Bad configuration option: PerSourcePenalties" >&2
+    exit 255;;
+esac
+echo "port 22"
+echo "loglevel INFO"
 """
 SSHD_BROKEN_CONFIG = """#!/bin/sh
 echo "/etc/ssh/sshd_config line 7: Bad configuration option: AcceptEnvv" >&2
@@ -81,15 +91,22 @@ def test_modern_sshd_gets_per_source_penalties_off(tmp_path):
     assert "sshd_setup: sshd -T accepts" in result.stdout
 
 
-def test_old_sshd_gets_no_drop_in_and_still_passes(tmp_path):
-    # a stale drop-in from an earlier layer must go too, or sshd would refuse to start on it
+def test_modern_sshd_logs_verbose(tmp_path):
+    result, drop_in = run_setup(tmp_path, SSHD_MODERN)
+
+    assert result.returncode == 0, result.stderr
+    assert "LogLevel VERBOSE" in drop_in.read_text().splitlines()
+
+
+def test_old_sshd_gets_only_verbose_logging_and_still_passes(tmp_path):
+    # a stale PerSourcePenalties line from an earlier layer must go, or sshd would refuse to start on it
     (tmp_path / "sshd_config.d").mkdir()
     (tmp_path / "sshd_config.d" / "lium.conf").write_text("PerSourcePenalties no\n")
 
     result, drop_in = run_setup(tmp_path, SSHD_OLD)
 
     assert result.returncode == 0, result.stderr
-    assert not drop_in.exists()
+    assert drop_in.read_text().splitlines()[1:] == ["LogLevel VERBOSE"]
     assert "predates PerSourcePenalties" in result.stdout
     assert "sshd_setup: sshd -T accepts" in result.stdout
 
@@ -100,6 +117,13 @@ def test_drop_in_that_sshd_does_not_read_fails_the_build(tmp_path):
     assert result.returncode == 1
     assert drop_in.exists()
     assert "is not in effect" in result.stderr
+
+
+def test_log_level_that_sshd_does_not_apply_fails_the_build(tmp_path):
+    result, _ = run_setup(tmp_path, SSHD_WITHOUT_INCLUDE_OLD)
+
+    assert result.returncode == 1
+    assert "LogLevel VERBOSE" in result.stderr
 
 
 def test_config_sshd_rejects_for_another_reason_fails_the_build(tmp_path):

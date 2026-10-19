@@ -39,9 +39,9 @@ class BackendMessageType(enum.Enum):
     ForcedValidationCycleRequest = "ForcedValidationCycleRequest"
     # ask the validator for an exact rental estimate; it answers with EstimateResponse
     GetEstimateRequest = "GetEstimateRequest"
-    # 1.9.0: reset a running pod's GPUs; the validator answers with PodGpuResetResult
+    # 1.12.0: reset a running pod's GPUs; the validator answers with PodGpuResetResult
     ResetPodGpuRequest = "ResetPodGpuRequest"
-    # 1.10.0: lock or reset a running pod's GPU clocks; the validator answers with PodGpuClocksResult
+    # 1.13.0: lock or reset a running pod's GPU clocks; the validator answers with PodGpuClocksResult
     LockPodGpuClocksRequest = "LockPodGpuClocksRequest"
 
 
@@ -292,7 +292,7 @@ class InstallJupyterServerRequest(ContainerRequest):
 
 @BACKEND_MESSAGES.register
 class ResetPodGpuRequest(ContainerRequest):
-    """1.9.0: the renter asked to reset the GPUs of their running pod. `gpu_uuids` is every GPU
+    """1.12.0: the renter asked to reset the GPUs of their running pod. `gpu_uuids` is every GPU
     the backend holds for the pod; `gpu_indices` picks some of them by pod index (the pod's GPUs sorted by
     host PCI bus id, the 0..n-1 order `nvidia-smi` shows inside the pod), None for all of them. Answered by
     `validator_to_backend.PodGpuResetResult` with the same `request_id`."""
@@ -308,7 +308,7 @@ class ResetPodGpuRequest(ContainerRequest):
 
 @BACKEND_MESSAGES.register
 class LockPodGpuClocksRequest(ContainerRequest):
-    """1.10.0: the renter asked to lock the graphics clocks of their running pod's GPUs to
+    """1.13.0: the renter asked to lock the graphics clocks of their running pod's GPUs to
     `[min_mhz, max_mhz]` (None = the GPU's own bound; clamped to its supported clocks), or with `reset`
     to give them back to the driver. `gpu_uuids` and `gpu_indices` as in `ResetPodGpuRequest`. Answered
     by `validator_to_backend.PodGpuClocksResult` with the same `request_id`."""

@@ -74,7 +74,7 @@ from core.config import settings
 from core.utils import _m, get_extra_info
 from clients.subtensor_client import SubtensorClient
 from services.docker_service import create_steps_after_reply, inflight_creates
-from services.gpu_reset import RESET_CAUSED_CHECK_IDS, renter_gpu_reset_in_progress
+from services.gpu_reset import renter_gpu_reset_in_progress, reset_caused
 from services.miner_service import MinerService
 from incentive.rental_price import ExecutorEstimateParams, RentalPriceSnapshot, estimate_executor
 from services.redis_service import (
@@ -426,8 +426,14 @@ class ComputeClient:
                     elif channel == RESET_VERIFIED_JOB_CHANNEL:
                         # DAH-4658: the renter is resetting the node's GPUs; what a reset can cause is the
                         # renter's doing, never the provider's fault (an unreadable mark sends it)
-                        if data.get("check_id") in RESET_CAUSED_CHECK_IDS and await renter_gpu_reset_in_progress(
-                            self.miner_service.redis_service, data["miner_hotkey"], data["executor_uuid"]
+                        evidence = data.get("evidence") or {}
+                        if reset_caused(
+                            data.get("check_id"), data.get("reason_code"), evidence
+                        ) and await renter_gpu_reset_in_progress(
+                            self.miner_service.redis_service,
+                            data["miner_hotkey"],
+                            data["executor_uuid"],
+                            evidence.get("pod_id"),
                         ):
                             logger.info(
                                 _m(

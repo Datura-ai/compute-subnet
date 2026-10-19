@@ -60,7 +60,7 @@ from protocol.vc_protocol.compute_requests import (
     RentedGpuDropResponse,
     RentedPod,
 )
-from services.gpu_reset import renter_gpu_reset_in_progress
+from services.gpu_reset import renter_gpu_resets
 from services.redis_service import GPU_ANCHOR_KEY
 
 from core.config import settings
@@ -303,15 +303,22 @@ class RentedGpuDropCheck:
                 Msg.NOT_RENTED, ctx=ctx, check_id=self.check_id, what={"listed_pods": len(all_pods)}
             )
             return CheckResult(passed=True, event=event)
-        # DAH-4658: a GPU missing while the renter resets it is the renter's doing (a dry run reads no Redis)
-        if not settings.DRY_RUN and await renter_gpu_reset_in_progress(
-            ctx.services.redis, ctx.miner_hotkey, ctx.executor.uuid
-        ):
-            event = render_message(Msg.GPU_RESET_IN_PROGRESS, ctx=ctx, check_id=self.check_id)
-            return CheckResult(passed=True, event=event)
-
         specs = ctx.state.specs or {}
         gpu_details = list(ctx.state.gpu_details or [])
+        # DAH-4658: a GPU missing while the renter resets it is the renter's doing, but only when every missing
+        # GPU is one being reset (as GpuUsageCheck); a mark that names no GPU covers the node. A dry run reads no Redis.
+        if not settings.DRY_RUN and (
+            resets := await renter_gpu_resets(ctx.services.redis, ctx.miner_hotkey, ctx.executor.uuid)
+        ):
+            missing = set(split_uuids((ctx.verified or {}).get(GPU_ANCHOR_KEY) or "")) - set(
+                _listed_uuids(gpu_details)
+            )
+            if not all(mark.get("gpu_uuids") for mark in resets) or (
+                missing and missing <= {uuid for mark in resets for uuid in mark["gpu_uuids"]}
+            ):
+                event = render_message(Msg.GPU_RESET_IN_PROGRESS, ctx=ctx, check_id=self.check_id)
+                return CheckResult(passed=True, event=event)
+
         nvml_count = ctx.state.gpu_count
         if nvml_count is None:
             nvml_count = (specs.get("gpu") or {}).get("count", 0) or 0
