@@ -323,6 +323,11 @@ class Settings(BaseSettings):
     # the pod really got. Off: the 90 s same-mapping wait as before. Either way the failure event
     # carries `error_class: port_collision`.
     PORT_COLLISION_RETRY_ENABLED: bool = Field(env="PORT_COLLISION_RETRY_ENABLED", default=False)
+    # DAH-4537: the outside port prober (an AWS Lambda function URL) and its bearer token. Each batch
+    # port check first fetches a few listening ports through it; when none answers it while the
+    # validator reaches them, the node gets no verified ports. Unset URL: no outside probe.
+    EXTERNAL_PORT_PROBE_URL: str = Field(env="EXTERNAL_PORT_PROBE_URL", default="")
+    EXTERNAL_PORT_PROBE_TOKEN: str = Field(env="EXTERNAL_PORT_PROBE_TOKEN", default="")
     # DAH-3011: a never-validated executor's FIRST verification (the express lane's, DAH-2958 —
     # published spec-only, never scored) proves "this GPU exists, is the model claimed, the host is
     # reachable and rentable"; the VRAM-filling matmul and the 128 GB RAM proof exist to make a
@@ -336,7 +341,8 @@ class Settings(BaseSettings):
     FIRST_PASS_MATMUL_VRAM_MB: int = Field(env="FIRST_PASS_MATMUL_VRAM_MB", default=8192)
     # A filler-only node skips the matmul while the filler runs. With N > 0, every Nth such cycle
     # runs the challenge on a small VRAM budget beside the filler and records the answer
-    # (FILLER_MATMUL_SAMPLE); the check result never depends on it. 0 = never, the default.
+    # (FILLER_MATMUL_SAMPLE); the check result never depends on it. Each sample is pinned to the
+    # next claimed card in rotation. 0 = never, the default.
     FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES: int = Field(
         env="FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES", default=0, ge=0
     )
@@ -482,6 +488,9 @@ class Settings(BaseSettings):
     RENTED_GPU_DROP_CHECK_ENABLED: bool = Field(env="RENTED_GPU_DROP_CHECK_ENABLED", default=False)
     # The per-pod incident mark expires this long after the last cycle that saw the fault.
     RENTED_GPU_DROP_STATE_TTL_SECONDS: int = Field(env="RENTED_GPU_DROP_STATE_TTL_SECONDS", default=86400, gt=0)
+    # DAH-4457: a node whose GPU dropped out stays hidden (GPU_LOST availability entry, no new rentals) until its
+    # cards have read clean this long after the last faulty cycle (GpuLossHoldCheck).
+    GPU_LOSS_HOLD_SECONDS: int = Field(env="GPU_LOSS_HOLD_SECONDS", default=7200, gt=0)
     # DAH-2735 — judge an idle node's GPU by WHO holds it, not by utilization: a competitor's
     # rental idling on the card (Nodexo/SN106) passes every percentage gate. CHECK_ENABLED
     # observes and logs the verdict; ENFORCEMENT additionally zeroes the score. Enforcement
@@ -501,15 +510,6 @@ class Settings(BaseSettings):
     # re-registers the node to list a different set. Off again = the mark stays in the record but is ignored.
     # Flip after reading a week of the warn-mode rows.
     GPU_ANCHOR_HARD_ENABLED: bool = Field(env="GPU_ANCHOR_HARD_ENABLED", default=False)
-    # The verified record (count, spec, GPU anchor) is keyed by executor id alone. Its owner is
-    # the backend's (RentedExecutorsResponse.executor_owner_hotkeys, the MinerExecutor row): a
-    # write or reset by another hotkey is always logged (VERIFIED_RECORD_FOREIGN_WRITER); with
-    # this on it is refused, so listing someone else's executor id no longer resets their record.
-    # A provider moves a node to a new hotkey in the portal. No owner from the backend lets the
-    # write through, so this stays off until the backend sends the map.
-    VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED: bool = Field(
-        env="VERIFIED_RECORD_OWNER_ENFORCEMENT_ENABLED", default=False
-    )
     PROVIDER_SIDE_LOAD_CHECK_ENABLED: bool = Field(env="PROVIDER_SIDE_LOAD_CHECK_ENABLED", default=True)
     PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED: bool = Field(
         env="PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED", default=False

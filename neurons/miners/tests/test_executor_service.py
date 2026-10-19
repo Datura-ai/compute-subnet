@@ -12,7 +12,11 @@ import bittensor
 import pytest
 
 from models.executor import Executor
-from protocol.miner_portal_request import DeleteExecutorRequest, ExecutorDeleted, SyncExecutorPayload
+from protocol.miner_portal_request import (
+    DeleteExecutorRequest,
+    ExecutorDeleted,
+    SyncExecutorPayload,
+)
 from services.executor_service import ExecutorService
 
 
@@ -110,10 +114,20 @@ async def test_send_pubkey_to_executor_includes_validator_signature(
     assert sent_payload["validator_signature"] == validator_sig
 
 
-# ---------------------------------------------------------------------------
-# DAH-3338: register_pubkey tells the validator which executors it KNOWS apart from
-# which ACCEPTED the key, so an unreachable node stops reading as an invalid id.
-# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_send_pubkey_to_executor_relays_the_miner_bound_signature(executor_service, test_executor):
+    """miner_hotkey and validator_miner_signature reach the executor verbatim; absent when not sent."""
+    mock_session = _make_mock_session()
+    with patch("services.executor_service.aiohttp.ClientSession", return_value=mock_session):
+        await executor_service.send_pubkey_to_executor(
+            test_executor, _SSH_KEY, "0xaa", miner_hotkey="5Miner", validator_miner_signature="0xbb"
+        )
+        sent = mock_session.post.call_args.kwargs["json"]
+        assert (sent["miner_hotkey"], sent["validator_miner_signature"]) == ("5Miner", "0xbb")
+
+        await executor_service.send_pubkey_to_executor(test_executor, _SSH_KEY, "0xaa")
+        sent = mock_session.post.call_args.kwargs["json"]
+        assert "miner_hotkey" not in sent and "validator_miner_signature" not in sent
 
 
 # ---------------------------------------------------------------------------

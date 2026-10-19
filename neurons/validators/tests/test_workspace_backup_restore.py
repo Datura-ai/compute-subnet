@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -11,7 +11,12 @@ sys.path.insert(0, str(MINER_JOBS_PATH))
 import restore_storage
 import workspace_mount as workspace_mount_module
 from datura.requests.miner_requests import ExecutorSSHInfo
+from payload_models.payloads import (
+    BackupContainerRequest,
+    ExternalVolumeInfo,
+)
 from services.docker_service import DockerService
+from services.miner_service import MinerService
 from workspace_mount import (
     VolumeAccess,
     detect_volume_access,
@@ -19,6 +24,7 @@ from workspace_mount import (
 )
 
 from services import docker_service as docker_service_module
+from services import miner_service as miner_service_module
 
 
 def _restore_args() -> SimpleNamespace:
@@ -102,9 +108,7 @@ def _docker_run_side_effect(
             if command[3] == "{{.State.Running}}":
                 container_name = command[-1]
                 is_running = running.get(container_name, True)
-                return SimpleNamespace(
-                    returncode=0, stdout="true\n" if is_running else "false\n", stderr=""
-                )
+                return SimpleNamespace(returncode=0, stdout="true\n" if is_running else "false\n", stderr="")
             container_name = command[-1]
             return SimpleNamespace(
                 returncode=0,
@@ -152,6 +156,17 @@ def test_detect_volume_access_raises_when_gocryptfs_conf_present(monkeypatch):
         detect_volume_access("source-volume", "/root")
 
 
+class _FakeSshContext:
+    def __init__(self, ssh_client):
+        self.ssh_client = ssh_client
+
+    async def __aenter__(self):
+        return self.ssh_client
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+
 def _executor_info() -> ExecutorSSHInfo:
     return ExecutorSSHInfo(
         uuid="executor",
@@ -164,6 +179,54 @@ def _executor_info() -> ExecutorSSHInfo:
         python_path="/usr/bin/python3",
         root_dir="/root",
     )
+
+
+def _backup_payload() -> BackupContainerRequest:
+    return BackupContainerRequest(
+        miner_hotkey="miner",
+        executor_id="executor",
+        pod_id="pod",
+        source_volume="source-volume",
+        backup_volume_info=ExternalVolumeInfo(
+            name="bucket",
+            plugin="s3fs",
+            iam_user_access_key="access",
+            iam_user_secret_key="secret",
+        ),
+        backup_path="/root/test",
+        source_volume_path="/root",
+        backup_target_path="target.tar.gz",
+        auth_token="token",
+        backup_log_id="backup-log",
+    )
+
+
+@pytest.mark.asyncio
+async def test_restic_backup_with_excludes_stops_on_an_executor_that_cannot_apply_them(monkeypatch):
+    ssh_client = AsyncMock()
+    monkeypatch.setattr(miner_service_module.asyncssh, "connect", Mock(return_value=_FakeSshContext(ssh_client)))
+    monkeypatch.setattr(miner_service_module, "supports_workspace_field", AsyncMock(return_value=False))
+    start = AsyncMock()
+    monkeypatch.setattr(miner_service_module, "start_storage_operation", start)
+    payload = _backup_payload()
+    payload.backup_engine = "restic"
+    payload.backup_log_id = "11111111-1111-4111-8111-111111111111"
+    payload.exclude_patterns = [".ssh"]
+
+    with pytest.raises(RuntimeError, match="exclude_patterns"):
+        await MinerService.__new__(MinerService).handle_backup_container_req(_executor_info(), payload, Mock())
+    start.assert_not_awaited()
+
+
+def test_restic_backup_spec_carries_the_exclude_patterns():
+    payload = _backup_payload()
+    payload.backup_engine = "restic"
+    payload.repository_password = "repository-password"
+    payload.exclude_patterns = [".cache", ".ssh"]
+
+    spec = MinerService._restic_backup_operation_spec(payload)
+
+    assert spec["workspace"]["exclude_patterns"] == [".cache", ".ssh"]
 
 
 def _walk_json(value, path=""):
@@ -187,9 +250,7 @@ async def test_encrypted_bootstrap_restore_spec_never_carries_the_passphrase(mon
 
     master_secret = "test-master-secret-32-chars-long!!"
     monkeypatch.setattr(docker_service_module.settings, "VOLUME_MASTER_SECRET", master_secret)
-    monkeypatch.setattr(
-        docker_service_module, "supports_storage_operation", AsyncMock(return_value=True)
-    )
+    monkeypatch.setattr(docker_service_module, "supports_storage_operation", AsyncMock(return_value=True))
     start = AsyncMock(return_value={"spec": "/tmp/spec.json"})
     monkeypatch.setattr(docker_service_module, "start_storage_operation", start)
     monkeypatch.setattr(docker_service_module, "wait_for_storage_operation", AsyncMock())

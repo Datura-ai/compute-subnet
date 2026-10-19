@@ -1,11 +1,15 @@
-"""A filler create stands down while a customer create ran on its executor since the filler started (the customer's sweep
-would remove the filler); only customer creates that end after the filler started count."""
+"""A filler create stands down at `docker run` while this connector creates a customer's container on
+the same executor, or did since the filler create started: the customer's sweep would remove the filler, or, if the executor's create lock
+lapsed and the sweep already ran, the filler would run beside the renter.
+"""
 
 from __future__ import annotations
 
 import contextlib
 
-from payload_models.payloads import WorkloadKind
+from payload_models.payloads import (
+    WorkloadKind,
+)
 from services.docker_service import customer_creates
 from test_deploy_optimizations import _payload
 

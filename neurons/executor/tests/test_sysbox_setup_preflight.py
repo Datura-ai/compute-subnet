@@ -1,10 +1,11 @@
-"""DAH-3319: nvidia_docker_sysbox_setup.sh never touches a host that holds a rental.
+"""DAH-3319: the preflight in nvidia_docker_sysbox_setup.sh — one PASS / FIX line per host
+requirement with the command that fixes it, run before anything is installed and standalone as
+`--check` (ticket-0309: a provider reinstalled sysbox three times; the cause was a host setting
+nobody had checked).
 
-Install mode stops on a stopped rental and leaves the vloopback plugin alone under a rental; the
-per-requirement PASS / FIX preflight cases were cut as low-signal in DAH-4027.
-
-The script is run under bash with stub commands on PATH and the files it reads under a fixture
-SYSBOX_SETUP_HOST_ROOT.
+Same harness as test_sysbox_setup_apt_repo.py: the script is run under bash with stub commands
+on PATH and the files it reads (/proc/modules, /etc/os-release, /etc/docker/daemon.json, ...)
+under a fixture SYSBOX_SETUP_HOST_ROOT. The check functions are sourced with SYSBOX_SETUP_LIB=1.
 """
 
 import os
@@ -23,7 +24,7 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 SCRIPT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "nvidia_docker_sysbox_setup.sh"))
 
 # the real tools the check functions call, so PATH can be built without the host's jq
-REAL_TOOLS = ["bash", "grep", "sed", "awk", "head", "tail", "cut", "ls", "dirname", "cat", "seq", "rm"]
+REAL_TOOLS = ["bash", "grep", "sed", "awk", "head", "tail", "cut", "ls", "dirname", "cat", "seq", "rm", "mkdir"]
 
 STUBS = {
     "id": '#!/bin/bash\necho "${STUB_UID:-0}"\n',
@@ -87,7 +88,7 @@ STUBS = {
                 echo "false $data_dir" > "$st/plugin" ;;
             "plugin set") echo "$enabled ${4#DATA_DIR=}" > "$st/plugin" ;;
             "plugin enable") echo "true $data_dir" > "$st/plugin" ;;
-            "image inspect") [ -z "${STUB_NO_VERIFY_IMAGE:-}" ] || { echo "Error: No such image: $3" >&2; exit 1; } ;;
+            "image inspect") [ -z "${STUB_NO_VERIFY_IMAGE:-}${STUB_NO_EXECUTOR_IMAGE:-}" ] || { echo "Error: No such image: $3" >&2; exit 1; } ;;
             "volume create")
                 [ -z "${STUB_VOLUME_CREATE_FAILS:-}" ] || { echo "Error response from daemon: create ${!#}: VolumeDriver.Create: no space left on device" >&2; exit 1; }
                 echo "${!#}" >> "$st/volumes"
@@ -124,6 +125,7 @@ STUBS = {
         #!/bin/bash
         case "$1" in
             --query-gpu=driver_version) echo "${STUB_NV_DRIVER:-580.65.06}" ;;
+            --query-gpu=name) for _ in $(seq "${STUB_NV_GPUS:-8}"); do echo "${STUB_NV_NAME:-NVIDIA H100 80GB HBM3}"; done ;;
             --query-gpu=memory.total) for _ in $(seq "${STUB_NV_GPUS:-8}"); do echo "${STUB_NV_MEM_MIB:-81559}"; done ;;
             --list-gpus) for i in $(seq "${STUB_NV_GPUS:-8}"); do echo "GPU $((i - 1)): NVIDIA H100 80GB HBM3"; done ;;
         esac
@@ -135,6 +137,15 @@ STUBS = {
     # the real `sysbox-runc --version`: the name alone on line 1, the version on line 2
     "sysbox-runc": '#!/bin/bash\nprintf "sysbox-runc\\n\\tversion:\\t${STUB_SYSBOX_VERSION:-0.7.1}\\n\\tcommit:\\tabc123\\n"\n',
     "fusermount3": "#!/bin/bash\nexit 0\n",
+    "lspci": '#!/bin/bash\necho "${STUB_LSPCI:-17:00.0 3D controller: NVIDIA Corporation GH100 [H100 SXM5 80GB] (rev a1)}"\n',
+    # loads the legacy iptables modules into the fixture /proc/modules, or fails with STUB_MODPROBE_FAILS
+    "modprobe": textwrap.dedent(
+        """\
+        #!/bin/bash
+        [ -z "${STUB_MODPROBE_FAILS:-}" ] || exit 1
+        printf "ip_tables 1 0\\niptable_nat 1 0\\niptable_filter 1 0\\n" >> "$SYSBOX_SETUP_HOST_ROOT/proc/modules"
+        """
+    ),
     "ss": textwrap.dedent(
         """\
         #!/bin/bash
@@ -149,7 +160,7 @@ STUBS = {
         """\
         #!/bin/bash
         echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
-        echo "/dev/nvme0n1p1 ${STUB_DF_TOTAL_KB:-1048576000} 1 1 1% /"
+        echo "/dev/nvme0n1p1 ${STUB_DF_TOTAL_KB:-1048576000} 1 ${STUB_DF_AVAIL_KB:-943718400} 1% /"
         """
     ),
 }
@@ -267,6 +278,64 @@ def run_script(
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="bash installer")
 
 
+def test_docker_29_0_passes_but_says_untested(tmp_path):
+    rc, out, _ = run_check(tmp_path, "check_docker", env={"STUB_DOCKER_VERSION": "29.0.1"})
+    assert rc == 0
+    assert "PASS Docker 29.0.1 (29.0 is untested with sysbox" in out
+
+
+def test_docker_29_1_passes_plainly(tmp_path):
+    rc, out, _ = run_check(tmp_path, "check_docker", env={"STUB_DOCKER_VERSION": "29.1.3"})
+    assert rc == 0
+    assert "PASS Docker 29.1.3.\n" in out
+
+
+@pytest.mark.parametrize(
+    ("env", "files", "package"),
+    [
+        ({"STUB_NV_DRIVER": "570.1.1"}, {}, "nvidia-driver-580-server &&"),
+        ({"STUB_NV_DRIVER": "570.1.1"}, {"proc/driver/nvidia/version": "NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  570.1.1\n"}, "nvidia-driver-580-server-open"),
+        ({"STUB_NV_DRIVER": "570.1.1", "STUB_NV_NAME": "NVIDIA GeForce RTX 5090"}, {}, "nvidia-driver-580-server-open"),
+    ],
+)
+def test_driver_fix_keeps_the_open_module_where_it_is_needed(tmp_path, env, files, package):
+    rc, out, _ = run_check(tmp_path, "check_nvidia_driver", env=env, files=files)
+    assert rc == 1
+    assert f"sudo apt-get install -y {package}" in out
+
+
+def test_blackwell_without_a_driver_gets_the_open_module_from_pci(tmp_path):
+    env = {"STUB_LSPCI": "17:00.0 3D controller: NVIDIA Corporation GB100 [B200] (rev a1)"}
+    rc, out, _ = run_check(tmp_path, "check_nvidia_driver", env=env, without=("nvidia-smi",))
+    assert rc == 1
+    assert "sudo apt-get install -y nvidia-driver-580-server-open" in out
+
+
+# ── free disk for the node's images and VerifyX's storage test ───────────────
+
+
+def test_free_disk_needs_room_for_the_images_before_the_first_pull(tmp_path):
+    # a 100 GB disk passes the 1.5x VRAM rule for one 48 GB card and then fails VerifyX
+    env = {"STUB_DF_AVAIL_KB": str(97 * 1024 * 1024), "STUB_NO_EXECUTOR_IMAGE": "1"}
+    rc, out, _ = run_check(tmp_path, "check_free_disk_for_node", env=env)
+    assert rc == 1
+    assert "FIX  Free disk 97.0 GB on " in out and "is below 140 GB" in out
+    assert "Use a disk of at least 150 GB" in out
+
+
+def test_free_disk_needs_only_the_storage_test_once_the_images_are_pulled(tmp_path):
+    rc, out, _ = run_check(tmp_path, "check_free_disk_for_node", env={"STUB_DF_AVAIL_KB": str(120 * 1024 * 1024)})
+    assert rc == 0, out
+    assert "PASS Free disk 120.0 GB on " in out and ">= 100 GB" in out
+
+
+def test_free_disk_just_below_100_gib_is_not_rounded_up(tmp_path):
+    env = {"STUB_DF_AVAIL_KB": str(100 * 1024 * 1024 - 40000)}
+    rc, out, _ = run_check(tmp_path, "check_free_disk_for_node", env=env)
+    assert rc == 1, out
+    assert "FIX  Free disk 100.0 GB on " in out
+
+
 # ── vloopback: size-limited volumes (ticket-0331) ────────────────────────────
 # ticket-0331, 22 Sep 2026: the fix support sent the provider by hand was "give the plugin an absolute data
 # directory, then run `docker volume create -d vloopback -o size=10G t && docker volume inspect t`; the
@@ -295,9 +364,6 @@ def test_install_mode_does_not_change_the_plugin_under_a_rental(tmp_path):
     assert _plugin_changes(tmp_path) == []
 
 
-# ── the script as a provider runs it ─────────────────────────────────────────
-
-
 def test_install_mode_stops_on_a_stopped_rental(tmp_path):
     # a renter's stopped pod is still a rental; the upgrade path removes every stopped container
     proc = run_script(tmp_path, env={"STUB_SYSBOX_VERSION": "0.6.6", "STUB_STOPPED_POD": "pod_abc123"})
@@ -306,3 +372,12 @@ def test_install_mode_stops_on_a_stopped_rental(tmp_path):
     assert "docker ps -a --filter name=pod_" in proc.stdout
     assert "pod_abc123" in proc.stdout
     assert "Removing stopped containers" not in proc.stdout
+
+
+def test_install_mode_loads_the_iptables_modules_itself(tmp_path):
+    proc = run_script(tmp_path, files={"proc/modules": "nf_tables 311296 0\n"})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Loaded the iptables modules (ip_tables iptable_nat iptable_filter) and made them load at boot." in proc.stdout
+    assert "The preflight printed" not in proc.stdout
+    conf = tmp_path / "root" / "etc" / "modules-load.d" / "lium-iptables.conf"
+    assert conf.read_text() == "ip_tables\niptable_nat\niptable_filter\n"

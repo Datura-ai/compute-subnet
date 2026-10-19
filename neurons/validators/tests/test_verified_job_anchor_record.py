@@ -36,13 +36,13 @@ def _redis_service() -> RedisService:
 
 
 async def _record(service: RedisService) -> dict:
-    return json.loads(await service.redis.hget(VERIFIED_JOB_COUNT_KEY, EXECUTOR))
+    return json.loads(await service.redis.hget(VERIFIED_JOB_COUNT_KEY, f"hk:{EXECUTOR}"))
 
 
 async def _cycle(service, handler, context_factory, *, uuids: str, hard: bool):
     """One validation cycle as the service runs it: record from Redis, the two GPU-set checks through the real
     Pipeline, the outcome persisted by the ResultHandler."""
-    verified = await service.get_verified_job_info(EXECUTOR)
+    verified = await service.get_verified_job_info("hk", EXECUTOR)
     ctx = context_factory(
         state=build_state(gpu_uuids=uuids, gpu_model_count=f"A100:{len(uuids.split(','))}"), verified=verified
     )
