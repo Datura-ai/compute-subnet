@@ -41,8 +41,9 @@ class PinnedMemoryProbeCheck:
     compares it on the host; it also reports the cpuinfo tdx_guest flag and `nvidia-smi conf-compute -f` as evidence.
 
     PINNED_MEMORY_PROBE_CHECK_ENABLED runs it, PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED lets a fault fail the
-    (fatal) check, which keeps the node unrentable. Both default on: the probe is a few-ms copy per card, and only
-    wrong data, a copy error or a copy that hangs counts as a fault. A probe that could not run (no libcuda, a
+    (fatal) check, which keeps the node unrentable. CHECK defaults on (a few-ms copy per card), ENFORCEMENT off:
+    a fault is logged with its verdict and the node passes. Wrong data, a copy error, a copy that hangs or a
+    driver error naming a broken GPU (BROKEN_GPU_CODES) counts as a fault. A probe that could not run (no libcuda, a
     context or allocation refused, a memlock limit) passes with PINNED_MEMORY_PROBE_UNKNOWN.
     """
 

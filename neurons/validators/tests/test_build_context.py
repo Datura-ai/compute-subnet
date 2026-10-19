@@ -230,6 +230,17 @@ def test_check_archive_refuses_more_unpacked_bytes_than_the_cap():
         build_context.check_archive(archive, 1 << 16)
 
 
+def test_check_archive_refuses_more_entries_than_the_cap(monkeypatch):
+    # Arrange
+    monkeypatch.setattr(build_context, "MAX_ARCHIVE_ENTRIES", 3)
+    archive = _archive({f"f{i}": b"" for i in range(4)})
+
+    # Act / Assert
+    build_context.check_archive(_archive({f"f{i}": b"" for i in range(3)}), 1 << 20)
+    with pytest.raises(BuildContextError, match="more than 3 entries"):
+        build_context.check_archive(archive, 1 << 20)
+
+
 def test_check_archive_refuses_bytes_that_are_not_a_gzipped_tar():
     # Act / Assert
     with pytest.raises(BuildContextError, match="not a gzipped tar"):

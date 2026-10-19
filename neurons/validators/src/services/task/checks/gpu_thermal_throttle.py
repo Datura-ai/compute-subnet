@@ -16,9 +16,13 @@ when it is at least ``MIN_UTILIZATION_PCT`` busy and either
 An idle card is not judged: an idle card downclocks by design. A scrape that predates these readings, or a
 driver that lacks the calls, leaves the fields missing and the GPU is not judged either.
 
-Non-fatal and observe-only: the event is a warning and the score is not changed. It runs right after the
-scrape, before the rented short-circuit (TenantEnforcementCheck), so rented nodes, where a renter pays for the
-lost speed, are judged too. One reading per cycle; a consecutive-cycle requirement is a follow-up.
+A GPU whose clock is below ``MIN_CLOCK_RATIO`` of its max WITH a thermal or hardware slowdown bit set has
+collapsed (ticket-0492: 345 MHz of 1980 at 95 C): on a node that is not rented the check fails (fatal, score 0,
+GPU_THERMAL_COLLAPSE) until the host fixes its cooling, so it is not listed to the next renter. A rented node
+only gets the warning, so this check never touches a running rental. Every other finding (a thermal bit at a
+near-full clock, a low clock with no slowdown bit) is the non-fatal GPU_THERMAL_THROTTLE warning, score
+unchanged. It runs right after the scrape, before the rented short-circuit (TenantEnforcementCheck), so rented
+nodes are judged too. One reading per cycle; the next clean cycle passes again.
 """
 
 from __future__ import annotations
@@ -88,6 +92,10 @@ def judge_gpu(detail: dict[str, Any]) -> dict[str, Any] | None:
         "clock_ratio": round(clock_ratio, 3) if clock_ratio is not None else None,
         "clocks_event_reasons": hex(reasons) if reasons is not None else None,
         "reasons": thermal_reasons + (["clock_below_half_of_max"] if low_clock else []),
+        # Hard evidence of a heat fault: half the clock gone AND the driver says why.
+        "collapsed": bool(thermal_reasons)
+        and clock_ratio is not None
+        and clock_ratio < MIN_CLOCK_RATIO,
     }
 
 
@@ -95,7 +103,7 @@ class GpuThermalThrottleCheck:
     """Warn about a busy GPU held below its clock by a thermal/hardware slowdown. Never fatal, never scores."""
 
     check_id = "gpu.validate.thermal_throttle"
-    fatal = False
+    fatal = True  # only the GPU_THERMAL_COLLAPSE result fails; every other result passes
 
     async def run(self, ctx: Context) -> CheckResult:
         throttled = [
@@ -107,6 +115,33 @@ class GpuThermalThrottleCheck:
             )
             if finding is not None
         ]
+        rented_executor = (
+            ctx.state.rented_data.executors.get(ctx.executor.uuid)
+            if ctx.state.rented_data
+            else None
+        )
+        rented = bool(rented_executor and rented_executor.pods)
+        collapsed = [finding for finding in throttled if finding["collapsed"]]
+        if collapsed and not rented:
+            event = render_message(
+                Msg.COLLAPSED,
+                ctx=ctx,
+                check_id=self.check_id,
+                what={
+                    "gpus": throttled,
+                    "collapsed_count": len(collapsed),
+                    "min_clock_ratio": MIN_CLOCK_RATIO,
+                },
+            )
+            return CheckResult(
+                passed=False,
+                event=event,
+                updates={
+                    "score": 0.0,
+                    "job_score": 0.0,
+                    "score_warning": " WARNING: a busy GPU is thermally throttled below half its clock",
+                },
+            )
         if throttled:
             event = render_message(
                 Msg.THROTTLED,

@@ -1008,7 +1008,7 @@ ok "Docker is running."
 
 step 6 7 "Verifying sysbox + GPU and a size-limited volume"
 
-if docker run --rm --runtime=sysbox-runc --gpus all "$VERIFY_IMAGE" nvidia-smi &>/dev/null; then
+if VERIFY_OUT=$(docker run --rm --runtime=sysbox-runc --gpus all "$VERIFY_IMAGE" nvidia-smi 2>&1); then
     ok "A GPU container starts under sysbox-runc."
     VLOOPBACK_OK=true
     setup_vloopback || VLOOPBACK_OK=false
@@ -1038,7 +1038,11 @@ if docker run --rm --runtime=sysbox-runc --gpus all "$VERIFY_IMAGE" nvidia-smi &
     fi
 else
     echo ""
-    fail "Verification FAILED. Diagnostics:"
+    fail "Verification FAILED. The test container said:"
+    # the docker run error names the cause (e.g. no CDI device driver); ticket-0478 had only "FAILED"
+    printf '%s\n' "$VERIFY_OUT" | tail -n 20 | sed 's/^/    /'
+    echo ""
+    fail "Diagnostics:"
     echo ""
     failure_diagnostics
     echo ""

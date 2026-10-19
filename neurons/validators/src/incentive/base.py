@@ -142,7 +142,6 @@ class BaseIncentive(ABC):
     async def calculate_final_weights(
         self,
         miners: list[bittensor.NeuronInfo],
-        last_mechanism_step_block: int | None,
         current_epoch: int | None = None,
     ) -> dict[str, float]:
         """Calculate final weights with burning logic applied for this cycle.
@@ -153,7 +152,6 @@ class BaseIncentive(ABC):
 
         Args:
             miners: List of all miners (needed to identify burners by UID)
-            last_mechanism_step_block: For burner selection randomization
 
         Returns:
             dict[str, float]: Weights with burning applied for each miner.

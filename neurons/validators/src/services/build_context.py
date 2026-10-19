@@ -3,6 +3,7 @@ validator, checked, and unpacked into the build container's context directory ne
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import posixpath
@@ -12,6 +13,8 @@ from urllib.parse import urlsplit
 import aiohttp
 
 _FETCH_TIMEOUT_SECONDS = 120
+# tarfile keeps every member it has read, so cap the count, not only the bytes
+MAX_ARCHIVE_ENTRIES = 10_000
 
 
 class BuildContextError(Exception):
@@ -35,7 +38,11 @@ def check_archive(data: bytes, max_unpacked_bytes: int) -> None:
     total = 0
     try:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
-            for member in archive:
+            for count, member in enumerate(archive, start=1):
+                if count > MAX_ARCHIVE_ENTRIES:
+                    raise BuildContextError(
+                        f"build context has more than {MAX_ARCHIVE_ENTRIES} entries"
+                    )
                 name = posixpath.normpath(member.name)
                 if name.startswith(("/", "../")) or name == "..":
                     raise BuildContextError(
@@ -102,5 +109,6 @@ async def fetch(
     if digest.hexdigest() != expected:
         raise BuildContextError("build context sha256 does not match")
     data = b"".join(chunks)
-    check_archive(data, max_unpacked_bytes)
+    # the parse is CPU-bound; off the event loop so a crafted archive cannot stall the validator
+    await asyncio.to_thread(check_archive, data, max_unpacked_bytes)
     return data

@@ -192,6 +192,9 @@ class ValidationResult:
     elapsed_source: str | None = None
     dim_n: int | None = None
     dim_k: int | None = None
+    # True when the run failed on the validator's side (SSH, our cipher, our own exception), not
+    # because of the executor's answer.
+    validator_error: bool = False
 
     def __bool__(self) -> bool:
         """Allow using ValidationResult in boolean context for backward compatibility."""
@@ -446,6 +449,7 @@ class ValidationService:
         machine_spec: dict,
         default_extra: dict,
         vram_budget_mb: int | None = None,
+        gpu_uuid: str | None = None,
     ) -> "MatmulChallenge":
         """Size and encrypt one capability challenge; the caller decides how it reaches the executor.
 
@@ -467,6 +471,10 @@ class ValidationService:
         gpu_details = machine_spec.get("gpu", {}).get("details", [])
         gpu_count = machine_spec.get("gpu", {}).get("count", 0)
         gpu_uuids = ','.join([detail.get('uuid', '') for detail in gpu_details])
+        if gpu_uuid is not None:
+            # A run pinned to one card: the executor's .so then sees only that card, so its key
+            # is built from that card alone.
+            gpu_uuids, gpu_count = gpu_uuid, 1
 
         # NOTE: machine_info MUST exactly match what the executor's libdmcompverify
         # reconstructs locally via getGPUInfo() — otherwise the hash-derived AES key
@@ -667,6 +675,7 @@ class ValidationService:
                     dim_k=verifier_params.dim_k,
                 )
         except Exception as e:
+            # only the executor's answer is read here, so a failure is theirs, not a validator_error
             error_msg = f"Error during UUID verification: {str(e)}"
             logger.error(_m(error_msg, extra=get_extra_info(log_extra)))
             return ValidationResult(
@@ -675,7 +684,7 @@ class ValidationService:
                 returned_uuid=uuid if 'uuid' in locals() else "",
                 stdout=stdout,
                 stderr=stderr,
-                error_message=error_msg
+                error_message=error_msg,
             )
 
     def _answer_was_sealed(self, sealed_blob: str) -> bool:
@@ -690,6 +699,8 @@ class ValidationService:
         default_extra: dict,
         machine_spec: dict,
         vram_budget_mb: int | None = None,
+        probe_all_cards: bool = True,
+        gpu_uuid: str | None = None,
     ) -> ValidationResult:
         # The SSH transport of the capability matmul: prepare_matmul_challenge → one remote
         # `decrypt_challenge.py` run → evaluate_matmul_output. The local transport (checks/
@@ -699,7 +710,8 @@ class ValidationService:
         # enforcement fails a count lie (device-selection error / OOM / serialised aggregate
         # wall-clock). Single-card / unknown-model hosts skip it (probe returns None), which also
         # keeps a not-yet-relevant fleet — and the legacy single-card path below — unchanged.
-        if settings.MATMUL_ALLCARDS_CHECK_ENABLED:
+        # a filler-node sample runs beside the filler, so it never probes every card
+        if settings.MATMUL_ALLCARDS_CHECK_ENABLED and probe_all_cards:
             all_cards = await self._probe_all_claimed_cards(
                 ssh_client, executor_info, default_extra, machine_spec
             )
@@ -719,7 +731,9 @@ class ValidationService:
         challenge = None
         try:
             script_path = f"{executor_info.root_dir}/src/decrypt_challenge.py"
-            challenge = self.prepare_matmul_challenge(machine_spec, default_extra, vram_budget_mb)
+            challenge = self.prepare_matmul_challenge(
+                machine_spec, default_extra, vram_budget_mb, gpu_uuid=gpu_uuid
+            )
             verifier_params = challenge.params
             log_extra = challenge.log_extra
 
@@ -733,9 +747,13 @@ class ValidationService:
                     success=False,
                     expected_uuid=verifier_params.uuid,
                     error_message=error_msg,
+                    validator_error=True,
                 )
 
             command = f"{executor_info.python_path} {script_path} {verifier_params}"
+            if gpu_uuid is not None:
+                # gpu_uuid comes from host-reported specs, so it is quoted
+                command = f"CUDA_VISIBLE_DEVICES={shlex.quote(gpu_uuid)} {command}"
 
             logger.info(_m("Matrix Multiplication Python Script Command", extra=get_extra_info(log_extra)))
 
@@ -769,7 +787,8 @@ class ValidationService:
                 return ValidationResult(
                     success=False,
                     expected_uuid=verifier_params.uuid,
-                    error_message=error_msg
+                    error_message=error_msg,
+                    validator_error=True,
                 )
 
             logger.info(f"{script_path}: {result}")
@@ -780,7 +799,8 @@ class ValidationService:
                 return ValidationResult(
                     success=False,
                     expected_uuid=verifier_params.uuid,
-                    error_message=error_msg
+                    error_message=error_msg,
+                    validator_error=True,
                 )
 
             try:
@@ -792,7 +812,8 @@ class ValidationService:
                 return ValidationResult(
                     success=False,
                     expected_uuid=verifier_params.uuid,
-                    error_message=error_msg
+                    error_message=error_msg,
+                    validator_error=True,
                 )
 
             run_seconds = time.perf_counter() - run_started
@@ -808,7 +829,8 @@ class ValidationService:
             logger.error(_m(error_msg, extra=default_extra))
             return ValidationResult(
                 success=False,
-                error_message=error_msg
+                error_message=error_msg,
+                validator_error=True,
             )
         finally:
             # Always release the per-call verifier object (it held the seal key).

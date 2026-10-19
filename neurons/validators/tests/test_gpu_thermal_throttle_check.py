@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 from neurons.validators.tests.helpers import build_scrape_namespace, build_state
+from protocol.vc_protocol.compute_requests import RentedExecutor, RentedExecutorsResponse
 from services.task.checks.gpu_thermal_throttle import GpuThermalThrottleCheck
 from services.task.checks.rented_gpu_drop import RentedGpuDropCheck
 from services.task.messages import GpuThermalThrottleMessages as Msg
@@ -41,8 +42,20 @@ def h100(**overrides: Any) -> dict[str, Any]:
     return row
 
 
-async def run(context_factory, *rows: dict[str, Any]):
-    ctx = context_factory(state=build_state(gpu_details=list(rows)))
+async def run(context_factory, *rows: dict[str, Any], rented: bool = False):
+    rented_data = None
+    if rented:
+        pod = {"pod_id": "pod-1", "container_name": "c", "gpu_count": 1}
+        executor = RentedExecutor.model_validate(
+            {
+                "miner_hotkey": "hk",
+                "executor_ip_address": "1.2.3.4",
+                "executor_ip_port": "8080",
+                "pods": [pod],
+            }
+        )
+        rented_data = RentedExecutorsResponse(executors={context_factory().executor.uuid: executor})
+    ctx = context_factory(state=build_state(gpu_details=list(rows), rented_data=rented_data))
     return await GpuThermalThrottleCheck().run(ctx)
 
 
@@ -59,15 +72,27 @@ async def test_the_ticket_reading_is_flagged(context_factory):
     # Act
     result = await run(context_factory, row)
 
-    # Assert: flagged, never fatal
-    assert result.passed is True
-    assert result.event.reason_code == Msg.THROTTLED.reason
+    # Assert: an unrented node fails with score 0 until the cooling is fixed
+    assert result.passed is False
+    assert result.event.reason_code == Msg.COLLAPSED.reason
+    assert result.updates["score"] == 0.0
     gpu = result.event.what_we_saw["gpus"][0]
     assert gpu["uuid"] == "GPU-aaaa"
     assert gpu["temperature_c"] == 87
     assert gpu["graphics_clock_mhz"] == 345
     assert gpu["clocks_event_reasons"] == "0x20"
     assert gpu["reasons"] == ["sw_thermal_slowdown", "clock_below_half_of_max"]
+    assert gpu["collapsed"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_collapsed_gpu_on_a_rented_node_only_warns(context_factory):
+    row = h100(graphics_speed=345, temperature=95, clocks_event_reasons=SW_THERMAL | HW_THERMAL)
+
+    result = await run(context_factory, row, rented=True)
+
+    assert result.passed is True
+    assert result.event.reason_code == Msg.THROTTLED.reason
 
 
 @pytest.mark.asyncio
@@ -103,7 +128,8 @@ async def test_only_the_throttled_card_of_a_multi_gpu_node_is_listed(context_fac
         h100(uuid="GPU-hot", graphics_speed=500, clocks_event_reasons=SW_THERMAL | HW_SLOWDOWN),
     )
 
-    assert result.event.what_we_saw["throttled_count"] == 1
+    assert result.event.reason_code == Msg.COLLAPSED.reason
+    assert result.event.what_we_saw["collapsed_count"] == 1
     assert [gpu["uuid"] for gpu in result.event.what_we_saw["gpus"]] == ["GPU-hot"]
 
 
@@ -158,8 +184,23 @@ async def test_no_gpu_details_passes(context_factory):
     assert result.event.reason_code == Msg.OK.reason
 
 
-def test_the_check_is_never_fatal():
-    assert GpuThermalThrottleCheck.fatal is False
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "row",
+    [
+        h100(
+            graphics_speed=1965, temperature=74, clocks_event_reasons=SW_THERMAL
+        ),  # a thermal bit at full clock
+        h100(
+            graphics_speed=650, clocks_event_reasons=None
+        ),  # a low clock the driver gives no reason for
+    ],
+)
+async def test_only_a_collapse_with_a_slowdown_bit_fails(context_factory, row):
+    result = await run(context_factory, row)
+
+    assert result.passed is True
+    assert result.event.reason_code == Msg.THROTTLED.reason
 
 
 # --------------------------------------------------------------------------------------------------
