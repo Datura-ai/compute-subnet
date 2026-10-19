@@ -323,6 +323,11 @@ class Settings(BaseSettings):
     # the pod really got. Off: the 90 s same-mapping wait as before. Either way the failure event
     # carries `error_class: port_collision`.
     PORT_COLLISION_RETRY_ENABLED: bool = Field(env="PORT_COLLISION_RETRY_ENABLED", default=False)
+    # DAH-4537: the outside port prober (an AWS Lambda function URL) and its bearer token. Each batch
+    # port check first fetches a few listening ports through it; when none answers it while the
+    # validator reaches them, the node gets no verified ports. Unset URL: no outside probe.
+    EXTERNAL_PORT_PROBE_URL: str = Field(env="EXTERNAL_PORT_PROBE_URL", default="")
+    EXTERNAL_PORT_PROBE_TOKEN: str = Field(env="EXTERNAL_PORT_PROBE_TOKEN", default="")
     # DAH-3011: a never-validated executor's FIRST verification (the express lane's, DAH-2958 —
     # published spec-only, never scored) proves "this GPU exists, is the model claimed, the host is
     # reachable and rentable"; the VRAM-filling matmul and the 128 GB RAM proof exist to make a
@@ -336,7 +341,8 @@ class Settings(BaseSettings):
     FIRST_PASS_MATMUL_VRAM_MB: int = Field(env="FIRST_PASS_MATMUL_VRAM_MB", default=8192)
     # A filler-only node skips the matmul while the filler runs. With N > 0, every Nth such cycle
     # runs the challenge on a small VRAM budget beside the filler and records the answer
-    # (FILLER_MATMUL_SAMPLE); the check result never depends on it. 0 = never, the default.
+    # (FILLER_MATMUL_SAMPLE); the check result never depends on it. Each sample is pinned to the
+    # next claimed card in rotation. 0 = never, the default.
     FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES: int = Field(
         env="FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES", default=0, ge=0
     )

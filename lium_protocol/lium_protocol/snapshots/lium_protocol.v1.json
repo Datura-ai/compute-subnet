@@ -255,6 +255,14 @@
           "default": null,
           "title": "Container Name"
         },
+        "exclude_patterns": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclude Patterns",
+          "type": "array"
+        },
         "executor_id": {
           "title": "Executor Id",
           "type": "string"
@@ -3269,7 +3277,7 @@
       "type": "object"
     },
     "GpuResetErrorCode": {
-      "description": "1.8.0 (DAH-4658): why a pod GPU reset did not run, or did not finish.",
+      "description": "1.9.0: why a pod GPU reset did not run, or did not finish.",
       "enum": [
         "MigEnabled",
         "NvlinkPeersOutsidePod",
@@ -4063,7 +4071,7 @@
       "type": "object"
     },
     "PodGpuResetResult": {
-      "description": "1.8.0 (DAH-4658): the answer to `backend_to_validator.ResetPodGpuRequest`, same `request_id`. `gpus` is\none outcome per GPU the validator reset (possibly more than asked: NVLink peers inside the pod are\nreset together); empty when a precheck refused before anything changed.",
+      "description": "1.9.0: the answer to `backend_to_validator.ResetPodGpuRequest`, same `request_id`. `gpus` is\none outcome per GPU the validator reset (possibly more than asked: NVLink peers inside the pod are\nreset together); empty when a precheck refused before anything changed.",
       "properties": {
         "container_restarted": {
           "default": false,
@@ -5131,7 +5139,7 @@
       "type": "object"
     },
     "ResetPodGpuRequest": {
-      "description": "1.8.0 (DAH-4658): the renter asked to reset the GPUs of their running pod. `gpu_uuids` is every GPU\nthe backend holds for the pod; `gpu_indices` picks some of them by pod index (the pod's GPUs sorted by\nhost PCI bus id, the 0..n-1 order `nvidia-smi` shows inside the pod), None for all of them. Answered by\n`validator_to_backend.PodGpuResetResult` with the same `request_id`.",
+      "description": "1.9.0: the renter asked to reset the GPUs of their running pod. `gpu_uuids` is every GPU\nthe backend holds for the pod; `gpu_indices` picks some of them by pod index (the pod's GPUs sorted by\nhost PCI bus id, the 0..n-1 order `nvidia-smi` shows inside the pod), None for all of them. Answered by\n`validator_to_backend.PodGpuResetResult` with the same `request_id`.",
       "properties": {
         "container_name": {
           "title": "Container Name",
@@ -6024,7 +6032,7 @@
       "$ref": "#/$defs/RentedExecutorsResponse"
     }
   },
-  "protocol_version": "1.8.0",
+  "protocol_version": "1.9.0",
   "socket_replies": {
     "RentedMachineResponse": {
       "$ref": "#/$defs/RentedMachineResponse"
