@@ -10,6 +10,7 @@ from .duplicate_executor import DuplicateExecutorCheck
 from .executor_image import ExecutorImageCheck
 from .finalize import FinalizeCheck
 from .gpu_count import GpuCountCheck
+from .gpu_attestation_identity import GpuAttestationIdentityCheck
 from .gpu_fault_probe import GpuFaultProbeCheck
 from .gpu_memory_health import GpuMemoryHealthCheck
 from .gpu_fingerprint import GpuFingerprintCheck
@@ -20,6 +21,7 @@ from .gpu_power_limit import GpuPowerLimitCheck
 from .gpu_thermal_throttle import GpuThermalThrottleCheck
 from .gpu_usage import GpuUsageCheck
 from .gpu_vram_precheck import GpuVramPrecheck
+from .hardware_identity import HardwareIdentityCheck
 from .inspector import InspectorRentedCheck
 from .local_verify import LocalVerifyCheck
 from .machine_spec_scrape import MachineSpecScrapeCheck
@@ -57,6 +59,7 @@ __all__ = [
     "ExecutorImageCheck",
     "FinalizeCheck",
     "GpuCountCheck",
+    "GpuAttestationIdentityCheck",
     "GpuFaultProbeCheck",
     "GpuMemoryHealthCheck",
     "GpuFingerprintCheck",
@@ -67,6 +70,7 @@ __all__ = [
     "GpuThermalThrottleCheck",
     "GpuUsageCheck",
     "GpuVramPrecheck",
+    "HardwareIdentityCheck",
     "InspectorRentedCheck",
     "SshdAuthLogCheck",
     "LocalVerifyCheck",
