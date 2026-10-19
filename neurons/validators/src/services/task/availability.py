@@ -53,6 +53,14 @@ class AvailabilityErrorCode(StrEnum):
     RENTED_EXECUTOR_NOT_LISTED = "RENTED_EXECUTOR_NOT_LISTED"
     # DAH-4457: a GPU dropped out of NVML within the hold window (GpuLossHoldCheck).
     GPU_LOST = "GPU_LOST"
+    # DAH-4683: NVML reports a card's memory broken (GpuMemoryHealthCheck).
+    GPU_MEMORY_HEALTH_FAILED = "GPU_MEMORY_HEALTH_FAILED"
+
+
+# Faults of the node's own cards: never a sign of our own outage, and never silenced with one.
+NODE_GPU_FAULT_CODES = frozenset(
+    {AvailabilityErrorCode.GPU_LOST, AvailabilityErrorCode.GPU_MEMORY_HEALTH_FAILED}
+)
 
 
 def build_availability_event(
@@ -231,12 +239,12 @@ def silence_availability_errors_on_our_own_outage(job_results: list[JobResult]) 
     are silenced (``_is_the_validators_own_reading``).
     """
     checked_results = [result for result in job_results if _is_the_validators_own_reading(result)]
-    # a lost GPU is the node's own fault, never a sign of our outage, so it does not count toward the share
+    # a lost or broken GPU is the node's own fault, never our outage: not counted in the share
     unreachable_results = [
         result
         for result in checked_results
         if any(
-            error.get("reason_code") != AvailabilityErrorCode.GPU_LOST
+            error.get("reason_code") not in NODE_GPU_FAULT_CODES
             for error in result.availability_errors or []
         )
     ]
@@ -244,11 +252,11 @@ def silence_availability_errors_on_our_own_outage(job_results: list[JobResult]) 
         return 0
     for result in checked_results:
         # None means "this cycle did not check": the backend leaves the stored errors alone.
-        # A lost GPU is still the node's own fault, so its entry stays and the node stays hidden.
+        # A lost or broken GPU is the node's own fault: its entry stays, the node stays hidden.
         lost = [
             error
             for error in result.availability_errors or []
-            if error.get("reason_code") == AvailabilityErrorCode.GPU_LOST
+            if error.get("reason_code") in NODE_GPU_FAULT_CODES
         ]
         result.availability_errors = lost or None
     return len(checked_results)
