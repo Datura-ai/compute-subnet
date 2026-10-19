@@ -3764,6 +3764,7 @@ class DockerService:
         active_volume_names: list[str] | None = None,
         host_probe: PrerunHostProbe | None = None,
         remove_every_filler: bool = False,
+        keep_every_filler: bool = False,
         report: ContainerCleanupReport | None = None,
         removed_at_ssh_connect: dict[str, str] | None = None,
         refuse_before_removal: Callable[[list[str]], None] | None = None,
@@ -3786,6 +3787,9 @@ class DockerService:
         re-read from `docker ps -a`; a filler that survived is reported as FILLER_STILL_RUNNING
         (typed fields, countable) and the create goes on: the running check after `docker run`
         removes it again or fails the create.
+
+        ``keep_every_filler`` (the rental probe beside a filler) treats no `filler_*` as stale,
+        listed or not, and so removes neither a filler nor its volume.
 
         A stale container whose full ID the listing carried is removed by that ID, so a same-name
         container created after the listing is left alone; own_sweep_removals records each such ID
@@ -3819,7 +3823,7 @@ class DockerService:
                 name for name in all_names
                 if name == pod_name
                 or name.startswith(POD_CONTAINER_PREFIX)
-                or name.startswith(FILLER_CONTAINER_PREFIX)
+                or (name.startswith(FILLER_CONTAINER_PREFIX) and not keep_every_filler)
             ]
             stale_containers = []
             for name in pod_containers:
@@ -7124,7 +7128,16 @@ class DockerService:
         executor_info: ExecutorSSHInfo,
         keypair: bittensor.Keypair,
         private_key: str,
+        *,
+        beside_fillers: bool = False,
     ):
+        # beside_fillers: the rental probe on a node running a Lium filler. The filler keeps running
+        # (the validator cannot end its run in the backend, so removing it reads as the provider
+        # killing it), so this create removes no filler_*, lifts no GPU power cap (DAH-2356: an
+        # uncapped PEARL filler) and reclaims no filler cache.
+        # Every step that removes fillers on a customer create (the sweep before `docker run`, any
+        # check after it) is gated on this, never on workload_kind alone.
+        removes_every_filler = payload.workload_kind == WorkloadKind.CUSTOMER_RENTAL and not beside_fillers
         warnings = []
         local_volume = payload.local_volume
         external_volume_info = payload.external_volume_info
@@ -7374,6 +7387,7 @@ class DockerService:
                 early_probes_allowed
                 and payload.workload_kind == WorkloadKind.CUSTOMER_RENTAL
                 and not payload.bootstrap_restore
+                and not beside_fillers
             )
             filler_removal_at_ssh_connect: asyncio.Task[FillerRemovalAtSshConnect] | None = None
 
@@ -7917,7 +7931,8 @@ class DockerService:
                     # DAH-3706: a customer's pod never shares the node with a filler, so its
                     # create removes every filler_* whatever the backend listed; a filler create
                     # keeps protecting its listed sibling bundle (DAH-2465).
-                    remove_every_filler=payload.workload_kind == WorkloadKind.CUSTOMER_RENTAL,
+                    remove_every_filler=removes_every_filler,
+                    keep_every_filler=beside_fillers,
                     report=cleanup_report,
                     removed_at_ssh_connect=fillers_removed_at_ssh_connect.listed_id_by_filler_name,
                     refuse_before_removal=lambda names: _refuse_filler_beside_unlisted_pod(payload, names),
@@ -7981,11 +7996,15 @@ class DockerService:
                     host_probe=docker_listing_probe,
                 )
 
-                reclaimed_cache_volumes = await self.reclaim_dphn_cache_for_rental(
-                    ssh_client=ssh_client,
-                    payload=payload,
-                    default_extra=default_extra,
-                    host_probe=docker_listing_probe,
+                reclaimed_cache_volumes = (
+                    []
+                    if beside_fillers
+                    else await self.reclaim_dphn_cache_for_rental(
+                        ssh_client=ssh_client,
+                        payload=payload,
+                        default_extra=default_extra,
+                        host_probe=docker_listing_probe,
+                    )
                 )
                 cleanup_changed_host = bool(
                     removal_at_ssh_connect_lost_its_channel
@@ -8013,7 +8032,7 @@ class DockerService:
                             ProfilerStepName.GPU_POWER_RESTORE_PARALLEL,
                         )
                     )
-                    if not brings_own_power_cap and not payload.bootstrap_restore
+                    if not (brings_own_power_cap or payload.bootstrap_restore or beside_fillers)
                     else None
                 )
                 if early_gpu_power_restore is not None:
@@ -8249,9 +8268,10 @@ class DockerService:
                     # Again right before docker run, where main restores power: since the early
                     # restore a filler create may have capped these GPUs (its Redis records) or the
                     # host may have lowered a limit with no record (the live floor raise).
-                    await self._restore_gpu_power_for_uncapped_pod(
-                        ssh_client, payload, host_probe, default_extra
-                    )
+                    if not beside_fillers:
+                        await self._restore_gpu_power_for_uncapped_pod(
+                            ssh_client, payload, host_probe, default_extra
+                        )
 
                 # DAH-1524: build_gpu_flags issues 2-3 serial SSH probes (proc minor
                 # map, shared nodes, and a slow nvidia-smi -q -x fallback). Profile it
@@ -8420,7 +8440,7 @@ class DockerService:
                         container_running = await self.check_container_running(
                             ssh_client,
                             container_name,
-                            remove_every_filler=payload.workload_kind == WorkloadKind.CUSTOMER_RENTAL,
+                            remove_every_filler=removes_every_filler,
                             default_extra=default_extra,
                         )
                     except _FillerRestoreStateUnavailable:
