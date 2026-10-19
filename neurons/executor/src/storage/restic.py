@@ -164,6 +164,7 @@ class ResticStorageRunner:
             operation.heartbeat_interval_seconds,
         )
         self._environment = self._build_environment()
+        self._snapshot_empty = False
 
     def run(self) -> ResticResult:
         if self._operation.engine is StorageEngine.RESTIC:
@@ -355,7 +356,7 @@ class ResticStorageRunner:
             *(f"--exclude={pattern}" for pattern in self._operation.workspace.exclude_patterns),
             ".",
         ]
-        # DAH-2002: a missing or empty path is a no-op, not a failed run
+        # DAH-2002/DAH-4693: a missing, empty or fully excluded path is a no-op, not a failed run
         nothing = ResticResult("COMPLETED", OperationResultQuality.EMPTY, None, 0)
         if isinstance(self._workspace, LocalWorkspace):
             path = self._workspace.path
@@ -365,7 +366,7 @@ class ResticStorageRunner:
                 return nothing
         exit_code, summary = self._stream(command, working_directory=True)
         snapshot_id = _snapshot_id(summary)
-        if exit_code == BACKUP_SOURCE_MISSING_EXIT and not snapshot_id:
+        if (exit_code == BACKUP_SOURCE_MISSING_EXIT or self._snapshot_empty) and not snapshot_id:
             return nothing
         if exit_code == 0 and snapshot_id:
             return ResticResult("COMPLETED", OperationResultQuality.FULL, snapshot_id, exit_code)
@@ -472,6 +473,8 @@ class ResticStorageRunner:
                 line = raw_line.strip()
                 if not line:
                     continue
+                # DAH-4693: every file excluded, so restic refuses to save an empty snapshot
+                self._snapshot_empty = self._snapshot_empty or "snapshot is empty" in line
                 checkpoint = _restore_checkpoint(line)
                 if checkpoint is not None and restore_stats is not None:
                     self._events.restic_event(

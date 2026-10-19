@@ -1322,6 +1322,29 @@ def test_backup_of_a_missing_path_is_an_empty_no_op(monkeypatch: pytest.MonkeyPa
     assert (result.status, result.result_quality, result.snapshot_id) == ("COMPLETED", OperationResultQuality.EMPTY, None)
 
 
+class _EmptySnapshotPopen(_FakePopen):
+    def __init__(self, command: list[str], *args: object, **kwargs: object) -> None:
+        super().__init__(command, *args, **kwargs)
+        self.stdout = iter(["Fatal: unable to save snapshot: snapshot is empty\n"])
+
+    def wait(self) -> int:
+        return 1
+
+
+def test_backup_with_every_file_excluded_is_an_empty_no_op(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    (tmp_path / "file").write_text("x")
+    runner = ResticStorageRunner(StorageOperationSpec.from_mapping(_operation_payload()), LocalWorkspace(tmp_path))
+    monkeypatch.setattr(
+        "storage.restic.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="[]", stderr=""),
+    )
+    monkeypatch.setattr("storage.restic.subprocess.Popen", _EmptySnapshotPopen)
+
+    result = runner._backup()
+
+    assert (result.status, result.result_quality, result.snapshot_id) == ("COMPLETED", OperationResultQuality.EMPTY, None)
+
+
 @pytest.mark.parametrize("make_dir", [False, True], ids=["missing", "empty"])
 def test_local_backup_of_a_missing_or_empty_directory_skips_restic(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_dir: bool
