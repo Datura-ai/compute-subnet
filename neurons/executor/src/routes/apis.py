@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Annotated, Any, Optional
 
 import docker
-from datura.requests.validator_requests import ssh_pubkey_signing_blob
+from datura.requests.validator_requests import ssh_pubkey_signing_blob, upload_nonce_issued_at
 from fastapi import APIRouter, Depends, Query, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
@@ -246,9 +246,14 @@ def _validate_validator_signature(payload: UploadSShKeyPayload, require_nonce: b
     the bare-public-key format. `require_nonce` is the G3 enforcement phase:
     attestation-relevant requests without a nonce are rejected outright.
     """
-    if require_nonce and not payload.nonce:
-        logger.warning("Rejecting SSH-key upload without an attestation nonce (enforcement on)")
+    issued_at = upload_nonce_issued_at(payload.nonce)
+    # I-78: enforcement wants the dated nonce, so an old captured signature (none, or a bare one) is refused
+    if require_nonce and issued_at is None:
+        logger.warning("Rejecting SSH-key upload without a dated validator nonce (enforcement on)")
         raise HTTPException(status_code=401, detail="Attestation nonce required")
+    if issued_at is not None and abs(time.time() - issued_at) > settings.UPLOAD_NONCE_MAX_AGE_SECONDS:
+        logger.warning("Rejecting SSH-key upload with a nonce minted %ds away", int(time.time() - issued_at))
+        raise HTTPException(status_code=401, detail="Stale upload nonce")
     try:
         signed_blob = ssh_pubkey_signing_blob(payload.public_key, payload.nonce)
         if match_validator_hotkey(signed_blob, payload.validator_signature) is None:
