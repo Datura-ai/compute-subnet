@@ -403,6 +403,12 @@ class Settings(BaseSettings):
     # filler container. Rollout: shadow first, flip enforcement after the shadow data is clean.
     FILLER_LIVENESS_CHECK_ENABLED: bool = Field(env="FILLER_LIVENESS_CHECK_ENABLED", default=True)
     FILLER_LIVENESS_ENFORCEMENT_ENABLED: bool = Field(env="FILLER_LIVENESS_ENFORCEMENT_ENABLED", default=False)
+    # GPU work inside a filler container counts as the filler's only while the container runs the
+    # image the validator started it from (recorded at create). A mismatch is always logged
+    # (FILLER_IMAGE_MISMATCH); with this on, the GPU usage check judges that work as foreign.
+    FILLER_IMAGE_IDENTITY_ENFORCEMENT_ENABLED: bool = Field(
+        env="FILLER_IMAGE_IDENTITY_ENFORCEMENT_ENABLED", default=False
+    )
     # DAH-2671 spec-truth checks. Each pair mirrors the FILLER_LIVENESS precedent above:
     # CHECK_ENABLED is the master switch — shadow mode computes the signal and emits the event/log
     # but returns passed=True and never changes score; ENFORCEMENT (only effective while
@@ -951,6 +957,21 @@ class Settings(BaseSettings):
     CUSTOM_DOCKERFILE_MAX_BYTES: int = Field(
         env="CUSTOM_DOCKERFILE_MAX_BYTES", default=65_536,
         description="Defense-in-depth cap on dockerfile_content size; route is authoritative.",
+    )
+    CUSTOM_DOCKERFILE_BUILD_CONTEXT_HOSTS: str = Field(
+        env="CUSTOM_DOCKERFILE_BUILD_CONTEXT_HOSTS", default="",
+        description=(
+            "Comma-separated hosts a build_context_url may name (https only). Empty: a request that "
+            "names a build context fails at build_context instead of building without the files."
+        ),
+    )
+    CUSTOM_DOCKERFILE_BUILD_CONTEXT_MAX_BYTES: int = Field(
+        env="CUSTOM_DOCKERFILE_BUILD_CONTEXT_MAX_BYTES", default=100 * 1024 * 1024, gt=0,
+        description="Largest build-context archive the validator downloads (compressed bytes).",
+    )
+    CUSTOM_DOCKERFILE_BUILD_CONTEXT_MAX_UNPACKED_BYTES: int = Field(
+        env="CUSTOM_DOCKERFILE_BUILD_CONTEXT_MAX_UNPACKED_BYTES", default=1024 * 1024 * 1024, gt=0,
+        description="Largest total size of the files in a build-context archive.",
     )
     # DAH-2211 — internet-enabled custom builds run inside a throwaway sysbox
     # Docker-in-Docker container (NOT on the host daemon) so the build can

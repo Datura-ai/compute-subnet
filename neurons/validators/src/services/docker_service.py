@@ -66,6 +66,7 @@ from payload_models.payloads import (
     now_ms,
 )
 from services.attestation_service import AttestationError, AttestationService
+from services import build_context as build_context_service
 from services.const import (
     EDIT_PARKED_SUFFIX,
     FILLER_CACHE_VOLUME_PREFIXES,
@@ -108,6 +109,8 @@ from services.gpu_wedge import cure_wedged_gpus, query_wedged_gpu_uuids
 from services.nvidia_devices import build_gpu_docker_config_for_executor
 from services.cluster_fabric import WIREGUARD_LISTEN_PORT, cluster_pod_networking
 from services.redis_service import (
+    FILLER_IMAGE_DIGESTS_PREFIX,
+    FILLER_IMAGE_DIGESTS_TTL_SECONDS,
     IN_CONTAINER_SSH_BOOTSTRAP_PATH,
     RENTAL_PROBE_FAILED_PREFIX,
     RENTAL_PROBE_OK_PREFIX,
@@ -4285,6 +4288,38 @@ class DockerService:
             )
             return []
 
+    async def _record_filler_image_best_effort(
+        self,
+        docker_client: RentalDockerSdkClient,
+        container: str,
+        container_name: str,
+        default_extra: dict,
+    ) -> None:
+        """Remember the image digests a filler was started from, so the GPU usage check can tell it
+        from another container later run under the same name. Never fails the create."""
+        try:
+            # the container's own image, not the tag: the tag can move during the bootstrap
+            image_id = await docker_client.container_image_id(container=container)
+            repo_digests = (
+                await docker_client.local_image_repo_digests(image=image_id) if image_id else None
+            )
+            digests = sorted(
+                {d.split("@", 1)[1] for d in repo_digests or () if "@" in d}
+            )
+            if digests:
+                await self.redis_service.set(
+                    f"{FILLER_IMAGE_DIGESTS_PREFIX}{container_name}",
+                    json.dumps(digests),
+                    ex=FILLER_IMAGE_DIGESTS_TTL_SECONDS,
+                )
+        except Exception as exc:
+            logger.warning(
+                _m(
+                    "Could not record the filler's image digests; its image is not checked",
+                    extra=get_extra_info({**default_extra, "error": str(exc)}),
+                )
+            )
+
     async def _cache_rented_pod_best_effort(
         self,
         executor_info: ExecutorSSHInfo,
@@ -6265,6 +6300,32 @@ class DockerService:
                 f"exit={result.exit_status} stderr={stderr!r}"
             )
 
+    async def _write_build_context_into_dind(
+        self,
+        ssh_client: asyncssh.SSHClientConnection,
+        dind_name: str,
+        archive: bytes,
+        timeout: int | None = None,
+    ) -> None:
+        """Unpack the checked build-context archive into the DinD build context, streamed on stdin."""
+        ctx = self._DIND_BUILD_CONTEXT
+        inner = f"mkdir -p {ctx} && tar -xzf - -C {ctx}"
+        command = (
+            f"/usr/bin/docker exec -i {shlex.quote(dind_name)} "
+            f"sh -c {shlex.quote(inner)}"
+        )
+        result = await ssh_client.run(
+            command, input=archive, encoding=None, check=False, timeout=timeout
+        )
+        if result.exit_status != 0:
+            stderr = result.stderr or b""
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", "replace")
+            raise RuntimeError(
+                f"Failed to unpack the build context into {dind_name!r}: "
+                f"exit={result.exit_status} stderr={stderr.strip()!r}"
+            )
+
     @staticmethod
     def _parse_egress_block_cidrs(raw: str) -> list[str]:
         """Validate the configured egress-block CIDRs into shell-safe strings.
@@ -6406,6 +6467,35 @@ class DockerService:
                 )
         return "; ".join(lines)
 
+    async def _fetch_build_context(
+        self, payload: ContainerCreateRequest, log_tag: str, default_extra: dict
+    ) -> bytes | CustomBuildOutcome:
+        """The checked build-context archive of `payload`, or the failed CustomBuildOutcome."""
+        from core.config import settings
+
+        context_hosts = build_context_service.allowed_hosts(settings.CUSTOM_DOCKERFILE_BUILD_CONTEXT_HOSTS)
+        if not context_hosts:
+            return CustomBuildOutcome(False, "build_context", "this validator does not take build contexts yet")
+        try:
+            build_context = await build_context_service.fetch(
+                payload.build_context_url,
+                payload.build_context_sha256 or "",
+                hosts=context_hosts,
+                max_bytes=int(settings.CUSTOM_DOCKERFILE_BUILD_CONTEXT_MAX_BYTES),
+                max_unpacked_bytes=int(settings.CUSTOM_DOCKERFILE_BUILD_CONTEXT_MAX_UNPACKED_BYTES),
+            )
+        except build_context_service.BuildContextError as exc:
+            await self.stream_log(str(exc), "error", log_tag)
+            logger.error(
+                _m(
+                    "Custom build context refused",
+                    extra=get_extra_info({**default_extra, "error": str(exc)}),
+                )
+            )
+            return CustomBuildOutcome(False, "build_context", str(exc))
+        await self.stream_log(f"Fetched build context ({len(build_context)} bytes)", "success", log_tag)
+        return build_context
+
     async def _custom_build_image(
         self,
         ssh_client: asyncssh.SSHClientConnection,
@@ -6452,6 +6542,14 @@ class DockerService:
                 )
             )
             return CustomBuildOutcome(False, "build_input_oversize", f"Dockerfile exceeds {max_bytes} byte cap")
+
+        # The build context is fetched and checked before anything starts on the executor.
+        build_context: bytes | None = None
+        if payload.build_context_url:
+            fetched = await self._fetch_build_context(payload, log_tag, default_extra)
+            if isinstance(fetched, CustomBuildOutcome):
+                return fetched
+            build_context = fetched
 
         # 1. Preflight: sysbox-runc MUST be available. Never fall back to runc —
         #    a silent fallback would run an internet-enabled build on the host
@@ -6687,6 +6785,11 @@ class DockerService:
                 f"Preparing build context in {dind_name}", "success", log_tag
             )
             try:
+                if build_context is not None:
+                    # unpacked first, so the request's Dockerfile replaces any the archive holds
+                    await self._write_build_context_into_dind(
+                        ssh_client, dind_name, build_context, timeout=setup_timeout_s
+                    )
                 await self._write_dockerfile_into_dind(
                     ssh_client, dind_name, content, timeout=setup_timeout_s
                 )
@@ -6698,7 +6801,7 @@ class DockerService:
                     ),
                     exc_info=True,
                 )
-                return CustomBuildOutcome(False, "build_setup", "could not write the Dockerfile into the build container")
+                return CustomBuildOutcome(False, "build_setup", "could not write the build context or the Dockerfile into the build container")
 
             # 6. Build INSIDE the DinD container WITH network enabled (no
             #    --network=none). BuildKit streams progress to stderr and
@@ -8772,6 +8875,10 @@ class DockerService:
                         container_name=container_name,
                         default_extra=default_extra,
                     )
+                    if payload.workload_kind == WorkloadKind.FILLER:
+                        await self._record_filler_image_best_effort(
+                            docker_client, container_id or container_name, container_name, default_extra
+                        )
                     # no duration: the collector starts after the reply, its time is logged there
                     profilers.append(
                         ProfilerStep(
