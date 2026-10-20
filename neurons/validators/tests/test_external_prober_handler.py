@@ -19,7 +19,7 @@ EVENT = {
 
 
 @pytest.fixture(autouse=True)
-def token(monkeypatch):
+def probe_token_env(monkeypatch):
     monkeypatch.setenv("PROBE_TOKEN", "t0k")
 
 
