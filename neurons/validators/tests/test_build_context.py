@@ -200,7 +200,8 @@ async def test_fetch_refuses_a_non_200(monkeypatch):
         _archive({"/etc/motd": b"x"}),
         _archive(links={"etc": "/etc"}),
         _archive(links={"up": "../../x"}),
-        _archive(hardlinks={"h": "../x"}),
+        _archive(links={"l1": ".", "d/l2": "../l1/..", "Dockerfile": "d/l2/etc/profile"}),
+        _archive({"d/../../x": b"x"}),
     ],
 )
 def test_check_archive_refuses_entries_that_leave_the_context(archive):
@@ -218,7 +219,7 @@ def test_check_archive_refuses_device_entries():
         tar.addfile(info)
 
     # Act / Assert
-    with pytest.raises(BuildContextError, match="not a file"):
+    with pytest.raises(BuildContextError, match="not a plain file"):
         build_context.check_archive(buf.getvalue(), 1 << 20)
 
 
@@ -242,29 +243,43 @@ def test_check_archive_refuses_more_entries_than_the_cap(monkeypatch):
         build_context.check_archive(archive, 1 << 20)
 
 
-def test_check_archive_counts_a_long_name_header_against_the_cap(monkeypatch):
-    # Arrange: one GNU long-name header of 4 MiB, a member of 0 bytes
-    monkeypatch.setattr(build_context, "MAX_ARCHIVE_ENTRIES", 3)
-    monkeypatch.setattr(build_context, "MAX_META_HEADER_BYTES", 8 << 20)
+@pytest.mark.parametrize("fmt", [tarfile.GNU_FORMAT, tarfile.PAX_FORMAT])
+def test_check_archive_refuses_any_long_name_or_pax_header(fmt):
+    # Arrange: a 101-character name, which needs a GNU long-name or a PAX header
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.GNU_FORMAT) as tar:
-        tar.addfile(tarfile.TarInfo("a" * (4 << 20)), io.BytesIO(b""))
+    with tarfile.open(fileobj=buf, mode="w:gz", format=fmt) as tar:
+        tar.addfile(tarfile.TarInfo("a" * 101), io.BytesIO(b""))
 
     # Act / Assert
-    with pytest.raises(BuildContextError, match="unpacks to more than"):
+    with pytest.raises(BuildContextError, match="not a plain file"):
+        build_context.check_archive(buf.getvalue(), 1 << 30)
+
+
+def test_check_archive_refuses_a_global_pax_header():
+    # Arrange
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT, pax_headers={"comment": "x"}) as tar:
+        tar.addfile(tarfile.TarInfo("app.py"), io.BytesIO(b""))
+
+    # Act / Assert
+    with pytest.raises(BuildContextError, match="not a plain file"):
         build_context.check_archive(buf.getvalue(), 1 << 20)
 
 
-@pytest.mark.parametrize("fmt", [tarfile.GNU_FORMAT, tarfile.PAX_FORMAT])
-def test_check_archive_refuses_a_long_name_or_pax_header_past_64_kib(fmt):
-    # Arrange: a 128 KiB name, well under the unpacked cap, stored as a GNU long-name or a PAX header
+def test_check_archive_refuses_a_hard_link():
+    # Act / Assert
+    with pytest.raises(BuildContextError, match="not a plain file"):
+        build_context.check_archive(_archive(hardlinks={"h": "app.py"}), 1 << 20)
+
+
+def test_check_archive_accepts_a_ustar_path_up_to_255_characters():
+    # Arrange: ustar stores a long path in its prefix field, no extension header
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz", format=fmt) as tar:
-        tar.addfile(tarfile.TarInfo("a" * (128 << 10)), io.BytesIO(b""))
+    with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.USTAR_FORMAT) as tar:
+        tar.addfile(tarfile.TarInfo("d" * 150 + "/" + "f" * 100), io.BytesIO(b""))
 
     # Act / Assert
-    with pytest.raises(BuildContextError, match="header is larger than"):
-        build_context.check_archive(buf.getvalue(), 1 << 30)
+    build_context.check_archive(buf.getvalue(), 1 << 20)
 
 
 def test_check_archive_refuses_a_sparse_entry():
@@ -276,7 +291,7 @@ def test_check_archive_refuses_a_sparse_entry():
         tar.addfile(info)
 
     # Act / Assert
-    with pytest.raises(BuildContextError, match="sparse"):
+    with pytest.raises(BuildContextError, match="not a plain file"):
         build_context.check_archive(buf.getvalue(), 1 << 20)
 
 
@@ -292,7 +307,7 @@ def test_check_archive_refuses_a_deep_chain_of_long_name_headers():
     data = gzip.compress(block + end)
 
     # Act / Assert
-    with pytest.raises(BuildContextError, match="not a gzipped tar"):
+    with pytest.raises(BuildContextError, match="not a plain file"):
         build_context.check_archive(data, 1 << 20)
 
 

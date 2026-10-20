@@ -7,7 +7,6 @@ import asyncio
 import gzip
 import hashlib
 import io
-import posixpath
 import tarfile
 import zlib
 from urllib.parse import urlsplit
@@ -17,15 +16,9 @@ import aiohttp
 _FETCH_TIMEOUT_SECONDS = 120
 # tarfile keeps every member it has read, so cap the count, not only the bytes
 MAX_ARCHIVE_ENTRIES = 10_000
-# tarfile reads a long-name or PAX header whole into memory, and copies it while decoding
-MAX_META_HEADER_BYTES = 64 << 10
-_META_TYPES = (
-    tarfile.GNUTYPE_LONGNAME,
-    tarfile.GNUTYPE_LONGLINK,
-    tarfile.XHDTYPE,
-    tarfile.XGLTYPE,
-    tarfile.SOLARIS_XHDTYPE,
-)
+# only plain ustar headers: every GNU long-name/long-link, PAX, sparse or other extension header is refused before
+# tarfile parses it, which closes tarfile's memory tricks as a class instead of one by one
+_ALLOWED_TYPES = (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE, tarfile.SYMTYPE)
 
 
 class BuildContextError(Exception):
@@ -49,15 +42,13 @@ class _CappedReader:
 
 
 class _BoundedTarInfo(tarfile.TarInfo):
-    """Refuses a sparse entry, or an oversized long-name or PAX header, before tarfile reads its payload."""
+    """Refuses any header but a plain file, directory or symlink before tarfile reads what follows it."""
 
     def _proc_member(self, tarfile_):
-        # a GNU sparse entry's extension blocks are read into memory without a bound
-        if self.type == tarfile.GNUTYPE_SPARSE:
-            raise BuildContextError("build context entry is a sparse file")
-        if self.type in _META_TYPES and self.size > MAX_META_HEADER_BYTES:
+        if self.type not in _ALLOWED_TYPES:
             raise BuildContextError(
-                f"build context entry header is larger than {MAX_META_HEADER_BYTES} bytes"
+                f"build context entry is not a plain file, directory or symlink: {self.name} "
+                "(create the archive with `tar --format=ustar`, names up to 100 characters, no extended attributes)"
             )
         return super()._proc_member(tarfile_)
 
@@ -75,7 +66,7 @@ def check_url(url: str, hosts: set[str]) -> None:
 
 
 def check_archive(data: bytes, max_unpacked_bytes: int) -> None:
-    """A gzipped tar of plain files, directories and links, every path inside the context."""
+    """A gzipped ustar of plain files, directories and symlinks, every path inside the context."""
     total = 0
     # tar headers and padding take at most 1 KiB per entry on top of the file bytes, plus the end records
     cap = max_unpacked_bytes + (MAX_ARCHIVE_ENTRIES + 20) * 1024
@@ -89,23 +80,15 @@ def check_archive(data: bytes, max_unpacked_bytes: int) -> None:
                     raise BuildContextError(
                         f"build context has more than {MAX_ARCHIVE_ENTRIES} entries"
                     )
-                name = posixpath.normpath(member.name)
-                if name.startswith(("/", "../")) or name == "..":
+                if member.name.startswith("/") or ".." in member.name.split("/"):
                     raise BuildContextError(
                         f"build context entry leaves the context: {member.name}"
                     )
-                if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
-                    raise BuildContextError(
-                        f"build context entry is not a file, directory or link: {member.name}"
-                    )
-                if member.issym() or member.islnk():
-                    # a symlink resolves from its own directory, a hard link from the archive root
-                    base = posixpath.dirname(name) if member.issym() else ""
-                    target = posixpath.normpath(posixpath.join(base, member.linkname))
-                    if target.startswith(("/", "../")) or target == "..":
-                        raise BuildContextError(
-                            f"build context link leaves the context: {member.name}"
-                        )
+                # no `..` part at all: a chain of symlinks through `.` can otherwise walk out of the context
+                if member.issym() and (
+                    member.linkname.startswith("/") or ".." in member.linkname.split("/")
+                ):
+                    raise BuildContextError(f"build context link leaves the context: {member.name}")
                 total += member.size
                 if total > max_unpacked_bytes:
                     raise BuildContextError(
