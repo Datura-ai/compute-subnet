@@ -9,16 +9,19 @@ containers under the validator's SSH sessions, and the cycle read the fleet as 1
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
+import asyncssh
 import pytest
 from core.validator import Validator
 from datura.requests.miner_requests import ExecutorSSHInfo
 from services.executor_rollout import (
+    ROLLOUT_FAILURE_REASONS,
     ExecutorRolloutTracker,
     RolloutWindow,
     rollout_grace_reason,
     withhold_rollout_verdicts,
 )
 from services.task.models import JobResult
+
 
 OLD = "sha256:" + "a" * 64
 NEW = "sha256:" + "b" * 64
@@ -83,9 +86,7 @@ def _failed(
         spec = {
             "docker": {
                 "container_id": "c1",
-                "containers": [
-                    {"container_id": "c1", "name": "executor-executor-1", "digest": observed_digest}
-                ],
+                "containers": [{"container_id": "c1", "name": "executor-executor-1", "digest": observed_digest}],
             }
         }
     if image_status is not None:
@@ -177,6 +178,25 @@ def test_a_failure_the_rollout_does_not_explain_stands() -> None:
 # --- TaskService hands the classifier the reason a run ended on ---------------------------------
 
 
+class _ShellThatRefusesToConnect:
+    def __init__(self, **_: object) -> None:
+        pass
+
+    async def __aenter__(self) -> "_ShellThatRefusesToConnect":
+        raise asyncssh.Error(code=1, reason="Connection refused")
+
+    async def __aexit__(self, *_: object) -> bool:
+        return False
+
+
+class _ShellThatOpens:
+    async def __aenter__(self) -> "_ShellThatOpens":
+        return self
+
+    async def __aexit__(self, *_: object) -> bool:
+        return False
+
+
 # --- the cycle: what happens when the tracker itself cannot be read -----------------------------
 
 
@@ -208,7 +228,13 @@ async def test_a_redis_error_leaves_every_verdict_standing_instead_of_ending_the
     # Redis was fine at cycle start and died before the cycle-end observation: the cycle keeps
     # the window it saw at its start instead of dropping every withheld verdict.
     seen_at_start = _open_window()
-    assert (
-        await validator_process.observe_executor_rollout(NEW, J0, fallback=seen_at_start)
-        is seen_at_start
-    )
+    assert await validator_process.observe_executor_rollout(NEW, J0, fallback=seen_at_start) is seen_at_start
+
+
+def test_an_idle_node_the_miner_cannot_reach_during_the_rollout_gets_the_rented_twins_grace() -> None:
+    """Regression: EXECUTOR_UNREACHABLE_BY_MINER outside the set, so a rollout scored every
+    restarting idle node 0 while the rented ones (RENTED_EXECUTOR_NOT_LISTED) were withheld."""
+    still_on_old = _failed("node-2", "EXECUTOR_UNREACHABLE_BY_MINER", observed_digest=OLD)
+
+    assert "EXECUTOR_UNREACHABLE_BY_MINER" in ROLLOUT_FAILURE_REASONS
+    assert rollout_grace_reason(still_on_old, _open_window(), J1) == "EXECUTOR_UNREACHABLE_BY_MINER"
