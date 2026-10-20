@@ -368,6 +368,21 @@ class Settings(BaseSettings):
     # `GET /version` (connect, and twice this as its whole budget) and the tunnel's local bind and
     # connect; the direct-tcpip channel open on the executor runs inside the whole-call budget.
     LOCAL_VERIFY_CONNECT_TIMEOUT_SECONDS: int = Field(env="LOCAL_VERIFY_CONNECT_TIMEOUT_SECONDS", default=5)
+    # The liumd shadow: after the pipeline has produced the node's result, run the same
+    # GPU steps again through `liumd run` on an SSH exec channel of the same session and log one
+    # `[liumd_shadow] comparison` line per node (per-step verdicts, agreement, durations). Nothing
+    # it finds is scored or stored: the result is built before it starts. Off: nothing new runs.
+    VALIDATOR_LIUMD_SHADOW: bool = Field(env="VALIDATOR_LIUMD_SHADOW", default=False)
+    # The shadow's whole-call budget (seconds), clipped to what the executor task has left; the
+    # intent's `deadline_s` is this − 30. Sized for a scored cycle, where VerifyX (p90 about 150 s)
+    # and the matmul (at most 120 s) run one after the other.
+    LIUMD_SHADOW_TIMEOUT_SECONDS: int = Field(env="LIUMD_SHADOW_TIMEOUT_SECONDS", default=330)
+    # The only executors the shadow runs on: reserved, non-rentable dev executors, as
+    # comma-separated `miner_hotkey/executor_uuid/address/ssh_port` entries. A pod or filler started
+    # after the cycle's snapshot is not seen, so on a rentable node the shadow could run its
+    # GPU/RAM/disk/network probe next to a workload. Executor UUIDs are miner-chosen, so an entry
+    # matches only that miner's executor at that SSH endpoint. Empty = none.
+    LIUMD_SHADOW_RESERVED_EXECUTORS: str = Field(env="LIUMD_SHADOW_RESERVED_EXECUTORS", default="")
     # DAH-2667: measure a RoCE fabric with ib_write_bw between the free hosts of one segment, rather
     # than inferring it from the addresses alone. The backend reads a flag of the SAME name to decide
     # whether a fabric must be measured before it is sold, so the feature has one switch across both
@@ -404,6 +419,12 @@ class Settings(BaseSettings):
     # `kernel_view_would_ban` is emitted on every banned_provider/banned event; the ban itself is
     # matched on the reported list until this is flipped from a week of clean fleet data.
     KERNEL_GPU_BAN_ENFORCEMENT_ENABLED: bool = Field(env="KERNEL_GPU_BAN_ENFORCEMENT_ENABLED", default=False)
+    # DAH-4547 - HardwareIdentityCheck: DMI files not served by sysfs (a cloak script's overlay), the
+    # kernel and NVML GPU lists disagreeing, or DMI identity changing under an unchanged GPU set.
+    # Shadow by default: the finding is logged as a warning event and the node passes.
+    HARDWARE_FINGERPRINT_ENFORCEMENT_ENABLED: bool = Field(
+        env="HARDWARE_FINGERPRINT_ENFORCEMENT_ENABLED", default=False
+    )
     # Cross-check the reported GPU count and UUIDs against the kernel's GPU list
     # (/proc/driver/nvidia/gpus, the same read the ban checks make). CHECK_ENABLED evaluates and
     # logs a verdict every validation (check_id gpu.validate.kernel_count) without changing the
@@ -488,6 +509,9 @@ class Settings(BaseSettings):
     RENTED_GPU_DROP_CHECK_ENABLED: bool = Field(env="RENTED_GPU_DROP_CHECK_ENABLED", default=False)
     # The per-pod incident mark expires this long after the last cycle that saw the fault.
     RENTED_GPU_DROP_STATE_TTL_SECONDS: int = Field(env="RENTED_GPU_DROP_STATE_TTL_SECONDS", default=86400, gt=0)
+    # DAH-4457: a node whose GPU dropped out stays hidden (GPU_LOST availability entry, no new rentals) until its
+    # cards have read clean this long after the last faulty cycle (GpuLossHoldCheck).
+    GPU_LOSS_HOLD_SECONDS: int = Field(env="GPU_LOSS_HOLD_SECONDS", default=7200, gt=0)
     # DAH-2735 — judge an idle node's GPU by WHO holds it, not by utilization: a competitor's
     # rental idling on the card (Nodexo/SN106) passes every percentage gate. CHECK_ENABLED
     # observes and logs the verdict; ENFORCEMENT additionally zeroes the score. Enforcement
@@ -537,6 +561,12 @@ class Settings(BaseSettings):
     # are read and the owner decides.
     GPU_FAULT_PROBE_CHECK_ENABLED: bool = Field(env="GPU_FAULT_PROBE_CHECK_ENABLED", default=True)
     GPU_FAULT_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="GPU_FAULT_PROBE_ENFORCEMENT_ENABLED", default=False)
+    # DAH-3110 — a card NVML reports broken (uncorrected ECC since the driver loaded, a pending or failed
+    # row remap, a required recovery action) fails the node like a GPU ban until the host resets or
+    # replaces it. On: a broken card faults renters' jobs. Off is the kill switch back to flag-only.
+    GPU_MEMORY_HEALTH_ENFORCEMENT_ENABLED: bool = Field(
+        env="GPU_MEMORY_HEALTH_ENFORCEMENT_ENABLED", default=True
+    )
     # F-1599 — a 64 MB pinned-host-memory H2D/D2H round trip on every GPU of an idle node, compared on the host.
     # A TDX guest whose GPUs are not in CC mode passed every check yet could not DMA pinned memory (8x H200,
     # 13 Oct). CHECK runs it; ENFORCEMENT lets wrong data, a copy error or a hung copy fail the node. CHECK is
@@ -613,6 +643,14 @@ class Settings(BaseSettings):
     )
     REGISTRY_PULL_PROBE_RETRY_MINUTES: float = Field(
         env="REGISTRY_PULL_PROBE_RETRY_MINUTES", default=30.0, gt=0
+    )
+    # DAH-4124, the unrented twin of the rented-not-listed row (DAH-3558, always on since
+    # DAH-4276): a node in the miner's known_executor_ids that is missing
+    # from its accepted executors (the miner could not reach it to install our key) gets no
+    # pipeline and no row, so it only "stops reporting". On, the wave writes one failed result per
+    # such unrented node (EXECUTOR_UNREACHABLE_BY_MINER, score 0, availability error). Off = today.
+    UNREACHABLE_EXECUTOR_REPORT_ENABLED: bool = Field(
+        env="UNREACHABLE_EXECUTOR_REPORT_ENABLED", default=False
     )
     SKIP_COLLATERAL_PENALTY: bool = Field(env="SKIP_COLLATERAL_PENALTY", default=True)
     DRY_RUN: bool = Field(env="DRY_RUN", default=False, description="Run validation without publishing scores/weights")
@@ -774,6 +812,8 @@ class Settings(BaseSettings):
     # 32-byte challenge per attestation event, folds it into the signed SSH-key
     # request, and requires the executor to echo it in TDX report_data[32:64].
     ENABLE_ATTESTATION_NONCE: bool = Field(env="ENABLE_ATTESTATION_NONCE", default=False)
+    # I-78: sign every SSH-key upload over a dated nonce (datura fresh_upload_nonce); see MinerService._dated_upload_nonce_if_enabled
+    ENABLE_DATED_UPLOAD_NONCE: bool = Field(env="ENABLE_DATED_UPLOAD_NONCE", default=False)
     # A nonce-bound attestation event is required at most once per this interval per
     # miner (freshness = "bounded, provably recent", not "every wave") — GPU evidence
     # collection is too expensive to force fleet-wide every cycle.
@@ -791,6 +831,12 @@ class Settings(BaseSettings):
     # GPU evidence bound to the issued nonce; any failure raises AttestationError.
     ENABLE_GPU_ATTESTATION_ENFORCEMENT: bool = Field(
         env="ENABLE_GPU_ATTESTATION_ENFORCEMENT", default=False
+    )
+    # DAH-4551 - GpuAttestationIdentityCheck: each Hopper/Blackwell GPU's NVIDIA-signed identity, pinned to its
+    # UUID both ways. Shadow by default: a mismatch or forged evidence is logged as a warning event and the node
+    # passes. On = it fails the node (not fatal with a live rental). Unavailable evidence alone never fails it.
+    GPU_ATTESTATION_IDENTITY_ENFORCEMENT_ENABLED: bool = Field(
+        env="GPU_ATTESTATION_IDENTITY_ENFORCEMENT_ENABLED", default=False
     )
     # Hosted NRAS endpoint (interim verification locus; a local nv-verifier removes
     # this outbound SPOF before fleet enforcement — see remediation plan CD4).
@@ -819,6 +865,23 @@ class Settings(BaseSettings):
 
     def get_allowed_advisory_ids(self) -> set[str]:
         return {s.strip() for s in self.TDX_ALLOWED_ADVISORY_IDS.split(",") if s.strip()}
+
+    def get_liumd_shadow_reserved_executors(self) -> set[tuple[str, str, str, int]]:
+        """`LIUMD_SHADOW_RESERVED_EXECUTORS` as (miner_hotkey, executor_uuid, address, ssh_port).
+        A malformed entry raises ValueError rather than being dropped."""
+        reserved = set()
+        for entry in self.LIUMD_SHADOW_RESERVED_EXECUTORS.split(","):
+            if not entry.strip():
+                continue
+            fields = [f.strip() for f in entry.split("/")]
+            if len(fields) != 4 or not all(fields) or not fields[3].isdigit():
+                raise ValueError(
+                    "LIUMD_SHADOW_RESERVED_EXECUTORS entry is not "
+                    f"miner_hotkey/executor_uuid/address/ssh_port: {entry.strip()!r}"
+                )
+            hotkey, uuid, address, ssh_port = fields
+            reserved.add((hotkey, uuid, address, int(ssh_port)))
+        return reserved
 
     def get_allowed_gpu_hwmodels(self) -> set[str]:
         return {s.strip() for s in self.GPU_ATTESTATION_ALLOWED_HWMODELS.split(",") if s.strip()}

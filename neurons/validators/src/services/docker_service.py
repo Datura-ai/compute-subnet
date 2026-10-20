@@ -108,10 +108,12 @@ from services.gpu_wedge import cure_wedged_gpus, query_wedged_gpu_uuids
 from services.nvidia_devices import build_gpu_docker_config_for_executor
 from services.cluster_fabric import WIREGUARD_LISTEN_PORT, cluster_pod_networking
 from services.redis_service import (
+    IN_CONTAINER_SSH_BOOTSTRAP_PATH,
     RENTAL_PROBE_FAILED_PREFIX,
     RENTAL_PROBE_OK_PREFIX,
     SSHD_BOOTSTRAP_FAILED_PREFIX,
     SSHD_BOOTSTRAP_FAILED_TTL_SECONDS,
+    SSHD_VERIFY_FAILED_MARKER,
     STREAMING_LOG_CHANNEL,
     RedisService,
 )
@@ -178,7 +180,6 @@ LOG_STREAM_INTERVAL = 0.5  # 500ms — keeps build-log p95 emit→publish under 
 # 2000ms budget (DAH-2211). Was 5s; that was fine for slow `docker pull` lines
 # but build phases emit dense progress (one line per layer) and a 5s batch
 # would violate the SSE latency requirement.
-IN_CONTAINER_SSH_BOOTSTRAP_PATH = "/tmp/lium-ssh-bootstrap.sh"
 
 # Each batch goes to the backend as one LogStreamRequest frame, and its validator socket takes at most 1 MiB per
 # frame (lium-platform F-29). A batch is budgeted by the JSON bytes of its entries, fields included, which leaves
@@ -986,10 +987,6 @@ def volume_step_detail(exc: BaseException) -> str | None:
 _HOST_FAULT_CREATE_STEPS = frozenset({"volume_creation", "gpu_flags"})
 # rental_probe.STEP_CONTAINER_START: the stamp reads as that probe step failing at the create step
 _RENTAL_PROBE_CONTAINER_START_STEP = "container_start"
-
-
-# sshd_bootstrap.sh's verify_sshd line: sshd is installed but not running or listening
-_SSHD_VERIFY_FAILED_MARKER = "sshd verification failed"
 
 
 def is_host_fault_create_failure(current_step: str | None) -> bool:
@@ -5254,7 +5251,7 @@ class DockerService:
                 )
             )
             # only sshd installed but not serving is the node's fault; a failed apt-get exits before that line
-            if _SSHD_VERIFY_FAILED_MARKER in f"{run_result.stdout}{run_result.stderr}":
+            if SSHD_VERIFY_FAILED_MARKER in f"{run_result.stdout}{run_result.stderr}":
                 await self._record_sshd_verdict(sshd_verdict_executor_uuid, failed=True, log_extra=log_extra)
             return False
 
@@ -7011,6 +7008,7 @@ class DockerService:
         ssh_connect: AbstractAsyncContextManager[asyncssh.SSHClientConnection],
         docker_connect: AbstractAsyncContextManager[RentalDockerSdkClient],
         on_ssh_connected: Callable[[asyncssh.SSHClientConnection], None] | None = None,
+        log_extra: dict | None = None,
     ) -> tuple[asyncssh.SSHClientConnection, RentalDockerSdkClient]:
         """DAH-3004: enter both connection contexts at once on the caller's exit stack.
 
@@ -7019,19 +7017,40 @@ class DockerService:
         the stack closes it on the way out and nothing is leaked, which a bare ``gather`` (one
         coroutine still connecting while the exception propagates) would not guarantee.
         ``on_ssh_connected`` runs as soon as the SSH session is up, while Docker still connects.
+        DAH-4677: with ``log_extra``, one line gives each leg's own connect time, since the step
+        waits for the slower one and only that one is worth making faster (DAH-4210).
         """
+        started_ms = now_ms()
+        leg_ms: dict[str, int] = {}
 
         async def enter_ssh() -> asyncssh.SSHClientConnection:
-            ssh_client = await connections.enter_async_context(ssh_connect)
+            try:
+                ssh_client = await connections.enter_async_context(ssh_connect)
+            finally:
+                leg_ms["ssh_connect_ms"] = now_ms() - started_ms
             if on_ssh_connected is not None:
                 on_ssh_connected(ssh_client)
             return ssh_client
 
-        ssh_outcome, docker_outcome = await asyncio.gather(
-            enter_ssh(),
-            connections.enter_async_context(docker_connect),
-            return_exceptions=True,
-        )
+        async def enter_docker() -> RentalDockerSdkClient:
+            try:
+                return await connections.enter_async_context(docker_connect)
+            finally:
+                leg_ms["docker_connect_ms"] = now_ms() - started_ms
+
+        ssh_outcome, docker_outcome = await asyncio.gather(enter_ssh(), enter_docker(), return_exceptions=True)
+        if log_extra is not None:
+            logger.info(
+                _m(
+                    "Create SSH legs timed",
+                    extra=get_extra_info({
+                        **log_extra,
+                        **leg_ms,
+                        "ssh_connected": not isinstance(ssh_outcome, BaseException),
+                        "docker_connected": not isinstance(docker_outcome, BaseException),
+                    }),
+                )
+            )
         if isinstance(ssh_outcome, BaseException):
             if isinstance(docker_outcome, BaseException):
                 # both sides failed: the SSH error is raised, the Docker one rides along as its cause
@@ -7474,6 +7493,7 @@ class DockerService:
                         private_key=private_key,
                     ),
                     on_ssh_connected=start_early_probes,
+                    log_extra=default_extra,
                 )
                 # DAH-2740: undoes a failed edit while this SSH session is still open
                 edit_swap = await connections.enter_async_context(
@@ -8219,6 +8239,7 @@ class DockerService:
                             # Decided only once the volume is really attached: runc
                             # keeps /mnt writable, sysbox without the base does not.
                             payload.is_sysbox = False
+                            warnings.append(ContainerWarningCode.DockerInDockerDisabled)
                             await self.stream_log(
                                 "Sysbox disabled: cannot align S3 volume owner with the executor's sysbox uid range",
                                 "warning",
@@ -9430,7 +9451,11 @@ class DockerService:
             await run_logged_rental_docker_sdk_operation(
                 operation="start_container",
                 log_extra=default_extra,
-                call=lambda: docker_client.start(container_name=container_name),
+                # a pod created before rentals ran on RENTAL_NETWORK_NAME would keep docker0 across
+                # every `docker start`; start moves it onto the rental network
+                call=lambda: docker_client.start(
+                    container_name=container_name, network=RENTAL_NETWORK_NAME
+                ),
                 container_name=container_name,
             )
             async with asyncssh.connect(
@@ -9465,7 +9490,9 @@ class DockerService:
         await run_logged_rental_docker_sdk_operation(
             operation="start_container",
             log_extra=default_extra,
-            call=lambda: docker_client.start(container_name=container_name),
+            call=lambda: docker_client.start(
+                container_name=container_name, network=RENTAL_NETWORK_NAME
+            ),
             container_name=container_name,
         )
         await self._restore_mount_and_sshd_after_start(

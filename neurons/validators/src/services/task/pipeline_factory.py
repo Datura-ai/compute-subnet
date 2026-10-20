@@ -39,14 +39,18 @@ from .checks import (
     ExecutorImageCheck,
     FinalizeCheck,
     GpuCountCheck,
+    GpuAttestationIdentityCheck,
     GpuFaultProbeCheck,
+    GpuMemoryHealthCheck,
     GpuFingerprintCheck,
     GpuKernelCountCheck,
+    GpuLossHoldCheck,
     GpuModelValidCheck,
     GpuPowerLimitCheck,
     GpuThermalThrottleCheck,
     GpuUsageCheck,
     GpuVramPrecheck,
+    HardwareIdentityCheck,
     InspectorRentedCheck,
     LocalVerifyCheck,
     MachineSpecScrapeCheck,
@@ -61,6 +65,7 @@ from .checks import (
     RentedGpuDropCheck,
     ScoreCheck,
     SpecChangeCheck,
+    SshdAuthLogCheck,
     StaleContainerCleanupCheck,
     StartGPUMonitorCheck,
     SshdBootstrapCheck,
@@ -287,6 +292,8 @@ class PipelineFactory:
         return cast(
             list[Check],
             [
+                # DAH-4629: first, before any fatal check, so every node reports its ssh logins, rented ones too
+                SshdAuthLogCheck(),
                 StartGPUMonitorCheck(),
                 UploadFilesCheck(),
                 MachineSpecScrapeCheck(),
@@ -294,6 +301,9 @@ class PipelineFactory:
                 # GPU checks below (DETAILS_MISMATCH, GPU_MISSING), which halt the cycle before
                 # TenantEnforcementCheck; this reports it to the backend on that same cycle.
                 RentedGpuDropCheck(),
+                # DAH-4457: a node whose GPU dropped out is hidden until its cards stay back; before the fatal GPU
+                # checks and the rented short-circuit, so rented and idle nodes are held alike.
+                GpuLossHoldCheck(),
                 # ticket-0492: pure data. A busy GPU held below its clock by a thermal/hardware slowdown is a
                 # warning; below half its clock with a slowdown bit it fails an unrented node (score 0) until
                 # fixed. Before the rented short-circuit, so rented nodes get the warning too.
@@ -314,6 +324,10 @@ class PipelineFactory:
                 # short-circuit so a rented host that has just lost its disk is reported too. The
                 # score is not changed until the reading is proven on live executors.
                 DiskHealthCheck(),
+                # one NVML read, no CUDA: a card with uncorrected ECC or a pending row remap fails
+                # the node like a GPU ban (not fatal under a live pod), so it sits before the rented
+                # short-circuit
+                GpuMemoryHealthCheck(),
                 # DAH-2671 item 2a: non-fatal, observe-only CPU-count corroboration. Placed right
                 # after the GPU spec-check group (and before the rented short-circuit) so it reads
                 # advertised specs already populated by the scrape; it only reads over SSH, mutates
@@ -324,8 +338,12 @@ class PipelineFactory:
                 # DAH-3457: the UUID set is the node's identity and model:count is derived from it, so the
                 # fingerprint check runs first; a missing card is then GPU_MISSING, not SPEC_CHANGED.
                 GpuFingerprintCheck(),
+                # DAH-4551: the reported UUIDs checked against each card's NVIDIA-signed identity (shadow by default).
+                GpuAttestationIdentityCheck(),
                 SpecChangeCheck(),
                 BannedProviderCheck(),
+                # DAH-4547: after BannedProviderCheck, which leaves the kernel GPU list in ctx.state.
+                HardwareIdentityCheck(),
                 BannedGpuCheck(),
                 # Reported GPU count and UUIDs against the kernel's list, which BannedProviderCheck
                 # read above. Logs a verdict every cycle; fails the validation only under
@@ -440,22 +458,30 @@ class PipelineFactory:
         return cast(
             list[Check],
             [
+                # DAH-4629: first, before any fatal check, so every node reports its ssh logins, rented ones too
+                SshdAuthLogCheck(),
                 StartGPUMonitorCheck(),
                 UploadFilesCheck(),
                 MachineSpecScrapeCheck(),
                 RentedGpuDropCheck(),
+                GpuLossHoldCheck(),
                 GpuThermalThrottleCheck(),
                 TdxHostCheck(),
                 GpuCountCheck(),
                 GpuModelValidCheck(),
                 GpuVramPrecheck(),
                 DiskHealthCheck(),
+                GpuMemoryHealthCheck(),
                 CpuTruthCheck(),
                 GpuPowerLimitCheck(),
                 NvmlDigestCheck(),
                 GpuFingerprintCheck(),
+                # DAH-4551: the reported UUIDs checked against each card's NVIDIA-signed identity (shadow by default).
+                GpuAttestationIdentityCheck(),
                 SpecChangeCheck(),
                 BannedProviderCheck(),
+                # DAH-4547: after BannedProviderCheck, which leaves the kernel GPU list in ctx.state.
+                HardwareIdentityCheck(),
                 BannedGpuCheck(),
                 GpuKernelCountCheck(),
                 DuplicateExecutorCheck(),
@@ -514,6 +540,8 @@ class PipelineFactory:
                 MachineSpecScrapeCheck(),
                 # RentedGpuDropCheck: same place as in build_checks(); under DRY_RUN it logs and posts nothing.
                 RentedGpuDropCheck(),
+                # DAH-4457: same place as in build_checks(); under DRY_RUN it reads the hold and writes none.
+                GpuLossHoldCheck(),
                 # ticket-0492: pure data, same place as in build_checks().
                 GpuThermalThrottleCheck(),
                 # DAH-3484: before the rented halt, same as build_checks().
@@ -523,6 +551,8 @@ class PipelineFactory:
                 GpuVramPrecheck(),
                 # DAH-2928: pure-data report on specs.disk_health, same place as in build_checks.
                 DiskHealthCheck(),
+                # one NVML read, no CUDA: safe in dry run, and a broken card is not rented out
+                GpuMemoryHealthCheck(),
                 # DAH-2671 item 2a: read-only SSH corroboration, safe in dry run (mutates nothing).
                 CpuTruthCheck(),
                 # DAH-2734: specs arithmetic plus a read-only SSH reading — safe in dry run.
@@ -534,8 +564,12 @@ class PipelineFactory:
                 # DAH-3457: the UUID set is the node's identity and model:count is derived from it, so the
                 # fingerprint check runs first; a missing card is then GPU_MISSING, not SPEC_CHANGED.
                 GpuFingerprintCheck(),
+                # DAH-4551: the reported UUIDs checked against each card's NVIDIA-signed identity (shadow by default).
+                GpuAttestationIdentityCheck(),
                 SpecChangeCheck(),
                 BannedProviderCheck(),
+                # DAH-4547: after BannedProviderCheck, which leaves the kernel GPU list in ctx.state.
+                HardwareIdentityCheck(),
                 BannedGpuCheck(),
                 GpuKernelCountCheck(),
                 DuplicateExecutorCheck(),
