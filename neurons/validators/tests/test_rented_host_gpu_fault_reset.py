@@ -110,7 +110,7 @@ async def _cycle(
 ):
     """One validation cycle as the service runs it: the record from Redis, the checks through the Pipeline, the
     outcome persisted by the ResultHandler."""
-    verified = await service.get_verified_job_info(EXECUTOR)
+    verified = await service.get_verified_job_info("hk", EXECUTOR)
     containers = [{"name": "tenant-123", "pod_id": POD_ID}] if rented else []
     ctx = context_factory(
         miner_hotkey=miner_hotkey,
@@ -150,7 +150,7 @@ def _resets(service: RedisService) -> list[dict]:
 
 
 async def _record(service: RedisService) -> dict:
-    return json.loads(await service.redis.hget(VERIFIED_JOB_COUNT_KEY, EXECUTOR))
+    return json.loads(await service.redis.hget(VERIFIED_JOB_COUNT_KEY, f"hk:{EXECUTOR}"))
 
 
 HEALTHY = _scrape_result(stdout=SSHService()._encrypt(ENCRYPT_KEY, json.dumps(HEALTHY_SPECS)), exit_code=0)
@@ -176,7 +176,7 @@ async def test_a_dead_gpu_runtime_on_a_rented_node_marks_the_executor_inactive(
     ok, _, _ = await _cycle(context_factory, service, scrape=HEALTHY)
     assert ok is True and _resets(service) == []
 
-    ok, event, _ = await _cycle(context_factory, service, scrape=_scrape_result(stdout=stdout, exit_code=1))
+    ok, event, ctx = await _cycle(context_factory, service, scrape=_scrape_result(stdout=stdout, exit_code=1))
 
     assert ok is False
     assert event.reason_code == reason_code
@@ -186,7 +186,13 @@ async def test_a_dead_gpu_runtime_on_a_rented_node_marks_the_executor_inactive(
     assert reset["executor_uuid"] == EXECUTOR
     assert reset["reason_code"] == reason_code
     assert reset["check_id"] == MachineSpecScrapeCheck.check_id
-    evidence = {"pod_id": POD_ID, "rented_pod_ids": [POD_ID], "scrape_error": "no_gpu_details"}
+    evidence = {
+        "pod_id": POD_ID,
+        "rented_pod_ids": [POD_ID],
+        "scrape_error": "no_gpu_details",
+        "executor_ip": ctx.executor.address,
+        "executor_port": ctx.executor.port,
+    }
     if gpu_scrape_error is not None:
         evidence["gpu_scrape_error"] = gpu_scrape_error
     assert reset["evidence"] == evidence

@@ -329,12 +329,15 @@ class BackendClient:
         stop=stop_after_attempt(3),
         wait=wait_fixed(30),
         retry=retry_if_result(lambda x: x is None),
+        # without this, tenacity raises RetryError after the last None
+        retry_error_callback=lambda retry_state: None,
     )
     async def get_all_rented_executors(self) -> RentedExecutorsResponse | None:
         """Fetch all rented executors with their ports from the backend.
 
         Retried three times, 30 s apart: this is the cycle's snapshot, and a cycle without it
-        cannot start. A check that asks mid-cycle uses `get_rented_executors_now` instead.
+        cannot start. None when all three fail. A check that asks mid-cycle uses
+        `get_rented_executors_now` instead.
         """
         return await self.get_rented_executors_now()
 

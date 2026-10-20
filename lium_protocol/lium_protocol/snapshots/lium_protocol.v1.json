@@ -254,6 +254,14 @@
           "default": null,
           "title": "Container Name"
         },
+        "exclude_patterns": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclude Patterns",
+          "type": "array"
+        },
         "executor_id": {
           "title": "Executor Id",
           "type": "string"
@@ -626,6 +634,30 @@
             }
           ],
           "default": null
+        },
+        "build_context_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Build Context Sha256"
+        },
+        "build_context_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Build Context Url"
         },
         "cache_volumes": {
           "anyOf": [
@@ -1640,7 +1672,8 @@
     },
     "ContainerWarningCode": {
       "enum": [
-        "ExternalVolumeFailed"
+        "ExternalVolumeFailed",
+        "DockerInDockerDisabled"
       ],
       "title": "ContainerWarningCode",
       "type": "string"
@@ -4726,6 +4759,14 @@
           "title": "Provider Spot Executor Ids",
           "type": "array"
         },
+        "renter_hardware_fault_executor_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Renter Hardware Fault Executor Ids",
+          "type": "array"
+        },
         "spot_executor_ids": {
           "default": [],
           "items": {
@@ -5749,7 +5790,7 @@
       "$ref": "#/$defs/RentedExecutorsResponse"
     }
   },
-  "protocol_version": "1.7.0",
+  "protocol_version": "1.12.0",
   "socket_replies": {
     "RentedMachineResponse": {
       "$ref": "#/$defs/RentedMachineResponse"

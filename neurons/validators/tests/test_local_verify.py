@@ -125,7 +125,7 @@ def verifyx_service(monkeypatch):
     monkeypatch.setattr(
         vvs,
         "_perform_verification_checks",
-        lambda payload: {
+        lambda payload, **_: {
             "success": True,
             "ram": {},
             "network": {"download_speed": 900.0, "upload_speed": 500.0, "success": True},
@@ -1147,7 +1147,7 @@ async def test_intent_carries_the_shortened_deadline(
 async def test_all_cards_check_keeps_the_matmul_on_ssh(
     keypair, monkeypatch, local_verify_on, verifyx_service
 ):
-    """DAH-2671 item 3: `_probe_all_claimed_cards` runs inside the SSH matmul path only. With the
+    """DAH-2671 item 3: `probe_all_claimed_cards` runs inside the SSH matmul path only. With the
     check on, the intent carries no matmul, CapabilityCheck runs the SSH path (probe included) and
     VerifyX is still consumed locally."""
     monkeypatch.setattr(settings, "MATMUL_ALLCARDS_CHECK_ENABLED", True)
@@ -1225,7 +1225,7 @@ async def test_filler_only_node_is_skipped_without_a_call(
     keypair, monkeypatch, local_verify_on, verifyx_service
 ):
     """A node running only Lium's own filler (no customer pod) is not probed — the same rule as
-    `CapabilityCheck` (`_get_filler_only_container`); a filler beside a customer pod is a rental
+    `CapabilityCheck` (`get_filler_only_container`); a filler beside a customer pod is a rental
     and is handled by the rented branch, not here."""
     validation = matmul_service(monkeypatch)
     factory = MagicMock(side_effect=AssertionError("no client for a filler-only node"))
