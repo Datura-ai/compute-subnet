@@ -295,6 +295,34 @@ async def test_a_node_that_always_runs_a_filler_is_probed_after_the_skip_limit(
     assert KEY not in ctx.services.redis.store
 
 
+
+@pytest.mark.asyncio
+async def test_a_filler_that_cannot_be_removed_is_inconclusive_not_a_failure(context_factory, recheck_on):
+    runner, validation = FakeRunner(probe_stdout("ok")), FakeValidation(_all_cards("", ""))
+    services = build_services(validation=validation)
+    services.redis.store[KEY] = json.dumps({**MARKER, "filler_skips": module.FILLER_SKIP_LIMIT})
+    uuid = default_executor().uuid
+    ctx = context_factory(
+        services=services,
+        config=build_context_config(),
+        state=build_state(
+            specs={"gpu": {"count": 2}},
+            rented_data=RentedExecutorsResponse(
+                all_filler_containers_by_executor={uuid: ["filler_run-1"]},
+                default_job_owner_by_executor={uuid: "other"},
+                executors={},
+            ),
+        ),
+        runner=runner,
+    )
+
+    with patch.object(module, "get_filler_only_container", return_value={"id": "filler"}):
+        result = await PostRentalGpuRecheckCheck().run(ctx)
+
+    assert result.passed and result.event.reason_code == Msg.INCONCLUSIVE.reason
+    assert runner.calls == [] and validation.calls == 0
+    assert KEY in ctx.services.redis.store
+
 # --- placement ----------------------------------------------------------------------------------------------
 
 
