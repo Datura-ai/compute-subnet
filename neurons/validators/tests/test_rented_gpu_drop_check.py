@@ -415,7 +415,10 @@ async def test_a_failed_memory_read_does_not_recover_an_uncorrected_ecc_incident
     assert unread.event.reason_code == Msg.OK.reason
     assert _states(services) == ["fault"]
 
-    healed, _ = await _run_with_memory_read(context_factory, services, _report("ok"))
+    healthy = {"available": True, "gpus": [{"index": 3, "uuid": UUIDS[3], "ecc_uncorrected": 0}]}
+    healed, _ = await _run_with_memory_read(
+        context_factory, services, _report("ok", flags=[], nvml=healthy)
+    )
     assert healed.event.reason_code == Msg.RECOVERED.reason
     assert _states(services) == ["fault", "recovered"]
 
@@ -439,6 +442,23 @@ async def test_a_broken_card_on_a_partly_rented_node_is_not_named(context_factor
     assert call.kwargs["missing_uuids"] == []
 
 
+def test_a_card_off_the_bus_does_not_make_a_part_rental_look_like_the_whole_node():
+    # 8 anchored cards, one fell off the bus so NVML and the scrape list 7, and the rental holds 7
+    drop = judge_rented_gpus(
+        rented_gpu_count=7,
+        anchor_uuids=UUIDS,
+        nvml_count=7,
+        listed_uuids=UUIDS[:7],
+        listed_count=7,
+        scrape_error=None,
+        broken_uuids=[UUIDS[3]],
+    )
+
+    assert (
+        len(drop.missing_uuids) == 1
+    )  # the card off the bus; the broken card may be one no pod rents
+
+
 UNREAD_MEMORY = [
     pytest.param(
         _report("flagged", flags=["gpu 3: no uuid in this flag"]), id="flag-names-no-card"
@@ -453,6 +473,9 @@ UNREAD_MEMORY = [
             },
         ),
         id="ecc-read-failed-on-a-card",
+    ),
+    pytest.param(
+        _report("ok", flags=[], nvml={"available": True, "gpus": []}), id="nvml-lists-no-card"
     ),
 ]
 

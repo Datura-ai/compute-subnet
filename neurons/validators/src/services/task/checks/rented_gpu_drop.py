@@ -179,7 +179,10 @@ def judge_rented_gpus(
     missing = sorted(anchor - listed)[:MAX_MISSING_UUIDS] if listed or not listed_count else []
     # The rental names no card per pod: a broken card is named only when the rental holds every card,
     # else it may be one no pod rents (it still raises the fault).
-    whole_node = rented_gpu_count is None or rented_gpu_count >= max(nvml_count, listed_count)
+    # anchor too: a card off the bus lowers both counts, so a 7-of-8 rental would read as the whole node
+    whole_node = rented_gpu_count is None or rented_gpu_count >= max(
+        nvml_count, listed_count, len(anchor)
+    )
     broken_set = set(broken_uuids or ())
     broken = [uuid for uuid in sorted(broken_set) if uuid not in missing]
     named_broken = broken if whole_node else []
@@ -313,7 +316,9 @@ async def _read_broken_uuids(ctx: Context) -> BrokenCardsRead:
         return BrokenCardsRead(None, updates)
     uuids = flagged_uuids(read.report)
     gpus = (read.report.get("nvml") or {}).get("gpus") or []
-    ecc_unread = any(isinstance(gpu, dict) and gpu.get("ecc_uncorrected") is None for gpu in gpus)
+    ecc_unread = not gpus or any(
+        isinstance(gpu, dict) and gpu.get("ecc_uncorrected") is None for gpu in gpus
+    )
     # a flag naming no card, or a card whose ECC NVML could not read, is no proof a broken card healed
     if not uuids and (status == "flagged" or ecc_unread):
         return BrokenCardsRead(None, updates)
