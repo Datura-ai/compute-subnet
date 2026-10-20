@@ -172,6 +172,8 @@ class ContextState:
     # ExecutorSpecRequest.pod_states.
     pod_states: list[PodContainerState] = field(default_factory=list)
     rented_data: RentedExecutorsResponse | None = None
+    # (run, report) of the NVML-only memory read (gpu_memory_health.read_memory_health)
+    memory_health: tuple[Any, dict[str, Any]] | None = None
     gpu_metrics: dict | None = None
     inspector_event: dict | None = None
     # DAH-2265 Plan 2: advisory result of the cached-template verification check.

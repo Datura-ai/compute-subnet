@@ -16,6 +16,7 @@ from neurons.validators.src.services.task.checks.rented_gpu_drop import (
     FAULT_ANCHORED_MISSING,
     FAULT_BELOW_RENTED,
     FAULT_DETAILS_SHORT,
+    FAULT_ECC_UNCORRECTED,
     FAULT_NVML_ERROR,
     judge_rented_gpus,
     nvml_error_code,
@@ -38,6 +39,8 @@ from tests.helpers import (
     build_state,
     default_executor,
 )
+from tests.test_gpu_fault_probe_check import FakeRunner
+from tests.test_gpu_memory_health_check import _report
 from tests.test_machine_spec_scrape_check import DummySSHCommandRunner, make_command_result
 
 MODEL = "NVIDIA GeForce RTX 5090"
@@ -371,6 +374,43 @@ async def test_an_nvml_error_with_every_card_listed_is_reported(context_factory)
     assert result.event.reason_code == Msg.DROP.reason
     assert result.event.what_we_saw["faults"] == [FAULT_NVML_ERROR]
     services.backend.report_rented_gpu_drop.assert_awaited_once()
+
+
+async def _run_with_memory_read(context_factory, services, stdout: str):
+    ctx = _ctx(context_factory, services, listed=UUIDS).model_copy(
+        update={"runner": FakeRunner(stdout)}
+    )
+    return await RentedGpuDropCheck().run(ctx), ctx
+
+
+@pytest.mark.asyncio
+async def test_a_listed_card_with_uncorrected_ecc_is_reported_as_lost(context_factory):
+    services = _services()
+    flags = [f"gpu 3 ({UUIDS[3]}): 1 uncorrected ECC error(s) since the driver loaded"]
+
+    result, ctx = await _run_with_memory_read(
+        context_factory, services, _report("flagged", flags=flags)
+    )
+
+    assert result.event.reason_code == Msg.DROP.reason
+    assert result.event.what_we_saw["faults"] == [FAULT_ECC_UNCORRECTED]
+    call = services.backend.report_rented_gpu_drop.await_args
+    assert call.kwargs["faults"] == [FAULT_ECC_UNCORRECTED]
+    assert call.kwargs["missing_uuids"] == [UUIDS[3]]
+    assert call.kwargs["expected_gpu_count"] == call.kwargs["visible_gpu_count"] == 8
+    # GpuMemoryHealthCheck reuses this read instead of a second SSH run
+    assert result.updates["state"].memory_health[1]["flags"] == flags
+    assert len(ctx.runner.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_memory_read_reports_nothing(context_factory):
+    services = _services()
+
+    result, _ = await _run_with_memory_read(context_factory, services, _report("ok"))
+
+    assert result.event.reason_code == Msg.OK.reason
+    services.backend.report_rented_gpu_drop.assert_not_awaited()
 
 
 @pytest.mark.asyncio

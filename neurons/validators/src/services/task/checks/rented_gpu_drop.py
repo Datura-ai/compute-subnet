@@ -17,7 +17,9 @@ fails the cycle. For a rented executor it compares what the scrape listed with:
 
 and reads the NVML error code out of `gpu_scrape_error`. A GPU-loss code (NVML_GPU_LOSS_CODES) is a fault
 on its own; any other NVML code only rides along with a count fault, and a scrape error with no NVML code
-adds no `nvml_error` label.
+adds no `nvml_error` label. A card NVML still lists but reports its memory broken (uncorrected ECC, a
+failed row remap: GpuMemoryHealthCheck's NVML read, done here first on a rented node) is
+`ecc_uncorrected`, with its UUID in `missing_uuids`, even when every card is listed.
 
 The counts are executor-wide, and a fault is posted for every RUNNING pod on the executor; each post
 carries that pod's own `gpu_count` next to the executor totals so the backend can tell which renters of
@@ -69,6 +71,7 @@ from ..messages import RentedGpuDropMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
 from .gpu_fingerprint import split_uuids
+from .gpu_memory_health import flagged_uuids, read_memory_health
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +86,7 @@ FAULT_BELOW_RENTED = "below_rented_count"
 FAULT_DETAILS_SHORT = "details_short_of_count"
 FAULT_ANCHORED_MISSING = "anchored_gpu_missing"
 FAULT_NVML_ERROR = "nvml_error"
+FAULT_ECC_UNCORRECTED = "ecc_uncorrected"
 
 # NVML return codes that mean a card is gone or unusable: DRIVER_NOT_LOADED, GPU_IS_LOST, RESET_REQUIRED,
 # GPU_NOT_FOUND, UNKNOWN (what a card that fell off the bus answers). Any other code (NOT_SUPPORTED on
@@ -156,6 +160,7 @@ def judge_rented_gpus(
     listed_uuids: list[str],
     listed_count: int,
     scrape_error: object,
+    broken_uuids: list[str] | None = None,
 ) -> GpuDrop | None:
     """The fault this scrape shows on a rented node, or None when every rented card is there.
 
@@ -171,6 +176,7 @@ def judge_rented_gpus(
     rented = rented_gpu_count or 1
     code = nvml_error_code(scrape_error)
     missing = sorted(anchor - listed)[:MAX_MISSING_UUIDS] if listed or not listed_count else []
+    broken = [uuid for uuid in sorted(set(broken_uuids or ())) if uuid not in missing]
 
     faults: list[str] = []
     if visible < rented:
@@ -181,6 +187,8 @@ def judge_rented_gpus(
         faults.append(FAULT_ANCHORED_MISSING)
     if code in NVML_GPU_LOSS_CODES or (code is not None and faults):
         faults.append(FAULT_NVML_ERROR)
+    if broken:
+        faults.append(FAULT_ECC_UNCORRECTED)
     if not faults:
         return None
     expected = max(rented, len(anchor), nvml_count)
@@ -198,7 +206,7 @@ def judge_rented_gpus(
         expected=expected,
         visible=visible,
         nvml_count=nvml_count,
-        missing_uuids=[uuid[:MAX_UUID_CHARS] for uuid in missing],
+        missing_uuids=[uuid[:MAX_UUID_CHARS] for uuid in (missing + broken)[:MAX_MISSING_UUIDS]],
         nvml_error_code=code,
         faults=faults,
         confirm_first=code not in NVML_GPU_LOSS_CODES and (cut_short or duplicate_listed),
@@ -310,6 +318,14 @@ class RentedGpuDropCheck:
             nvml_count = (specs.get("gpu") or {}).get("count", 0) or 0
         scrape_error = specs.get("gpu_scrape_error")
         rented_total = _rented_gpu_count(all_pods)
+        updates: dict[str, Any] = {}
+        try:
+            memory_health = await read_memory_health(ctx)
+            updates = {"state": replace(ctx.state, memory_health=memory_health)}
+            broken_uuids = flagged_uuids(memory_health[1])
+        except Exception:
+            # never fatal: an unread card is not a broken one, and GpuMemoryHealthCheck reads again
+            broken_uuids = []
         drop = judge_rented_gpus(
             rented_gpu_count=rented_total,
             anchor_uuids=split_uuids((ctx.verified or {}).get(GPU_ANCHOR_KEY) or ""),
@@ -317,6 +333,7 @@ class RentedGpuDropCheck:
             listed_uuids=_listed_uuids(gpu_details),
             listed_count=len(gpu_details),
             scrape_error=scrape_error,
+            broken_uuids=broken_uuids,
         )
 
         now_iso = datetime.now(UTC).isoformat()
@@ -349,6 +366,7 @@ class RentedGpuDropCheck:
             return CheckResult(
                 passed=True,
                 event=render_message(Msg.DROP, ctx=ctx, check_id=self.check_id, what=what),
+                updates=updates,
             )
 
         if outcomes:
@@ -359,6 +377,7 @@ class RentedGpuDropCheck:
             return CheckResult(
                 passed=True,
                 event=render_message(Msg.RECOVERED, ctx=ctx, check_id=self.check_id, what=what),
+                updates=updates,
             )
 
         event = render_message(
@@ -367,7 +386,7 @@ class RentedGpuDropCheck:
             check_id=self.check_id,
             what={"visible_gpu_count": len(gpu_details), "nvml_gpu_count": nvml_count},
         )
-        return CheckResult(passed=True, event=event)
+        return CheckResult(passed=True, event=event, updates=updates)
 
     async def _track_pod(
         self,

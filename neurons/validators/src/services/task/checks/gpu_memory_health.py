@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shlex
 from typing import Any
 
@@ -13,6 +14,28 @@ from .gpu_fault_probe import OUTPUT_TAIL_CHARS, PROBE_SOURCE, _cap, _parse_repor
 
 # one NVML snapshot in a fork with its own 10 s deadline (miner_jobs/gpu_fault_probe.py), plus SSH
 TIMEOUT_SECONDS = 30
+# a flag names its card as "gpu <index> (<uuid>): ..." (miner_jobs/gpu_fault_probe.py nvml_health)
+_FLAG_UUID = re.compile(r"^gpu \S+ \(([^()]+)\): ")
+
+
+async def read_memory_health(ctx: Context) -> tuple[Any, dict[str, Any]]:
+    """The NVML-only probe's run and report, read once per cycle: RentedGpuDropCheck reads it first
+    on a rented node (and keeps it in `ctx.state.memory_health`), and GpuMemoryHealthCheck reuses it."""
+    if ctx.state.memory_health is not None:
+        return ctx.state.memory_health
+    command = f"{shlex.quote(ctx.executor.python_path)} -I - --nvml-only"
+    run = await ctx.runner.run(
+        command, timeout=TIMEOUT_SECONDS, retryable=False, stdin_text=PROBE_SOURCE
+    )
+    return run, _parse_report(run.stdout) or {}
+
+
+def flagged_uuids(report: dict[str, Any]) -> list[str]:
+    """The UUIDs of the cards a flagged report names broken."""
+    if report.get("status") != "flagged" or not isinstance(report.get("flags"), list):
+        return []
+    found = (_FLAG_UUID.match(flag) for flag in report["flags"] if isinstance(flag, str))
+    return sorted({match.group(1) for match in found if match and match.group(1) != "None"})
 
 
 class GpuMemoryHealthCheck:
@@ -33,11 +56,7 @@ class GpuMemoryHealthCheck:
     fatal = True
 
     async def run(self, ctx: Context) -> CheckResult:
-        command = f"{shlex.quote(ctx.executor.python_path)} -I - --nvml-only"
-        run = await ctx.runner.run(
-            command, timeout=TIMEOUT_SECONDS, retryable=False, stdin_text=PROBE_SOURCE
-        )
-        report = _parse_report(run.stdout) or {}
+        run, report = await read_memory_health(ctx)
         what: dict[str, Any] = {"executor_uuid": ctx.executor.uuid}
         status = report.get("status")
         if status == "flagged":
