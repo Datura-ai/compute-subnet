@@ -141,9 +141,9 @@ def test_command_runs_in_a_container_with_the_renter_runtime_and_a_size_cap():
 
 
 def test_parse_reports_the_network_on_every_reading_failed_or_not():
-    assert [r.as_record()["network"] for r in parse_download_speed(DNS_DOWN)] == ["lium-rentals", "lium-rentals"]
+    assert [r.network for r in parse_download_speed(DNS_DOWN)] == ["lium-rentals", "lium-rentals"]
     assert parse_download_speed(DNS_DOWN)[0].error == "dns_failed"
-    assert "network" not in parse_download_speed(FAST.replace(RENTALS, ""))[0].as_record()
+    assert parse_download_speed(FAST.replace(RENTALS, ""))[0].network is None
 
 
 def test_parse_measures_mbps_and_names_errors():
@@ -218,7 +218,7 @@ async def test_rentals_failures_after_a_bridge_failure_are_enforced():
 async def test_a_streak_saved_without_the_rentals_count_is_not_enforced():
     with flags(enforced=True) as clock:
         redis = FakeRedis()
-        # a failing reading saved by an earlier release: no rentals_failures_in_a_row
+        # a failing reading saved by an earlier release: no failing_readings_on_rentals_network
         redis.store[f"{module._REDIS_PREFIX}:{EXECUTOR.uuid}"] = json.dumps(
             {"at": clock.now - 31 * 60, "failures_in_a_row": 1, "readings": [], "measured": True}
         )

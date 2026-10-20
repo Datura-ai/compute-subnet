@@ -5,8 +5,8 @@ import json
 import logging
 import shlex
 import time
-from dataclasses import dataclass, field, replace
-from typing import Any
+from dataclasses import asdict, dataclass, field, replace
+from typing import Any, NamedTuple
 
 import aiohttp
 
@@ -92,19 +92,10 @@ class EndpointReading:
     detail: str | None = None
     network: str | None = None
 
-    def as_record(self) -> dict[str, Any]:
-        record: dict[str, Any] = {"endpoint": self.endpoint, "bytes": self.bytes}
-        if self.seconds is not None:
-            record["seconds"] = round(self.seconds, 2)
-        if self.mbps is not None:
-            record["mbps"] = round(self.mbps, 2)
-        if self.error:
-            record["error"] = self.error
-        if self.detail:
-            record["detail"] = self.detail[:_TAIL_CHARS]
-        if self.network:
-            record["network"] = self.network
-        return record
+
+class Judgement(NamedTuple):
+    is_failing: bool
+    has_no_verdict: bool
 
 
 def _error_kind(stderr: str) -> str:
@@ -135,7 +126,7 @@ def parse_download_speed(stdout: str) -> list[EndpointReading]:
     readings = []
     for name, _ in ENDPOINTS:
         reading = fields.get(name)
-        detail = errors.get(name) or None
+        detail = errors.get(name, "")[:_TAIL_CHARS] or None
         if reading is None:
             readings.append(EndpointReading(name, error="no_output"))
             continue
@@ -182,11 +173,11 @@ async def validator_reaches(url: str) -> bool:
 class _State:
     at: float
     failures_in_a_row: int = 0
-    readings: list[dict[str, Any]] = field(default_factory=list)
+    readings: list[EndpointReading] = field(default_factory=list)
     measured: bool = False
     # failing readings in a row taken on the rentals bridge. Only these are enforced: a default-bridge reading (a
     # node with no rental yet) restarts the count, and a state saved without the field starts from 0.
-    rentals_failures_in_a_row: int = 0
+    failing_readings_on_rentals_network: int = 0
 
     def next_due_at(self) -> float:
         if self.failures_in_a_row > 0:
@@ -200,9 +191,9 @@ class _State:
             return cls(
                 at=float(data["at"]),
                 failures_in_a_row=int(data.get("failures_in_a_row", 0)),
-                readings=list(data.get("readings") or []),
+                readings=[EndpointReading(**r) for r in data.get("readings") or []],
                 measured=bool(data.get("measured")),
-                rentals_failures_in_a_row=int(data.get("rentals_failures_in_a_row", 0)),
+                failing_readings_on_rentals_network=int(data.get("failing_readings_on_rentals_network", 0)),
             )
         except (TypeError, ValueError, KeyError, AttributeError):
             return None
@@ -258,22 +249,22 @@ class ContainerDownloadSpeedCheck:
             return self._verdict(ctx, state, probed=False)
 
         readings = await self._measure(ctx)
-        failing, no_verdict = await self._judge(readings)
+        judgement = await self._judge(readings)
+        failing, no_verdict = judgement.is_failing, judgement.has_no_verdict
         on_rentals = all(r.network == RENTAL_NETWORK_NAME for r in readings)
         if failing:
             failures = state.failures_in_a_row + 1
-            rentals_failures = state.rentals_failures_in_a_row + 1 if on_rentals else 0
+            failing_on_rentals = state.failing_readings_on_rentals_network + 1 if on_rentals else 0
         elif no_verdict:
-            failures, rentals_failures = state.failures_in_a_row, state.rentals_failures_in_a_row
+            failures, failing_on_rentals = state.failures_in_a_row, state.failing_readings_on_rentals_network
         else:
-            failures = rentals_failures = 0
-        records = [r.as_record() for r in readings]
+            failures = failing_on_rentals = 0
         state = _State(
             at=now,
             failures_in_a_row=failures,
-            readings=records,
+            readings=readings,
             measured=not no_verdict,
-            rentals_failures_in_a_row=rentals_failures,
+            failing_readings_on_rentals_network=failing_on_rentals,
         )
         logger.info(
             _m(
@@ -281,7 +272,7 @@ class ContainerDownloadSpeedCheck:
                 extra=get_extra_info(
                     {
                         **ctx.default_extra,
-                        "endpoints": records,
+                        "endpoints": [asdict(r) for r in readings],
                         "min_mbps": settings.CONTAINER_DOWNLOAD_SPEED_MIN_MBPS,
                         "failing": failing,
                         "no_verdict": no_verdict,
@@ -306,30 +297,30 @@ class ContainerDownloadSpeedCheck:
             return [EndpointReading(name, error="no_output", detail=detail[-_TAIL_CHARS:]) for name, _ in ENDPOINTS]
         return readings
 
-    async def _judge(self, readings: list[EndpointReading]) -> tuple[bool, bool]:
-        """(failing, no_verdict). Slow on any endpoint fails: a renter needs both."""
+    async def _judge(self, readings: list[EndpointReading]) -> Judgement:
+        """Slow on any endpoint fails: a renter needs both."""
         threshold = settings.CONTAINER_DOWNLOAD_SPEED_MIN_MBPS
         if any(r.mbps is not None and r.mbps < threshold for r in readings):
-            return True, False
+            return Judgement(is_failing=True, has_no_verdict=False)
         urls = dict(ENDPOINTS)
         for r in readings:
             if r.error in NODE_SIDE_ERRORS and await validator_reaches(urls[r.endpoint]):
-                return True, False
+                return Judgement(is_failing=True, has_no_verdict=False)
         # an endpoint left unmeasured (ours, or the endpoint's) and no failure: no verdict
-        return False, any(r.mbps is None for r in readings)
+        return Judgement(is_failing=False, has_no_verdict=any(r.mbps is None for r in readings))
 
     def _verdict(self, ctx: Context, state: _State, *, probed: bool) -> CheckResult:
         enforced = (
             settings.CONTAINER_DOWNLOAD_SPEED_ENFORCEMENT_ENABLED
-            and state.rentals_failures_in_a_row >= READINGS_BEFORE_VERDICT
+            and state.failing_readings_on_rentals_network >= READINGS_BEFORE_VERDICT
         )
         what: dict[str, Any] = {
-            "endpoints": state.readings,
+            "endpoints": [asdict(r) for r in state.readings],
             "min_mbps": settings.CONTAINER_DOWNLOAD_SPEED_MIN_MBPS,
             "probed_this_cycle": probed,
             "failures_in_a_row": state.failures_in_a_row,
             "enforced": enforced,
-            "rentals_failures_in_a_row": state.rentals_failures_in_a_row,
+            "failing_readings_on_rentals_network": state.failing_readings_on_rentals_network,
         }
         if state.failures_in_a_row >= READINGS_BEFORE_VERDICT:
             template = Msg.SLOW if enforced else Msg.SLOW_OBSERVED
@@ -351,9 +342,9 @@ class ContainerDownloadSpeedCheck:
         payload = {
             "at": state.at,
             "failures_in_a_row": state.failures_in_a_row,
-            "readings": state.readings,
+            "readings": [asdict(r) for r in state.readings],
             "measured": state.measured,
-            "rentals_failures_in_a_row": state.rentals_failures_in_a_row,
+            "failing_readings_on_rentals_network": state.failing_readings_on_rentals_network,
         }
         try:
             await ctx.services.redis.set(key, json.dumps(payload), ex=_REDIS_TTL_SECONDS)
