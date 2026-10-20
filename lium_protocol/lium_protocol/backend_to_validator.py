@@ -39,7 +39,7 @@ class BackendMessageType(enum.Enum):
     ForcedValidationCycleRequest = "ForcedValidationCycleRequest"
     # ask the validator for an exact rental estimate; it answers with EstimateResponse
     GetEstimateRequest = "GetEstimateRequest"
-    # 1.12.0: reset a running pod's GPUs; the validator answers with PodGpuResetResult
+    # 1.13.0: reset a running pod's GPUs; the validator answers with PodGpuResetResult
     ResetPodGpuRequest = "ResetPodGpuRequest"
 
 
@@ -166,6 +166,10 @@ class ContainerCreateRequest(ContainerRequest):
     cluster_membership: ClusterMembership | None = None
     # DAH-2211: build from this Dockerfile on the host instead of pulling `docker_image`
     dockerfile_content: str | None = None
+    # 1.11.0: a gzipped tar of the build context for `dockerfile_content`, fetched by the validator and
+    # checked against `build_context_sha256` (hex) before the build; None builds with the Dockerfile alone
+    build_context_url: str | None = None
+    build_context_sha256: str | None = None
     # DAH-1524: the image ships sshd (and runs Jupyter itself); None keeps the validator's bootstrap
     ships_sshd: bool | None = None
     gpu_power_limits: list[GpuPowerLimit] | None = None
@@ -290,7 +294,7 @@ class InstallJupyterServerRequest(ContainerRequest):
 
 @BACKEND_MESSAGES.register
 class ResetPodGpuRequest(ContainerRequest):
-    """1.12.0: the renter asked to reset the GPUs of their running pod. `gpu_uuids` is every GPU
+    """1.13.0: the renter asked to reset the GPUs of their running pod. `gpu_uuids` is every GPU
     the backend holds for the pod; `gpu_indices` picks some of them by pod index (the pod's GPUs sorted by
     host PCI bus id, the 0..n-1 order `nvidia-smi` shows inside the pod), None for all of them. Answered by
     `validator_to_backend.PodGpuResetResult` with the same `request_id`."""

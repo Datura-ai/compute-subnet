@@ -56,7 +56,7 @@ class ValidatorMessageType(enum.Enum):
     FailedAddDebugSshKey = "FailedAddDebugSshKey"
     JupyterServerInstalled = "JupyterServerInstalled"
     JupyterInstallationFailed = "JupyterInstallationFailed"
-    # 1.12.0: the answer to ResetPodGpuRequest
+    # 1.13.0: the answer to ResetPodGpuRequest
     PodGpuResetResult = "PodGpuResetResult"
 
 
@@ -518,7 +518,7 @@ class JupyterInstallationFailed(PodContainerResponse):
 
 
 class GpuResetErrorCode(enum.Enum):
-    """1.12.0: why a pod GPU reset did not run, or did not finish."""
+    """1.13.0: why a pod GPU reset did not run, or did not finish."""
 
     MigEnabled = "MigEnabled"
     NvlinkPeersOutsidePod = "NvlinkPeersOutsidePod"
@@ -539,7 +539,7 @@ class GpuResetOutcome(pydantic.BaseModel):
 
 @VALIDATOR_MESSAGES.register
 class PodGpuResetResult(PodContainerResponse):
-    """1.12.0: the answer to `backend_to_validator.ResetPodGpuRequest`, same `request_id`. `gpus` is
+    """1.13.0: the answer to `backend_to_validator.ResetPodGpuRequest`, same `request_id`. `gpus` is
     one outcome per GPU the validator reset (possibly more than asked: NVLink peers inside the pod are
     reset together); empty when a precheck refused before anything changed."""
 
