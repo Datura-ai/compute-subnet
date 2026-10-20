@@ -77,7 +77,12 @@ from services.task.availability import (
 )
 from incentive.config import BASE_GPU_MAP
 from services.task_service import TaskService, JobResult
-from services.storage_operations import cancel_storage_operation, start_storage_operation, supports_workspace_field
+from services.storage_operations import (
+    cancel_storage_operation,
+    report_launch_failure,
+    start_storage_operation,
+    supports_workspace_field,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1575,9 +1580,25 @@ class MinerService:
         # DAH-2728: register the create BEFORE the miner handshake — a delete whose handshake is
         # quicker would otherwise reach the executor first and see a pod that does not exist yet.
         if not isinstance(payload, ContainerCreateRequest):
-            return await self._route_container(payload)
+            result = await self._route_container(payload)
+            await self._report_storage_dispatch_failure(payload, result)
+            return result
         with inflight_creates.track(payload.pod_id), customer_creates.track(payload):
             return await self._route_container(payload)
+
+    async def _report_storage_dispatch_failure(self, payload: ContainerBaseRequest, result: object) -> None:
+        """A Restic backup/restore that fails before its runner starts (executor unreachable, old image)
+        reports nothing itself, so the backend waited 20 min and logged "stopped reporting progress".
+        Report the failure now. The backend ignores a second report on a log that is already terminal."""
+        if not isinstance(result, FailedContainerRequest) or getattr(payload, "backup_engine", None) != "restic":
+            return
+        if isinstance(payload, BackupContainerRequest):
+            operation_id, spec = payload.backup_log_id, self._restic_backup_operation_spec(payload)
+        elif isinstance(payload, RestoreContainerRequest):
+            operation_id, spec = payload.restore_log_id, self._restic_restore_operation_spec(payload)
+        else:
+            return
+        await report_launch_failure(UUID(operation_id), spec, RuntimeError(result.msg))
 
     async def _route_container(self, payload: ContainerBaseRequest):
         """Route a container request - uses REST API if configured, otherwise WebSocket."""
@@ -2221,10 +2242,13 @@ class MinerService:
                 if payload.exclude_patterns and not await supports_workspace_field(
                     ssh_client, executor_info.python_path, "exclude_patterns"
                 ):
-                    raise RuntimeError(
+                    error = RuntimeError(
                         "executor image cannot skip caches and keys (no workspace.exclude_patterns); "
                         "the provider must update the executor image"
                     )
+                    # report the real reason first; the generic dispatch-failure report then finds the log terminal
+                    await report_launch_failure(operation_id, self._restic_backup_operation_spec(payload), error)
+                    raise error
                 await start_storage_operation(
                     ssh_client,
                     executor_info.python_path,

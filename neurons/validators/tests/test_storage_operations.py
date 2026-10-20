@@ -50,7 +50,7 @@ async def test_launch_failure_is_reported_before_the_error_is_reraised(
     ssh_client = AsyncMock()
     ssh_client.run.side_effect = RuntimeError("ssh failed")
     report_failure = AsyncMock()
-    monkeypatch.setattr(storage_operations, "_report_launch_failure", report_failure)
+    monkeypatch.setattr(storage_operations, "report_launch_failure", report_failure)
 
     with pytest.raises(RuntimeError, match="ssh failed"):
         await storage_operations.start_storage_operation(
@@ -97,7 +97,7 @@ async def test_launch_failure_uses_the_operation_progress_endpoint(
 
     monkeypatch.setattr(storage_operations.aiohttp, "ClientSession", FakeSession)
 
-    await storage_operations._report_launch_failure(
+    await storage_operations.report_launch_failure(
         OPERATION_ID,
         _spec(),
         RuntimeError("ssh failed"),
@@ -117,7 +117,7 @@ async def test_missing_runner_capability_is_reported_as_launch_failure(
     ssh_client = AsyncMock()
     ssh_client.run.return_value = SimpleNamespace(exit_status=1, stdout="", stderr="")
     report_failure = AsyncMock()
-    monkeypatch.setattr(storage_operations, "_report_launch_failure", report_failure)
+    monkeypatch.setattr(storage_operations, "report_launch_failure", report_failure)
 
     with pytest.raises(storage_operations.StorageOperationLaunchError, match="does not support"):
         await storage_operations.start_storage_operation(

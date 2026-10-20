@@ -363,3 +363,34 @@ def test_missing_executor_failure_reads_known_executor_ids():
     assert not_listed.extra["reason_code"] == "EXECUTOR_NOT_LISTED_BY_MINER"
     # A miner without known_executor_ids keeps DAH-3508's wording, not the old "Invalid executor id".
     assert str(_missing_executor_failure(old_miner, executor_id, extra)[0]) == "Error: no executor accepted the SSH key"
+
+
+@pytest.mark.parametrize("engine,reported", [("restic", True), ("tar_aws_cli", False)])
+@pytest.mark.asyncio
+async def test_backup_that_fails_before_its_runner_starts_is_reported_at_once(mocker, miner_service, engine, reported):
+    """An unreachable executor used to leave the backup IN_PROGRESS until the 20-min heartbeat sweep."""
+    from payload_models.payloads import BackupContainerRequest, ExternalVolumeInfo
+
+    log_id = str(uuid4())
+    payload = BackupContainerRequest(
+        miner_hotkey="miner", executor_id="executor", pod_id="pod", source_volume="v",
+        backup_volume_info=ExternalVolumeInfo(name="b", plugin="s3", iam_user_access_key="a", iam_user_secret_key="s"),
+        backup_path="/root", source_volume_path="/root", backup_target_path="", auth_token="token",
+        backup_log_id=log_id, backup_engine=engine,
+    )
+    failed = FailedContainerRequest(
+        miner_hotkey="miner", executor_id="executor", pod_id="pod", msg="Error: Executor unreachable",
+        error_code=FailedContainerErrorCodes.ExecutorUnreachable,
+    )
+    mocker.patch.object(miner_service, "_route_container", AsyncMock(return_value=failed))
+    report = mocker.patch("services.miner_service.report_launch_failure", AsyncMock())
+
+    assert await miner_service.handle_container(payload) is failed
+
+    if not reported:
+        report.assert_not_awaited()
+        return
+    operation_id, spec, error = report.await_args.args
+    assert str(operation_id) == log_id
+    assert spec["reporter"]["auth_token"] == "token" and spec["reporter"]["resource"] == "backup"
+    assert str(error) == "Error: Executor unreachable"
