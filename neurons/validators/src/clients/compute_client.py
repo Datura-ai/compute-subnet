@@ -901,6 +901,7 @@ class ComputeClient:
         redis_service = self.miner_service.redis_service
         creates = await redis_service.inflight_backend_creates()
         for pod_id, create in creates.items():
+            # the validator wipes these flags on its own start; this covers a connector that restarted alone
             await redis_service.remove_pending_pod(create.miner_hotkey, create.executor_id, pod_id)
             self.message_queue.append(
                 FailedContainerRequest(

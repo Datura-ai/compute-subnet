@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from typing import NamedTuple
 
 from pydantic import BaseModel, ValidationError
+from payload_models.payloads import WorkloadKind
 from protocol.vc_protocol.validator_requests import ResetVerifiedJobReason
 import redis.asyncio as aioredis
 import redis.exceptions
@@ -589,7 +590,7 @@ class RedisService:
 
     async def inflight_backend_creates(self) -> dict[str, InflightBackendCreate]:
         """pod id -> the create the backend sent for it"""
-        raw = await self.hgetall(INFLIGHT_BACKEND_CREATES_KEY) or {}
+        raw = await self.hgetall(INFLIGHT_BACKEND_CREATES_KEY)
         creates: dict[str, InflightBackendCreate] = {}
         for raw_pod_id, entry in raw.items():
             pod_id = raw_pod_id.decode() if isinstance(raw_pod_id, bytes) else raw_pod_id
