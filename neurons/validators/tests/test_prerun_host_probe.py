@@ -122,6 +122,15 @@ def _stdout(
     return out
 
 
+@pytest.fixture
+def docker_service():
+    return DockerService(
+        ssh_service=Mock(),
+        redis_service=Mock(),
+        attestation_service=Mock(),
+    )
+
+
 def _ssh(*results):
     client = AsyncMock()
     client.run = AsyncMock(side_effect=list(results))
