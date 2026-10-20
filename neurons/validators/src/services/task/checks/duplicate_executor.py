@@ -95,7 +95,7 @@ class DuplicateExecutorCheck:
         hotkey is recorded only when no other hotkey holds a card inside the window and the whole cycle
         passes (the check returns the writes; ResultHandler applies them on success), so the hotkey that
         listed the cards first keeps passing and the relister fails until the first one has not reported
-        them for CROSS_HOTKEY_GPU_UUID_WINDOW_DAYS (a sale or move waits out the window once). The same
+        them for CROSS_HOTKEY_GPU_UUID_WINDOW_HOURS (a sale or move waits out the window once). The same
         hotkey under a new executor id matches its own entry and passes. Off = a structured warning only.
         """
         uuids = sorted({u for u in (ctx.state.gpu_uuids or "").split(",") if u})
@@ -103,7 +103,7 @@ class DuplicateExecutorCheck:
             return None, {}
         redis = ctx.services.redis
         now = time.time()
-        window = settings.CROSS_HOTKEY_GPU_UUID_WINDOW_DAYS * 86400
+        window = settings.CROSS_HOTKEY_GPU_UUID_WINDOW_HOURS * 3600
         seen: dict[str, dict[str, float]] = {}
         for uuid in uuids:
             raw = await redis.hget(GPU_UUID_HOTKEYS_SEEN, uuid)
@@ -123,7 +123,7 @@ class DuplicateExecutorCheck:
             "miner_hotkey": ctx.miner_hotkey,
             "other_hotkeys": sorted({hk for hks in matches.values() for hk in hks}),
             "matching_gpu_uuids": sorted(matches),
-            "window_days": settings.CROSS_HOTKEY_GPU_UUID_WINDOW_DAYS,
+            "window_hours": settings.CROSS_HOTKEY_GPU_UUID_WINDOW_HOURS,
             "enforced": enforced,
         }
         logger.warning(
