@@ -403,6 +403,12 @@ class Settings(BaseSettings):
     # filler container. Rollout: shadow first, flip enforcement after the shadow data is clean.
     FILLER_LIVENESS_CHECK_ENABLED: bool = Field(env="FILLER_LIVENESS_CHECK_ENABLED", default=True)
     FILLER_LIVENESS_ENFORCEMENT_ENABLED: bool = Field(env="FILLER_LIVENESS_ENFORCEMENT_ENABLED", default=False)
+    # GPU work inside a filler container counts as the filler's only while the container runs the
+    # image the validator started it from (recorded at create). A mismatch is always logged
+    # (FILLER_IMAGE_MISMATCH); with this on, the GPU usage check judges that work as foreign.
+    FILLER_IMAGE_IDENTITY_ENFORCEMENT_ENABLED: bool = Field(
+        env="FILLER_IMAGE_IDENTITY_ENFORCEMENT_ENABLED", default=False
+    )
     # DAH-2671 spec-truth checks. Each pair mirrors the FILLER_LIVENESS precedent above:
     # CHECK_ENABLED is the master switch — shadow mode computes the signal and emits the event/log
     # but returns passed=True and never changes score; ENFORCEMENT (only effective while
@@ -419,6 +425,12 @@ class Settings(BaseSettings):
     # `kernel_view_would_ban` is emitted on every banned_provider/banned event; the ban itself is
     # matched on the reported list until this is flipped from a week of clean fleet data.
     KERNEL_GPU_BAN_ENFORCEMENT_ENABLED: bool = Field(env="KERNEL_GPU_BAN_ENFORCEMENT_ENABLED", default=False)
+    # DAH-4547 - HardwareIdentityCheck: DMI files not served by sysfs (a cloak script's overlay), the
+    # kernel and NVML GPU lists disagreeing, or DMI identity changing under an unchanged GPU set.
+    # Shadow by default: the finding is logged as a warning event and the node passes.
+    HARDWARE_FINGERPRINT_ENFORCEMENT_ENABLED: bool = Field(
+        env="HARDWARE_FINGERPRINT_ENFORCEMENT_ENABLED", default=False
+    )
     # Cross-check the reported GPU count and UUIDs against the kernel's GPU list
     # (/proc/driver/nvidia/gpus, the same read the ban checks make). CHECK_ENABLED evaluates and
     # logs a verdict every validation (check_id gpu.validate.kernel_count) without changing the
@@ -501,6 +513,14 @@ class Settings(BaseSettings):
     # Report a rented node that lost a GPU to the backend from the first cycle that sees it (a possible
     # glitch waits one more); observation only, no score change. Off by default.
     RENTED_GPU_DROP_CHECK_ENABLED: bool = Field(env="RENTED_GPU_DROP_CHECK_ENABLED", default=False)
+    # DAH-4564 — read a rented pod's cpuset, CPU quota and init oom_score_adj and flag a host that
+    # pinned or throttled the renter below 95% of its advertised cores. CHECK_ENABLED observes and
+    # reports (on); ENFORCEMENT additionally zeroes the score (off: penalty owners decide). A raised
+    # oom_score_adj is recorded only, never scored.
+    RENTED_POD_RESOURCES_CHECK_ENABLED: bool = Field(env="RENTED_POD_RESOURCES_CHECK_ENABLED", default=True)
+    RENTED_POD_RESOURCES_ENFORCEMENT_ENABLED: bool = Field(
+        env="RENTED_POD_RESOURCES_ENFORCEMENT_ENABLED", default=False
+    )
     # The per-pod incident mark expires this long after the last cycle that saw the fault.
     RENTED_GPU_DROP_STATE_TTL_SECONDS: int = Field(env="RENTED_GPU_DROP_STATE_TTL_SECONDS", default=86400, gt=0)
     # DAH-4457: a node whose GPU dropped out stays hidden (GPU_LOST availability entry, no new rentals) until its
@@ -637,6 +657,14 @@ class Settings(BaseSettings):
     )
     REGISTRY_PULL_PROBE_RETRY_MINUTES: float = Field(
         env="REGISTRY_PULL_PROBE_RETRY_MINUTES", default=30.0, gt=0
+    )
+    # DAH-4124, the unrented twin of the rented-not-listed row (DAH-3558, always on since
+    # DAH-4276): a node in the miner's known_executor_ids that is missing
+    # from its accepted executors (the miner could not reach it to install our key) gets no
+    # pipeline and no row, so it only "stops reporting". On, the wave writes one failed result per
+    # such unrented node (EXECUTOR_UNREACHABLE_BY_MINER, score 0, availability error). Off = today.
+    UNREACHABLE_EXECUTOR_REPORT_ENABLED: bool = Field(
+        env="UNREACHABLE_EXECUTOR_REPORT_ENABLED", default=False
     )
     SKIP_COLLATERAL_PENALTY: bool = Field(env="SKIP_COLLATERAL_PENALTY", default=True)
     DRY_RUN: bool = Field(env="DRY_RUN", default=False, description="Run validation without publishing scores/weights")
@@ -798,6 +826,8 @@ class Settings(BaseSettings):
     # 32-byte challenge per attestation event, folds it into the signed SSH-key
     # request, and requires the executor to echo it in TDX report_data[32:64].
     ENABLE_ATTESTATION_NONCE: bool = Field(env="ENABLE_ATTESTATION_NONCE", default=False)
+    # I-78: sign every SSH-key upload over a dated nonce (datura fresh_upload_nonce); see MinerService._dated_upload_nonce_if_enabled
+    ENABLE_DATED_UPLOAD_NONCE: bool = Field(env="ENABLE_DATED_UPLOAD_NONCE", default=False)
     # A nonce-bound attestation event is required at most once per this interval per
     # miner (freshness = "bounded, provably recent", not "every wave") — GPU evidence
     # collection is too expensive to force fleet-wide every cycle.
@@ -815,6 +845,12 @@ class Settings(BaseSettings):
     # GPU evidence bound to the issued nonce; any failure raises AttestationError.
     ENABLE_GPU_ATTESTATION_ENFORCEMENT: bool = Field(
         env="ENABLE_GPU_ATTESTATION_ENFORCEMENT", default=False
+    )
+    # DAH-4551 - GpuAttestationIdentityCheck: each Hopper/Blackwell GPU's NVIDIA-signed identity, pinned to its
+    # UUID both ways. Shadow by default: a mismatch or forged evidence is logged as a warning event and the node
+    # passes. On = it fails the node (not fatal with a live rental). Unavailable evidence alone never fails it.
+    GPU_ATTESTATION_IDENTITY_ENFORCEMENT_ENABLED: bool = Field(
+        env="GPU_ATTESTATION_IDENTITY_ENFORCEMENT_ENABLED", default=False
     )
     # Hosted NRAS endpoint (interim verification locus; a local nv-verifier removes
     # this outbound SPOF before fleet enforcement — see remediation plan CD4).
@@ -869,6 +905,11 @@ class Settings(BaseSettings):
 
     # Use REST API instead of WebSocket for miner communication
     USE_REST_API: bool = Field(env="USE_REST_API", default=False)
+
+    # A rented node missing from its miner's answer for ONE cycle is mostly a key upload that missed the miner's 10 s
+    # window: 86 of the 347 RENTED_EXECUTOR_NOT_LISTED rows on 19 Oct were back in the next answer. On: the row is
+    # written from the second consecutive miss. Off by default: provider scoring, enabling it is the penalty owners' call.
+    RENTED_NOT_LISTED_ONE_CYCLE_GRACE: bool = Field(env="RENTED_NOT_LISTED_ONE_CYCLE_GRACE", default=False)
 
     # DAH-2958 — express lane for never-validated executors. A new node is published only by
     # the fleet-wide scored cycle today, so it waits for the 15-min boundary (mean 7.5 min) and
@@ -929,6 +970,21 @@ class Settings(BaseSettings):
     CUSTOM_DOCKERFILE_MAX_BYTES: int = Field(
         env="CUSTOM_DOCKERFILE_MAX_BYTES", default=65_536,
         description="Defense-in-depth cap on dockerfile_content size; route is authoritative.",
+    )
+    CUSTOM_DOCKERFILE_BUILD_CONTEXT_HOSTS: str = Field(
+        env="CUSTOM_DOCKERFILE_BUILD_CONTEXT_HOSTS", default="",
+        description=(
+            "Comma-separated hosts a build_context_url may name (https only). Empty: a request that "
+            "names a build context fails at build_context instead of building without the files."
+        ),
+    )
+    CUSTOM_DOCKERFILE_BUILD_CONTEXT_MAX_BYTES: int = Field(
+        env="CUSTOM_DOCKERFILE_BUILD_CONTEXT_MAX_BYTES", default=100 * 1024 * 1024, gt=0,
+        description="Largest build-context archive the validator downloads (compressed bytes).",
+    )
+    CUSTOM_DOCKERFILE_BUILD_CONTEXT_MAX_UNPACKED_BYTES: int = Field(
+        env="CUSTOM_DOCKERFILE_BUILD_CONTEXT_MAX_UNPACKED_BYTES", default=1024 * 1024 * 1024, gt=0,
+        description="Largest total size of the files in a build-context archive.",
     )
     # DAH-2211 — internet-enabled custom builds run inside a throwaway sysbox
     # Docker-in-Docker container (NOT on the host daemon) so the build can

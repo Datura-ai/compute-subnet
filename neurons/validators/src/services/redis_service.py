@@ -4,6 +4,9 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from typing import NamedTuple
+
+from pydantic import BaseModel, ValidationError
+from payload_models.payloads import WorkloadKind
 from protocol.vc_protocol.validator_requests import ResetVerifiedJobReason
 import redis.asyncio as aioredis
 import redis.exceptions
@@ -26,16 +29,26 @@ PENDING_PODS_PREFIX = "pending_pods_prefix"
 GPU_RESET_PENDING_KIND = "gpu_reset"
 # DAH-4663: a renter's own GPU clock lock in progress (a second lock, reset or create is declined meanwhile)
 GPU_CLOCKS_PENDING_KIND = "gpu_clocks"
+# DAH-4698: creates the backend sent that are running in this connector right now, by pod id; what is left when a
+# connector starts was cut off by the restart (a redeploy recreates the connector mid-create)
+INFLIGHT_BACKEND_CREATES_KEY = "inflight_backend_creates"
 DUPLICATED_MACHINE_SET = "duplicated_machines"
 RENTAL_SUCCEED_MACHINE_SET = "rental_succeed_machines"
 AVAILABLE_PORT_MAPS_PREFIX = "available_port_maps"
 RENTAL_PROBE_OK_PREFIX = "rental_probe_ok"
 RENTAL_PROBE_FAILED_PREFIX = "rental_probe_failed"
+# filler container name -> JSON list of the image digests (bare sha256) the validator started it from
+FILLER_IMAGE_DIGESTS_PREFIX = "filler_image_digests:"
+FILLER_IMAGE_DIGESTS_TTL_SECONDS = 30 * 24 * 3600
 # set by a filler create whose sshd never came up in the container, cleared by one where it did
 SSHD_BOOTSTRAP_FAILED_PREFIX = "sshd_bootstrap_failed"
 # prod, 24 h: failed filler creates on a broken node came 5 min to 2.7 h apart, so 6 h outlives the
 # longest gap about twice over; a stale stamp ends by itself
 SSHD_BOOTSTRAP_FAILED_TTL_SECONDS = 6 * 3600
+# sshd_bootstrap.sh's verify_sshd line: sshd is installed but not running or listening
+SSHD_VERIFY_FAILED_MARKER = "sshd verification failed"
+# where the sshd bootstrap script is copied in a filler container
+IN_CONTAINER_SSH_BOOTSTRAP_PATH = "/tmp/lium-ssh-bootstrap.sh"
 VERIFIED_JOB_COUNT_KEY = "verified_job_counts"
 # The anchor: the GPU UUID set of the executor's first successful verification, kept by every later write.
 GPU_ANCHOR_KEY = "uuids"
@@ -115,6 +128,13 @@ REDIS_RETRY_ATTEMPTS = 3
 REDIS_HEALTH_CHECK_INTERVAL_SECONDS = 30
 
 logger = logging.getLogger(__name__)
+
+
+class InflightBackendCreate(BaseModel):
+    miner_hotkey: str
+    executor_id: str
+    workload_kind: WorkloadKind
+    started_at_unix_seconds: int
 
 
 class _PassThroughLock:
@@ -574,6 +594,34 @@ class RedisService:
         else:
             await self.hdel(PENDING_PODS_PREFIX, f"{miner_hotkey}:{executor_id}")
     
+    async def add_inflight_backend_create(
+        self, pod_id: str, miner_hotkey: str, executor_id: str, workload_kind: WorkloadKind
+    ) -> None:
+        create = InflightBackendCreate(
+            miner_hotkey=miner_hotkey,
+            executor_id=executor_id,
+            workload_kind=workload_kind,
+            started_at_unix_seconds=int(time.time()),
+        )
+        await self.hset(INFLIGHT_BACKEND_CREATES_KEY, pod_id, create.model_dump_json())
+
+    async def remove_inflight_backend_create(self, pod_id: str) -> None:
+        await self.hdel(INFLIGHT_BACKEND_CREATES_KEY, pod_id)
+
+    async def inflight_backend_creates(self) -> dict[str, InflightBackendCreate]:
+        """pod id -> the create the backend sent for it"""
+        raw = await self.hgetall(INFLIGHT_BACKEND_CREATES_KEY)
+        creates: dict[str, InflightBackendCreate] = {}
+        for raw_pod_id, entry in raw.items():
+            pod_id = raw_pod_id.decode() if isinstance(raw_pod_id, bytes) else raw_pod_id
+            try:
+                creates[pod_id] = InflightBackendCreate.model_validate_json(entry)
+            except ValidationError:
+                # one bad entry must not block the sweep of the others on every start
+                logger.error(_m("Dropping an unreadable inflight backend create", extra={"pod_id": pod_id}))
+                await self.hdel(INFLIGHT_BACKEND_CREATES_KEY, pod_id)
+        return creates
+
     async def get_pending_pods(self, miner_hotkey: str, executor_id: str) -> list[dict]:
         data = await self.hget(PENDING_PODS_PREFIX, f"{miner_hotkey}:{executor_id}")
         if not data:

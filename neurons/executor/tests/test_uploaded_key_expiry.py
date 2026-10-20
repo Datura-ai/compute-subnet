@@ -39,6 +39,8 @@ def _marked(key: str, uploaded_at) -> str:
 def authorized_keys(tmp_path, monkeypatch):
     """A private HOME so ~/.ssh/authorized_keys is a temp file; returns its path."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    # the line format these tests assert on is the unpinned one; the I-78 pin is test_ssh_source_pin.py
+    monkeypatch.setattr(ssh_service, "VALIDATOR_SSH_SOURCES", "")
     ssh_dir = tmp_path / ".ssh"
     ssh_dir.mkdir(mode=0o700)
     path = ssh_dir / "authorized_keys"

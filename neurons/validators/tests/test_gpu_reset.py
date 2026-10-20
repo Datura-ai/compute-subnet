@@ -53,6 +53,7 @@ class FakeHost:
         stop_exit=0,
         main_pid=4242,
         mounts=(),
+        own_cgroup="0::/user.slice/user-0.slice/session-7.scope",
     ):
         self.commands: list[str] = []
         self.stopped = False
@@ -67,6 +68,7 @@ class FakeHost:
         self.apps, self.apps_after_stop = list(apps), list(apps_after_stop)
         self.cgroups = {main_pid: f"0::/../docker-{CID}.scope", **(cgroups or {})}
         self.reset_exit, self.inspect_exit, self.stop_exit = reset_exit, inspect_exit, stop_exit
+        self.own_cgroup = own_cgroup
 
     async def run(self, cmd: str, *, timeout: int = 60, retryable: bool = True, **_):
         self.commands.append(cmd)
@@ -84,6 +86,8 @@ class FakeHost:
             return make_command_result(True, "/dev/nvidia-nvswitch0\n" if self.nvswitch else "")
         if cmd == "nvidia-smi topo -m":
             return make_command_result(True, self.topo)
+        if cmd.endswith("< /proc/self/cgroup"):
+            return make_command_result(True, f"{self.own_cgroup} ")
         if cmd.startswith("for p in "):
             pids = [int(p) for p in cmd.split(";")[0].split()[3:]]
             out = "\n".join(f"{pid} {self.cgroups[pid]} " for pid in pids if pid in self.cgroups)
@@ -220,7 +224,7 @@ async def test_a_process_left_after_the_stop_aborts_the_reset_but_restarts_the_p
 async def test_a_refused_reset_falls_back_to_the_latch_cure_on_the_pods_gpus_only():
     host = FakeHost(reset_exit=1)
     report, start = await _reset(host)
-    assert not report.ok and report.error_code == GpuResetErrorCode.ResetNotSupported
+    assert report.ok and report.error_code is None and "nvidia-smi -r refused" in report.detail
     assert {(g.uuid, g.result) for g in report.gpus} == {(U[0], "latch_cleared"), (U[1], "latch_cleared")}
     cured = [cmd for cmd in host.commands if cmd.startswith("CUDA_VISIBLE_DEVICES=")]
     assert len(cured) == 2 and all(U[2] not in c and U[3] not in c for c in cured)
@@ -417,3 +421,19 @@ async def test_a_reset_that_never_reached_the_executor_answers_with_a_reset_resu
     assert isinstance(busy, PodGpuResetResult) and busy.request_id == "r1" and not busy.ok
     assert busy.error_code == GpuResetErrorCode.OperationInProgress
     assert gone.error_code == GpuResetErrorCode.ExecutorUnreachable
+
+
+@pytest.mark.asyncio
+async def test_the_validators_own_session_processes_do_not_block_the_reset():
+    own = "0::/user.slice/user-0.slice/session-7.scope"
+    host = FakeHost(apps=[(4242, U[0]), (900, U[1])], cgroups={900: own})
+    report, _ = await _reset(host)
+    assert report.ok and any(cmd.startswith("nvidia-smi -r") for cmd in host.commands)
+
+
+@pytest.mark.asyncio
+async def test_a_root_own_cgroup_ignores_nothing():
+    host = FakeHost(apps=[(900, U[0])], cgroups={900: "0::/"}, own_cgroup="0::/")
+    report, start = await _reset(host)
+    assert not report.ok and report.error_code == GpuResetErrorCode.GpuInUseOutsidePod
+    _no_change(host, start)

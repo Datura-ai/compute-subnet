@@ -39,6 +39,7 @@ from .checks import (
     ExecutorImageCheck,
     FinalizeCheck,
     GpuCountCheck,
+    GpuAttestationIdentityCheck,
     GpuFaultProbeCheck,
     GpuMemoryHealthCheck,
     GpuFingerprintCheck,
@@ -49,6 +50,7 @@ from .checks import (
     GpuThermalThrottleCheck,
     GpuUsageCheck,
     GpuVramPrecheck,
+    HardwareIdentityCheck,
     InspectorRentedCheck,
     LocalVerifyCheck,
     MachineSpecScrapeCheck,
@@ -61,6 +63,7 @@ from .checks import (
     RentalProbeCheck,
     RentalVerificationCheck,
     RentedGpuDropCheck,
+    RentedPodResourcesCheck,
     ScoreCheck,
     SpecChangeCheck,
     SshdAuthLogCheck,
@@ -336,8 +339,12 @@ class PipelineFactory:
                 # DAH-3457: the UUID set is the node's identity and model:count is derived from it, so the
                 # fingerprint check runs first; a missing card is then GPU_MISSING, not SPEC_CHANGED.
                 GpuFingerprintCheck(),
+                # DAH-4551: the reported UUIDs checked against each card's NVIDIA-signed identity (shadow by default).
+                GpuAttestationIdentityCheck(),
                 SpecChangeCheck(),
                 BannedProviderCheck(),
+                # DAH-4547: after BannedProviderCheck, which leaves the kernel GPU list in ctx.state.
+                HardwareIdentityCheck(),
                 BannedGpuCheck(),
                 # Reported GPU count and UUIDs against the kernel's list, which BannedProviderCheck
                 # read above. Logs a verdict every cycle; fails the validation only under
@@ -377,6 +384,7 @@ class PipelineFactory:
                 SysboxRequiredCheck(),
                 ExecutorImageCheck(),
                 InspectorRentedCheck(),
+                RentedPodResourcesCheck(),
                 TenantEnforcementCheck(),
                 GpuUsageCheck(),
                 # liumd phase 1 (DAH-2834): one signed `POST /verify` runs the VerifyX and matmul
@@ -470,8 +478,12 @@ class PipelineFactory:
                 GpuPowerLimitCheck(),
                 NvmlDigestCheck(),
                 GpuFingerprintCheck(),
+                # DAH-4551: the reported UUIDs checked against each card's NVIDIA-signed identity (shadow by default).
+                GpuAttestationIdentityCheck(),
                 SpecChangeCheck(),
                 BannedProviderCheck(),
+                # DAH-4547: after BannedProviderCheck, which leaves the kernel GPU list in ctx.state.
+                HardwareIdentityCheck(),
                 BannedGpuCheck(),
                 GpuKernelCountCheck(),
                 DuplicateExecutorCheck(),
@@ -482,6 +494,7 @@ class PipelineFactory:
                 _CUSTOM_BUILD_ORPHAN_SWEEP_SINGLETON,
                 ExecutorImageCheck(),
                 InspectorRentedCheck(),
+                RentedPodResourcesCheck(),
                 TenantEnforcementCheck(),
                 GpuUsageCheck(),
                 LocalVerifyCheck(),
@@ -547,6 +560,8 @@ class PipelineFactory:
                 CpuTruthCheck(),
                 # DAH-2734: specs arithmetic plus a read-only SSH reading — safe in dry run.
                 ProviderSideLoadCheck(),
+                # DAH-4564: read-only docker inspect + /proc read — safe in dry run.
+                RentedPodResourcesCheck(),
                 # restore_stale_caps=False: dry run must not run nvidia-smi -pl on the executor or
                 # consume the shared gpu_power_restore:* records the production pipeline relies on.
                 GpuPowerLimitCheck(restore_stale_caps=False),
@@ -554,8 +569,12 @@ class PipelineFactory:
                 # DAH-3457: the UUID set is the node's identity and model:count is derived from it, so the
                 # fingerprint check runs first; a missing card is then GPU_MISSING, not SPEC_CHANGED.
                 GpuFingerprintCheck(),
+                # DAH-4551: the reported UUIDs checked against each card's NVIDIA-signed identity (shadow by default).
+                GpuAttestationIdentityCheck(),
                 SpecChangeCheck(),
                 BannedProviderCheck(),
+                # DAH-4547: after BannedProviderCheck, which leaves the kernel GPU list in ctx.state.
+                HardwareIdentityCheck(),
                 BannedGpuCheck(),
                 GpuKernelCountCheck(),
                 DuplicateExecutorCheck(),

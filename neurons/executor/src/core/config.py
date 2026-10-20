@@ -1,4 +1,5 @@
 import importlib.util
+import ipaddress
 from typing import Optional
 from bittensor_wallet import Keypair
 from pydantic import Field
@@ -72,6 +73,30 @@ def _validator_hotkeys(current: str, next_: str) -> dict[str, str]:
 
 VALIDATOR_HOTKEYS_SS58: dict[str, str] = _validator_hotkeys(VALIDATOR_HOTKEY_SS58, VALIDATOR_NEXT_HOTKEY_SS58)
 
+# I-78: the addresses the prod validator reaches executors from (the prod VPC's two NAT gateways).
+# A key uploaded through /upload_ssh_key logs in only from these, so a copy of the hotkey can no
+# longer buy a root shell from anywhere else. Fixed by the image like the hotkeys; a non-prod build
+# names its own in config_override (_VALIDATOR_SSH_SOURCES, written by docker_build.sh from
+# VALIDATOR_SSH_SOURCES; absent or "" = no pin).
+_BUILTIN_VALIDATOR_SSH_SOURCES = "54.163.250.18,13.223.237.157"
+
+
+def _resolve_validator_ssh_sources() -> str:
+    if importlib.util.find_spec("core.config_override") is None:
+        sources = _BUILTIN_VALIDATOR_SSH_SOURCES
+    else:
+        try:
+            from core.config_override import _VALIDATOR_SSH_SOURCES as sources
+        except ImportError:
+            sources = ""
+    # a malformed from= makes sshd refuse the key: fail the build, not every login on the fleet
+    for source in filter(None, sources.split(",")):
+        ipaddress.ip_network(source)
+    return sources
+
+
+VALIDATOR_SSH_SOURCES = _resolve_validator_ssh_sources()
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
     PROJECT_NAME: str = "compute-subnet-executor"
@@ -134,6 +159,9 @@ class Settings(BaseSettings):
     # nonce. Leave off until the validator fleet mints nonces (migration order:
     # executors accept optional nonce first, then validators send, then this).
     REQUIRE_ATTESTATION_NONCE: bool = Field(env="REQUIRE_ATTESTATION_NONCE", default=False)
+    # I-78: a dated upload nonce (datura fresh_upload_nonce) older or newer than this is refused, so a
+    # captured upload signature is worth at most this window. Symmetric for host clock drift.
+    UPLOAD_NONCE_MAX_AGE_SECONDS: int = Field(env="UPLOAD_NONCE_MAX_AGE_SECONDS", default=600)
     # Refuse an SSH-key upload unless the validator signed it for this executor's
     # MINER_HOTKEY_SS58_ADDRESS. Off: a missing or different miner hotkey is only logged
     # ("ssh_key_miner_binding"). Turn on once the validator, miner and executor fleet send it.
@@ -153,6 +181,9 @@ class Settings(BaseSettings):
     EXECUTOR_UPLOADED_KEY_TTL_S: int = Field(env="EXECUTOR_UPLOADED_KEY_TTL_S", default=900, ge=1)
     # How often the purge looks at authorized_keys; a key lives at most TTL + this.
     EXECUTOR_UPLOADED_KEY_PURGE_INTERVAL_S: int = Field(env="EXECUTOR_UPLOADED_KEY_PURGE_INTERVAL_S", default=60, ge=1)
+    # I-78 opt-out for a node whose inbound ssh is relayed (the relay's address, not the validator's,
+    # reaches sshd). Safe as an env value: whoever writes this .env is already root on the host.
+    EXECUTOR_SSH_SOURCE_PIN: bool = Field(env="EXECUTOR_SSH_SOURCE_PIN", default=True)
 
     # liumd phase 1 (DAH-2834): `POST /verify` runs the verification suite locally from one
     # validator-signed intent instead of 25–40 SSH commands. Off: the route answers 404 and

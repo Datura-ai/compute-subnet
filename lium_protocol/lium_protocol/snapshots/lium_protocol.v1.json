@@ -637,6 +637,30 @@
           ],
           "default": null
         },
+        "build_context_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Build Context Sha256"
+        },
+        "build_context_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Build Context Url"
+        },
         "cache_volumes": {
           "anyOf": [
             {
@@ -3343,7 +3367,7 @@
       "type": "object"
     },
     "GpuResetErrorCode": {
-      "description": "1.12.0: why a pod GPU reset did not run, or did not finish.",
+      "description": "1.13.0: why a pod GPU reset did not run, or did not finish.",
       "enum": [
         "MigEnabled",
         "NvlinkPeersOutsidePod",
@@ -3812,7 +3836,7 @@
       "type": "object"
     },
     "LockPodGpuClocksRequest": {
-      "description": "1.13.0: the renter asked to lock the graphics clocks of their running pod's GPUs to\n`[min_mhz, max_mhz]` (None = the GPU's own bound; clamped to its supported clocks), or with `reset`\nto give them back to the driver. `gpu_uuids` and `gpu_indices` as in `ResetPodGpuRequest`. Answered\nby `validator_to_backend.PodGpuClocksResult` with the same `request_id`.",
+      "description": "1.14.0: the renter asked to lock the graphics clocks of their running pod's GPUs to\n`[min_mhz, max_mhz]` (None = the GPU's own bound; clamped to its supported clocks), or with `reset`\nto give them back to the driver. `gpu_uuids` and `gpu_indices` as in `ResetPodGpuRequest`. Answered\nby `validator_to_backend.PodGpuClocksResult` with the same `request_id`.",
       "properties": {
         "container_name": {
           "title": "Container Name",
@@ -4256,7 +4280,7 @@
       "type": "object"
     },
     "PodGpuClocksResult": {
-      "description": "1.13.0: the answer to `backend_to_validator.LockPodGpuClocksRequest`, same `request_id`.\n`gpus` is one outcome per GPU touched, with the clamped range applied; empty when a precheck refused\nbefore anything changed, when `detail` says why. `error_code` reuses `GpuResetErrorCode`.",
+      "description": "1.14.0: the answer to `backend_to_validator.LockPodGpuClocksRequest`, same `request_id`.\n`gpus` is one outcome per GPU touched, with the clamped range applied; empty when a precheck refused\nbefore anything changed, when `detail` says why. `error_code` reuses `GpuResetErrorCode`.",
       "properties": {
         "detail": {
           "anyOf": [
@@ -4365,7 +4389,7 @@
       "type": "object"
     },
     "PodGpuResetResult": {
-      "description": "1.12.0: the answer to `backend_to_validator.ResetPodGpuRequest`, same `request_id`. `gpus` is\none outcome per GPU the validator reset (possibly more than asked: NVLink peers inside the pod are\nreset together); empty when a precheck refused before anything changed.",
+      "description": "1.13.0: the answer to `backend_to_validator.ResetPodGpuRequest`, same `request_id`. `gpus` is\none outcome per GPU the validator reset (possibly more than asked: NVLink peers inside the pod are\nreset together); empty when a precheck refused before anything changed.",
       "properties": {
         "container_restarted": {
           "default": false,
@@ -5433,7 +5457,7 @@
       "type": "object"
     },
     "ResetPodGpuRequest": {
-      "description": "1.12.0: the renter asked to reset the GPUs of their running pod. `gpu_uuids` is every GPU\nthe backend holds for the pod; `gpu_indices` picks some of them by pod index (the pod's GPUs sorted by\nhost PCI bus id, the 0..n-1 order `nvidia-smi` shows inside the pod), None for all of them. Answered by\n`validator_to_backend.PodGpuResetResult` with the same `request_id`.",
+      "description": "1.13.0: the renter asked to reset the GPUs of their running pod. `gpu_uuids` is every GPU\nthe backend holds for the pod; `gpu_indices` picks some of them by pod index (the pod's GPUs sorted by\nhost PCI bus id, the 0..n-1 order `nvidia-smi` shows inside the pod), None for all of them. Answered by\n`validator_to_backend.PodGpuResetResult` with the same `request_id`.",
       "properties": {
         "container_name": {
           "title": "Container Name",
@@ -6330,7 +6354,7 @@
       "$ref": "#/$defs/RentedExecutorsResponse"
     }
   },
-  "protocol_version": "1.13.0",
+  "protocol_version": "1.14.0",
   "socket_replies": {
     "RentedMachineResponse": {
       "$ref": "#/$defs/RentedMachineResponse"
