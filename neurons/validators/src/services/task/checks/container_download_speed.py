@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Two public objects a renter's first minutes fetch: a wheel from PyPI's file CDN and a model file from Hugging Face
 # (a pinned revision, so the bytes and the redirect target stay the same). Each read is capped at CAP_BYTES by a
-# Range request and by `head -c`, under FETCH_TIMEOUT_SECONDS.
+# `head -c` (no Range: busybox wget fails on a 206 answer), under FETCH_TIMEOUT_SECONDS.
 ENDPOINTS: tuple[tuple[str, str], ...] = (
     (
         "pypi",
@@ -57,7 +57,7 @@ NODE_SIDE_ERRORS = frozenset({"dns_failed", "unreachable", "timeout"})
 _FETCH_SCRIPT = (
     "up() { cut -d' ' -f1 /proc/uptime; }; "
     "probe() { s=$(up); "
-    f"n=$( {{ timeout {FETCH_TIMEOUT_SECONDS} wget -q -O - --header 'Range: bytes=0-{CAP_BYTES - 1}' \"$2\" "
+    f"n=$( {{ timeout {FETCH_TIMEOUT_SECONDS} wget -q -O - \"$2\" "
     f"2>/tmp/e; echo $? >/tmp/rc; }} | head -c {CAP_BYTES} | wc -c); e=$(up); "
     f'echo "{MARKER} ep=$1 bytes=$n start=$s end=$e rc=$(cat /tmp/rc 2>/dev/null)"; '
     f"echo \"{MARKER}_err ep=$1 $(head -c {_TAIL_CHARS} /tmp/e | tr '\\n' ' ')\"; }}; "
@@ -140,7 +140,7 @@ def parse_download_speed(stdout: str) -> list[EndpointReading]:
         timed_out = rc in _TIMEOUT_EXITS
         if got >= CAP_BYTES or (got > 0 and (rc == 0 or timed_out)):
             # a timed-out fetch that read something is the slow reading itself, not an error; a full read is a
-            # reading whatever wget's exit (a server ignoring Range gets SIGPIPE from head)
+            # reading whatever wget's exit (head stops a large file at the cap and wget dies of SIGPIPE)
             mbps = got * 8 / max(seconds, 0.01) / 1e6
             readings.append(EndpointReading(name, got, seconds, mbps))
         elif timed_out:

@@ -135,7 +135,7 @@ def test_command_runs_in_a_container_with_the_renter_runtime_and_a_size_cap():
     # the rentals bridge a pod runs on, or the default bridge before the node's first rental
     assert "docker network inspect lium-rentals" in cmd and "net=lium-rentals" in cmd and "net=bridge" in cmd
     assert '/usr/bin/docker run --rm --network "$net" --runtime=sysbox-runc ' in cmd
-    assert f"Range: bytes=0-{CAP_BYTES - 1}" in cmd and f"head -c {CAP_BYTES}" in cmd
+    assert "Range" not in cmd and f"head -c {CAP_BYTES}" in cmd  # busybox wget fails on 206
     assert all(url in cmd for _, url in module.ENDPOINTS)  # both pinned files, in full
     assert "--runtime" not in download_speed_command(False)
 
@@ -158,7 +158,7 @@ def test_parse_measures_mbps_and_names_errors():
     assert parse_download_speed(line("pypi", 0, 30, 143))[0].error == "timeout"
     assert parse_download_speed(line("pypi", 0, 1, 1, "wget: server returned error: HTTP/1.1 403"))[0].error == "http_error"
     assert parse_download_speed(line("pypi", 0, 1, 1, "wget: can't connect: Connection refused"))[0].error == "unreachable"
-    # a server that ignored Range: head stopped the read at the cap and wget died of SIGPIPE
+    # head stopped the read at the cap and wget died of SIGPIPE
     assert parse_download_speed(line("pypi", CAP_BYTES, 2.0, 1))[0].mbps is not None
     assert parse_download_speed("")[1].error == "no_output"
 
