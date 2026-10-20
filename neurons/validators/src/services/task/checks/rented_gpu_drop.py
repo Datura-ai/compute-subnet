@@ -19,7 +19,8 @@ and reads the NVML error code out of `gpu_scrape_error`. A GPU-loss code (NVML_G
 on its own; any other NVML code only rides along with a count fault, and a scrape error with no NVML code
 adds no `nvml_error` label. A card NVML still lists but reports its memory broken (uncorrected ECC, a
 failed row remap: GpuMemoryHealthCheck's NVML read, done here first on a rented node) is
-`ecc_uncorrected`, with its UUID in `missing_uuids`, even when every card is listed.
+`ecc_uncorrected`, even when every card is listed; its UUID goes into `missing_uuids` only when the
+rental holds every card, since the rental does not say which cards each pod holds.
 
 The counts are executor-wide, and a fault is posted for every RUNNING pod on the executor; each post
 carries that pod's own `gpu_count` next to the executor totals so the backend can tell which renters of
@@ -176,7 +177,12 @@ def judge_rented_gpus(
     rented = rented_gpu_count or 1
     code = nvml_error_code(scrape_error)
     missing = sorted(anchor - listed)[:MAX_MISSING_UUIDS] if listed or not listed_count else []
-    broken = [uuid for uuid in sorted(set(broken_uuids or ())) if uuid not in missing]
+    # The rental names no card per pod: a broken card is named only when the rental holds every card,
+    # else it may be one no pod rents (it still raises the fault).
+    whole_node = rented_gpu_count is None or rented_gpu_count >= max(nvml_count, listed_count)
+    broken_set = set(broken_uuids or ())
+    broken = [uuid for uuid in sorted(broken_set) if uuid not in missing]
+    named_broken = broken if whole_node else []
 
     faults: list[str] = []
     if visible < rented:
@@ -187,7 +193,7 @@ def judge_rented_gpus(
         faults.append(FAULT_ANCHORED_MISSING)
     if code in NVML_GPU_LOSS_CODES or (code is not None and faults):
         faults.append(FAULT_NVML_ERROR)
-    if broken:
+    if broken_set:
         faults.append(FAULT_ECC_UNCORRECTED)
     if not faults:
         return None
@@ -206,7 +212,9 @@ def judge_rented_gpus(
         expected=expected,
         visible=visible,
         nvml_count=nvml_count,
-        missing_uuids=[uuid[:MAX_UUID_CHARS] for uuid in (missing + broken)[:MAX_MISSING_UUIDS]],
+        missing_uuids=[
+            uuid[:MAX_UUID_CHARS] for uuid in (missing + named_broken)[:MAX_MISSING_UUIDS]
+        ],
         nvml_error_code=code,
         faults=faults,
         confirm_first=code not in NVML_GPU_LOSS_CODES and (cut_short or duplicate_listed),
@@ -284,18 +292,32 @@ def _rented_gpu_count(pods: list[RentedPod]) -> int | None:
     return sum(counts) if counts and all(counts) else None
 
 
-async def _read_broken_uuids(ctx: Context) -> tuple[list[str] | None, dict[str, Any]]:
-    """The UUIDs of the cards the memory read names broken (None when NVML gave no reading), and the
-    state update that keeps the read for GpuMemoryHealthCheck."""
+@dataclass(frozen=True)
+class BrokenCardsRead:
+    """The UUIDs of the cards the memory read names broken (None when NVML gave no full reading), and
+    the state update that keeps the read for GpuMemoryHealthCheck."""
+
+    uuids: list[str] | None
+    updates: dict[str, Any]
+
+
+async def _read_broken_uuids(ctx: Context) -> BrokenCardsRead:
     try:
         read = await read_memory_health(ctx)
     except Exception:
         # never fatal: GpuMemoryHealthCheck reads again
-        return None, {}
+        return BrokenCardsRead(None, {})
     updates = {"state": replace(ctx.state, memory_health=read)}
-    if read.report.get("status") not in ("ok", "flagged"):
-        return None, updates
-    return flagged_uuids(read.report), updates
+    status = read.report.get("status")
+    if status not in ("ok", "flagged"):
+        return BrokenCardsRead(None, updates)
+    uuids = flagged_uuids(read.report)
+    gpus = (read.report.get("nvml") or {}).get("gpus") or []
+    ecc_unread = any(isinstance(gpu, dict) and gpu.get("ecc_uncorrected") is None for gpu in gpus)
+    # a flag naming no card, or a card whose ECC NVML could not read, is no proof a broken card healed
+    if not uuids and (status == "flagged" or ecc_unread):
+        return BrokenCardsRead(None, updates)
+    return BrokenCardsRead(uuids, updates)
 
 
 class RentedGpuDropCheck:
@@ -334,7 +356,8 @@ class RentedGpuDropCheck:
             nvml_count = (specs.get("gpu") or {}).get("count", 0) or 0
         scrape_error = specs.get("gpu_scrape_error")
         rented_total = _rented_gpu_count(all_pods)
-        broken_uuids, updates = await _read_broken_uuids(ctx)
+        memory = await _read_broken_uuids(ctx)
+        broken_uuids, updates = memory.uuids, memory.updates
         drop = judge_rented_gpus(
             rented_gpu_count=rented_total,
             anchor_uuids=split_uuids((ctx.verified or {}).get(GPU_ANCHOR_KEY) or ""),
@@ -424,7 +447,9 @@ class RentedGpuDropCheck:
             if mark is None:
                 return None
             if memory_unread and mark.ecc:
-                # no memory reading is no proof the broken card healed: keep the incident open
+                # no memory reading is no proof the broken card healed: keep the incident open, and its
+                # mark alive past the TTL
+                await self._save(ctx, pod.pod_id, mark, redis_ok)
                 return None
             return await self._recover(ctx, pod, mark, rented_total, nvml_count, redis_ok)
 

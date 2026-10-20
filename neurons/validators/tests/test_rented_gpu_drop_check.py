@@ -420,6 +420,62 @@ async def test_a_failed_memory_read_does_not_recover_an_uncorrected_ecc_incident
     assert _states(services) == ["fault", "recovered"]
 
 
+ECC_FLAGS = [f"gpu 3 ({UUIDS[3]}): 1 uncorrected ECC error(s) since the driver loaded"]
+
+
+@pytest.mark.asyncio
+async def test_a_broken_card_on_a_partly_rented_node_is_not_named(context_factory):
+    # the rental does not say which cards the pod holds: the broken card may be one no pod rents
+    services = _services()
+    ctx = _ctx(context_factory, services, listed=UUIDS, gpu_count=1).model_copy(
+        update={"runner": FakeRunner(_report("flagged", flags=ECC_FLAGS))}
+    )
+
+    result = await RentedGpuDropCheck().run(ctx)
+
+    assert result.event.what_we_saw["faults"] == [FAULT_ECC_UNCORRECTED]
+    call = services.backend.report_rented_gpu_drop.await_args
+    assert call.kwargs["faults"] == [FAULT_ECC_UNCORRECTED]
+    assert call.kwargs["missing_uuids"] == []
+
+
+UNREAD_MEMORY = [
+    pytest.param(
+        _report("flagged", flags=["gpu 3: no uuid in this flag"]), id="flag-names-no-card"
+    ),
+    pytest.param(
+        _report(
+            "ok",
+            flags=[],
+            nvml={
+                "available": True,
+                "gpus": [{"index": 3, "uuid": UUIDS[3], "ecc_uncorrected": None}],
+            },
+        ),
+        id="ecc-read-failed-on-a-card",
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unread_stdout", UNREAD_MEMORY)
+async def test_a_memory_read_that_proves_nothing_keeps_an_ecc_incident_open(
+    context_factory, unread_stdout
+):
+    redis = FakeRedis()
+    services = _services(redis=redis)
+    key = f"rented_gpu_drop:{POD_ID}"
+    await _run_with_memory_read(context_factory, services, _report("flagged", flags=ECC_FLAGS))
+    redis.ttl.pop(key)
+
+    unread, _ = await _run_with_memory_read(context_factory, services, unread_stdout)
+
+    assert unread.event.reason_code == Msg.OK.reason
+    assert _states(services) == ["fault"]
+    # the held mark is written again, so its TTL does not run out while NVML stays unread
+    assert redis.ttl[key] == rented_gpu_drop.settings.RENTED_GPU_DROP_STATE_TTL_SECONDS
+
+
 @pytest.mark.asyncio
 async def test_a_healthy_memory_read_reports_nothing(context_factory):
     services = _services()
