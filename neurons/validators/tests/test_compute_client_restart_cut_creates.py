@@ -5,25 +5,25 @@ import pytest
 
 from clients.compute_client import CREATE_CUT_OFF_BY_RESTART_STEP, ComputeClient, OutgoingMessages
 from payload_models.payloads import ContainerCreateRequest, FailedContainerRequest, WorkloadKind
-from services.redis_service import RedisService
+from services.redis_service import InflightBackendCreate, RedisService
 
 
 class _FakeRedis:
     """the hash commands RedisService uses, in memory"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.hashes: dict[str, dict[str, str]] = {}
 
-    async def hset(self, key, field, value):
+    async def hset(self, key: str, field: str, value: str) -> None:
         self.hashes.setdefault(key, {})[field] = value
 
-    async def hget(self, key, field):
+    async def hget(self, key: str, field: str) -> str | None:
         return self.hashes.get(key, {}).get(field)
 
-    async def hgetall(self, key):
+    async def hgetall(self, key: str) -> dict[bytes, bytes]:
         return {k.encode(): v.encode() for k, v in self.hashes.get(key, {}).items()}
 
-    async def hdel(self, key, *fields):
+    async def hdel(self, key: str, *fields: str) -> None:
         for field in fields:
             self.hashes.get(key, {}).pop(field, None)
 
@@ -45,7 +45,7 @@ def _client(redis_service: RedisService) -> ComputeClient:
 
 
 @pytest.mark.asyncio
-async def test_a_create_cut_off_by_a_restart_is_reported_failed_and_its_pending_flag_cleared():
+async def test_a_create_cut_off_by_a_restart_is_reported_failed_and_its_pending_flag_cleared() -> None:
     redis_service = _redis_service()
     await redis_service.add_pending_pod("miner-hk", "exec-1", "pod-1")
     await redis_service.add_inflight_backend_create("pod-1", "miner-hk", "exec-1", WorkloadKind.FILLER)
@@ -87,7 +87,7 @@ async def test_the_restart_report_untracks_the_create_once_it_is_sent():
 
 
 @pytest.mark.asyncio
-async def test_a_finished_customer_rental_keeps_its_pending_flag_and_is_not_reported():
+async def test_a_finished_customer_rental_keeps_its_pending_flag_and_is_not_reported() -> None:
     # a customer create that succeeded leaves its pending-pod flag on purpose (the rental probe clears it later)
     redis_service = _redis_service()
     await redis_service.add_pending_pod("miner-hk", "exec-1", "pod-running")
@@ -100,12 +100,12 @@ async def test_a_finished_customer_rental_keeps_its_pending_flag_and_is_not_repo
 
 
 @pytest.mark.asyncio
-async def test_a_create_is_tracked_while_it_runs_and_untracked_when_it_ends():
+async def test_a_create_is_tracked_while_it_runs_and_untracked_when_it_ends() -> None:
     redis_service = _redis_service()
     client = _client(redis_service)
-    seen_while_running: list[dict] = []
+    seen_while_running: list[dict[str, InflightBackendCreate]] = []
 
-    async def drive(job_request):
+    async def drive(job_request: ContainerCreateRequest) -> None:
         seen_while_running.append(await redis_service.inflight_backend_creates())
         raise RuntimeError("the create failed")
 
@@ -122,21 +122,21 @@ async def test_a_create_is_tracked_while_it_runs_and_untracked_when_it_ends():
 
 
 class _BrokenRedis(_FakeRedis):
-    async def hset(self, key, field, value):
+    async def hset(self, key: str, field: str, value: str) -> None:
         raise ConnectionError("redis is down")
 
-    async def hdel(self, key, *fields):
+    async def hdel(self, key: str, *fields: str) -> None:
         raise ConnectionError("redis is down")
 
 
 @pytest.mark.asyncio
-async def test_a_create_still_runs_and_returns_when_redis_cannot_track_it():
+async def test_a_create_still_runs_and_returns_when_redis_cannot_track_it() -> None:
     # a lost tracking entry costs only the restart report; a lost create would leave the pod pending
     redis_service = _redis_service()
     redis_service.redis = _BrokenRedis()
     client = _client(redis_service)
 
-    async def drive(job_request):
+    async def drive(job_request: ContainerCreateRequest) -> str:
         return "created"
 
     client._drive_miner_job = drive

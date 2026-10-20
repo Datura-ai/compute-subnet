@@ -5,7 +5,7 @@ import time
 from contextlib import asynccontextmanager
 from typing import NamedTuple
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from protocol.vc_protocol.validator_requests import ResetVerifiedJobReason
 import redis.asyncio as aioredis
 import redis.exceptions
@@ -29,7 +29,6 @@ PENDING_PODS_PREFIX = "pending_pods_prefix"
 # DAH-4698: creates the backend sent that are running in this connector right now, by pod id; what is left when a
 # connector starts was cut off by the restart (a redeploy recreates the connector mid-create)
 INFLIGHT_BACKEND_CREATES_KEY = "inflight_backend_creates"
-
 DUPLICATED_MACHINE_SET = "duplicated_machines"
 RENTAL_SUCCEED_MACHINE_SET = "rental_succeed_machines"
 AVAILABLE_PORT_MAPS_PREFIX = "available_port_maps"
@@ -123,6 +122,8 @@ REDIS_RETRY_ATTEMPTS = 3
 REDIS_HEALTH_CHECK_INTERVAL_SECONDS = 30
 
 logger = logging.getLogger(__name__)
+
+
 
 class InflightBackendCreate(BaseModel):
     miner_hotkey: str
@@ -589,10 +590,16 @@ class RedisService:
     async def inflight_backend_creates(self) -> dict[str, InflightBackendCreate]:
         """pod id -> the create the backend sent for it"""
         raw = await self.hgetall(INFLIGHT_BACKEND_CREATES_KEY) or {}
-        return {
-            (pod_id.decode() if isinstance(pod_id, bytes) else pod_id): InflightBackendCreate.model_validate_json(entry)
-            for pod_id, entry in raw.items()
-        }
+        creates: dict[str, InflightBackendCreate] = {}
+        for raw_pod_id, entry in raw.items():
+            pod_id = raw_pod_id.decode() if isinstance(raw_pod_id, bytes) else raw_pod_id
+            try:
+                creates[pod_id] = InflightBackendCreate.model_validate_json(entry)
+            except ValidationError:
+                # one bad entry must not block the sweep of the others on every start
+                logger.error(_m("Dropping an unreadable inflight backend create", extra={"pod_id": pod_id}))
+                await self.hdel(INFLIGHT_BACKEND_CREATES_KEY, pod_id)
+        return creates
 
     async def get_pending_pods(self, miner_hotkey: str, executor_id: str) -> list[dict]:
         data = await self.hget(PENDING_PODS_PREFIX, f"{miner_hotkey}:{executor_id}")
