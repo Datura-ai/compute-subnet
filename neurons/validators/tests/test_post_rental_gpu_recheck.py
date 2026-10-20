@@ -10,23 +10,22 @@ from neurons.validators.src.services.task.checks import (
     GpuModelValidCheck,
     PinnedMemoryProbeCheck,
     PostRentalGpuRecheckCheck,
-    RentedGpuHealthShadowCheck,
     ScoreCheck,
     TenantEnforcementCheck,
 )
 from neurons.validators.src.services.task.checks import gpu_fault_probe as probe_module
 from neurons.validators.src.services.task.checks import post_rental_gpu_recheck as module
+from neurons.validators.src.services.task.checks.gpu_memory_health import GpuMemoryHealthCheck
 from neurons.validators.src.services.task.messages import PostRentalGpuRecheckMessages as Msg
 from neurons.validators.src.services.task.pipeline import ParallelStage
 from neurons.validators.src.services.task.pipeline_factory import PipelineFactory
 
 from tests.helpers import build_context_config, build_services, build_state, default_executor
 from tests.test_gpu_fault_probe_check import FakeRunner, probe_stdout
-from tests.test_rented_gpu_health_shadow import _ctx as rented_ctx
-from tests.test_rented_gpu_health_shadow import _healthy, _stdout
+from tests.test_gpu_memory_health_check import FLAGS, _live_rental, _report
 
 KEY = module.marker_key("miner-hotkey", default_executor().uuid)
-MARKER = {"at": "2026-10-15T00:00:00+00:00", "source": "rented_gpu_health_shadow", "cards": []}
+MARKER = {"at": "2026-10-15T00:00:00+00:00", "source": "gpu.validate.memory_health", "flags": []}
 
 
 class FakeValidation:
@@ -71,39 +70,45 @@ def test_off_by_default():
 # --- the marker, set on a rented cycle ----------------------------------------------------------------------
 
 
-@pytest.fixture
-def shadow_on():
-    with patch.object(module.settings, "RENTED_GPU_HEALTH_SHADOW_ENABLED", True):
-        yield
+def _memory_health_ctx(context_factory, *, rented: bool):
+    return context_factory(
+        services=build_services(),
+        config=build_context_config(),
+        state=build_state(
+            specs={"gpu": {"count": 8}}, rented_data=_live_rental() if rented else None
+        ),
+        runner=FakeRunner(_report("flagged", flags=FLAGS)),
+    )
 
 
 @pytest.mark.asyncio
-async def test_a_flagged_rented_cycle_records_the_marker(context_factory, shadow_on):
-    gpus = [_healthy(i) for i in range(8)]
-    gpus[0]["recovery_action"] = 1
-    gpus[1] |= {"pcie_width": 8, "pcie_width_max": 16}
-    ctx = rented_ctx(context_factory, FakeRunner(_stdout(gpus)))
+async def test_a_card_flagged_under_a_live_rental_records_the_marker(context_factory):
+    ctx = _memory_health_ctx(context_factory, rented=True)
 
-    result = await RentedGpuHealthShadowCheck().run(ctx)
+    result = await GpuMemoryHealthCheck().run(ctx)
 
-    assert result.passed is True
+    assert result.passed is False and result.fatal is False
     redis = ctx.services.redis
     assert redis.ttl[KEY] == module.MARKER_TTL_SECONDS
     marker = json.loads(redis.store[KEY])
-    assert marker["source"] == "rented_gpu_health_shadow" and marker["at"]
-    assert [(card["index"], card["flags"]) for card in marker["cards"]] == [
-        (0, ["recovery_action"]),
-        (1, ["pcie_width_drop"]),
-    ]
+    assert marker["source"] == "gpu.validate.memory_health" and marker["at"]
+    assert (marker["verdict"], marker["flags"]) == ("flagged", FLAGS)
 
 
 @pytest.mark.asyncio
-async def test_a_clean_rented_cycle_records_nothing(context_factory, shadow_on):
-    ctx = rented_ctx(context_factory, FakeRunner(_stdout([_healthy(i) for i in range(8)])))
+async def test_an_idle_flagged_or_a_clean_rented_read_records_nothing(context_factory):
+    # idle: the read itself already fails the node every cycle until the card is fixed
+    idle = _memory_health_ctx(context_factory, rented=False)
+    clean = context_factory(
+        services=build_services(),
+        config=build_context_config(),
+        state=build_state(specs={"gpu": {"count": 8}}, rented_data=_live_rental()),
+        runner=FakeRunner(_report("ok")),
+    )
 
-    await RentedGpuHealthShadowCheck().run(ctx)
-
-    assert KEY not in ctx.services.redis.store
+    for ctx in (idle, clean):
+        await GpuMemoryHealthCheck().run(ctx)
+        assert KEY not in ctx.services.redis.store
 
 
 # --- the recheck, on the next unrented cycle ----------------------------------------------------------------

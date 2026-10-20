@@ -13,11 +13,14 @@ Covers:
 """
 
 import asyncio
+import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import bittensor
 import pytest
-from datura.requests.validator_requests import ssh_pubkey_signing_blob
+from datura.requests import validator_requests
+from datura.requests.validator_requests import fresh_upload_nonce, ssh_pubkey_signing_blob
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from middlewares.miner import MinerMiddleware
@@ -148,13 +151,26 @@ def test_require_nonce_enforcement_upload_only(
     # Arrange — enforcement phase: uploads without a nonce are rejected
     monkeypatch.setattr(settings, "REQUIRE_ATTESTATION_NONCE", True)
     no_nonce = _build_payload(miner_keypair, validator_keypair, nonce=None)
-    with_nonce = _build_payload(miner_keypair, validator_keypair, nonce=_NONCE)
+    undated = _build_payload(miner_keypair, validator_keypair, nonce=_NONCE)
+    with_nonce = _build_payload(miner_keypair, validator_keypair, nonce=fresh_upload_nonce())
 
     # Act / Assert
     assert client.post("/upload_ssh_key", json=no_nonce).status_code == 401
+    assert client.post("/upload_ssh_key", json=undated).status_code == 401
     assert client.post("/upload_ssh_key", json=with_nonce).status_code == 200
     # Removals never carry a nonce and must keep working during enforcement.
     assert client.post("/remove_ssh_key", json=no_nonce).status_code == 200
+
+
+@pytest.mark.parametrize("age, status", [(0, 200), (590, 200), (-590, 200), (610, 401), (-610, 401)])
+def test_dated_nonce_freshness(client, miner_keypair, validator_keypair, age, status, monkeypatch):
+    # I-78: a captured upload signature over a dated nonce is refused once outside the window
+    minted_at = time.time() - age
+    # patch only the minting module's `time`: the executor's freshness check keeps the real clock
+    with monkeypatch.context() as m:
+        m.setattr(validator_requests, "time", SimpleNamespace(time=lambda: minted_at))
+        payload = _build_payload(miner_keypair, validator_keypair, nonce=fresh_upload_nonce())
+    assert client.post("/upload_ssh_key", json=payload).status_code == status
 
 
 # ---------------------------------------------------------------------------

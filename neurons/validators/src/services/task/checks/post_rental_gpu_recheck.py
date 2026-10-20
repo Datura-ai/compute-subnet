@@ -1,11 +1,11 @@
 """POST_RENTAL_GPU_RECHECK (DAH-4482): a node whose GPUs looked broken during a rental proves every card
 before it re-lists.
 
-A rented node's cycle halts at TenantEnforcementCheck before any GPU work, and a GeForce card that breaks
-under a rental keeps passing the single-card matmul once the renter leaves. RentedGpuHealthShadowCheck
-records a per-executor marker whenever its read shows a fault or a flag; on the node's next unrented cycle
-this check runs the all-cards matmul and the kernel-fault probe on every card, whatever the
-MATMUL_ALLCARDS_* / GPU_FAULT_PROBE_* flags say. A failure fails the node and keeps the marker; a pass
+A rented node's cycle halts at TenantEnforcementCheck before any GPU work, and a card that breaks under a
+rental can keep passing the single-card matmul once the renter leaves. GpuMemoryHealthCheck, the one NVML
+read that runs on rented nodes (DAH-3110), records a per-executor marker when it flags a card under a live
+rental; on the node's next unrented cycle this check runs the all-cards matmul and the kernel-fault probe
+on every card, whatever the MATMUL_ALLCARDS_* / GPU_FAULT_PROBE_* flags say. A failure fails the node and keeps the marker; a pass
 clears it. Off by default (POST_RENTAL_GPU_RECHECK_ENABLED): the cycle then only logs
 POST_RENTAL_GPU_RECHECK_WOULD_REQUIRE.
 
@@ -52,25 +52,11 @@ def marker_key(miner_hotkey: str, executor_uuid: str) -> str:
     return f"{POST_RENTAL_GPU_RECHECK_PREFIX}:{miner_hotkey}:{executor_uuid}"
 
 
-async def record_marker(ctx: Context, source: str, health: dict[str, Any]) -> None:
-    """Remember what a rented cycle flagged. Never raises: the caller is a shadow check."""
+async def record_marker(ctx: Context, source: str, detail: dict[str, Any]) -> None:
+    """Remember what a rented cycle flagged. Never raises: the caller's verdict must not depend on Redis."""
     if settings.DRY_RUN:
         return
-    cards = [
-        {
-            key: card.get(key)
-            for key in ("index", "uuid", "verdict", "reasons", "flags")
-            if card.get(key) is not None
-        }
-        for card in health.get("cards") or []
-        if card.get("verdict") != "ok" or card.get("flags")
-    ][:MAX_MARKED_CARDS]
-    marker = {
-        "at": datetime.now(UTC).isoformat(),
-        "source": source,
-        "verdict": health.get("verdict"),
-        "cards": cards,
-    }
+    marker = {"at": datetime.now(UTC).isoformat(), "source": source, **detail}
     try:
         await ctx.services.redis.set(
             marker_key(ctx.miner_hotkey, ctx.executor.uuid),
@@ -87,7 +73,7 @@ async def record_marker(ctx: Context, source: str, health: dict[str, Any]) -> No
 
 
 async def record_gpu_drop(ctx: Context, missing_uuids: list[str]) -> None:
-    """A card fell off the bus: owe a recheck. Never raises: the caller's verdict must not depend on Redis."""
+    """A card fell off the bus: owe a recheck."""
     await record_marker(
         ctx,
         "gpu_details_mismatch",

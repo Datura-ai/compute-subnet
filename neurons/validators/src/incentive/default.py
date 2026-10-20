@@ -269,10 +269,16 @@ class DefaultIncentive(BaseIncentive):
             )
 
         # Apply multiplier
+        spot_rental_factor: float = self._spot_rental_factor(job_result)
         job_result.mining_score *= (
-            job_result.sysbox_multiplier * job_result.uptime_multiplier * job_result.driver_multiplier
+            job_result.sysbox_multiplier
+            * job_result.uptime_multiplier
+            * job_result.driver_multiplier
+            * spot_rental_factor
         )
-        line: MinerLogLine = MinerLogLine.mining_score_calculated(job_result, is_rented_after_cutoff)
+        line: MinerLogLine = MinerLogLine.mining_score_calculated(
+            job_result, is_rented_after_cutoff, spot_rental_factor
+        )
         job_result.record_incentive_log(line)
         logger.info(line.as_internal_log())
         # a rented node zeroed by the Sysbox portion must say why (the idle path has its own reason)
@@ -280,10 +286,13 @@ class DefaultIncentive(BaseIncentive):
             job_result.record_incentive_log(MinerLogLine.no_payout_because_rented_sysbox_not_confirmed(job_result))
         return job_result
 
+    def _spot_rental_factor(self, job_result: JobResult) -> float:
+        """Share of the mining score a rented spot node keeps; 1.0 for every other node."""
+        return 1.0
+
     async def calculate_final_weights(
         self,
         miners: list[bittensor.NeuronInfo],
-        last_mechanism_step_block: int | None,
         current_epoch: int | None = None,
     ) -> dict[str, float]:
         """Calculate scores with burning logic for this cycle.
@@ -294,7 +303,6 @@ class DefaultIncentive(BaseIncentive):
 
         Args:
             miners: List of miner neuron information
-            last_mechanism_step_block: Last mechanism step block number
 
         Returns:
             dict[str, float]: Scores with burning applied for each miner
@@ -303,7 +311,6 @@ class DefaultIncentive(BaseIncentive):
         burn_scores = self.burn_service.calculate_burn_scores(
             miners=miners,
             burn_share=self.burn_share,  # burn-emission share sourced from shared config (DAH-2274)
-            last_mechanism_step_block=last_mechanism_step_block,
         )
         cycle_scores = dict(burn_scores)
         for miner in miners:
