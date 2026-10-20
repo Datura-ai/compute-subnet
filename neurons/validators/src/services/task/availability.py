@@ -150,7 +150,9 @@ def build_ssh_unreachable_event(
         if host_key_mismatch
         else (
             "Check that sshd on the node accepts the validator on its management port, "
-            "and that no firewall or rate limit rejects the connection."
+            "and that no firewall or rate limit rejects the connection. If your host NATs or "
+            "proxies inbound SSH, set EXECUTOR_SSH_SOURCE_PIN=false in the executor .env and "
+            "restart the executor."
         ),
         what_we_saw={
             "executor_uuid": executor_uuid,
