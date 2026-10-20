@@ -8,7 +8,7 @@ from core.config import settings
 
 from ..messages import GpuMemoryHealthMessages as Msg
 from ..messages import render_message
-from ..pipeline import CheckResult, Context
+from ..pipeline import CheckResult, Context, MemoryHealthRead
 from .banned_provider import has_live_rental
 from .gpu_fault_probe import OUTPUT_TAIL_CHARS, PROBE_SOURCE, _cap, _parse_report
 
@@ -18,7 +18,7 @@ TIMEOUT_SECONDS = 30
 _FLAG_UUID = re.compile(r"^gpu \S+ \(([^()]+)\): ")
 
 
-async def read_memory_health(ctx: Context) -> tuple[Any, dict[str, Any]]:
+async def read_memory_health(ctx: Context) -> MemoryHealthRead:
     """The NVML-only probe's run and report, read once per cycle: RentedGpuDropCheck reads it first
     on a rented node (and keeps it in `ctx.state.memory_health`), and GpuMemoryHealthCheck reuses it."""
     if ctx.state.memory_health is not None:
@@ -27,7 +27,7 @@ async def read_memory_health(ctx: Context) -> tuple[Any, dict[str, Any]]:
     run = await ctx.runner.run(
         command, timeout=TIMEOUT_SECONDS, retryable=False, stdin_text=PROBE_SOURCE
     )
-    return run, _parse_report(run.stdout) or {}
+    return MemoryHealthRead(run=run, report=_parse_report(run.stdout) or {})
 
 
 def flagged_uuids(report: dict[str, Any]) -> list[str]:
@@ -56,7 +56,8 @@ class GpuMemoryHealthCheck:
     fatal = True
 
     async def run(self, ctx: Context) -> CheckResult:
-        run, report = await read_memory_health(ctx)
+        read = await read_memory_health(ctx)
+        run, report = read.run, read.report
         what: dict[str, Any] = {"executor_uuid": ctx.executor.uuid}
         status = report.get("status")
         if status == "flagged":

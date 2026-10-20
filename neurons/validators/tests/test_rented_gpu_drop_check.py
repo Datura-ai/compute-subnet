@@ -399,8 +399,25 @@ async def test_a_listed_card_with_uncorrected_ecc_is_reported_as_lost(context_fa
     assert call.kwargs["missing_uuids"] == [UUIDS[3]]
     assert call.kwargs["expected_gpu_count"] == call.kwargs["visible_gpu_count"] == 8
     # GpuMemoryHealthCheck reuses this read instead of a second SSH run
-    assert result.updates["state"].memory_health[1]["flags"] == flags
+    assert result.updates["state"].memory_health.report["flags"] == flags
     assert len(ctx.runner.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_memory_read_does_not_recover_an_uncorrected_ecc_incident(context_factory):
+    services = _services()
+    flags = [f"gpu 3 ({UUIDS[3]}): 1 uncorrected ECC error(s) since the driver loaded"]
+    await _run_with_memory_read(context_factory, services, _report("flagged", flags=flags))
+
+    unread, _ = await _run_with_memory_read(
+        context_factory, services, _report("error", flags=[], nvml={"available": False})
+    )
+    assert unread.event.reason_code == Msg.OK.reason
+    assert _states(services) == ["fault"]
+
+    healed, _ = await _run_with_memory_read(context_factory, services, _report("ok"))
+    assert healed.event.reason_code == Msg.RECOVERED.reason
+    assert _states(services) == ["fault", "recovered"]
 
 
 @pytest.mark.asyncio

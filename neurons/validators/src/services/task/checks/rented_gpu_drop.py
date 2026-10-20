@@ -224,6 +224,8 @@ class DropMark:
     unanswered: bool = False
     recovering: bool = False
     evidence: list[Any] | None = None
+    # the incident named a card with uncorrected ECC, which only the memory read can call healed
+    ecc: bool = False
 
     @classmethod
     def load(cls, raw: object) -> DropMark | None:
@@ -282,6 +284,20 @@ def _rented_gpu_count(pods: list[RentedPod]) -> int | None:
     return sum(counts) if counts and all(counts) else None
 
 
+async def _read_broken_uuids(ctx: Context) -> tuple[list[str] | None, dict[str, Any]]:
+    """The UUIDs of the cards the memory read names broken (None when NVML gave no reading), and the
+    state update that keeps the read for GpuMemoryHealthCheck."""
+    try:
+        read = await read_memory_health(ctx)
+    except Exception:
+        # never fatal: GpuMemoryHealthCheck reads again
+        return None, {}
+    updates = {"state": replace(ctx.state, memory_health=read)}
+    if read.report.get("status") not in ("ok", "flagged"):
+        return None, updates
+    return flagged_uuids(read.report), updates
+
+
 class RentedGpuDropCheck:
     """Report a rented node that lost a GPU on the cycle it is seen, once per incident per pod.
 
@@ -318,14 +334,7 @@ class RentedGpuDropCheck:
             nvml_count = (specs.get("gpu") or {}).get("count", 0) or 0
         scrape_error = specs.get("gpu_scrape_error")
         rented_total = _rented_gpu_count(all_pods)
-        updates: dict[str, Any] = {}
-        try:
-            memory_health = await read_memory_health(ctx)
-            updates = {"state": replace(ctx.state, memory_health=memory_health)}
-            broken_uuids = flagged_uuids(memory_health[1])
-        except Exception:
-            # never fatal: an unread card is not a broken one, and GpuMemoryHealthCheck reads again
-            broken_uuids = []
+        broken_uuids, updates = await _read_broken_uuids(ctx)
         drop = judge_rented_gpus(
             rented_gpu_count=rented_total,
             anchor_uuids=split_uuids((ctx.verified or {}).get(GPU_ANCHOR_KEY) or ""),
@@ -333,7 +342,7 @@ class RentedGpuDropCheck:
             listed_uuids=_listed_uuids(gpu_details),
             listed_count=len(gpu_details),
             scrape_error=scrape_error,
-            broken_uuids=broken_uuids,
+            broken_uuids=broken_uuids or [],
         )
 
         now_iso = datetime.now(UTC).isoformat()
@@ -341,7 +350,9 @@ class RentedGpuDropCheck:
         outcomes: list[dict[str, Any]] = []
         if not settings.DRY_RUN:
             for pod in pods:
-                outcome = await self._track_pod(ctx, pod, drop, rented_total, nvml_count, now_iso)
+                outcome = await self._track_pod(
+                    ctx, pod, drop, rented_total, nvml_count, now_iso, broken_uuids is None
+                )
                 if outcome is not None:
                     outcomes.append(outcome)
 
@@ -396,6 +407,7 @@ class RentedGpuDropCheck:
         rented_total: int | None,
         nvml_count: int,
         now_iso: str,
+        memory_unread: bool = False,
     ) -> dict[str, Any] | None:
         key = _key(pod.pod_id)
         redis_ok = True
@@ -411,6 +423,9 @@ class RentedGpuDropCheck:
         if drop is None:
             if mark is None:
                 return None
+            if memory_unread and mark.ecc:
+                # no memory reading is no proof the broken card healed: keep the incident open
+                return None
             return await self._recover(ctx, pod, mark, rented_total, nvml_count, redis_ok)
 
         if mark is None:
@@ -421,6 +436,7 @@ class RentedGpuDropCheck:
             mark = DropMark(now_iso, recorded=mark.recorded, unanswered=mark.unanswered)
         else:
             mark = replace(mark, consecutive_cycles=mark.consecutive_cycles + 1)
+        mark = replace(mark, ecc=mark.ecc or FAULT_ECC_UNCORRECTED in drop.faults)
         answer: RentedGpuDropResponse | None = None
         posted = False
         held = drop.confirm_first and mark.consecutive_cycles < 2

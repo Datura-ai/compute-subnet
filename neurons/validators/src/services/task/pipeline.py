@@ -27,7 +27,7 @@ from services.container_cleanup import ContainerCleanup
 from protocol.vc_protocol.compute_requests import RentedExecutorsResponse
 from protocol.vc_protocol.validator_requests import PodContainerState
 from .models import ValidationEvent
-from .runner import SSHCommandRunner
+from .runner import SSHCommandResult, SSHCommandRunner
 
 @runtime_checkable
 class PodRecoverer(Protocol):
@@ -125,6 +125,14 @@ class ContextConfig:
 
 
 @dataclass(frozen=True)
+class MemoryHealthRead:
+    """One NVML-only memory read (gpu_memory_health.read_memory_health): the SSH run and its report."""
+
+    run: SSHCommandResult
+    report: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class ContextState:
     upload_local_dir: Optional[str] = None
     upload_remote_dir: Optional[str] = None
@@ -172,8 +180,7 @@ class ContextState:
     # ExecutorSpecRequest.pod_states.
     pod_states: list[PodContainerState] = field(default_factory=list)
     rented_data: RentedExecutorsResponse | None = None
-    # (run, report) of the NVML-only memory read (gpu_memory_health.read_memory_health)
-    memory_health: tuple[Any, dict[str, Any]] | None = None
+    memory_health: MemoryHealthRead | None = None
     gpu_metrics: dict | None = None
     inspector_event: dict | None = None
     # DAH-2265 Plan 2: advisory result of the cached-template verification check.
