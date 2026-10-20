@@ -424,8 +424,10 @@ class Settings(BaseSettings):
     CROSS_HOTKEY_GPU_UUID_ENFORCEMENT_ENABLED: bool = Field(
         env="CROSS_HOTKEY_GPU_UUID_ENFORCEMENT_ENABLED", default=False
     )
-    # Mikhail (20 Oct): 24 h, as genuine new providers re-list the same rented-out nodes
-    CROSS_HOTKEY_GPU_UUID_WINDOW_HOURS: int = Field(env="CROSS_HOTKEY_GPU_UUID_WINDOW_HOURS", default=24)
+    # Fish (20 Oct): never hold back a card that moved to another hotkey; only stop one card earning
+    # twice. The window is two validation cycles (15 min each), so it only catches two hotkeys
+    # validating the same card at the same time; a moved machine stops validating under the old one.
+    CROSS_HOTKEY_GPU_UUID_WINDOW_MINUTES: int = Field(env="CROSS_HOTKEY_GPU_UUID_WINDOW_MINUTES", default=30)
     # DAH-4547 - HardwareIdentityCheck: DMI files not served by sysfs (a cloak script's overlay), the
     # kernel and NVML GPU lists disagreeing, or DMI identity changing under an unchanged GPU set.
     # Shadow by default: the finding is logged as a warning event and the node passes.

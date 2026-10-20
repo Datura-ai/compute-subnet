@@ -829,12 +829,12 @@ class DuplicateExecutorMessages:
         remediation="One machine earns under one miner per cycle. Register it under one miner only.",
     )
     CROSS_HOTKEY_GPU_UUID = MessageTemplate(
-        event="GPU UUIDs recently listed under another miner hotkey",
+        event="GPU UUIDs validated under another miner hotkey at the same time",
         reason="GPU_UUID_SEEN_UNDER_OTHER_HOTKEY",
         severity="warning",
         category="policy",
         impact="Score set to 0; verification cleared",
-        remediation="List each GPU under one miner hotkey. A moved node passes once the old hotkey has not reported it for the window.",
+        remediation="List each GPU under one miner hotkey. A node moved to a new hotkey passes once the old hotkey stops validating it.",
     )
 
 class CollateralStatusMessages:

@@ -136,8 +136,8 @@ def _gpu_ctx(redis_service, context_factory, miner_hotkey: str, executor_uuid: s
     )
 
 
-def _seen(redis_service, hotkey: str, hours_ago: float):
-    ts = time.time() - hours_ago * 3600
+def _seen(redis_service, hotkey: str, minutes_ago: float):
+    ts = time.time() - minutes_ago * 60
     for uuid in ("GPU-1", "GPU-2"):
         redis_service.hashes.setdefault(GPU_UUID_HOTKEYS_SEEN, {})[uuid] = json.dumps({hotkey: ts})
 
@@ -171,7 +171,7 @@ async def test_same_hotkey_new_executor_id_passes(context_factory, monkeypatch):
 async def test_other_hotkey_in_window_logged_only_when_off(context_factory, monkeypatch, caplog):
     monkeypatch.setattr(settings, "CROSS_HOTKEY_GPU_UUID_ENFORCEMENT_ENABLED", False)
     redis_service = GpuSeenRedis()
-    _seen(redis_service, "hotkey-a", hours_ago=2)
+    _seen(redis_service, "hotkey-a", minutes_ago=10)
 
     with caplog.at_level(logging.WARNING):
         result = await _run_cycle(redis_service, _gpu_ctx(redis_service, context_factory, "hotkey-b"))
@@ -187,7 +187,7 @@ async def test_other_hotkey_in_window_logged_only_when_off(context_factory, monk
 async def test_other_hotkey_in_window_fails_when_on(context_factory, monkeypatch):
     monkeypatch.setattr(settings, "CROSS_HOTKEY_GPU_UUID_ENFORCEMENT_ENABLED", True)
     redis_service = GpuSeenRedis()
-    _seen(redis_service, "hotkey-a", hours_ago=2)
+    _seen(redis_service, "hotkey-a", minutes_ago=10)
 
     result = await _run_cycle(redis_service, _gpu_ctx(redis_service, context_factory, "hotkey-b"))
 
@@ -200,9 +200,9 @@ async def test_other_hotkey_in_window_fails_when_on(context_factory, monkeypatch
 @pytest.mark.asyncio
 async def test_other_hotkey_older_than_window_passes(context_factory, monkeypatch):
     monkeypatch.setattr(settings, "CROSS_HOTKEY_GPU_UUID_ENFORCEMENT_ENABLED", True)
-    monkeypatch.setattr(settings, "CROSS_HOTKEY_GPU_UUID_WINDOW_HOURS", 24)
+    monkeypatch.setattr(settings, "CROSS_HOTKEY_GPU_UUID_WINDOW_MINUTES", 30)
     redis_service = GpuSeenRedis()
-    _seen(redis_service, "hotkey-a", hours_ago=25)
+    _seen(redis_service, "hotkey-a", minutes_ago=31)
 
     result = await _run_cycle(redis_service, _gpu_ctx(redis_service, context_factory, "hotkey-b"))
 
