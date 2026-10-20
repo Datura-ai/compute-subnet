@@ -108,6 +108,8 @@ from services.gpu_wedge import cure_wedged_gpus, query_wedged_gpu_uuids
 from services.nvidia_devices import build_gpu_docker_config_for_executor
 from services.cluster_fabric import WIREGUARD_LISTEN_PORT, cluster_pod_networking
 from services.redis_service import (
+    FILLER_IMAGE_DIGESTS_PREFIX,
+    FILLER_IMAGE_DIGESTS_TTL_SECONDS,
     IN_CONTAINER_SSH_BOOTSTRAP_PATH,
     RENTAL_PROBE_FAILED_PREFIX,
     RENTAL_PROBE_OK_PREFIX,
@@ -4284,6 +4286,38 @@ class DockerService:
                 exc_info=True,
             )
             return []
+
+    async def _record_filler_image_best_effort(
+        self,
+        docker_client: RentalDockerSdkClient,
+        container: str,
+        container_name: str,
+        default_extra: dict,
+    ) -> None:
+        """Remember the image digests a filler was started from, so the GPU usage check can tell it
+        from another container later run under the same name. Never fails the create."""
+        try:
+            # the container's own image, not the tag: the tag can move during the bootstrap
+            image_id = await docker_client.container_image_id(container=container)
+            repo_digests = (
+                await docker_client.local_image_repo_digests(image=image_id) if image_id else None
+            )
+            digests = sorted(
+                {d.split("@", 1)[1] for d in repo_digests or () if "@" in d}
+            )
+            if digests:
+                await self.redis_service.set(
+                    f"{FILLER_IMAGE_DIGESTS_PREFIX}{container_name}",
+                    json.dumps(digests),
+                    ex=FILLER_IMAGE_DIGESTS_TTL_SECONDS,
+                )
+        except Exception as exc:
+            logger.warning(
+                _m(
+                    "Could not record the filler's image digests; its image is not checked",
+                    extra=get_extra_info({**default_extra, "error": str(exc)}),
+                )
+            )
 
     async def _cache_rented_pod_best_effort(
         self,
@@ -8772,6 +8806,10 @@ class DockerService:
                         container_name=container_name,
                         default_extra=default_extra,
                     )
+                    if payload.workload_kind == WorkloadKind.FILLER:
+                        await self._record_filler_image_best_effort(
+                            docker_client, container_id or container_name, container_name, default_extra
+                        )
                     # no duration: the collector starts after the reply, its time is logged there
                     profilers.append(
                         ProfilerStep(

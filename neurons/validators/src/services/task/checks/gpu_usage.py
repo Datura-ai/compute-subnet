@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,7 @@ from services.const import (
     RENTAL_CLOSE_CLOCK_SKEW_MINUTES,
     RENTAL_TEARDOWN_GRACE_MINUTES,
 )
+from services.redis_service import FILLER_IMAGE_DIGESTS_PREFIX, FILLER_IMAGE_DIGESTS_TTL_SECONDS
 from services.gpu_wedge import (
     COMPUTE_APPS_QUERY_COMMAND,
     GPU_QUERY_COMMAND,
@@ -212,7 +214,18 @@ class GpuUsageCheck:
         self, ctx: Context, gpu_details: list[dict], gpu_processes: list[dict]
     ) -> CheckResult:
         """The legacy guard: flag GPU load owned by live processes outside our workloads."""
+        rented_data = ctx.state.rented_data
+        # A GPU-split node runs one filler per VRAM bundle (DAH-2465): the GPU is "clean" as long as
+        # every process belongs to ONE OF the node's fillers, not a single expected container.
+        filler_containers = set(rented_data.get_filler_containers(ctx.executor.uuid)) if rented_data else set()
+        process_names = {process.get("container_name") for process in gpu_processes}
+        fillers_only = bool(filler_containers) and all(name in filler_containers for name in process_names)
+        # judged at any load, also beside a rental pod: a swapped filler can hold VRAM while staying
+        # under the utilization limits
+        off_image = await _fillers_off_their_image(ctx, process_names & filler_containers)
         violation = _find_violation(gpu_details, gpu_processes)
+        if violation is None and off_image:
+            violation = {"filler_containers_off_their_image": off_image}
 
         if violation is None:
             foreign_result = await self._judge_foreign_occupancy(ctx, gpu_details, gpu_processes)
@@ -227,13 +240,7 @@ class GpuUsageCheck:
             )
             return CheckResult(passed=True, event=event)
 
-        rented_data = ctx.state.rented_data
-        # A GPU-split node runs one filler per VRAM bundle (DAH-2465): the GPU is "clean" as long as
-        # every process belongs to ONE OF the node's fillers, not a single expected container.
-        filler_containers = set(rented_data.get_filler_containers(ctx.executor.uuid)) if rented_data else set()
-        if filler_containers and all(
-            process.get("container_name") in filler_containers for process in gpu_processes
-        ):
+        if fillers_only and not off_image:
             event = render_message(
                 Msg.USAGE_OK,
                 ctx=ctx,
@@ -514,6 +521,42 @@ def _parse_gpu_memory_used_mb(gpu_query_csv: str) -> dict[str, float]:
         except ValueError:
             continue
     return memory_by_uuid
+
+
+async def _fillers_off_their_image(ctx: Context, names: set[str]) -> list[str]:
+    """The fillers running another image than the one the validator started them from; empty
+    while enforcement is off. A filler with no readable record or missing from the scrape is not
+    judged; a scraped empty digest (a locally built image has no RepoDigests) is a mismatch."""
+    scraped = {
+        str(entry.get("name") or ""): str(entry.get("digest") or "")
+        for entry in ((ctx.state.specs or {}).get("docker") or {}).get("containers") or []
+        if isinstance(entry, dict)
+    }
+    off_image = []
+    for name in sorted(names):
+        try:
+            key = f"{FILLER_IMAGE_DIGESTS_PREFIX}{name}"
+            recorded = await ctx.services.redis.get(key)
+            if recorded:
+                # a filler can outlive the TTL: keep its record while it is still being checked
+                await ctx.services.redis.expire(key, FILLER_IMAGE_DIGESTS_TTL_SECONDS)
+            digests = json.loads(recorded) if recorded else []
+            if not isinstance(digests, list):
+                raise ValueError("not a list of digests")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Filler image record unreadable, not judging %s: %s", name, exc)
+            continue
+        if digests and name in scraped and scraped[name] not in digests:
+            off_image.append(name)
+    if off_image:
+        logger.warning(
+            "FILLER_IMAGE_MISMATCH executor=%s miner=%s containers=%s enforced=%s",
+            ctx.executor.uuid,
+            ctx.miner_hotkey,
+            off_image,
+            settings.FILLER_IMAGE_IDENTITY_ENFORCEMENT_ENABLED,
+        )
+    return off_image if settings.FILLER_IMAGE_IDENTITY_ENFORCEMENT_ENABLED else []
 
 
 def carries_a_rental_prefix(container_name: str) -> bool:
