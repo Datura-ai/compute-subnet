@@ -258,12 +258,11 @@ class Validator:
         )
 
     def express_lane_cycle_inputs(self) -> CycleInputs | None:
-        """DAH-2958: the express lane runs only once a full cycle has completed since start.
-        That cycle marks validated every executor of every miner that answered it; an executor
-        registered before it began whose miner failed or was offline is not in that set, so the
-        lane also skips everything registered before `fleet_known_since` (the inputs carry it)."""
-        if self.completed_cycles_since_start < 1:
-            return None
+        """DAH-2958: the express lane runs once the first cycle since start has begun (None before).
+        The lane skips everything registered before `fleet_known_since` (that cycle's start, the inputs
+        carry it), so it only ever takes executors no cycle since start could have known; one the running
+        cycle does pick up is in `in_flight` under the cycle lane, which the lane skips. Waiting for that
+        first cycle to finish instead kept new nodes out of the lane 8-14 minutes after every restart."""
         return self.cycle_inputs
 
     async def an_operator_asked_for_a_cycle_now(self) -> bool:
