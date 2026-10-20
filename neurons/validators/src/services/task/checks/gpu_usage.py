@@ -620,9 +620,9 @@ async def _pod_container_rental(ctx: Context, container_name: str) -> PodContain
     """Where the rental behind a pod container stands now, re-read from the backend.
 
     The cycle's snapshot says which pods were rented on this node when the run started; the
-    backend's close time says when the rental ended. A pod the snapshot listed ended during this
-    run, even when the backend cannot be reached now. A name the backend does not confirm stays an
-    orphan, as it always was: a container called pod_<any uuid> must not buy a pass.
+    backend's close time says when the rental ended. A name the backend does not confirm (live, or
+    closed within the grace) stays an orphan, as it always was, even when the snapshot listed it: a
+    container called pod_<any uuid> must not buy a pass.
     """
     pod_id: str | None = _uuid_after_prefix(
         container_name.removesuffix(EDIT_PARKED_SUFFIX), POD_CONTAINER_PREFIX
@@ -676,10 +676,7 @@ async def _pod_container_rental(ctx: Context, container_name: str) -> PodContain
             return PodContainerRental(container_name, pod_id, PodRentalState.ORPHAN, status, closed_at)
         return PodContainerRental(container_name, pod_id, PodRentalState.ENDED_RECENTLY, status, closed_at)
 
-    if rented_at_run_start:
-        return PodContainerRental(
-            container_name, pod_id, PodRentalState.ENDED_DURING_RUN, "its rental ended during this run"
-        )
+    # DAH-3693 review: the snapshot alone never clears a container; the backend must confirm it
     status = "Lium could not confirm a rental for it this cycle" if pod_rental is None else "Lium has no rental for it"
     return PodContainerRental(container_name, pod_id, PodRentalState.ORPHAN, status)
 

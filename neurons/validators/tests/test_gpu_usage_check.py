@@ -272,15 +272,14 @@ async def test_teardown_passes_and_the_pipeline_goes_on(context_factory):
 
 
 @pytest.mark.asyncio
-async def test_a_pod_the_snapshot_listed_is_teardown_even_when_the_backend_is_unreachable(context_factory):
+async def test_a_pod_the_snapshot_listed_is_an_orphan_when_the_backend_cannot_confirm_it(context_factory):
     ctx = _unrented_ctx(context_factory, pod_rental=None, rented_data=_snapshot_with_pod())
 
     result = await GpuUsageCheck().run(ctx)
 
-    assert result.passed is True
-    assert result.event.reason_code == Msg.USAGE_OK.reason
-    rental = result.event.what_we_saw["pod_containers"][0]
-    assert rental.provider_facing_rental_status == "its rental ended during this run"
+    assert result.passed is False
+    assert result.event.reason_code == Msg.ORPHANED_CONTAINER.reason
+    assert result.event.what_we_saw["rental_status"] == "Lium could not confirm a rental for it this cycle"
 
 
 @pytest.mark.asyncio
