@@ -4,6 +4,9 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from typing import NamedTuple
+
+from pydantic import BaseModel, ValidationError
+from payload_models.payloads import WorkloadKind
 from protocol.vc_protocol.validator_requests import ResetVerifiedJobReason
 import redis.asyncio as aioredis
 import redis.exceptions
@@ -23,11 +26,17 @@ RESET_VERIFIED_JOB_CHANNEL = "RESET_VERIFIED_JOB_CHANNEL"
 POD_STATES_CHANNEL = "POD_STATES_CHANNEL"
 RENTED_MACHINE_PREFIX = "rented_machines_prefix"
 PENDING_PODS_PREFIX = "pending_pods_prefix"
+# DAH-4698: creates the backend sent that are running in this connector right now, by pod id; what is left when a
+# connector starts was cut off by the restart (a redeploy recreates the connector mid-create)
+INFLIGHT_BACKEND_CREATES_KEY = "inflight_backend_creates"
 DUPLICATED_MACHINE_SET = "duplicated_machines"
 RENTAL_SUCCEED_MACHINE_SET = "rental_succeed_machines"
 AVAILABLE_PORT_MAPS_PREFIX = "available_port_maps"
 RENTAL_PROBE_OK_PREFIX = "rental_probe_ok"
 RENTAL_PROBE_FAILED_PREFIX = "rental_probe_failed"
+# filler container name -> JSON list of the image digests (bare sha256) the validator started it from
+FILLER_IMAGE_DIGESTS_PREFIX = "filler_image_digests:"
+FILLER_IMAGE_DIGESTS_TTL_SECONDS = 30 * 24 * 3600
 # set by a filler create whose sshd never came up in the container, cleared by one where it did
 SSHD_BOOTSTRAP_FAILED_PREFIX = "sshd_bootstrap_failed"
 # prod, 24 h: failed filler creates on a broken node came 5 min to 2.7 h apart, so 6 h outlives the
@@ -116,6 +125,13 @@ REDIS_RETRY_ATTEMPTS = 3
 REDIS_HEALTH_CHECK_INTERVAL_SECONDS = 30
 
 logger = logging.getLogger(__name__)
+
+
+class InflightBackendCreate(BaseModel):
+    miner_hotkey: str
+    executor_id: str
+    workload_kind: WorkloadKind
+    started_at_unix_seconds: int
 
 
 class _PassThroughLock:
@@ -562,6 +578,34 @@ class RedisService:
         else:
             await self.hdel(PENDING_PODS_PREFIX, f"{miner_hotkey}:{executor_id}")
     
+    async def add_inflight_backend_create(
+        self, pod_id: str, miner_hotkey: str, executor_id: str, workload_kind: WorkloadKind
+    ) -> None:
+        create = InflightBackendCreate(
+            miner_hotkey=miner_hotkey,
+            executor_id=executor_id,
+            workload_kind=workload_kind,
+            started_at_unix_seconds=int(time.time()),
+        )
+        await self.hset(INFLIGHT_BACKEND_CREATES_KEY, pod_id, create.model_dump_json())
+
+    async def remove_inflight_backend_create(self, pod_id: str) -> None:
+        await self.hdel(INFLIGHT_BACKEND_CREATES_KEY, pod_id)
+
+    async def inflight_backend_creates(self) -> dict[str, InflightBackendCreate]:
+        """pod id -> the create the backend sent for it"""
+        raw = await self.hgetall(INFLIGHT_BACKEND_CREATES_KEY)
+        creates: dict[str, InflightBackendCreate] = {}
+        for raw_pod_id, entry in raw.items():
+            pod_id = raw_pod_id.decode() if isinstance(raw_pod_id, bytes) else raw_pod_id
+            try:
+                creates[pod_id] = InflightBackendCreate.model_validate_json(entry)
+            except ValidationError:
+                # one bad entry must not block the sweep of the others on every start
+                logger.error(_m("Dropping an unreadable inflight backend create", extra={"pod_id": pod_id}))
+                await self.hdel(INFLIGHT_BACKEND_CREATES_KEY, pod_id)
+        return creates
+
     async def get_pending_pods(self, miner_hotkey: str, executor_id: str) -> list[dict]:
         data = await self.hget(PENDING_PODS_PREFIX, f"{miner_hotkey}:{executor_id}")
         if not data:

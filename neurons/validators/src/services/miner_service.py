@@ -72,6 +72,7 @@ from services.roce_link_probe import measure_and_attach
 from services.ssh_service import SSHService
 from services.task.availability import (
     availability_errors,
+    build_executor_unreachable_by_miner_event,
     build_rented_executor_not_listed_event,
 )
 from incentive.config import BASE_GPU_MAP
@@ -278,6 +279,9 @@ class MinerService:
         # wave's list of the node's miner, or the wave could verify and publish the node again
         # under the same id once the lane let go of it. Stays empty with the flag off.
         self.miners_awaiting_wave_list: dict[str, str] = {}
+        # per miner hotkey, the rented executor uuids it left out of its previous answer (RENTED_NOT_LISTED_ONE_CYCLE_GRACE).
+        # shortcut: in memory, so a restart costs one extra cycle before a real outage is reported.
+        self.rented_missed_last_cycle: dict[str, set[str]] = {}
 
     def start_awaiting_wave_lists(self, job_batch_id: str, miner_hotkeys: list[str]) -> None:
         """Validator.sync(), in the same step that publishes the cycle's inputs to the lane."""
@@ -595,6 +599,9 @@ class MinerService:
                         and not self._has_not_listed_rented_executors(
                             payload, rented_data, msg.executors, executor_id
                         )
+                        and not self._build_unreachable_known_results(
+                            payload, rented_data, msg, executor_id, log=False
+                        )
                     ):
                         # Zero executors is normally a miner failure. It is the *expected* shape when
                         # every executor this miner has is under a manual rental, though -- the miner
@@ -649,6 +656,9 @@ class MinerService:
                         self._build_not_listed_rented_results(
                             payload, rented_data, msg.executors, executor_id
                         )
+                    )
+                    results.extend(
+                        self._build_unreachable_known_results(payload, rented_data, msg, executor_id)
                     )
 
                     # DAH-2667: while the miner's key is still installed and its idle hosts are
@@ -978,7 +988,7 @@ class MinerService:
 
         return results
 
-    def _iter_not_listed_rented(
+    def _missing_rented(
         self,
         payload: MinerJobRequestPayload,
         rented_data: RentedExecutorsResponse | None,
@@ -1013,6 +1023,24 @@ class MinerService:
                 continue
             yield executor_uuid, rented_executor
 
+    def _not_listed_rented_to_report(
+        self,
+        payload: MinerJobRequestPayload,
+        rented_data: RentedExecutorsResponse | None,
+        miner_returned_executors: list[ExecutorSSHInfo],
+        executor_id: str | None,
+    ) -> Iterator[tuple[str, RentedExecutor]]:
+        """The missing rented executors that get a row: with RENTED_NOT_LISTED_ONE_CYCLE_GRACE only those the
+        miner also left out of its previous answer."""
+        for executor_uuid, rented_executor in self._missing_rented(
+            payload, rented_data, miner_returned_executors, executor_id
+        ):
+            if settings.RENTED_NOT_LISTED_ONE_CYCLE_GRACE and executor_uuid not in self.rented_missed_last_cycle.get(
+                payload.miner_hotkey, ()
+            ):
+                continue
+            yield executor_uuid, rented_executor
+
     def _has_not_listed_rented_executors(
         self,
         payload: MinerJobRequestPayload,
@@ -1025,8 +1053,9 @@ class MinerService:
         A miner whose only executors are rented and down answers with zero executors; that used to
         end as one miner-level failure row and nothing about the nodes.
         """
+        # the raw list, not the graced one: a first miss must still reach the build, which records it
         return any(
-            self._iter_not_listed_rented(
+            self._missing_rented(
                 payload, rented_data, miner_returned_executors, executor_id
             )
         )
@@ -1058,10 +1087,18 @@ class MinerService:
         """
         results = [
             self._not_listed_rented_job_result(payload, executor_uuid, rented_executor)
-            for executor_uuid, rented_executor in self._iter_not_listed_rented(
+            for executor_uuid, rented_executor in self._not_listed_rented_to_report(
                 payload, rented_data, miner_returned_executors, executor_id
             )
         ]
+        if settings.RENTED_NOT_LISTED_ONE_CYCLE_GRACE and rented_data and executor_id is None:
+            # this miner's misses replace its previous ones: a node it returned, or whose rental ended, drops out
+            self.rented_missed_last_cycle[payload.miner_hotkey] = {
+                executor_uuid
+                for executor_uuid, _ in self._missing_rented(
+                    payload, rented_data, miner_returned_executors, executor_id
+                )
+            }
         if results:
             logger.info(
                 _m(
@@ -1133,6 +1170,102 @@ class MinerService:
             ],
             failure_reason_code=event.reason_code,
         )
+
+    def _build_unreachable_known_results(
+        self,
+        payload: MinerJobRequestPayload,
+        rented_data: RentedExecutorsResponse | None,
+        msg: AcceptSSHKeyRequest,
+        executor_id: str | None,
+        log: bool = True,
+    ) -> list[JobResult]:
+        """One failed result per unrented executor the miner knows and did not return.
+
+        ``msg.known_executor_ids`` minus ``msg.executors`` is what the miner tried and could not
+        reach (DAH-3338). Rented ones are left to ``_build_not_listed_rented_results``; only the
+        cycle's whole-miner request reports, as there. A miner that predates the field sends None
+        and gets nothing. Flag off: [].
+
+        A miner that reached none of its nodes is down itself (its own network, a restart), not its
+        nodes: that wave writes none of these rows, so one miner-side blip does not mark every node
+        down (Pixel, 19 Oct). Manual rentals are left out, as the miner cannot reach them anyway. The
+        zero-executor wave then fails as before.
+        """
+        if (
+            not settings.UNREACHABLE_EXECUTOR_REPORT_ENABLED
+            or msg.known_executor_ids is None
+            or executor_id is not None
+        ):
+            return []
+        known = list(dict.fromkeys(str(uuid).lower() for uuid in msg.known_executor_ids))
+        reached = {str(executor.uuid).lower() for executor in msg.executors}
+        manual = {str(uuid).lower() for uuid in ((rented_data and rented_data.manual_rental_executors) or {})}
+        reachable = set(known) - manual
+        if reachable and not reached & reachable:
+            if log:
+                logger.warning(
+                    _m(
+                        "Miner reached none of its known executors; no unreachable rows this wave",
+                        extra=get_extra_info({
+                            "job_batch_id": payload.job_batch_id,
+                            "miner_hotkey": payload.miner_hotkey,
+                            "known": len(reachable),
+                        }),
+                    )
+                )
+            return []
+        skip = reached | manual
+        if rented_data:
+            skip |= {str(uuid).lower() for uuid in rented_data.executors}
+        results = []
+        for executor_uuid in known:
+            if executor_uuid in skip:
+                continue
+            event = build_executor_unreachable_by_miner_event(
+                executor_uuid=executor_uuid, miner_hotkey=payload.miner_hotkey
+            )
+            log_text = _m(
+                event.event,
+                extra=get_extra_info({
+                    **event.model_dump(mode="json"),
+                    "job_batch_id": payload.job_batch_id,
+                    "miner_hotkey": payload.miner_hotkey,
+                    "executor_uuid": executor_uuid,
+                }),
+            )
+            if log:
+                logger.warning(log_text)
+            results.append(
+                JobResult(
+                    spec=None,
+                    executor_info=ExecutorSSHInfo(
+                        uuid=executor_uuid,
+                        # The miner sends only the id of a node it could not reach.
+                        address="",
+                        port=0,
+                        ssh_username="",
+                        ssh_port=0,
+                        python_path="",
+                        root_dir="",
+                    ),
+                    score=0,
+                    job_score=0,
+                    collateral_deposited=False,
+                    job_batch_id=payload.job_batch_id,
+                    log_status="error",
+                    log_text=log_text.to_full_string(),
+                    validation_event=event,
+                    gpu_model=None,
+                    gpu_count=0,
+                    sysbox_runtime=False,
+                    is_rented=False,
+                    availability_errors=[
+                        error.model_dump(mode="json") for error in availability_errors([event])
+                    ],
+                    failure_reason_code=event.reason_code,
+                )
+            )
+        return results
 
     def _build_failed_job_result(self, payload: MinerJobRequestPayload, reason: str):
         executor_info = ExecutorSSHInfo(
@@ -2568,6 +2701,9 @@ class MinerService:
                     and not self._has_not_listed_rented_executors(
                         payload, rented_data, msg.executors, executor_id
                     )
+                    and not self._build_unreachable_known_results(
+                        payload, rented_data, msg, executor_id, log=False
+                    )
                 ):
                     # See the WebSocket path: zero executors is the expected shape when every
                     # executor is under a manual rental (or, DAH-3558, every rented node is down),
@@ -2618,6 +2754,9 @@ class MinerService:
                     self._build_not_listed_rented_results(
                         payload, rented_data, msg.executors, executor_id
                     )
+                )
+                results.extend(
+                    self._build_unreachable_known_results(payload, rented_data, msg, executor_id)
                 )
 
                 # DAH-2667: while the miner's key is still installed and its idle hosts are free,
