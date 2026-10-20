@@ -130,7 +130,7 @@ class InflightBackendCreate(BaseModel):
     miner_hotkey: str
     executor_id: str
     workload_kind: WorkloadKind
-    started_at: int
+    started_at_unix_seconds: int
 
 
 class _PassThroughLock:
@@ -581,7 +581,10 @@ class RedisService:
         self, pod_id: str, miner_hotkey: str, executor_id: str, workload_kind: WorkloadKind
     ) -> None:
         create = InflightBackendCreate(
-            miner_hotkey=miner_hotkey, executor_id=executor_id, workload_kind=workload_kind, started_at=int(time.time())
+            miner_hotkey=miner_hotkey,
+            executor_id=executor_id,
+            workload_kind=workload_kind,
+            started_at_unix_seconds=int(time.time()),
         )
         await self.hset(INFLIGHT_BACKEND_CREATES_KEY, pod_id, create.model_dump_json())
 

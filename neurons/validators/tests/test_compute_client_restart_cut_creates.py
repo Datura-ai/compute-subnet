@@ -105,11 +105,11 @@ async def test_a_create_is_tracked_while_it_runs_and_untracked_when_it_ends() ->
     client = _client(redis_service)
     seen_while_running: list[dict[str, InflightBackendCreate]] = []
 
-    async def drive(job_request: ContainerCreateRequest) -> None:
+    async def fake_drive_miner_job(job_request: ContainerCreateRequest) -> None:
         seen_while_running.append(await redis_service.inflight_backend_creates())
         raise RuntimeError("the create failed")
 
-    client._drive_miner_job = drive
+    client._drive_miner_job = fake_drive_miner_job
     request = ContainerCreateRequest.model_construct(
         pod_id="pod-2", miner_hotkey="miner-hk", executor_id="exec-2", workload_kind=WorkloadKind.CUSTOMER_RENTAL
     )
@@ -136,10 +136,10 @@ async def test_a_create_still_runs_and_returns_when_redis_cannot_track_it() -> N
     redis_service.redis = _BrokenRedis()
     client = _client(redis_service)
 
-    async def drive(job_request: ContainerCreateRequest) -> str:
+    async def fake_drive_miner_job(job_request: ContainerCreateRequest) -> str:
         return "created"
 
-    client._drive_miner_job = drive
+    client._drive_miner_job = fake_drive_miner_job
     request = ContainerCreateRequest.model_construct(
         pod_id="pod-3", miner_hotkey="miner-hk", executor_id="exec-3", workload_kind=WorkloadKind.FILLER
     )

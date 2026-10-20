@@ -912,7 +912,7 @@ class ComputeClient:
                     error_type=FailedContainerErrorTypes.ContainerCreationFailed,
                     error_code=FailedContainerErrorCodes.UnknownError,
                     msg="The create was interrupted by a validator restart. Please try again.",
-                    detail=f"validator connector restarted during the create (started {create.started_at})",
+                    detail=f"validator connector restarted during the create (started {create.started_at_unix_seconds})",
                     failure_step=CREATE_CUT_OFF_BY_RESTART_STEP,
                 )
             )
