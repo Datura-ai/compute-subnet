@@ -25,7 +25,7 @@ from services.const import (
     RENTAL_CLOSE_CLOCK_SKEW_MINUTES,
     RENTAL_TEARDOWN_GRACE_MINUTES,
 )
-from services.redis_service import FILLER_IMAGE_DIGESTS_PREFIX
+from services.redis_service import FILLER_IMAGE_DIGESTS_PREFIX, FILLER_IMAGE_DIGESTS_TTL_SECONDS
 from services.gpu_wedge import (
     COMPUTE_APPS_QUERY_COMMAND,
     GPU_QUERY_COMMAND,
@@ -524,7 +524,8 @@ def _parse_gpu_memory_used_mb(gpu_query_csv: str) -> dict[str, float]:
 
 async def _fillers_off_their_image(ctx: Context, names: set[str]) -> bool:
     """True when enforcement is on and a filler runs another image than the one the validator
-    started it from. A filler with no recorded or no scraped digest is not judged."""
+    started it from. A filler with no record or missing from the scrape is not judged; a scraped
+    empty digest (a locally built image has no RepoDigests) is a mismatch."""
     scraped = {
         str(entry.get("name") or ""): str(entry.get("digest") or "")
         for entry in ((ctx.state.specs or {}).get("docker") or {}).get("containers") or []
@@ -533,11 +534,15 @@ async def _fillers_off_their_image(ctx: Context, names: set[str]) -> bool:
     off_image = []
     for name in sorted(names):
         try:
-            recorded = await ctx.services.redis.get(f"{FILLER_IMAGE_DIGESTS_PREFIX}{name}")
+            key = f"{FILLER_IMAGE_DIGESTS_PREFIX}{name}"
+            recorded = await ctx.services.redis.get(key)
+            if recorded:
+                # a filler can outlive the TTL: keep its record while it is still being checked
+                await ctx.services.redis.expire(key, FILLER_IMAGE_DIGESTS_TTL_SECONDS)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Filler image record unreadable, not judging %s: %s", name, exc)
             continue
-        if recorded and scraped.get(name) and scraped[name] not in json.loads(recorded):
+        if recorded and name in scraped and scraped[name] not in json.loads(recorded):
             off_image.append(name)
     if off_image:
         logger.warning(

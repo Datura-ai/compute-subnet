@@ -4288,18 +4288,18 @@ class DockerService:
             return []
 
     async def _record_filler_image_best_effort(
-        self, ssh_client, container_name: str, default_extra: dict
+        self,
+        docker_client: RentalDockerSdkClient,
+        image: str,
+        container_name: str,
+        default_extra: dict,
     ) -> None:
         """Remember the image digests a filler was started from, so the GPU usage check can tell it
         from another container later run under the same name. Never fails the create."""
         try:
-            name = shlex.quote(container_name)
-            result = await ssh_client.run(
-                "/usr/bin/docker image inspect --format '{{json .RepoDigests}}' "
-                f"$(/usr/bin/docker inspect --format '{{{{.Image}}}}' {name})"
-            )
+            repo_digests = await docker_client.local_image_repo_digests(image=image)
             digests = sorted(
-                {d.split("@", 1)[1] for d in json.loads(result.stdout or "[]") or [] if "@" in d}
+                {d.split("@", 1)[1] for d in repo_digests or () if "@" in d}
             )
             if digests:
                 await self.redis_service.set(
@@ -8804,7 +8804,7 @@ class DockerService:
                     )
                     if payload.workload_kind == WorkloadKind.FILLER:
                         await self._record_filler_image_best_effort(
-                            ssh_client, container_name, default_extra
+                            docker_client, payload.docker_image, container_name, default_extra
                         )
                     # no duration: the collector starts after the reply, its time is logged there
                     profilers.append(

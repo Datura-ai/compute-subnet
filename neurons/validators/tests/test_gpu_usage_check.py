@@ -1671,14 +1671,18 @@ def test_lium_workload_containers_counts_the_pod_container_of_an_unnamed_pod():
         ("sha256:filler", True, True),  # the image it was started from
         ("sha256:other", False, True),  # another image, logged only
         ("sha256:other", True, False),  # another image under enforcement: foreign GPU work
-        ("", True, True),  # image digest unknown to the scrape: not judged
+        ("", True, False),  # a local build has no RepoDigests: an empty digest is a mismatch
+        (None, True, True),  # container missing from the scrape: not judged
     ],
 )
 @pytest.mark.asyncio
 async def test_filler_gpu_work_counts_only_on_the_filler_image(
     context_factory, monkeypatch, scraped_digest, enforced, expected_pass, load
 ):
-    from neurons.validators.src.services.redis_service import FILLER_IMAGE_DIGESTS_PREFIX
+    from neurons.validators.src.services.redis_service import (
+        FILLER_IMAGE_DIGESTS_PREFIX,
+        FILLER_IMAGE_DIGESTS_TTL_SECONDS,
+    )
 
     monkeypatch.setattr(gpu_usage.settings, "FILLER_IMAGE_IDENTITY_ENFORCEMENT_ENABLED", enforced)
     filler_container = "filler_5703f4c9-c2f4-4fae-a652-3dee4753030a"
@@ -1691,7 +1695,11 @@ async def test_filler_gpu_work_counts_only_on_the_filler_image(
             executors={},
             all_filler_containers_by_executor={"executor-123": [filler_container]},
         ),
-        specs={"docker": {"containers": [{"name": filler_container, "digest": scraped_digest}]}},
+        specs={
+            "docker": {
+                "containers": [] if scraped_digest is None else [{"name": filler_container, "digest": scraped_digest}]
+            }
+        },
     )
     ctx = context_factory(services=services, config=build_context_config(), state=state)
 
@@ -1699,3 +1707,5 @@ async def test_filler_gpu_work_counts_only_on_the_filler_image(
 
     assert result.passed is expected_pass
     assert result.event.reason_code == (Msg.USAGE_OK if expected_pass else Msg.USAGE_HIGH).reason
+    # the record outlives a long filler: each check refreshes its TTL
+    assert services.redis.ttl[f"{FILLER_IMAGE_DIGESTS_PREFIX}{filler_container}"] == FILLER_IMAGE_DIGESTS_TTL_SECONDS
