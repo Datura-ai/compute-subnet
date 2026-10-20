@@ -66,6 +66,7 @@ from payload_models.payloads import (
     now_ms,
 )
 from services.attestation_service import AttestationError, AttestationService
+from services import build_context as build_context_service
 from services.const import (
     EDIT_PARKED_SUFFIX,
     FILLER_CACHE_VOLUME_PREFIXES,
@@ -108,6 +109,8 @@ from services.gpu_wedge import cure_wedged_gpus, query_wedged_gpu_uuids
 from services.nvidia_devices import build_gpu_docker_config_for_executor
 from services.cluster_fabric import WIREGUARD_LISTEN_PORT, cluster_pod_networking
 from services.redis_service import (
+    FILLER_IMAGE_DIGESTS_PREFIX,
+    FILLER_IMAGE_DIGESTS_TTL_SECONDS,
     IN_CONTAINER_SSH_BOOTSTRAP_PATH,
     RENTAL_PROBE_FAILED_PREFIX,
     RENTAL_PROBE_OK_PREFIX,
@@ -164,6 +167,7 @@ from tenacity import RetryError
 from core.config import settings
 from core.utils import _m, _StructuredMessage, get_extra_info, retry_ssh_command
 from services.ssh_service import SSHService
+from services.pod_ssh_host_key import derive_pod_ssh_host_key
 from services.volume_keys import VolumeKeyDeriver
 
 logger = logging.getLogger(__name__)
@@ -3776,7 +3780,8 @@ class DockerService:
         DAH-3980: ``removed_at_ssh_connect`` holds the fillers `remove_fillers_at_ssh_connect` already
         removed (or tried to), each with the ID it was listed under: the listing may predate that
         removal, and such an instance is never removed twice; a same-name filler listed under another
-        ID was created since, and goes.
+        ID was created since, and goes. The host is then listed again rather than read from ``host_probe``:
+        a filler created again under that name after the probe would carry the removed ID there and be kept.
 
         DAH-3706: ``remove_every_filler`` (a customer's create) treats every `filler_*` as stale
         whatever ``active_container_names`` says -- a paying pod never shares the node with a
@@ -3792,7 +3797,7 @@ class DockerService:
         container created after the listing is left alone; own_sweep_removals records each such ID
         before its `rm` is sent. A name listed without an ID is removed by name and not recorded.
         """
-        if host_probe is not None and host_probe.container_names is not None:
+        if host_probe is not None and host_probe.container_names is not None and not removed_at_ssh_connect:
             all_names: list[str] = list(host_probe.container_names)
             listed_ids = dict(host_probe.container_ids)
         else:
@@ -4284,6 +4289,38 @@ class DockerService:
                 exc_info=True,
             )
             return []
+
+    async def _record_filler_image_best_effort(
+        self,
+        docker_client: RentalDockerSdkClient,
+        container: str,
+        container_name: str,
+        default_extra: dict,
+    ) -> None:
+        """Remember the image digests a filler was started from, so the GPU usage check can tell it
+        from another container later run under the same name. Never fails the create."""
+        try:
+            # the container's own image, not the tag: the tag can move during the bootstrap
+            image_id = await docker_client.container_image_id(container=container)
+            repo_digests = (
+                await docker_client.local_image_repo_digests(image=image_id) if image_id else None
+            )
+            digests = sorted(
+                {d.split("@", 1)[1] for d in repo_digests or () if "@" in d}
+            )
+            if digests:
+                await self.redis_service.set(
+                    f"{FILLER_IMAGE_DIGESTS_PREFIX}{container_name}",
+                    json.dumps(digests),
+                    ex=FILLER_IMAGE_DIGESTS_TTL_SECONDS,
+                )
+        except Exception as exc:
+            logger.warning(
+                _m(
+                    "Could not record the filler's image digests; its image is not checked",
+                    extra=get_extra_info({**default_extra, "error": str(exc)}),
+                )
+            )
 
     async def _cache_rented_pod_best_effort(
         self,
@@ -5257,6 +5294,44 @@ class DockerService:
 
         await self._record_sshd_verdict(sshd_verdict_executor_uuid, failed=False, log_extra=log_extra)
         return True
+
+    def _pod_ssh_host_key_script_path(self) -> Path:
+        return Path(__file__).resolve().parent / "assets" / "pod_ssh_host_key.sh"
+
+    async def install_pod_ssh_host_key(
+        self,
+        docker_client: RentalDockerSdkClient,
+        *,
+        container_name: str,
+        pod_id: str,
+        log_extra: dict,
+    ) -> None:
+        """Give the container the host key derived for this pod, so a recreated container (reboot,
+        edit, template switch) presents the key the renter's known_hosts already holds. Best effort:
+        on any failure the pod keeps the key its image generated, as before."""
+        if not settings.VOLUME_MASTER_SECRET or not pod_id:
+            return
+        try:
+            host_key = derive_pod_ssh_host_key(settings.VOLUME_MASTER_SECRET, pod_id)
+            script = self._pod_ssh_host_key_script_path().read_text()
+            await exec_logged_rental_docker_sdk_operation(
+                docker_client=docker_client,
+                operation="exec_install_pod_ssh_host_key",
+                exec_spec=ContainerExecSpec(
+                    container_name=container_name,
+                    argv=("sh", "-c", script, "pod_ssh_host_key", host_key.public_openssh),
+                    stdin=host_key.private_openssh,
+                    idempotent=True,
+                ),
+                log_extra=log_extra,
+            )
+        except Exception as exc:
+            logger.warning(
+                _m(
+                    "Failed to install pod SSH host key",
+                    extra=get_extra_info({**log_extra, "container_name": container_name, "error": str(exc)}),
+                ),
+            )
 
     async def _record_sshd_verdict(self, executor_uuid: str | None, *, failed: bool, log_extra: dict) -> None:
         if not executor_uuid:
@@ -6265,6 +6340,32 @@ class DockerService:
                 f"exit={result.exit_status} stderr={stderr!r}"
             )
 
+    async def _write_build_context_into_dind(
+        self,
+        ssh_client: asyncssh.SSHClientConnection,
+        dind_name: str,
+        archive: bytes,
+        timeout: int | None = None,
+    ) -> None:
+        """Unpack the checked build-context archive into the DinD build context, streamed on stdin."""
+        ctx = self._DIND_BUILD_CONTEXT
+        inner = f"mkdir -p {ctx} && tar -xzf - -C {ctx}"
+        command = (
+            f"/usr/bin/docker exec -i {shlex.quote(dind_name)} "
+            f"sh -c {shlex.quote(inner)}"
+        )
+        result = await ssh_client.run(
+            command, input=archive, encoding=None, check=False, timeout=timeout
+        )
+        if result.exit_status != 0:
+            stderr = result.stderr or b""
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", "replace")
+            raise RuntimeError(
+                f"Failed to unpack the build context into {dind_name!r}: "
+                f"exit={result.exit_status} stderr={stderr.strip()!r}"
+            )
+
     @staticmethod
     def _parse_egress_block_cidrs(raw: str) -> list[str]:
         """Validate the configured egress-block CIDRs into shell-safe strings.
@@ -6406,6 +6507,35 @@ class DockerService:
                 )
         return "; ".join(lines)
 
+    async def _fetch_build_context(
+        self, payload: ContainerCreateRequest, log_tag: str, default_extra: dict
+    ) -> bytes | CustomBuildOutcome:
+        """The checked build-context archive of `payload`, or the failed CustomBuildOutcome."""
+        from core.config import settings
+
+        context_hosts = build_context_service.allowed_hosts(settings.CUSTOM_DOCKERFILE_BUILD_CONTEXT_HOSTS)
+        if not context_hosts:
+            return CustomBuildOutcome(False, "build_context", "this validator does not take build contexts yet")
+        try:
+            build_context = await build_context_service.fetch(
+                payload.build_context_url,
+                payload.build_context_sha256 or "",
+                hosts=context_hosts,
+                max_bytes=int(settings.CUSTOM_DOCKERFILE_BUILD_CONTEXT_MAX_BYTES),
+                max_unpacked_bytes=int(settings.CUSTOM_DOCKERFILE_BUILD_CONTEXT_MAX_UNPACKED_BYTES),
+            )
+        except build_context_service.BuildContextError as exc:
+            await self.stream_log(str(exc), "error", log_tag)
+            logger.error(
+                _m(
+                    "Custom build context refused",
+                    extra=get_extra_info({**default_extra, "error": str(exc)}),
+                )
+            )
+            return CustomBuildOutcome(False, "build_context", str(exc))
+        await self.stream_log(f"Fetched build context ({len(build_context)} bytes)", "success", log_tag)
+        return build_context
+
     async def _custom_build_image(
         self,
         ssh_client: asyncssh.SSHClientConnection,
@@ -6452,6 +6582,14 @@ class DockerService:
                 )
             )
             return CustomBuildOutcome(False, "build_input_oversize", f"Dockerfile exceeds {max_bytes} byte cap")
+
+        # The build context is fetched and checked before anything starts on the executor.
+        build_context: bytes | None = None
+        if payload.build_context_url:
+            fetched = await self._fetch_build_context(payload, log_tag, default_extra)
+            if isinstance(fetched, CustomBuildOutcome):
+                return fetched
+            build_context = fetched
 
         # 1. Preflight: sysbox-runc MUST be available. Never fall back to runc —
         #    a silent fallback would run an internet-enabled build on the host
@@ -6687,6 +6825,11 @@ class DockerService:
                 f"Preparing build context in {dind_name}", "success", log_tag
             )
             try:
+                if build_context is not None:
+                    # unpacked first, so the request's Dockerfile replaces any the archive holds
+                    await self._write_build_context_into_dind(
+                        ssh_client, dind_name, build_context, timeout=setup_timeout_s
+                    )
                 await self._write_dockerfile_into_dind(
                     ssh_client, dind_name, content, timeout=setup_timeout_s
                 )
@@ -6698,7 +6841,7 @@ class DockerService:
                     ),
                     exc_info=True,
                 )
-                return CustomBuildOutcome(False, "build_setup", "could not write the Dockerfile into the build container")
+                return CustomBuildOutcome(False, "build_setup", "could not write the build context or the Dockerfile into the build container")
 
             # 6. Build INSIDE the DinD container WITH network enabled (no
             #    --network=none). BuildKit streams progress to stderr and
@@ -8675,6 +8818,13 @@ class DockerService:
                         ),
                     ):
                         soft_failed_step = current_step
+                    if soft_failed_step is None:
+                        await self.install_pod_ssh_host_key(
+                            docker_client,
+                            container_name=container_name,
+                            pod_id=payload.pod_id,
+                            log_extra=default_extra,
+                        )
 
                     jupyter_url = None
                     if payload.enable_jupyter and jupyter_port_map:
@@ -8772,6 +8922,10 @@ class DockerService:
                         container_name=container_name,
                         default_extra=default_extra,
                     )
+                    if payload.workload_kind == WorkloadKind.FILLER:
+                        await self._record_filler_image_best_effort(
+                            docker_client, container_id or container_name, container_name, default_extra
+                        )
                     # no duration: the collector starts after the reply, its time is logged there
                     profilers.append(
                         ProfilerStep(
@@ -10349,6 +10503,9 @@ class DockerService:
                 jupyter_port = payload.jupyter_port_map[0]
                 local_volume = payload.local_volume
                 local_volume_path = payload.local_volume_path
+                # the request does not say whether the volume is encrypted; without the flag the
+                # script is copied into the ciphertext and `chmod /root/run_jupyter.sh` fails
+                encryption_state = await self._local_volume_encryption_state(ssh_client, payload.container_name)
                 await self.run_jupyter(
                     ssh_client=ssh_client,
                     container_name=payload.container_name,
@@ -10358,6 +10515,7 @@ class DockerService:
                     log_extra=default_extra,
                     local_volume=local_volume,
                     local_volume_path=local_volume_path,
+                    encrypted_local_volume=encryption_state is _VolumeEncryptionState.ENCRYPTED,
                 )
 
                 logger.info(

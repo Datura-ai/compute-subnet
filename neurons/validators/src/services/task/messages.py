@@ -1643,8 +1643,10 @@ class GpuMemoryHealthMessages:
         event="GPU memory reported broken by NVML",
         reason="GPU_MEMORY_HEALTH_FAILED",
         severity="error",
-        category="gpu",
-        impact="Node not rentable until the card is reset or replaced (a running rental is kept)",
+        # an availability error: the backend hides the node and refuses new rentals, a rental on it runs on
+        category=AVAILABILITY_CATEGORY,
+        impact="Node hidden and not rentable until the card is reset or replaced (a running rental "
+        "is kept)",
         remediation="NVML reports uncorrected ECC errors, a pending or failed row remap, or a "
         "required recovery action on the card(s) in flags; a rented card in this state faults the "
         "renter's jobs. Check `nvidia-smi -q -d ECC,ROW_REMAPPER`: a pending remap or a "
@@ -1671,6 +1673,17 @@ class GpuMemoryHealthMessages:
         severity="info",
         category="gpu",
         impact="Proceed",
+    )
+    RESET_ADVISED = MessageTemplate(
+        event="GPU memory needs a reset",
+        reason="GPU_MEMORY_HEALTH_RESET_ADVISED",
+        severity="warning",
+        category="gpu",
+        impact="Proceed; score not changed",
+        remediation="NVML reports a pending row remap or a recovery action from correctable errors "
+        "on the card(s) in warnings. The card still works, but the remap takes effect only after "
+        "a reset: drain the card and reset it (`nvidia-smi -r` with no process on it, or a host "
+        "reboot) when it is free.",
     )
     OK = MessageTemplate(
         event="GPU memory health ok",
@@ -2239,6 +2252,55 @@ class LocalVerifyMessages:
         severity="info",
         category="transport",
         impact="The matmul and VerifyX verdicts below come from the executor's local run, judged by the validator",
+    )
+
+
+class RentedPodResourcesMessages:
+    """DAH-4564 — a host script `docker update --cpuset-cpus`-pins a rented pod, or cuts its CPU quota,
+    below 95% of the cores rented. Shadow (RENTED_POD_RESOURCES_CHECK_ENABLED without enforcement)
+    renders RESOURCES_REDUCED as a warning and keeps passed=True; only
+    RENTED_POD_RESOURCES_ENFORCEMENT_ENABLED zeroes the score. A raised oom_score_adj is recorded
+    in the event and never scored: a renter running as root can raise it himself."""
+
+    RESOURCES_OK = MessageTemplate(
+        event="Rented pod CPU resources match the deployment",
+        reason="RENTED_POD_RESOURCES_OK",
+        severity="info",
+        category="policy",
+        impact="Proceed",
+    )
+    RESOURCES_REDUCED = MessageTemplate(
+        event="Host pinned or throttled a rented pod below 95% of its advertised CPUs",
+        reason="RENTED_POD_RESOURCES_REDUCED",
+        severity="error",
+        category="policy",
+        impact="Score set to 0",
+        remediation=(
+            "A host-side script changed the renter's container with `docker update` "
+            "(--cpuset-cpus, --cpus or --cpu-quota). A rental must keep at least 95% of its advertised "
+            "cores in both its cpuset and its CPU quota; remove the script or loosen it to that."
+        ),
+    )
+    RESOURCES_UNKNOWN = MessageTemplate(
+        event="Rented pod CPU resources could not be read",
+        reason="RENTED_POD_RESOURCES_UNKNOWN",
+        severity="info",
+        category="policy",
+        impact="Proceed without penalty",
+    )
+    NOT_RENTED = MessageTemplate(
+        event="Rented pod resources check skipped: no running rental",
+        reason="RENTED_POD_RESOURCES_NOT_RENTED",
+        severity="info",
+        category="policy",
+        impact="Proceed",
+    )
+    SKIPPED = MessageTemplate(
+        event="Rented pod resources check disabled",
+        reason="RENTED_POD_RESOURCES_DISABLED",
+        severity="info",
+        category="policy",
+        impact="Proceed",
     )
 
 

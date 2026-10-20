@@ -369,18 +369,18 @@ class RentalProbeCheck:
             return self._skipped(ctx, _RENT_IN_PROGRESS)
 
         try:
-            stop_or_fillers_beside = await self._idle_under_lock(ctx, standing)
+            stop_result_or_fillers_beside = await self._idle_under_lock(ctx, standing)
         except BaseException:
             await create_lock.release(ctx)
             raise
-        if isinstance(stop_or_fillers_beside, CheckResult):
+        if isinstance(stop_result_or_fillers_beside, CheckResult):
             await create_lock.release(ctx)
-            return stop_or_fillers_beside
+            return stop_result_or_fillers_beside
         return _ProbeGate(
             image_ref=image_ref,
             create_lock=create_lock,
             standing=standing,
-            fillers_beside=stop_or_fillers_beside,
+            fillers_beside=stop_result_or_fillers_beside,
         )
 
     async def _idle_under_lock(

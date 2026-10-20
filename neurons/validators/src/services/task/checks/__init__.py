@@ -34,6 +34,7 @@ from .registry_pull import RegistryPullCheck
 from .rental_probe import RentalProbeCheck
 from .port_count import PortCountCheck
 from .rental_verification import RentalVerificationCheck
+from .rented_pod_resources import RentedPodResourcesCheck
 from .rented_gpu_drop import RentedGpuDropCheck
 from .rented_machine import TenantEnforcementCheck
 from .score import ScoreCheck
@@ -73,6 +74,7 @@ __all__ = [
     "GpuVramPrecheck",
     "HardwareIdentityCheck",
     "InspectorRentedCheck",
+    "RentedPodResourcesCheck",
     "SshdAuthLogCheck",
     "LocalVerifyCheck",
     "MachineSpecScrapeCheck",
