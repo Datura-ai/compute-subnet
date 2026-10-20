@@ -160,6 +160,7 @@ def test_parse_measures_mbps_and_names_errors():
     assert parse_download_speed(line("pypi", 0, 1, 1, "wget: can't connect: Connection refused"))[0].error == "unreachable"
     # head stopped the read at the cap and wget died of SIGPIPE
     assert parse_download_speed(line("pypi", CAP_BYTES, 2.0, 1))[0].mbps is not None
+    assert parse_download_speed(line("hf", CAP_BYTES, 1.7, 141))[1].mbps is not None  # staging node, 20 Oct
     assert parse_download_speed("")[1].error == "no_output"
 
 
