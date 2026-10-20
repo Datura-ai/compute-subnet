@@ -126,6 +126,7 @@ async def test_fetch_returns_the_archive_when_digest_and_entries_pass(monkeypatc
         "https://contexts.example.com.evil.test/ctx.tar.gz",
         "https://user@contexts.example.com/ctx.tar.gz",
         "https://contexts.example.com:8443/ctx.tar.gz",
+        "https://contexts.example.com:bad/ctx.tar.gz",
         "file:///etc/passwd",
     ],
 )

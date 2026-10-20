@@ -61,7 +61,11 @@ def check_url(url: str, hosts: set[str]) -> None:
     parts = urlsplit(url)
     if parts.scheme != "https" or not parts.hostname or parts.hostname.lower() not in hosts:
         raise BuildContextError("build context URL is not on an allowed host")
-    if parts.username or parts.password or parts.port not in (None, 443):
+    try:
+        port = parts.port
+    except ValueError:  # a port that is not a number
+        raise BuildContextError("build context URL is not on an allowed host") from None
+    if parts.username or parts.password or port not in (None, 443):
         raise BuildContextError("build context URL is not on an allowed host")
 
 
