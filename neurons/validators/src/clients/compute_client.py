@@ -862,15 +862,35 @@ class ComputeClient:
         # past it and find nothing to cancel — and the create it raced then orphans its container.
         if not isinstance(job_request, ContainerCreateRequest):
             return await self._drive_miner_job(job_request)
-        redis_service = self.miner_service.redis_service
-        await redis_service.add_inflight_backend_create(
-            job_request.pod_id, job_request.miner_hotkey, job_request.executor_id, job_request.workload_kind.value
-        )
-        try:
-            with inflight_creates.track(job_request.pod_id):
+        with inflight_creates.track(job_request.pod_id):
+            await self._track_backend_create_for_restart_report(job_request)
+            try:
                 return await self._drive_miner_job(job_request)
-        finally:
-            await redis_service.remove_inflight_backend_create(job_request.pod_id)
+            finally:
+                await self._untrack_backend_create_for_restart_report(job_request.pod_id)
+
+    async def _track_backend_create_for_restart_report(self, job_request: ContainerCreateRequest) -> None:
+        # best-effort: a Redis error loses only the restart report, never the create itself
+        try:
+            await self.miner_service.redis_service.add_inflight_backend_create(
+                job_request.pod_id, job_request.miner_hotkey, job_request.executor_id, job_request.workload_kind.value
+            )
+        except Exception as exc:
+            self._log_backend_create_tracking_error(job_request.pod_id, exc)
+
+    async def _untrack_backend_create_for_restart_report(self, pod_id: str) -> None:
+        try:
+            await self.miner_service.redis_service.remove_inflight_backend_create(pod_id)
+        except Exception as exc:
+            self._log_backend_create_tracking_error(pod_id, exc)
+
+    def _log_backend_create_tracking_error(self, pod_id: str, exc: Exception) -> None:
+        logger.error(
+            _m(
+                "Failed to track a backend create for the restart report",
+                extra=get_extra_info({**self.logging_extra, "pod_id": pod_id, "error": str(exc)}),
+            )
+        )
 
     async def fail_creates_cut_off_by_restart(self) -> None:
         """DAH-4698: a create the previous connector was running when it died (every lium-io deploy recreates it) never
@@ -879,18 +899,17 @@ class ComputeClient:
         redis_service = self.miner_service.redis_service
         creates = await redis_service.inflight_backend_creates()
         for pod_id, create in creates.items():
-            miner_hotkey, executor_id = create["miner_hotkey"], create["executor_id"]
-            await redis_service.remove_pending_pod(miner_hotkey, executor_id, pod_id)
+            await redis_service.remove_pending_pod(create.miner_hotkey, create.executor_id, pod_id)
             self.message_queue.append(
                 FailedContainerRequest(
-                    miner_hotkey=miner_hotkey,
-                    executor_id=executor_id,
+                    miner_hotkey=create.miner_hotkey,
+                    executor_id=create.executor_id,
                     pod_id=pod_id,
-                    workload_kind=WorkloadKind(create["workload_kind"]),
+                    workload_kind=WorkloadKind(create.workload_kind),
                     error_type=FailedContainerErrorTypes.ContainerCreationFailed,
                     error_code=FailedContainerErrorCodes.UnknownError,
                     msg="The create was interrupted by a validator restart. Please try again.",
-                    detail=f"validator connector restarted during the create (started {create['time']})",
+                    detail=f"validator connector restarted during the create (started {create.started_at})",
                     failure_step=CREATE_CUT_OFF_BY_RESTART_STEP,
                 )
             )
@@ -898,7 +917,7 @@ class ComputeClient:
             logger.warning(
                 _m(
                     "Create cut off by a connector restart, reported failed",
-                    extra=get_extra_info({**self.logging_extra, "pod_id": pod_id, **create}),
+                    extra=get_extra_info({**self.logging_extra, "pod_id": pod_id, **create.model_dump()}),
                 )
             )
 

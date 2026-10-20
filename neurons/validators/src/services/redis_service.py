@@ -4,6 +4,8 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from typing import NamedTuple
+
+from pydantic import BaseModel
 from protocol.vc_protocol.validator_requests import ResetVerifiedJobReason
 import redis.asyncio as aioredis
 import redis.exceptions
@@ -26,6 +28,13 @@ PENDING_PODS_PREFIX = "pending_pods_prefix"
 # DAH-4698: creates the backend sent that are running in this connector right now, by pod id; what is left when a
 # connector starts was cut off by the restart (a redeploy recreates the connector mid-create)
 INFLIGHT_BACKEND_CREATES_KEY = "inflight_backend_creates"
+
+
+class InflightBackendCreate(BaseModel):
+    miner_hotkey: str
+    executor_id: str
+    workload_kind: str
+    started_at: int
 DUPLICATED_MACHINE_SET = "duplicated_machines"
 RENTAL_SUCCEED_MACHINE_SET = "rental_succeed_machines"
 AVAILABLE_PORT_MAPS_PREFIX = "available_port_maps"
@@ -565,19 +574,23 @@ class RedisService:
         else:
             await self.hdel(PENDING_PODS_PREFIX, f"{miner_hotkey}:{executor_id}")
     
-    async def add_inflight_backend_create(self, pod_id: str, miner_hotkey: str, executor_id: str, workload_kind: str):
-        entry = {"miner_hotkey": miner_hotkey, "executor_id": executor_id, "workload_kind": workload_kind, "time": int(time.time())}
-        await self.hset(INFLIGHT_BACKEND_CREATES_KEY, pod_id, json.dumps(entry))
+    async def add_inflight_backend_create(
+        self, pod_id: str, miner_hotkey: str, executor_id: str, workload_kind: str
+    ) -> None:
+        create = InflightBackendCreate(
+            miner_hotkey=miner_hotkey, executor_id=executor_id, workload_kind=workload_kind, started_at=int(time.time())
+        )
+        await self.hset(INFLIGHT_BACKEND_CREATES_KEY, pod_id, create.model_dump_json())
 
-    async def remove_inflight_backend_create(self, pod_id: str):
+    async def remove_inflight_backend_create(self, pod_id: str) -> None:
         await self.hdel(INFLIGHT_BACKEND_CREATES_KEY, pod_id)
 
-    async def inflight_backend_creates(self) -> dict[str, dict]:
-        """pod id -> {miner_hotkey, executor_id, workload_kind, time}"""
+    async def inflight_backend_creates(self) -> dict[str, InflightBackendCreate]:
+        """pod id -> the create the backend sent for it"""
         raw = await self.hgetall(INFLIGHT_BACKEND_CREATES_KEY) or {}
         return {
-            (k.decode() if isinstance(k, bytes) else k): json.loads(v)
-            for k, v in raw.items()
+            (pod_id.decode() if isinstance(pod_id, bytes) else pod_id): InflightBackendCreate.model_validate_json(entry)
+            for pod_id, entry in raw.items()
         }
 
     async def get_pending_pods(self, miner_hotkey: str, executor_id: str) -> list[dict]:

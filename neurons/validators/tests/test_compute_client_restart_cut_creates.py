@@ -94,5 +94,31 @@ async def test_a_create_is_tracked_while_it_runs_and_untracked_when_it_ends():
     with pytest.raises(RuntimeError):
         await client.miner_driver(request)
 
-    assert seen_while_running[0]["pod-2"]["executor_id"] == "exec-2"
+    assert seen_while_running[0]["pod-2"].executor_id == "exec-2"
     assert await redis_service.inflight_backend_creates() == {}
+
+
+class _BrokenRedis(_FakeRedis):
+    async def hset(self, key, field, value):
+        raise ConnectionError("redis is down")
+
+    async def hdel(self, key, *fields):
+        raise ConnectionError("redis is down")
+
+
+@pytest.mark.asyncio
+async def test_a_create_still_runs_and_returns_when_redis_cannot_track_it():
+    # a lost tracking entry costs only the restart report; a lost create would leave the pod pending
+    redis_service = _redis_service()
+    redis_service.redis = _BrokenRedis()
+    client = _client(redis_service)
+
+    async def drive(job_request):
+        return "created"
+
+    client._drive_miner_job = drive
+    request = ContainerCreateRequest.model_construct(
+        pod_id="pod-3", miner_hotkey="miner-hk", executor_id="exec-3", workload_kind=WorkloadKind.FILLER
+    )
+
+    assert await client.miner_driver(request) == "created"
