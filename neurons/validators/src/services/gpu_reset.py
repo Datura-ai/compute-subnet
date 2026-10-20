@@ -248,7 +248,7 @@ async def _precheck(
     if not set(targets) <= set(pod_gpu_uuids):
         raise GpuResetRefused(GpuResetErrorCode.GpuNotInContainer, "an NVLink peer is not one of the pod's GPUs")
 
-    outside = await _processes_outside(runner, targets, container_id)
+    outside = await _processes_outside(runner, targets, container_id, ignore_cgroup=await _own_cgroup(runner))
     if outside:
         raise GpuResetRefused(
             GpuResetErrorCode.GpuInUseOutsidePod, f"processes outside the pod use the GPUs: {outside}"
@@ -286,8 +286,20 @@ async def _widen_targets_to_nvlink_peers(
     return [uuid for uuid in ordered if uuid in targets]
 
 
-async def _processes_outside(runner: SSHCommandRunner, targets: list[str], container_id: str | None) -> list[int]:
-    """PIDs computing on the targets that are not the container's (every one when container_id is None)."""
+async def _own_cgroup(runner: SSHCommandRunner) -> str | None:
+    """The cgroup of the validator's own SSH session (its GPU probes run there); None when it is the root."""
+    result = await _run(runner, "tr '\\n' ' ' < /proc/self/cgroup")
+    cgroup = (result.stdout or "").strip() if result.exit_code == 0 else ""
+    # the root cgroup also holds every unconfined host process, so it proves nothing
+    return cgroup if cgroup and cgroup != "0::/" else None
+
+
+async def _processes_outside(
+    runner: SSHCommandRunner, targets: list[str], container_id: str | None, *, ignore_cgroup: str | None = None
+) -> list[int]:
+    """PIDs computing on the targets that are not the container's (every one when container_id is None).
+
+    PIDs in ignore_cgroup (the validator's own session) do not count."""
     apps = await _run(runner, COMPUTE_APPS_COMMAND)
     if apps.exit_code != 0:
         raise GpuResetRefused(GpuResetErrorCode.ResetNotSupported, "could not list the GPU processes")
@@ -296,7 +308,11 @@ async def _processes_outside(runner: SSHCommandRunner, targets: list[str], conta
         return pids
     cgroups = await _cgroups(runner, pids)
     # a PID whose cgroup cannot be read is not proven to be the pod's
-    return [pid for pid in pids if container_id not in cgroups.get(pid, "")]
+    return [
+        pid
+        for pid in pids
+        if container_id not in cgroups.get(pid, "") and (ignore_cgroup is None or cgroups.get(pid, "").strip() != ignore_cgroup)
+    ]
 
 
 async def reset_pod_gpus(
@@ -369,6 +385,9 @@ async def reset_pod_gpus(
                         detail=None if cure.cured else _tail(cure.error or cure.output),
                     )
                 )
+            # the fallback is the fix when it cures every target; the refused -r stays in the notes
+            if report.gpus and all(gpu.result == "latch_cleared" for gpu in report.gpus):
+                report.ok, report.error_code = True, None
     except GpuResetRefused as refused:
         report.error_code = refused.code
         notes.append(refused.detail)
