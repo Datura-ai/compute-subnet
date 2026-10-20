@@ -17,7 +17,6 @@ from protocol.vc_protocol.compute_requests import ExecutorUptimeResponse, Rented
 from core.config import settings
 from core.utils import _m
 from services.const import GPU_MODEL_RATES
-from payload_models.payloads import WorkloadKind
 
 MACHINE_SPEC_CHANNEL = "MACHINE_SPEC_CHANNEL"
 STREAMING_LOG_CHANNEL = "STREAMING_LOG_CHANNEL"
@@ -123,7 +122,6 @@ REDIS_RETRY_ATTEMPTS = 3
 REDIS_HEALTH_CHECK_INTERVAL_SECONDS = 30
 
 logger = logging.getLogger(__name__)
-
 
 
 class InflightBackendCreate(BaseModel):
