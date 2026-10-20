@@ -285,6 +285,20 @@ async def test_cycle_result_carries_the_listed_verdict_and_the_missing_rented_no
 
 
 @pytest.mark.asyncio
+async def test_one_cycle_grace_a_miner_answering_zero_executors_twice_gets_the_row_on_the_second(rest_service, monkeypatch):
+    monkeypatch.setattr("services.miner_service.settings.RENTED_NOT_LISTED_ONE_CYCLE_GRACE", True)
+    rest_service.miner_returns()
+    rented_data = RentedExecutorsResponse(executors={MISSING: rented()})
+
+    first = await request(rest_service, rented_data)
+    second = await request(rest_service, rented_data)
+
+    assert MISSING not in [r.executor_info.uuid for r in first["results"]]
+    assert [r.executor_info.uuid for r in second["results"]] == [MISSING]
+    assert second["results"][0].failure_reason_code == "RENTED_EXECUTOR_NOT_LISTED"
+
+
+@pytest.mark.asyncio
 async def test_a_miner_whose_only_rented_node_is_down_gets_a_row_for_the_node_not_a_miner_failure(rest_service):
     """Zero executors used to end as one miner-level failure row (uuid 1111-…) and nothing about
     the node; now the node gets its own row."""

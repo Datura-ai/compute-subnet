@@ -278,9 +278,9 @@ class MinerService:
         # wave's list of the node's miner, or the wave could verify and publish the node again
         # under the same id once the lane let go of it. Stays empty with the flag off.
         self.miners_awaiting_wave_list: dict[str, str] = {}
-        # rented executor uuids its miner left out of the previous cycle's answer (RENTED_NOT_LISTED_ONE_CYCLE_GRACE).
+        # per miner hotkey, the rented executor uuids it left out of its previous answer (RENTED_NOT_LISTED_ONE_CYCLE_GRACE).
         # shortcut: in memory, so a restart costs one extra cycle before a real outage is reported.
-        self.rented_missed_last_cycle: set[str] = set()
+        self.rented_missed_last_cycle: dict[str, set[str]] = {}
 
     def start_awaiting_wave_lists(self, job_batch_id: str, miner_hotkeys: list[str]) -> None:
         """Validator.sync(), in the same step that publishes the cycle's inputs to the lane."""
@@ -1016,7 +1016,7 @@ class MinerService:
                 continue
             yield executor_uuid, rented_executor
 
-    def _iter_not_listed_rented(
+    def _not_listed_rented_to_report(
         self,
         payload: MinerJobRequestPayload,
         rented_data: RentedExecutorsResponse | None,
@@ -1028,7 +1028,9 @@ class MinerService:
         for executor_uuid, rented_executor in self._missing_rented(
             payload, rented_data, miner_returned_executors, executor_id
         ):
-            if settings.RENTED_NOT_LISTED_ONE_CYCLE_GRACE and executor_uuid not in self.rented_missed_last_cycle:
+            if settings.RENTED_NOT_LISTED_ONE_CYCLE_GRACE and executor_uuid not in self.rented_missed_last_cycle.get(
+                payload.miner_hotkey, ()
+            ):
                 continue
             yield executor_uuid, rented_executor
 
@@ -1078,18 +1080,13 @@ class MinerService:
         """
         results = [
             self._not_listed_rented_job_result(payload, executor_uuid, rented_executor)
-            for executor_uuid, rented_executor in self._iter_not_listed_rented(
+            for executor_uuid, rented_executor in self._not_listed_rented_to_report(
                 payload, rented_data, miner_returned_executors, executor_id
             )
         ]
         if settings.RENTED_NOT_LISTED_ONE_CYCLE_GRACE and rented_data and executor_id is None:
-            # this miner's misses become the next cycle's; a node it returned again starts over
-            self.rented_missed_last_cycle -= {
-                str(raw_uuid).lower()
-                for raw_uuid, rented_executor in rented_data.executors.items()
-                if rented_executor.miner_hotkey == payload.miner_hotkey
-            }
-            self.rented_missed_last_cycle |= {
+            # this miner's misses replace its previous ones: a node it returned, or whose rental ended, drops out
+            self.rented_missed_last_cycle[payload.miner_hotkey] = {
                 executor_uuid
                 for executor_uuid, _ in self._missing_rented(
                     payload, rented_data, miner_returned_executors, executor_id
