@@ -115,6 +115,7 @@ async def test_a_successful_edit_runs_the_same_host_commands(svc, monkeypatch):
     result = await _run(svc, payload)
 
     assert isinstance(result, ContainerCreated)
+    host_key = next(cmd for cmd in ssh.commands if "pod_ssh_host_key" in cmd)
     assert ssh.commands == [
         f'/usr/bin/docker ps -a --no-trunc --format "{{{{.Names}}}} {{{{.ID}}}}" --filter name=^{name}$ --filter name=^{parked}$',
         f"/usr/bin/docker rename {name} {parked}",
@@ -125,6 +126,7 @@ async def test_a_successful_edit_runs_the_same_host_commands(svc, monkeypatch):
         " --format=csv,noheader,nounits",
         "nvidia-smi --query-gpu=uuid,power.limit,power.default_limit,power.min_limit,power.max_limit"
         " --format=csv,noheader,nounits",
+        host_key,
         "nohup /usr/bin/python /root/app/src/inspector_executor.py --start-collector >/dev/null 2>&1 &",
         f"/usr/bin/docker rm -fv id-{name}",
     ]

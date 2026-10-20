@@ -18,6 +18,7 @@ Covers (from the plan's Test Plan):
 
 from __future__ import annotations
 
+import shlex
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
@@ -614,6 +615,7 @@ async def test_a_present_public_hub_image_rent_makes_the_same_host_calls(
     assert _docker_client(svc).freshness_calls == []
     assert _docker_client(svc).login_calls == []
     assert _pulled_images(svc) == []
+    host_key = next(cmd for cmd in _ssh_run_cmds(ssh_client) if "pod_ssh_host_key" in cmd)
     assert _ssh_run_cmds(ssh_client) == [
         # the host's kernel.pid_max first — before any host side-effect (the filler removal below, the
         # stale-container cleanup, the pull, the volume) so a rental whose pids.max can't be clamped below
@@ -627,12 +629,13 @@ async def test_a_present_public_hub_image_rent_makes_the_same_host_calls(
         " --format=csv,noheader,nounits",
         "nvidia-smi --query-gpu=uuid,power.limit,power.default_limit,power.min_limit,power.max_limit"
         " --format=csv,noheader,nounits",
+        host_key,
         "nohup /usr/bin/python /root/app/src/inspector_executor.py --start-collector >/dev/null 2>&1 &",
     ]
     exec_argv = _exec_argv_texts(svc)
     assert exec_argv[0] == "sh -c mkdir -p /root/.ssh && chmod 700 /root/.ssh && cat >> /root/.ssh/authorized_keys"
     # the image ships sshd, so no bootstrap exec; the pod's host key is installed all the same
-    assert len(exec_argv) == 2 and " pod_ssh_host_key ssh-ed25519 " in exec_argv[1]
+    assert len(exec_argv) == 1 and shlex.split(host_key)[-1].startswith("ssh-ed25519 ")
 
 
 @pytest.mark.asyncio
