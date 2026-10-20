@@ -1707,5 +1707,69 @@ async def test_filler_gpu_work_counts_only_on_the_filler_image(
 
     assert result.passed is expected_pass
     assert result.event.reason_code == (Msg.USAGE_OK if expected_pass else Msg.USAGE_HIGH).reason
+    if not expected_pass and load == (2, 3):  # at high load the utilization violation is reported
+        assert result.event.what_we_saw["filler_containers_off_their_image"] == [filler_container]
     # the record outlives a long filler: each check refreshes its TTL
     assert services.redis.ttl[f"{FILLER_IMAGE_DIGESTS_PREFIX}{filler_container}"] == FILLER_IMAGE_DIGESTS_TTL_SECONDS
+
+
+async def _filler_image_ctx(context_factory, monkeypatch, record, extra_processes=()):
+    from neurons.validators.src.services.redis_service import FILLER_IMAGE_DIGESTS_PREFIX
+
+    monkeypatch.setattr(gpu_usage.settings, "FILLER_IMAGE_IDENTITY_ENFORCEMENT_ENABLED", True)
+    swapped, intact = "filler_swapped", "filler_intact"
+    services = build_services()
+    await services.redis.set(f"{FILLER_IMAGE_DIGESTS_PREFIX}{swapped}", record)
+    await services.redis.set(f"{FILLER_IMAGE_DIGESTS_PREFIX}{intact}", '["sha256:filler"]')
+    state = build_state(
+        gpu_details=[{"gpu_utilization": 2, "memory_utilization": 3}],
+        gpu_processes=[
+            {"pid": 1, "container_name": swapped},
+            {"pid": 2, "container_name": intact},
+            *extra_processes,
+        ],
+        rented_data=RentedExecutorsResponse(
+            executors={},
+            all_filler_containers_by_executor={"executor-123": [swapped, intact]},
+        ),
+        specs={
+            "docker": {
+                "containers": [
+                    {"name": swapped, "digest": "sha256:other"},
+                    {"name": intact, "digest": "sha256:filler"},
+                ]
+            }
+        },
+    )
+    return context_factory(services=services, config=build_context_config(), state=state)
+
+
+@pytest.mark.asyncio
+async def test_off_image_event_names_only_the_mismatched_fillers(context_factory, monkeypatch):
+    ctx = await _filler_image_ctx(context_factory, monkeypatch, '["sha256:filler"]')
+
+    result = await GpuUsageCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.event.what_we_saw["filler_containers_off_their_image"] == ["filler_swapped"]
+
+
+@pytest.mark.asyncio
+async def test_unreadable_filler_image_record_skips_that_filler(context_factory, monkeypatch):
+    ctx = await _filler_image_ctx(context_factory, monkeypatch, "not json")
+
+    result = await GpuUsageCheck().run(ctx)
+
+    assert result.passed is True
+    assert result.event.reason_code == Msg.USAGE_OK.reason
+
+
+@pytest.mark.asyncio
+async def test_swapped_filler_is_judged_beside_a_rental_pod(context_factory, monkeypatch):
+    pod = {"pid": 3, "container_name": f"{POD_CONTAINER_PREFIX}53a68595"}
+    ctx = await _filler_image_ctx(context_factory, monkeypatch, '["sha256:filler"]', [pod])
+
+    result = await GpuUsageCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.event.what_we_saw["filler_containers_off_their_image"] == ["filler_swapped"]

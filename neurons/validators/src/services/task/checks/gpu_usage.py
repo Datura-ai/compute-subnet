@@ -220,11 +220,12 @@ class GpuUsageCheck:
         filler_containers = set(rented_data.get_filler_containers(ctx.executor.uuid)) if rented_data else set()
         process_names = {process.get("container_name") for process in gpu_processes}
         fillers_only = bool(filler_containers) and all(name in filler_containers for name in process_names)
-        # judged at any load: a swapped filler can hold VRAM while staying under the utilization limits
-        off_image = fillers_only and await _fillers_off_their_image(ctx, process_names)
+        # judged at any load, also beside a rental pod: a swapped filler can hold VRAM while staying
+        # under the utilization limits
+        off_image = await _fillers_off_their_image(ctx, process_names & filler_containers)
         violation = _find_violation(gpu_details, gpu_processes)
         if violation is None and off_image:
-            violation = {"filler_containers_off_their_image": sorted(process_names)}
+            violation = {"filler_containers_off_their_image": off_image}
 
         if violation is None:
             foreign_result = await self._judge_foreign_occupancy(ctx, gpu_details, gpu_processes)
@@ -522,10 +523,10 @@ def _parse_gpu_memory_used_mb(gpu_query_csv: str) -> dict[str, float]:
     return memory_by_uuid
 
 
-async def _fillers_off_their_image(ctx: Context, names: set[str]) -> bool:
-    """True when enforcement is on and a filler runs another image than the one the validator
-    started it from. A filler with no record or missing from the scrape is not judged; a scraped
-    empty digest (a locally built image has no RepoDigests) is a mismatch."""
+async def _fillers_off_their_image(ctx: Context, names: set[str]) -> list[str]:
+    """The fillers running another image than the one the validator started them from; empty
+    while enforcement is off. A filler with no readable record or missing from the scrape is not
+    judged; a scraped empty digest (a locally built image has no RepoDigests) is a mismatch."""
     scraped = {
         str(entry.get("name") or ""): str(entry.get("digest") or "")
         for entry in ((ctx.state.specs or {}).get("docker") or {}).get("containers") or []
@@ -539,10 +540,13 @@ async def _fillers_off_their_image(ctx: Context, names: set[str]) -> bool:
             if recorded:
                 # a filler can outlive the TTL: keep its record while it is still being checked
                 await ctx.services.redis.expire(key, FILLER_IMAGE_DIGESTS_TTL_SECONDS)
+            digests = json.loads(recorded) if recorded else []
+            if not isinstance(digests, list):
+                raise ValueError("not a list of digests")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Filler image record unreadable, not judging %s: %s", name, exc)
             continue
-        if recorded and name in scraped and scraped[name] not in json.loads(recorded):
+        if digests and name in scraped and scraped[name] not in digests:
             off_image.append(name)
     if off_image:
         logger.warning(
@@ -552,7 +556,7 @@ async def _fillers_off_their_image(ctx: Context, names: set[str]) -> bool:
             off_image,
             settings.FILLER_IMAGE_IDENTITY_ENFORCEMENT_ENABLED,
         )
-    return bool(off_image) and settings.FILLER_IMAGE_IDENTITY_ENFORCEMENT_ENABLED
+    return off_image if settings.FILLER_IMAGE_IDENTITY_ENFORCEMENT_ENABLED else []
 
 
 def carries_a_rental_prefix(container_name: str) -> bool:

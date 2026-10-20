@@ -4290,14 +4290,18 @@ class DockerService:
     async def _record_filler_image_best_effort(
         self,
         docker_client: RentalDockerSdkClient,
-        image: str,
+        container: str,
         container_name: str,
         default_extra: dict,
     ) -> None:
         """Remember the image digests a filler was started from, so the GPU usage check can tell it
         from another container later run under the same name. Never fails the create."""
         try:
-            repo_digests = await docker_client.local_image_repo_digests(image=image)
+            # the container's own image, not the tag: the tag can move during the bootstrap
+            image_id = await docker_client.container_image_id(container=container)
+            repo_digests = (
+                await docker_client.local_image_repo_digests(image=image_id) if image_id else None
+            )
             digests = sorted(
                 {d.split("@", 1)[1] for d in repo_digests or () if "@" in d}
             )
@@ -8804,7 +8808,7 @@ class DockerService:
                     )
                     if payload.workload_kind == WorkloadKind.FILLER:
                         await self._record_filler_image_best_effort(
-                            docker_client, payload.docker_image, container_name, default_extra
+                            docker_client, container_id or container_name, container_name, default_extra
                         )
                     # no duration: the collector starts after the reply, its time is logged there
                     profilers.append(

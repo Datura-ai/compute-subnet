@@ -11,7 +11,8 @@ from services.redis_service import FILLER_IMAGE_DIGESTS_PREFIX
 
 def _docker(repo_digests=None, error: Exception | None = None):
     return SimpleNamespace(
-        local_image_repo_digests=AsyncMock(return_value=repo_digests, side_effect=error)
+        container_image_id=AsyncMock(return_value="sha256:imageid"),
+        local_image_repo_digests=AsyncMock(return_value=repo_digests, side_effect=error),
     )
 
 
@@ -21,14 +22,15 @@ async def test_records_bare_digests_of_the_filler_image():
     docker = _docker(("daturaai/filler@sha256:aaa", "mirror/filler@sha256:bbb"))
 
     await DockerService._record_filler_image_best_effort(
-        SimpleNamespace(redis_service=redis), docker, "daturaai/filler:prod", "filler_x", {}
+        SimpleNamespace(redis_service=redis), docker, "container-id", "filler_x", {}
     )
 
     assert (
         await redis.get(f"{FILLER_IMAGE_DIGESTS_PREFIX}filler_x") == '["sha256:aaa", "sha256:bbb"]'
     )
-    # read through the validator's Docker client by the image it started, not by container name on the host
-    docker.local_image_repo_digests.assert_awaited_once_with(image="daturaai/filler:prod")
+    # read from the created container's own image, not the tag, which can move during the bootstrap
+    docker.container_image_id.assert_awaited_once_with(container="container-id")
+    docker.local_image_repo_digests.assert_awaited_once_with(image="sha256:imageid")
 
 
 @pytest.mark.parametrize(
