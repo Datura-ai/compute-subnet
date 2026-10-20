@@ -10,7 +10,7 @@ from ..messages import render_message
 from ..pipeline import CheckResult, Context
 from .banned_provider import has_live_rental
 from .gpu_fault_probe import OUTPUT_TAIL_CHARS, PROBE_SOURCE, _cap, _parse_report
-from .post_rental_gpu_recheck import record_marker
+from .post_rental_gpu_recheck import RecheckMarker, record_marker
 
 # one NVML snapshot in a fork with its own 10 s deadline (miner_jobs/gpu_fault_probe.py), plus SSH
 TIMEOUT_SECONDS = 30
@@ -48,7 +48,7 @@ class GpuMemoryHealthCheck:
             if has_live_rental(ctx):
                 # DAH-4482: the node owes an every-card recheck on its next unrented cycle
                 await record_marker(
-                    ctx, self.check_id, {"verdict": "flagged", "flags": what["flags"]}
+                    ctx, RecheckMarker(self.check_id, "flagged", flags=what["flags"])
                 )
             if settings.GPU_MEMORY_HEALTH_ENFORCEMENT_ENABLED:
                 event = render_message(Msg.FAILED, ctx=ctx, check_id=self.check_id, what=what)

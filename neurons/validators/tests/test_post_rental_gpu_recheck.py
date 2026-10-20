@@ -40,6 +40,17 @@ class FakeValidation:
         return self.all_cards
 
 
+def _all_cards(*reasons, over_wall_clock=False):
+    per_card = [{"card_index": i, "ok": not r, "reason": r} for i, r in enumerate(reasons)]
+    passed = not any(reasons) and not over_wall_clock
+    return SimpleNamespace(
+        passed=passed,
+        failure_reason="" if passed else "1/2 card(s) failed device work-proof",
+        over_wall_clock=over_wall_clock,
+        per_card=per_card,
+    )
+
+
 def _idle_ctx(context_factory, runner, validation, *, marker=MARKER, gpu_count=2):
     services = build_services(validation=validation)
     if marker is not None:
@@ -144,7 +155,7 @@ async def test_off_only_logs_what_it_would_require(context_factory, caplog):
 @pytest.mark.asyncio
 async def test_on_a_fault_fails_the_node_and_keeps_the_marker(context_factory, recheck_on):
     runner = FakeRunner(probe_stdout("fault", faults=["gpu 1: wrong result in gather"]))
-    validation = FakeValidation(SimpleNamespace(passed=True, failure_reason=""))
+    validation = FakeValidation(_all_cards("", ""))
     ctx = _idle_ctx(context_factory, runner, validation)
 
     result = await PostRentalGpuRecheckCheck().run(ctx)
@@ -160,9 +171,7 @@ async def test_on_a_fault_fails_the_node_and_keeps_the_marker(context_factory, r
 @pytest.mark.asyncio
 async def test_on_a_failed_all_cards_matmul_fails_the_node(context_factory, recheck_on):
     runner = FakeRunner(probe_stdout("ok"))
-    validation = FakeValidation(
-        SimpleNamespace(passed=False, failure_reason="1/2 card(s) failed device work-proof")
-    )
+    validation = FakeValidation(_all_cards("", "exit_status=1"))
     ctx = _idle_ctx(context_factory, runner, validation)
 
     result = await PostRentalGpuRecheckCheck().run(ctx)
@@ -175,7 +184,7 @@ async def test_on_a_failed_all_cards_matmul_fails_the_node(context_factory, rech
 @pytest.mark.asyncio
 async def test_on_a_pass_clears_the_marker(context_factory, recheck_on, caplog):
     runner = FakeRunner(probe_stdout("ok"))
-    validation = FakeValidation(SimpleNamespace(passed=True, failure_reason=""))
+    validation = FakeValidation(_all_cards("", ""))
     ctx = _idle_ctx(context_factory, runner, validation)
 
     with caplog.at_level("INFO", logger=module.__name__):
@@ -198,6 +207,7 @@ async def test_on_a_probe_without_a_verdict_keeps_the_marker_and_skips_the_strea
 
     assert result.passed and result.event.reason_code == Msg.INCONCLUSIVE.reason
     assert KEY in ctx.services.redis.store
+    assert ctx.services.redis.ttl[KEY] == module.MARKER_TTL_SECONDS
     # the pipeline's own probe already counted this cycle
     assert probe_module._unknown_streak == {}
 
@@ -215,6 +225,39 @@ async def test_no_all_cards_matmul_is_inconclusive_on_a_multi_card_node(
     assert result.passed
     assert result.event.reason_code == (Msg.PASSED if cleared else Msg.INCONCLUSIVE).reason
     assert (KEY in ctx.services.redis.store) is not cleared
+
+
+@pytest.mark.parametrize(
+    "all_cards",
+    [
+        _all_cards("", "timeout"),
+        _all_cards("ssh_error: channel closed", ""),
+        _all_cards("", "", over_wall_clock=True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_an_all_cards_matmul_lost_to_ssh_or_time_is_inconclusive(
+    context_factory, recheck_on, all_cards
+):
+    ctx = _idle_ctx(context_factory, FakeRunner(probe_stdout("ok")), FakeValidation(all_cards))
+
+    result = await PostRentalGpuRecheckCheck().run(ctx)
+
+    assert result.passed and result.event.reason_code == Msg.INCONCLUSIVE.reason
+    assert ctx.services.redis.ttl[KEY] == module.MARKER_TTL_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_a_filler_cycle_renews_the_marker(context_factory, recheck_on):
+    runner, validation = FakeRunner(), FakeValidation()
+    ctx = _idle_ctx(context_factory, runner, validation)
+
+    with patch.object(module, "_get_filler_only_container", return_value={"id": "filler"}):
+        result = await PostRentalGpuRecheckCheck().run(ctx)
+
+    assert result.passed and result.event.reason_code == Msg.FILLER_SKIPPED.reason
+    assert runner.calls == [] and validation.calls == 0
+    assert ctx.services.redis.ttl[KEY] == module.MARKER_TTL_SECONDS
 
 
 # --- placement ----------------------------------------------------------------------------------------------

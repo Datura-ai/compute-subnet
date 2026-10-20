@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -44,23 +44,32 @@ MAX_MARKED_CARDS = 16
 @dataclass(frozen=True)
 class CardProbes:
     failures: list[str]
-    all_cards_probe: AllCardsProbe | None
+    # no all-cards verdict: skipped on a multi-card node, or lost to SSH, a timeout or the wall clock
+    all_cards_inconclusive: bool
     fault_probe: CheckResult
+
+
+@dataclass(frozen=True)
+class RecheckMarker:
+    source: str
+    verdict: str
+    flags: list[Any] = field(default_factory=list)
+    cards: list[dict[str, str]] = field(default_factory=list)
 
 
 def marker_key(miner_hotkey: str, executor_uuid: str) -> str:
     return f"{POST_RENTAL_GPU_RECHECK_PREFIX}:{miner_hotkey}:{executor_uuid}"
 
 
-async def record_marker(ctx: Context, source: str, detail: dict[str, Any]) -> None:
+async def record_marker(ctx: Context, marker: RecheckMarker) -> None:
     """Remember what a rented cycle flagged. Never raises: the caller's verdict must not depend on Redis."""
     if settings.DRY_RUN:
         return
-    marker = {"at": datetime.now(UTC).isoformat(), "source": source, **detail}
+    payload = {"at": datetime.now(UTC).isoformat(), **asdict(marker)}
     try:
         await ctx.services.redis.set(
             marker_key(ctx.miner_hotkey, ctx.executor.uuid),
-            json.dumps(marker),
+            json.dumps(payload),
             ex=MARKER_TTL_SECONDS,
         )
     except Exception as exc:  # noqa: BLE001
@@ -76,12 +85,20 @@ async def record_gpu_drop(ctx: Context, missing_uuids: list[str]) -> None:
     """A card fell off the bus: owe a recheck."""
     await record_marker(
         ctx,
-        "gpu_details_mismatch",
-        {
-            "verdict": "gpu_missing",
-            "cards": [{"uuid": u, "verdict": "missing"} for u in missing_uuids[:MAX_MARKED_CARDS]],
-        },
+        RecheckMarker(
+            source="gpu_details_mismatch",
+            verdict="gpu_missing",
+            cards=[{"uuid": u, "verdict": "missing"} for u in missing_uuids[:MAX_MARKED_CARDS]],
+        ),
     )
+
+
+def _all_cards_no_verdict(probe: AllCardsProbe) -> bool:
+    # SSH errors, timeouts and the wall clock say nothing about the cards, as the fault probe treats them
+    reasons = [c.get("reason") or "" for c in probe.per_card if not c.get("ok")]
+    if not reasons:
+        return probe.over_wall_clock
+    return all(r == "timeout" or r.startswith("ssh_error") for r in reasons)
 
 
 class PostRentalGpuRecheckCheck:
@@ -90,24 +107,11 @@ class PostRentalGpuRecheckCheck:
 
     async def run(self, ctx: Context) -> CheckResult:
         key = marker_key(ctx.miner_hotkey, ctx.executor.uuid)
-        try:
-            raw = await ctx.services.redis.get(key)
-        except Exception as exc:  # noqa: BLE001 — no marker readable is no recheck, never a failure
-            raw = None
-            logger.warning(
-                _m(
-                    "POST_RENTAL_GPU_RECHECK_MARKER_READ_FAILED",
-                    extra=get_extra_info({**ctx.default_extra, "error": str(exc)}),
-                )
-            )
-        if raw is None:
+        marker = await self._read_marker(ctx, key)
+        if marker is None:
             return CheckResult(
                 passed=True, event=render_message(Msg.NO_MARKER, ctx=ctx, check_id=self.check_id)
             )
-        try:
-            marker = json.loads(raw)
-        except (TypeError, ValueError):
-            marker = {"raw": str(raw)[:200]}
         what: dict[str, Any] = {"executor_uuid": ctx.executor.uuid, "marker": marker}
 
         if not settings.POST_RENTAL_GPU_RECHECK_ENABLED:
@@ -119,6 +123,7 @@ class PostRentalGpuRecheckCheck:
 
         if _get_filler_only_container(ctx):
             # both probes would compete with the filler for VRAM; the marker waits for an idle cycle
+            await self._refresh_marker(ctx, key, what)
             return CheckResult(
                 passed=True,
                 event=render_message(
@@ -129,23 +134,19 @@ class PostRentalGpuRecheckCheck:
         probes = await self._run_every_card_probes(ctx, what)
         if probes.failures:
             what["error"] = "; ".join(probes.failures)
-            if not settings.DRY_RUN:
-                try:
-                    # keep the marker alive while the node keeps failing, or it re-lists unchecked
-                    await ctx.services.redis.expire(key, MARKER_TTL_SECONDS)
-                except Exception as exc:  # noqa: BLE001 — the failure stands either way
-                    what["marker_refresh_error"] = str(exc)
+            await self._refresh_marker(ctx, key, what)
             self._log(ctx, "POST_RENTAL_GPU_RECHECK_FAILED", what, logging.WARNING)
             return CheckResult(
                 passed=False,
                 event=render_message(Msg.FAILED, ctx=ctx, check_id=self.check_id, what=what),
             )
-        gpu_count = ((ctx.state.specs or {}).get("gpu") or {}).get("count") or 0
-        if probes.fault_probe.event.reason_code != GpuFaultProbeMessages.PROBE_OK.reason or (
-            probes.all_cards_probe is None and gpu_count > 1
+        if (
+            probes.fault_probe.event.reason_code != GpuFaultProbeMessages.PROBE_OK.reason
+            or probes.all_cards_inconclusive
         ):
-            # a probe that could not run (or found a filler), or a multi-card node the all-cards matmul
-            # skipped: not a pass, so the marker stays
+            # a probe that could not run (or found a filler), or no all-cards verdict: not a pass, so
+            # the marker stays
+            await self._refresh_marker(ctx, key, what)
             self._log(ctx, "POST_RENTAL_GPU_RECHECK_INCONCLUSIVE", what, logging.INFO)
             return CheckResult(
                 passed=True,
@@ -163,6 +164,35 @@ class PostRentalGpuRecheckCheck:
         )
 
     @staticmethod
+    async def _read_marker(ctx: Context, key: str) -> dict[str, Any] | None:
+        try:
+            raw = await ctx.services.redis.get(key)
+        except Exception as exc:  # noqa: BLE001 — no marker readable is no recheck, never a failure
+            logger.warning(
+                _m(
+                    "POST_RENTAL_GPU_RECHECK_MARKER_READ_FAILED",
+                    extra=get_extra_info({**ctx.default_extra, "error": str(exc)}),
+                )
+            )
+            return None
+        if raw is None:
+            return None
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return {"raw": str(raw)[:200]}
+
+    @staticmethod
+    async def _refresh_marker(ctx: Context, key: str, what: dict[str, Any]) -> None:
+        # keep the marker alive until a pass clears it, or the node re-lists unchecked
+        if settings.DRY_RUN:
+            return
+        try:
+            await ctx.services.redis.expire(key, MARKER_TTL_SECONDS)
+        except Exception as exc:  # noqa: BLE001 — the cycle's verdict stands either way
+            what["marker_refresh_error"] = str(exc)
+
+    @staticmethod
     async def _run_every_card_probes(ctx: Context, what: dict[str, Any]) -> CardProbes:
         """The all-cards matmul and the kernel-fault probe, whatever their own flags say."""
         failures: list[str] = []
@@ -178,8 +208,13 @@ class PostRentalGpuRecheckCheck:
                 "failure_reason": all_cards_probe.failure_reason,
             }
         )
+        gpu_count = ((ctx.state.specs or {}).get("gpu") or {}).get("count") or 0
+        inconclusive = all_cards_probe is None and gpu_count > 1
         if all_cards_probe is not None and not all_cards_probe.passed:
-            failures.append(f"all-cards matmul: {all_cards_probe.failure_reason}")
+            if _all_cards_no_verdict(all_cards_probe):
+                inconclusive = True
+            else:
+                failures.append(f"all-cards matmul: {all_cards_probe.failure_reason}")
         probe = await GpuFaultProbeCheck(enforce=True).run(ctx)
         what["fault_probe"] = {
             "reason": probe.event.reason_code,
@@ -187,7 +222,7 @@ class PostRentalGpuRecheckCheck:
         }
         if not probe.passed:
             failures.append(f"fault probe: {probe.event.what_we_saw.get('error')}")
-        return CardProbes(failures, all_cards_probe, probe)
+        return CardProbes(failures, inconclusive, probe)
 
     @staticmethod
     def _log(ctx: Context, key: str, what: dict[str, Any], level: int) -> None:
