@@ -5,6 +5,7 @@ from typing import Any
 
 from core.config import settings
 
+from ..availability import ReachSource, ReachTarget
 from ..messages import GpuMemoryHealthMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
@@ -19,14 +20,18 @@ class GpuMemoryHealthCheck:
     """Flag a card whose memory NVML reports broken (DAH-3110): uncorrected ECC errors since the
     driver loaded, a failed row remap, or a pending remap / required recovery action on a card with
     uncorrectable remapped rows or uncorrected ECC (what `nvidia-smi -q -d ECC,ROW_REMAPPER` shows);
-    a pending remap or recovery action from correctable errors alone is only a warning. The fault probe sees these only as changes across its own run, and
-    only on an idle node; this is one NVML read and no CUDA, so it runs before the rented
+    a pending remap or recovery action from correctable errors alone is only a warning, sent as one
+    so the provider resets the card. The fault probe sees these only as changes across its own run,
+    and only on an idle node; this is one NVML read and no CUDA, so it runs before the rented
     short-circuit, for rented and idle executors alike.
 
     A flagged card fails the node while GPU_MEMORY_HEALTH_ENFORCEMENT_ENABLED (on by default) like
     a GPU ban: verified job info is cleared, so it is not rented again until the host resets or
     replaces the card, and the failure is fatal only when no renter's pod is running (a live rental
-    keeps being verified and billed). A node NVML could not read passes.
+    keeps being verified and billed). DAH-4683: the failure is also a GPU_MEMORY_HEALTH_FAILED
+    availability entry, so the backend hides the node and refuses new rentals while leaving a rental
+    already on it alone: a split-rented node with one live pod otherwise kept its broken free card
+    listed. A node NVML could not read passes.
     """
 
     check_id = "gpu.validate.memory_health"
@@ -44,6 +49,8 @@ class GpuMemoryHealthCheck:
             flags = _cap(report.get("flags"))
             what["flags"] = flags if isinstance(flags, list) else []
             if settings.GPU_MEMORY_HEALTH_ENFORCEMENT_ENABLED:
+                what["reach_source"] = str(ReachSource.VALIDATOR)
+                what["reach_target"] = str(ReachTarget.GPU)
                 event = render_message(Msg.FAILED, ctx=ctx, check_id=self.check_id, what=what)
                 return CheckResult(
                     passed=False,
@@ -53,11 +60,13 @@ class GpuMemoryHealthCheck:
                 )
             message = Msg.FLAGGED
         elif status == "ok":
-            # a pending remap from correctable errors only: reported, the card still works
+            # a pending remap from correctable errors only: the card still works, but needs a reset
             warnings = _cap(report.get("warnings"))
             if isinstance(warnings, list) and warnings:
                 what["warnings"] = warnings
-            message = Msg.OK
+                message = Msg.RESET_ADVISED
+            else:
+                message = Msg.OK
         else:
             # no NVML binding, NVML that would not start, SSH: not a reading of the cards
             nvml = report.get("nvml") if isinstance(report.get("nvml"), dict) else {}
