@@ -39,6 +39,7 @@ from neurons.validators.src.services.task.messages import TenantEnforcementMessa
 from neurons.validators.src.services.task.models import ValidationEvent
 from neurons.validators.src.services.task.pipeline import CheckResult, updates_with_clear_verified_job_evidence
 from protocol.vc_protocol.validator_requests import ResetVerifiedJobReason, ResetVerifiedJobRequest
+from services.task.result_handler import ResultHandler
 from test_rented_machine_check import (
     DummyBackendClient,
     DummyScoreCalculator,
@@ -250,3 +251,22 @@ async def test_the_published_reset_reaches_the_backend_queue_with_its_names_and_
     plain = await _queued_reset_request(bare)
     assert plain.reason == ResetVerifiedJobReason.DEFAULT
     assert plain.reason_code is None and plain.check_id is None and plain.evidence is None
+
+
+@pytest.mark.asyncio
+async def test_the_reset_carries_the_address_this_cycle_checked(context_factory):
+    # DAH-2865: the backend drops a reset that arrives after the node moved to another address under the same id
+    redis = AsyncMock()
+    ctx = context_factory(state=build_state()).model_copy(
+        update={"clear_verified_job_info": True, "clear_verified_job_evidence": {"reason_code": "SPEC_CHANGED"}}
+    )
+
+    await ResultHandler(redis_service=redis, dry_run=False)._persist_verification_data(
+        "miner-hotkey", "executor-123", {"count": 7, "failed": 0, "spec": "s", "uuids": "GPU-a"}, ctx, success=False
+    )
+
+    assert redis.clear_verified_job_info.await_args.kwargs["evidence"] == {
+        "reason_code": "SPEC_CHANGED",
+        "executor_ip": ctx.executor.address,
+        "executor_port": ctx.executor.port,
+    }
