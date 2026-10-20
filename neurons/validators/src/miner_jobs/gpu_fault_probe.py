@@ -923,17 +923,17 @@ def nvml_health(snapshot: dict) -> tuple[list[str], list[str]]:
         uncorrectable = bool(gpu.get("ecc_uncorrected")) or bool(
             rows and len(rows) >= 2 and rows[1]
         )
-        needs_reset = flags if uncorrectable else warnings
+        reset_needed_target = flags if uncorrectable else warnings
         if rows and len(rows) >= 4:
             _, _, is_pending, has_failed = rows[:4]
             if is_pending:
-                needs_reset.append(f"{name}: row remap pending (needs a GPU reset)")
+                reset_needed_target.append(f"{name}: row remap pending (needs a GPU reset)")
             if has_failed:
                 flags.append(f"{name}: row remap failed")
         action = gpu.get("recovery_action")
         if action:
             name_of_action = RECOVERY_ACTIONS.get(action, action)
-            needs_reset.append(f"{name}: NVML recovery action {name_of_action} required")
+            reset_needed_target.append(f"{name}: NVML recovery action {name_of_action} required")
     return flags, warnings
 
 

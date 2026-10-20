@@ -283,6 +283,12 @@ class Settings(BaseSettings):
     INSPECTOR_BLIND_STREAK_ENFORCEMENT_ENABLED: bool = Field(
         env="INSPECTOR_BLIND_STREAK_ENFORCEMENT_ENABLED", default=False
     )
+    # DAH-4548: on, the sensor's rental-interference verdict of a host write into a rented pod fails
+    # the Inspector check and zeroes the score. Off: unchanged, logged as INSPECTOR_HOST_WRITE with
+    # enforced=false. A read is only logged either way.
+    INSPECTOR_HOST_WRITE_ENFORCEMENT_ENABLED: bool = Field(
+        env="INSPECTOR_HOST_WRITE_ENFORCEMENT_ENABLED", default=False
+    )
     # On a libinspector.so hash mismatch a RENTED executor, during the rental, curls
     # INSPECTOR_LIBRARY_FETCH_URL once into a temp file beside /usr/lib/libinspector.so, and the
     # file replaces the library (one rename) only if its sha256 is the validator's own. This is a
@@ -513,11 +519,24 @@ class Settings(BaseSettings):
     # Report a rented node that lost a GPU to the backend from the first cycle that sees it (a possible
     # glitch waits one more); observation only, no score change. Off by default.
     RENTED_GPU_DROP_CHECK_ENABLED: bool = Field(env="RENTED_GPU_DROP_CHECK_ENABLED", default=False)
+    # DAH-4564 — read a rented pod's cpuset, CPU quota and init oom_score_adj and flag a host that
+    # pinned or throttled the renter below 95% of its advertised cores. CHECK_ENABLED observes and
+    # reports (on); ENFORCEMENT additionally zeroes the score (off: penalty owners decide). A raised
+    # oom_score_adj is recorded only, never scored.
+    RENTED_POD_RESOURCES_CHECK_ENABLED: bool = Field(env="RENTED_POD_RESOURCES_CHECK_ENABLED", default=True)
+    RENTED_POD_RESOURCES_ENFORCEMENT_ENABLED: bool = Field(
+        env="RENTED_POD_RESOURCES_ENFORCEMENT_ENABLED", default=False
+    )
     # The per-pod incident mark expires this long after the last cycle that saw the fault.
     RENTED_GPU_DROP_STATE_TTL_SECONDS: int = Field(env="RENTED_GPU_DROP_STATE_TTL_SECONDS", default=86400, gt=0)
     # DAH-4457: a node whose GPU dropped out stays hidden (GPU_LOST availability entry, no new rentals) until its
     # cards have read clean this long after the last faulty cycle (GpuLossHoldCheck).
     GPU_LOSS_HOLD_SECONDS: int = Field(env="GPU_LOSS_HOLD_SECONDS", default=7200, gt=0)
+    # DAH-4482: a node GpuMemoryHealthCheck flagged while rented must pass the all-cards matmul and the
+    # kernel-fault probe on every card on its next unrented cycle, whatever the MATMUL_ALLCARDS_* /
+    # GPU_FAULT_PROBE_* flags say; a failure fails the node until a recheck passes. Off: that cycle only logs
+    # POST_RENTAL_GPU_RECHECK_WOULD_REQUIRE.
+    POST_RENTAL_GPU_RECHECK_ENABLED: bool = Field(env="POST_RENTAL_GPU_RECHECK_ENABLED", default=False)
     # DAH-2735 — judge an idle node's GPU by WHO holds it, not by utilization: a competitor's
     # rental idling on the card (Nodexo/SN106) passes every percentage gate. CHECK_ENABLED
     # observes and logs the verdict; ENFORCEMENT additionally zeroes the score. Enforcement
@@ -897,6 +916,11 @@ class Settings(BaseSettings):
 
     # Use REST API instead of WebSocket for miner communication
     USE_REST_API: bool = Field(env="USE_REST_API", default=False)
+
+    # A rented node missing from its miner's answer for ONE cycle is mostly a key upload that missed the miner's 10 s
+    # window: 86 of the 347 RENTED_EXECUTOR_NOT_LISTED rows on 19 Oct were back in the next answer. On: the row is
+    # written from the second consecutive miss. Off by default: provider scoring, enabling it is the penalty owners' call.
+    RENTED_NOT_LISTED_ONE_CYCLE_GRACE: bool = Field(env="RENTED_NOT_LISTED_ONE_CYCLE_GRACE", default=False)
 
     # DAH-2958 — express lane for never-validated executors. A new node is published only by
     # the fleet-wide scored cycle today, so it waits for the 15-min boundary (mean 7.5 min) and

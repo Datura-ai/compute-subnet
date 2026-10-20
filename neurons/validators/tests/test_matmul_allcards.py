@@ -93,7 +93,7 @@ async def test_a_filler_sample_skips_the_all_cards_probe(svc, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_honest_eight_cards_probe_passes(svc):
-    probe = await svc._probe_all_claimed_cards(_ssh(real_cards=8), _executor(), {}, _spec(8))
+    probe = await svc.probe_all_claimed_cards(_ssh(real_cards=8), _executor(), {}, _spec(8))
     assert probe is not None
     assert probe.passed is True
     assert len(probe.per_card) == 8

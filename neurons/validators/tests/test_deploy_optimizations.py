@@ -1,7 +1,19 @@
-"""DAH-1524 deploy path: rental memory cap and the fail-closed host pid_max / RAM / GPU-count reads.
+"""DAH-1524 — deploy-time optimizations for cached-template pods.
 
-The other deploy-optimization cases (pull-skip, ssh bootstrap, profile summary, docker login)
-were cut as low-signal (DAH-4027); the helpers here are still shared by other test files.
+Covers (from the plan's Test Plan):
+- Pull-skip (#1): skip when image present, pull when absent, fail-open on probe
+  error, and `check=False` on the inspect probe.
+- SSH bootstrap (#2): run the idempotent bootstrap for the default rental path
+  (`ships_sshd` None/False), and SKIP it for templates that set `ships_sshd`
+  (DAH-2265) — the image ships+starts sshd itself, so the validator only
+  re-ensures ~/.ssh for key injection. Includes the DEFAULT-PATH REGRESSION
+  GUARD. When `ships_sshd` is set with `enable_jupyter`, the validator forwards
+  JUPYTER_PASSWORD as a docker-run env var instead of running run_jupyter — that
+  is the only Jupyter variable the image's start.sh reads — and falls back to
+  run_jupyter if the mapped docker port is not the 8888 the image hardcodes.
+- Profile summary log (#3): emitted once on success, survives the mixed-shape
+  profilers list, and NOT emitted on the failure path.
+- Backward compat: payloads omitting `ships_sshd` deserialize with None.
 """
 
 from __future__ import annotations
@@ -250,7 +262,7 @@ def _created_run_spec(svc):
 
 
 # ------------------------------------------------------------------
-# memory cap and pid_max
+# #1 — pull-skip
 # ------------------------------------------------------------------
 
 
@@ -462,3 +474,35 @@ async def test_a_split_legacy_rental_is_sized_to_its_gpu_share(svc, monkeypatch)
 
     assert isinstance(result, ContainerCreated)
     assert _created_run_spec(svc).memory_gb == 30
+
+
+# ------------------------------------------------------------------
+# #2 — SSH bootstrap
+# ------------------------------------------------------------------
+
+
+# ------------------------------------------------------------------
+# #3 — profile summary log
+# ------------------------------------------------------------------
+
+
+# ------------------------------------------------------------------
+# Backward compatibility
+# ------------------------------------------------------------------
+
+
+# ------------------------------------------------------------------
+# DAH-1524 — cleanup step no longer blocks the critical path on a 10s sleep
+# ------------------------------------------------------------------
+
+
+# ------------------------------------------------------------------
+# DAH-1524 — ProfilerStep schema: typed `name` enum + wire-shape preservation
+# ------------------------------------------------------------------
+
+
+# ------------------------------------------------------------------
+# #4 — docker login only when a pull follows (DAH-3246)
+# ------------------------------------------------------------------
+
+

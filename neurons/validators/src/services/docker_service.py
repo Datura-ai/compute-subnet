@@ -167,6 +167,7 @@ from tenacity import RetryError
 from core.config import settings
 from core.utils import _m, _StructuredMessage, get_extra_info, retry_ssh_command
 from services.ssh_service import SSHService
+from services.pod_ssh_host_key import derive_pod_ssh_host_key
 from services.volume_keys import VolumeKeyDeriver
 
 logger = logging.getLogger(__name__)
@@ -3779,7 +3780,8 @@ class DockerService:
         DAH-3980: ``removed_at_ssh_connect`` holds the fillers `remove_fillers_at_ssh_connect` already
         removed (or tried to), each with the ID it was listed under: the listing may predate that
         removal, and such an instance is never removed twice; a same-name filler listed under another
-        ID was created since, and goes.
+        ID was created since, and goes. The host is then listed again rather than read from ``host_probe``:
+        a filler created again under that name after the probe would carry the removed ID there and be kept.
 
         DAH-3706: ``remove_every_filler`` (a customer's create) treats every `filler_*` as stale
         whatever ``active_container_names`` says -- a paying pod never shares the node with a
@@ -3795,7 +3797,7 @@ class DockerService:
         container created after the listing is left alone; own_sweep_removals records each such ID
         before its `rm` is sent. A name listed without an ID is removed by name and not recorded.
         """
-        if host_probe is not None and host_probe.container_names is not None:
+        if host_probe is not None and host_probe.container_names is not None and not removed_at_ssh_connect:
             all_names: list[str] = list(host_probe.container_names)
             listed_ids = dict(host_probe.container_ids)
         else:
@@ -5292,6 +5294,44 @@ class DockerService:
 
         await self._record_sshd_verdict(sshd_verdict_executor_uuid, failed=False, log_extra=log_extra)
         return True
+
+    def _pod_ssh_host_key_script_path(self) -> Path:
+        return Path(__file__).resolve().parent / "assets" / "pod_ssh_host_key.sh"
+
+    async def install_pod_ssh_host_key(
+        self,
+        docker_client: RentalDockerSdkClient,
+        *,
+        container_name: str,
+        pod_id: str,
+        log_extra: dict,
+    ) -> None:
+        """Give the container the host key derived for this pod, so a recreated container (reboot,
+        edit, template switch) presents the key the renter's known_hosts already holds. Best effort:
+        on any failure the pod keeps the key its image generated, as before."""
+        if not settings.VOLUME_MASTER_SECRET or not pod_id:
+            return
+        try:
+            host_key = derive_pod_ssh_host_key(settings.VOLUME_MASTER_SECRET, pod_id)
+            script = self._pod_ssh_host_key_script_path().read_text()
+            await exec_logged_rental_docker_sdk_operation(
+                docker_client=docker_client,
+                operation="exec_install_pod_ssh_host_key",
+                exec_spec=ContainerExecSpec(
+                    container_name=container_name,
+                    argv=("sh", "-c", script, "pod_ssh_host_key", host_key.public_openssh),
+                    stdin=host_key.private_openssh,
+                    idempotent=True,
+                ),
+                log_extra=log_extra,
+            )
+        except Exception as exc:
+            logger.warning(
+                _m(
+                    "Failed to install pod SSH host key",
+                    extra=get_extra_info({**log_extra, "container_name": container_name, "error": str(exc)}),
+                ),
+            )
 
     async def _record_sshd_verdict(self, executor_uuid: str | None, *, failed: bool, log_extra: dict) -> None:
         if not executor_uuid:
@@ -8778,6 +8818,13 @@ class DockerService:
                         ),
                     ):
                         soft_failed_step = current_step
+                    if soft_failed_step is None:
+                        await self.install_pod_ssh_host_key(
+                            docker_client,
+                            container_name=container_name,
+                            pod_id=payload.pod_id,
+                            log_extra=default_extra,
+                        )
 
                     jupyter_url = None
                     if payload.enable_jupyter and jupyter_port_map:
@@ -10456,6 +10503,9 @@ class DockerService:
                 jupyter_port = payload.jupyter_port_map[0]
                 local_volume = payload.local_volume
                 local_volume_path = payload.local_volume_path
+                # the request does not say whether the volume is encrypted; without the flag the
+                # script is copied into the ciphertext and `chmod /root/run_jupyter.sh` fails
+                encryption_state = await self._local_volume_encryption_state(ssh_client, payload.container_name)
                 await self.run_jupyter(
                     ssh_client=ssh_client,
                     container_name=payload.container_name,
@@ -10465,6 +10515,7 @@ class DockerService:
                     log_extra=default_extra,
                     local_volume=local_volume,
                     local_volume_path=local_volume_path,
+                    encrypted_local_volume=encryption_state is _VolumeEncryptionState.ENCRYPTED,
                 )
 
                 logger.info(

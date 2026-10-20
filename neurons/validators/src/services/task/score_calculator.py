@@ -94,12 +94,25 @@ def calculate_scores(
         job_score = 0.0
         warning_messages.append("Rental sensor saw nothing of the rental too many cycles in a row")
 
+    # Rented-pod resources gate (DAH-4564): same mechanics as the CPU-truth gate above.
+    if not ctx.rented_pod_resources_passed:
+        actual_score = 0.0
+        job_score = 0.0
+        warning_messages.append("Host pinned or throttled a rented pod below its deployed CPUs")
+
     # GPU identity gate (DAH-4551): non-fatal on a live rental, so only this line zeroes the
     # score there; shadow leaves the flag True.
     if not ctx.gpu_attestation_identity_passed:
         actual_score = 0.0
         job_score = 0.0
         warning_messages.append("GPU identity changed or could not be verified against the card")
+
+    # Host-write gate (DAH-4548): same mechanics; it reads only the sensor's verdict that the host
+    # wrote into a rented pod under enforcement, and shadow leaves the flag True.
+    if not ctx.inspector_host_write_passed:
+        actual_score = 0.0
+        job_score = 0.0
+        warning_messages.append("The host wrote into a renter's container")
 
     # EMA verifyx download speed check — threshold enforced upstream in VerifyXCheck
     ema_verifyx_download = ((ctx.state.specs or {}).get("network") or {}).get(
