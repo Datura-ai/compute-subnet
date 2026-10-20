@@ -1322,27 +1322,53 @@ def test_backup_of_a_missing_path_is_an_empty_no_op(monkeypatch: pytest.MonkeyPa
     assert (result.status, result.result_quality, result.snapshot_id) == ("COMPLETED", OperationResultQuality.EMPTY, None)
 
 
-class _EmptySnapshotPopen(_FakePopen):
-    def __init__(self, command: list[str], *args: object, **kwargs: object) -> None:
-        super().__init__(command, *args, **kwargs)
-        self.stdout = iter(["Fatal: unable to save snapshot: snapshot is empty\n"])
-
-    def wait(self) -> int:
-        return 1
+_EMPTY_JSON = '{"message_type":"exit_error","code":1,"message":"Fatal: unable to save snapshot: snapshot is empty"}\n'
+_EMPTY_TEXT = "Fatal: unable to save snapshot: snapshot is empty\n"
+_EMPTY_IN_FILENAME = '{"message_type":"status","current_files":["/data/snapshot is empty.txt"]}\n'
 
 
-def test_backup_with_every_file_excluded_is_an_empty_no_op(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def _run_backup_with_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, lines: list[str], exclude_patterns: list[str]
+) -> object:
+    class _Popen(_FakePopen):
+        def __init__(self, command: list[str], *args: object, **kwargs: object) -> None:
+            super().__init__(command, *args, **kwargs)
+            self.stdout = iter(lines)
+
+        def wait(self) -> int:
+            return 1
+
     (tmp_path / "file").write_text("x")
-    runner = ResticStorageRunner(StorageOperationSpec.from_mapping(_operation_payload()), LocalWorkspace(tmp_path))
+    payload = _operation_payload()
+    payload["workspace"]["exclude_patterns"] = exclude_patterns
+    runner = ResticStorageRunner(StorageOperationSpec.from_mapping(payload), LocalWorkspace(tmp_path))
     monkeypatch.setattr(
         "storage.restic.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="[]", stderr=""),
     )
-    monkeypatch.setattr("storage.restic.subprocess.Popen", _EmptySnapshotPopen)
+    monkeypatch.setattr("storage.restic.subprocess.Popen", _Popen)
+    return runner._backup()
 
-    result = runner._backup()
+
+@pytest.mark.parametrize("line", [_EMPTY_JSON, _EMPTY_TEXT], ids=["json", "text"])
+def test_backup_with_every_file_excluded_is_an_empty_no_op(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, line: str
+) -> None:
+    result = _run_backup_with_output(monkeypatch, tmp_path, [line], [".cache"])
 
     assert (result.status, result.result_quality, result.snapshot_id) == ("COMPLETED", OperationResultQuality.EMPTY, None)
+
+
+@pytest.mark.parametrize(
+    ("lines", "exclude_patterns"),
+    [([_EMPTY_JSON], []), ([_EMPTY_IN_FILENAME], [".cache"])],
+    ids=["no-excludes", "filename-contains-text"],
+)
+def test_backup_empty_snapshot_without_excludes_or_real_error_still_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, lines: list[str], exclude_patterns: list[str]
+) -> None:
+    with pytest.raises(ResticOperationError):
+        _run_backup_with_output(monkeypatch, tmp_path, lines, exclude_patterns)
 
 
 @pytest.mark.parametrize("make_dir", [False, True], ids=["missing", "empty"])
