@@ -245,6 +245,9 @@ class SemiBatchVerifier:
     # chunk size is the blast radius of one busy port (DAH-2527: idle fillers take the same low
     # ports this tier probes). Ten matches the sequential tier's cap.
     CHUNK_SIZE = 10
+    # a healthy chunk answers in under 10 s (prod p90 9 s); a host too loaded to start a container
+    # took 6.5 min and pushed rented B300s past the job deadline (20 Oct), so a stalled chunk fails
+    CHUNK_TIMEOUT_SEC = 60
 
     def __init__(self, port_tester: PortTester, runner: ContainerRunner):
         self.port_tester = port_tester
@@ -275,7 +278,7 @@ class SemiBatchVerifier:
         )
 
         chunk_results = await asyncio.gather(
-            *(self._verify_chunk(chunk, ssh_client=ssh_client, host=host, log_ctx=log_ctx) for chunk in chunks)
+            *(self._verify_chunk_in_time(chunk, ssh_client=ssh_client, host=host, log_ctx=log_ctx) for chunk in chunks)
         )
         successful = [port for chunk_successful, _ in chunk_results for port in chunk_successful]
         failed = [port for _, chunk_failed in chunk_results for port in chunk_failed]
@@ -284,6 +287,29 @@ class SemiBatchVerifier:
             _m(f"semi-batch: {len(successful)}/{len(ports_to_test)} verified", extra=get_extra_info(log_ctx))
         )
         return successful, failed
+
+    async def _verify_chunk_in_time(
+        self,
+        ports: list[PortPair],
+        *,
+        ssh_client: SSHClientConnection,
+        host: str,
+        log_ctx: dict,
+    ) -> tuple[list[PortPair], list[PortPair]]:
+        try:
+            return await asyncio.wait_for(
+                self._verify_chunk(ports, ssh_client=ssh_client, host=host, log_ctx=log_ctx),
+                self.CHUNK_TIMEOUT_SEC,
+            )
+        except TimeoutError:
+            # the container kills itself after its 20 s window, so nothing is left holding the ports
+            logger.warning(
+                _m(
+                    f"semi-batch: chunk of {len(ports)} ports timed out after {self.CHUNK_TIMEOUT_SEC}s",
+                    extra=get_extra_info(log_ctx),
+                )
+            )
+            return [], ports
 
     async def _verify_chunk(
         self,
