@@ -1,9 +1,9 @@
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from clients.compute_client import CREATE_CUT_OFF_BY_RESTART_STEP, ComputeClient
+from clients.compute_client import CREATE_CUT_OFF_BY_RESTART_STEP, ComputeClient, OutgoingMessages
 from payload_models.payloads import ContainerCreateRequest, FailedContainerRequest, WorkloadKind
 from services.redis_service import RedisService
 
@@ -48,7 +48,7 @@ def _client(redis_service: RedisService) -> ComputeClient:
 async def test_a_create_cut_off_by_a_restart_is_reported_failed_and_its_pending_flag_cleared():
     redis_service = _redis_service()
     await redis_service.add_pending_pod("miner-hk", "exec-1", "pod-1")
-    await redis_service.add_inflight_backend_create("pod-1", "miner-hk", "exec-1", WorkloadKind.FILLER.value)
+    await redis_service.add_inflight_backend_create("pod-1", "miner-hk", "exec-1", WorkloadKind.FILLER)
     client = _client(redis_service)
 
     await client.fail_creates_cut_off_by_restart()
@@ -60,6 +60,29 @@ async def test_a_create_cut_off_by_a_restart_is_reported_failed_and_its_pending_
     assert failed.workload_kind == WorkloadKind.FILLER
     assert failed.failure_step == CREATE_CUT_OFF_BY_RESTART_STEP
     assert not await redis_service.renting_in_progress("miner-hk", "exec-1", "pod-1")
+    # kept until the report is sent: a second restart before the WebSocket connects reports it again
+    assert list(await redis_service.inflight_backend_creates()) == ["pod-1"]
+
+
+@pytest.mark.asyncio
+async def test_the_restart_report_untracks_the_create_once_it_is_sent():
+    redis_service = _redis_service()
+    await redis_service.add_inflight_backend_create("pod-1", "miner-hk", "exec-1", WorkloadKind.FILLER)
+    client = _client(redis_service)
+    client.message_queue = OutgoingMessages()
+    client.lock = asyncio.Lock()
+    client.ws = object()
+    client.send_model = AsyncMock()
+    await client.fail_creates_cut_off_by_restart()
+
+    sender = asyncio.create_task(client.handle_send_messages())
+    for _ in range(50):
+        if not await redis_service.inflight_backend_creates():
+            break
+        await asyncio.sleep(0.01)
+    sender.cancel()
+
+    assert client.send_model.await_count == 1
     assert await redis_service.inflight_backend_creates() == {}
 
 

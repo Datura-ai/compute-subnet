@@ -16,6 +16,7 @@ from protocol.vc_protocol.compute_requests import ExecutorUptimeResponse, Rented
 from core.config import settings
 from core.utils import _m
 from services.const import GPU_MODEL_RATES
+from payload_models.payloads import WorkloadKind
 
 MACHINE_SPEC_CHANNEL = "MACHINE_SPEC_CHANNEL"
 STREAMING_LOG_CHANNEL = "STREAMING_LOG_CHANNEL"
@@ -29,12 +30,6 @@ PENDING_PODS_PREFIX = "pending_pods_prefix"
 # connector starts was cut off by the restart (a redeploy recreates the connector mid-create)
 INFLIGHT_BACKEND_CREATES_KEY = "inflight_backend_creates"
 
-
-class InflightBackendCreate(BaseModel):
-    miner_hotkey: str
-    executor_id: str
-    workload_kind: str
-    started_at: int
 DUPLICATED_MACHINE_SET = "duplicated_machines"
 RENTAL_SUCCEED_MACHINE_SET = "rental_succeed_machines"
 AVAILABLE_PORT_MAPS_PREFIX = "available_port_maps"
@@ -128,6 +123,12 @@ REDIS_RETRY_ATTEMPTS = 3
 REDIS_HEALTH_CHECK_INTERVAL_SECONDS = 30
 
 logger = logging.getLogger(__name__)
+
+class InflightBackendCreate(BaseModel):
+    miner_hotkey: str
+    executor_id: str
+    workload_kind: WorkloadKind
+    started_at: int
 
 
 class _PassThroughLock:
@@ -575,7 +576,7 @@ class RedisService:
             await self.hdel(PENDING_PODS_PREFIX, f"{miner_hotkey}:{executor_id}")
     
     async def add_inflight_backend_create(
-        self, pod_id: str, miner_hotkey: str, executor_id: str, workload_kind: str
+        self, pod_id: str, miner_hotkey: str, executor_id: str, workload_kind: WorkloadKind
     ) -> None:
         create = InflightBackendCreate(
             miner_hotkey=miner_hotkey, executor_id=executor_id, workload_kind=workload_kind, started_at=int(time.time())

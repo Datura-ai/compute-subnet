@@ -43,7 +43,6 @@ from payload_models.payloads import (
     InstallJupyterServerRequest,
     JupyterServerInstalled,
     JupyterInstallationFailed,
-    WorkloadKind,
 )
 from protocol.vc_protocol.compute_requests import (
     Error,
@@ -515,6 +514,9 @@ class ComputeClient:
                 if log_to_send:
                     try:
                         await self.send_model(log_to_send)
+                        if getattr(log_to_send, "failure_step", None) == CREATE_CUT_OFF_BY_RESTART_STEP:
+                            # kept until now so a second restart before the send reports it again
+                            await self._untrack_backend_create_for_restart_report(log_to_send.pod_id)
                     except Exception as exc:
                         async with self.lock:
                             self.message_queue.insert(0, log_to_send)
@@ -873,7 +875,7 @@ class ComputeClient:
         # best-effort: a Redis error loses only the restart report, never the create itself
         try:
             await self.miner_service.redis_service.add_inflight_backend_create(
-                job_request.pod_id, job_request.miner_hotkey, job_request.executor_id, job_request.workload_kind.value
+                job_request.pod_id, job_request.miner_hotkey, job_request.executor_id, job_request.workload_kind
             )
         except Exception as exc:
             self._log_backend_create_tracking_error(job_request.pod_id, exc)
@@ -905,7 +907,7 @@ class ComputeClient:
                     miner_hotkey=create.miner_hotkey,
                     executor_id=create.executor_id,
                     pod_id=pod_id,
-                    workload_kind=WorkloadKind(create.workload_kind),
+                    workload_kind=create.workload_kind,
                     error_type=FailedContainerErrorTypes.ContainerCreationFailed,
                     error_code=FailedContainerErrorCodes.UnknownError,
                     msg="The create was interrupted by a validator restart. Please try again.",
@@ -913,11 +915,10 @@ class ComputeClient:
                     failure_step=CREATE_CUT_OFF_BY_RESTART_STEP,
                 )
             )
-            await redis_service.remove_inflight_backend_create(pod_id)
             logger.warning(
                 _m(
                     "Create cut off by a connector restart, reported failed",
-                    extra=get_extra_info({**self.logging_extra, "pod_id": pod_id, **create.model_dump()}),
+                    extra=get_extra_info({**self.logging_extra, "pod_id": pod_id, **create.model_dump(mode="json")}),
                 )
             )
 
