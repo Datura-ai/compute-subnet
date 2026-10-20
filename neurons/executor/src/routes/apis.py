@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Annotated, Any, Optional
 
 import docker
-from datura.requests.validator_requests import ssh_pubkey_signing_blob
+from datura.requests.validator_requests import ssh_pubkey_signing_blob, upload_nonce_issued_at
 from fastapi import APIRouter, Depends, Query, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
@@ -22,6 +22,7 @@ from services.pod_log_service import PodLogService
 from services.hardware_service import get_docker_client, get_system_metrics, get_container_metrics
 from services.update_status_service import ExpectedDigestCache, collect_update_status
 from core.config import settings
+from core.logger import _m
 
 from payloads.miner import UploadSShKeyPayload, GetPodLogsPaylod, MinerIdentityResponse
 from payloads.backend import ContainerUtilizationPayload, SignaturePayload
@@ -245,9 +246,14 @@ def _validate_validator_signature(payload: UploadSShKeyPayload, require_nonce: b
     the bare-public-key format. `require_nonce` is the G3 enforcement phase:
     attestation-relevant requests without a nonce are rejected outright.
     """
-    if require_nonce and not payload.nonce:
-        logger.warning("Rejecting SSH-key upload without an attestation nonce (enforcement on)")
+    issued_at = upload_nonce_issued_at(payload.nonce)
+    # I-78: enforcement wants the dated nonce, so an old captured signature (none, or a bare one) is refused
+    if require_nonce and issued_at is None:
+        logger.warning("Rejecting SSH-key upload without a dated validator nonce (enforcement on)")
         raise HTTPException(status_code=401, detail="Attestation nonce required")
+    if issued_at is not None and abs(time.time() - issued_at) > settings.UPLOAD_NONCE_MAX_AGE_SECONDS:
+        logger.warning("Rejecting SSH-key upload with a nonce minted %ds away", int(time.time() - issued_at))
+        raise HTTPException(status_code=401, detail="Stale upload nonce")
     try:
         signed_blob = ssh_pubkey_signing_blob(payload.public_key, payload.nonce)
         if match_validator_hotkey(signed_blob, payload.validator_signature) is None:
@@ -258,6 +264,43 @@ def _validate_validator_signature(payload: UploadSShKeyPayload, require_nonce: b
     except Exception as exc:
         logger.warning("Validator signature verification failed: %s", exc)
         raise HTTPException(status_code=401, detail="Invalid validator signature")
+
+
+def _check_miner_binding(payload: UploadSShKeyPayload) -> None:
+    """Check the validator issued this key for this executor's own miner hotkey.
+
+    Logs `ssh_key_miner_binding` with miner_binding = legacy (no miner-bound signature),
+    bad_signature or mismatch, and refuses the upload only with REQUIRE_MINER_BOUND_SSH_KEY.
+    """
+    own_hotkey = settings.MINER_HOTKEY_SS58_ADDRESS
+    if not payload.miner_hotkey or not payload.validator_miner_signature:
+        miner_binding = "legacy"
+    else:
+        blob = ssh_pubkey_signing_blob(payload.public_key, payload.nonce, payload.miner_hotkey)
+        try:
+            signed = match_validator_hotkey(blob, payload.validator_miner_signature) is not None
+        except Exception:
+            signed = False
+        if not signed:
+            miner_binding = "bad_signature"
+        elif payload.miner_hotkey != own_hotkey:
+            miner_binding = "mismatch"
+        else:
+            return
+    enforced = settings.REQUIRE_MINER_BOUND_SSH_KEY
+    logger.warning(
+        _m(
+            "ssh_key_miner_binding",
+            extra={
+                "miner_binding": miner_binding,
+                "signed_miner_hotkey": payload.miner_hotkey,
+                "executor_miner_hotkey": own_hotkey,
+                "enforced": enforced,
+            },
+        )
+    )
+    if enforced:
+        raise HTTPException(status_code=403, detail="SSH key was not issued for this miner")
 
 
 @apis_router.post("/upload_ssh_key")
@@ -271,6 +314,7 @@ async def upload_ssh_key(
     # request); removals never carry a nonce.
     _validate_validator_signature(payload, require_nonce=settings.REQUIRE_ATTESTATION_NONCE)
     logger.info("upload_ssh_key validator signature validated")
+    _check_miner_binding(payload)
     logger.info("upload_ssh_key service call started")
     response = await miner_service.upload_ssh_key(payload)
     logger.info("upload_ssh_key service call completed")

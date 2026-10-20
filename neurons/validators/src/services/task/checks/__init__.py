@@ -10,30 +10,38 @@ from .duplicate_executor import DuplicateExecutorCheck
 from .executor_image import ExecutorImageCheck
 from .finalize import FinalizeCheck
 from .gpu_count import GpuCountCheck
+from .gpu_attestation_identity import GpuAttestationIdentityCheck
 from .gpu_fault_probe import GpuFaultProbeCheck
+from .gpu_memory_health import GpuMemoryHealthCheck
 from .gpu_fingerprint import GpuFingerprintCheck
 from .gpu_kernel_count import GpuKernelCountCheck
+from .gpu_loss_hold import GpuLossHoldCheck
 from .gpu_model_valid import GpuModelValidCheck
 from .gpu_power_limit import GpuPowerLimitCheck
 from .gpu_thermal_throttle import GpuThermalThrottleCheck
 from .gpu_usage import GpuUsageCheck
 from .gpu_vram_precheck import GpuVramPrecheck
+from .hardware_identity import HardwareIdentityCheck
 from .inspector import InspectorRentedCheck
 from .local_verify import LocalVerifyCheck
 from .machine_spec_scrape import MachineSpecScrapeCheck
 from .nvml_digest import NvmlDigestCheck
 from .pinned_memory_probe import PinnedMemoryProbeCheck
 from .port_connectivity import PortConnectivityCheck
+from .post_rental_gpu_recheck import PostRentalGpuRecheckCheck
 from .provider_side_load import ProviderSideLoadCheck
 from .registry_pull import RegistryPullCheck
+from .container_download_speed import ContainerDownloadSpeedCheck
 from .rental_probe import RentalProbeCheck
 from .port_count import PortCountCheck
 from .rental_verification import RentalVerificationCheck
+from .rented_pod_resources import RentedPodResourcesCheck
 from .rented_gpu_drop import RentedGpuDropCheck
 from .rented_machine import TenantEnforcementCheck
 from .score import ScoreCheck
 from .spec_change import SpecChangeCheck
 from .sshd_bootstrap import SshdBootstrapCheck
+from .sshd_auth_log import SshdAuthLogCheck
 from .stale_container_cleanup import StaleContainerCleanupCheck
 from .start_gpu_monitor import StartGPUMonitorCheck
 from .sysbox_required import SysboxRequiredCheck
@@ -54,23 +62,31 @@ __all__ = [
     "ExecutorImageCheck",
     "FinalizeCheck",
     "GpuCountCheck",
+    "GpuAttestationIdentityCheck",
     "GpuFaultProbeCheck",
+    "GpuMemoryHealthCheck",
     "GpuFingerprintCheck",
     "GpuKernelCountCheck",
+    "GpuLossHoldCheck",
     "GpuModelValidCheck",
     "GpuPowerLimitCheck",
     "GpuThermalThrottleCheck",
     "GpuUsageCheck",
     "GpuVramPrecheck",
+    "HardwareIdentityCheck",
     "InspectorRentedCheck",
+    "RentedPodResourcesCheck",
+    "SshdAuthLogCheck",
     "LocalVerifyCheck",
     "MachineSpecScrapeCheck",
     "NvmlDigestCheck",
     "PinnedMemoryProbeCheck",
     "PortConnectivityCheck",
     "PortCountCheck",
+    "PostRentalGpuRecheckCheck",
     "ProviderSideLoadCheck",
     "RegistryPullCheck",
+    "ContainerDownloadSpeedCheck",
     "RentalProbeCheck",
     "RentalVerificationCheck",
     "RentedGpuDropCheck",

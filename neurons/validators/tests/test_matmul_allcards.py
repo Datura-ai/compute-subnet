@@ -95,7 +95,7 @@ async def test_a_filler_sample_skips_the_all_cards_probe(svc, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_honest_eight_cards_probe_passes(svc):
-    probe = await svc._probe_all_claimed_cards(_ssh(real_cards=8), _executor(), {}, _spec(8))
+    probe = await svc.probe_all_claimed_cards(_ssh(real_cards=8), _executor(), {}, _spec(8))
     assert probe is not None
     assert probe.passed is True
     assert len(probe.per_card) == 8
@@ -138,14 +138,14 @@ async def test_wall_clock_over_threshold_only_emits_under_shadow(svc, monkeypatc
 async def test_legacy_single_card_is_not_judged_by_all_cards(svc):
     # gpu_count <= 1 → probe returns None, so the executor is judged only by the unchanged
     # single-card path and a not-yet-upgraded / single-GPU fleet is never zeroed by this check.
-    probe = await svc._probe_all_claimed_cards(_ssh(real_cards=1), _executor(), {}, _spec(1))
+    probe = await svc.probe_all_claimed_cards(_ssh(real_cards=1), _executor(), {}, _spec(1))
     assert probe is None
 
 
 @pytest.mark.asyncio
 async def test_unknown_model_skips_probe(svc):
     # a model with no registry VRAM size cannot be sized safely → probe returns None (fail-open).
-    probe = await svc._probe_all_claimed_cards(
+    probe = await svc.probe_all_claimed_cards(
         _ssh(real_cards=8), _executor(), {}, _spec(8, model="NVIDIA MADE-UP 9000")
     )
     assert probe is None
@@ -158,7 +158,7 @@ async def test_native_cipher_failure_skips_probe(svc, monkeypatch):
     monkeypatch.setattr(
         svc, "_generate_card_cipher", lambda machine_info, params: "", raising=False
     )
-    probe = await svc._probe_all_claimed_cards(_ssh(real_cards=8), _executor(), {}, _spec(8))
+    probe = await svc.probe_all_claimed_cards(_ssh(real_cards=8), _executor(), {}, _spec(8))
     assert probe is None
 
 
@@ -189,7 +189,7 @@ async def test_card_fan_out_stays_under_sshd_max_sessions(svc):
         in_flight -= 1
         return SimpleNamespace(exit_status=0, stdout="RESULT_JSON: {}", stderr="")
 
-    probe = await svc._probe_all_claimed_cards(SimpleNamespace(run=run), _executor(), {}, _spec(14))
+    probe = await svc.probe_all_claimed_cards(SimpleNamespace(run=run), _executor(), {}, _spec(14))
     assert probe is not None and probe.passed is True
     assert peak <= mvs.MATMUL_ALLCARDS_MAX_CONCURRENT_CARDS < 10
 
@@ -207,7 +207,7 @@ async def test_timeout_sweeps_orphan_matmul(svc, monkeypatch):
             raise TimeoutError
         return SimpleNamespace(exit_status=0, stdout="RESULT_JSON: {}", stderr="")
 
-    probe = await svc._probe_all_claimed_cards(SimpleNamespace(run=run), _executor(), {}, _spec(2))
+    probe = await svc.probe_all_claimed_cards(SimpleNamespace(run=run), _executor(), {}, _spec(2))
     assert probe is not None and probe.passed is False
     killed.assert_awaited_once()
 
@@ -225,7 +225,7 @@ async def test_ssh_error_sweeps_orphan_matmul(svc, monkeypatch):
             raise OSError("channel closed")
         return SimpleNamespace(exit_status=0, stdout="RESULT_JSON: {}", stderr="")
 
-    probe = await svc._probe_all_claimed_cards(SimpleNamespace(run=run), _executor(), {}, _spec(2))
+    probe = await svc.probe_all_claimed_cards(SimpleNamespace(run=run), _executor(), {}, _spec(2))
     assert probe is not None and probe.passed is False
     killed.assert_awaited_once()
 
@@ -243,6 +243,6 @@ async def test_a_plain_card_failure_does_not_sweep(svc, monkeypatch):
             return SimpleNamespace(exit_status=1, stdout="", stderr="invalid device ordinal")
         return SimpleNamespace(exit_status=0, stdout="RESULT_JSON: {}", stderr="")
 
-    probe = await svc._probe_all_claimed_cards(SimpleNamespace(run=run), _executor(), {}, _spec(2))
+    probe = await svc.probe_all_claimed_cards(SimpleNamespace(run=run), _executor(), {}, _spec(2))
     assert probe is not None and probe.passed is False
     killed.assert_not_awaited()

@@ -19,8 +19,15 @@ if [ -S "$SOCK" ]; then
   usermod -aG "$GNAME" liumuser || true
 fi
 
+# liumd's host settings, before sshd lets the validator in (the executor itself never runs liumd)
+pdm run python src/liumd_host_files.py host || echo "[liumd] host files not written; continuing"
+
 # start ssh service
 ssh-keygen -A
+# sshd logs to syslog (LogLevel VERBOSE from sshd_setup.sh names the key of each login); this container
+# runs no syslog, so sshd_log_receiver.py is /dev/log and keeps the login lines for the validator.
+python3 sshd_log_receiver.py &
+for _ in $(seq 50); do [ -S /dev/log ] && break; sleep 0.1; done
 service ssh start
 
 # run fastapi app
