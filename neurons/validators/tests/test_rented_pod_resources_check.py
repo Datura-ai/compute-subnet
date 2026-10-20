@@ -33,14 +33,16 @@ def _container(cpuset="", nano=8_000_000_000, oom=500, label="8", quota=0, perio
     }
 
 
-def _ssh(container=None, init_oom=500, raise_exc=None):
+def _ssh(container=None, init_oom=500, raise_exc=None, cgroup_cpuset="", cpu_max=""):
     async def run(cmd, *args, **kwargs):
         if raise_exc is not None:
             raise raise_exc
         if cmd.startswith("/usr/bin/docker inspect"):
             out = json.dumps(container) if container else ""
             return SimpleNamespace(exit_status=0 if container else 1, stdout=out, stderr="")
-        return SimpleNamespace(exit_status=0, stdout=f"4242 {init_oom}\n", stderr="")
+        return SimpleNamespace(
+            exit_status=0, stdout=f"4242|{init_oom}|{cgroup_cpuset}|{cpu_max}\n", stderr=""
+        )
 
     return SimpleNamespace(run=run)
 
@@ -175,5 +177,27 @@ def test_reporting_on_and_enforcement_off_by_default():
 )
 async def test_95_percent_floor(context_factory, container, findings):
     result = await _run(_ctx(context_factory, _ssh(container)), enforce=True)
+    assert _findings(result) == findings
+    assert result.passed is (not findings)
+
+
+# A host that writes the pod's cgroup directly leaves HostConfig untouched; the init PID's cgroup shows it.
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cgroup_cpuset, cpu_max, findings",
+    [
+        ("0-63", ";800000 100000;max 100000", []),  # the pod's own --cpus 8, host CPUs all usable
+        ("2-7", ";800000 100000", ["cpuset_pinned"]),  # cpuset.cpus written on the pod's cgroup
+        (
+            "0-63",
+            ";800000 100000;400000 100000",
+            ["cpu_quota_reduced"],
+        ),  # a parent slice capped at 4
+        ("", "", []),  # cgroup v1 or unreadable: nothing seen, nothing judged
+    ],
+)
+async def test_cgroup_written_directly_is_seen(context_factory, cgroup_cpuset, cpu_max, findings):
+    ssh = _ssh(_container(), cgroup_cpuset=cgroup_cpuset, cpu_max=cpu_max)
+    result = await _run(_ctx(context_factory, ssh), enforce=True)
     assert _findings(result) == findings
     assert result.passed is (not findings)
