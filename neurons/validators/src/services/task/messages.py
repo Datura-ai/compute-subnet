@@ -2188,6 +2188,55 @@ class LocalVerifyMessages:
     )
 
 
+class RentedPodResourcesMessages:
+    """DAH-4564 — a host script `docker update --cpuset-cpus`-pins a rented pod, or cuts its CPU quota,
+    below 95% of the cores rented. Shadow (RENTED_POD_RESOURCES_CHECK_ENABLED without enforcement)
+    renders RESOURCES_REDUCED as a warning and keeps passed=True; only
+    RENTED_POD_RESOURCES_ENFORCEMENT_ENABLED zeroes the score. A raised oom_score_adj is recorded
+    in the event and never scored: a renter running as root can raise it himself."""
+
+    RESOURCES_OK = MessageTemplate(
+        event="Rented pod CPU resources match the deployment",
+        reason="RENTED_POD_RESOURCES_OK",
+        severity="info",
+        category="policy",
+        impact="Proceed",
+    )
+    RESOURCES_REDUCED = MessageTemplate(
+        event="Host pinned or throttled a rented pod below 95% of its advertised CPUs",
+        reason="RENTED_POD_RESOURCES_REDUCED",
+        severity="error",
+        category="policy",
+        impact="Score set to 0",
+        remediation=(
+            "A host-side script changed the renter's container with `docker update` "
+            "(--cpuset-cpus, --cpus or --cpu-quota). A rental must keep at least 95% of its advertised "
+            "cores in both its cpuset and its CPU quota; remove the script or loosen it to that."
+        ),
+    )
+    RESOURCES_UNKNOWN = MessageTemplate(
+        event="Rented pod CPU resources could not be read",
+        reason="RENTED_POD_RESOURCES_UNKNOWN",
+        severity="info",
+        category="policy",
+        impact="Proceed without penalty",
+    )
+    NOT_RENTED = MessageTemplate(
+        event="Rented pod resources check skipped: no running rental",
+        reason="RENTED_POD_RESOURCES_NOT_RENTED",
+        severity="info",
+        category="policy",
+        impact="Proceed",
+    )
+    SKIPPED = MessageTemplate(
+        event="Rented pod resources check disabled",
+        reason="RENTED_POD_RESOURCES_DISABLED",
+        severity="info",
+        category="policy",
+        impact="Proceed",
+    )
+
+
 class GpuAttestationIdentityMessages:
     # DAH-4551: warning in shadow; fails the node under GPU_ATTESTATION_IDENTITY_ENFORCEMENT_ENABLED.
     MISMATCH = MessageTemplate(
