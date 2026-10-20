@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import io
 import tarfile
@@ -264,6 +265,35 @@ def test_check_archive_refuses_a_long_name_or_pax_header_past_64_kib(fmt):
     # Act / Assert
     with pytest.raises(BuildContextError, match="header is larger than"):
         build_context.check_archive(buf.getvalue(), 1 << 30)
+
+
+def test_check_archive_refuses_a_sparse_entry():
+    # Arrange: a GNU sparse entry, whose extension blocks tarfile would read without a bound
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.GNU_FORMAT) as tar:
+        info = tarfile.TarInfo("sparse.bin")
+        info.type = tarfile.GNUTYPE_SPARSE
+        tar.addfile(info)
+
+    # Act / Assert
+    with pytest.raises(BuildContextError, match="sparse"):
+        build_context.check_archive(buf.getvalue(), 1 << 20)
+
+
+def test_check_archive_refuses_a_deep_chain_of_long_name_headers():
+    # Arrange: 400 GNU long-name headers in a row, which tarfile parses recursively
+    block = b""
+    for _ in range(400):
+        info = tarfile.TarInfo("././@LongLink")
+        info.type = tarfile.GNUTYPE_LONGNAME
+        info.size = 2
+        block += info.tobuf(tarfile.GNU_FORMAT) + b"a\0".ljust(tarfile.BLOCKSIZE, b"\0")
+    end = tarfile.TarInfo("app.py").tobuf(tarfile.GNU_FORMAT) + b"\0" * (2 * tarfile.BLOCKSIZE)
+    data = gzip.compress(block + end)
+
+    # Act / Assert
+    with pytest.raises(BuildContextError, match="not a gzipped tar"):
+        build_context.check_archive(data, 1 << 20)
 
 
 def test_check_archive_refuses_a_corrupt_deflate_stream():

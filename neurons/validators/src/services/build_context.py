@@ -49,9 +49,12 @@ class _CappedReader:
 
 
 class _BoundedTarInfo(tarfile.TarInfo):
-    """Refuses an oversized long-name or PAX header before tarfile reads its payload."""
+    """Refuses a sparse entry, or an oversized long-name or PAX header, before tarfile reads its payload."""
 
     def _proc_member(self, tarfile_):
+        # a GNU sparse entry's extension blocks are read into memory without a bound
+        if self.type == tarfile.GNUTYPE_SPARSE:
+            raise BuildContextError("build context entry is a sparse file")
         if self.type in _META_TYPES and self.size > MAX_META_HEADER_BYTES:
             raise BuildContextError(
                 f"build context entry header is larger than {MAX_META_HEADER_BYTES} bytes"
@@ -81,6 +84,7 @@ def check_archive(data: bytes, max_unpacked_bytes: int) -> None:
         # stream mode: tarfile reads the decompressed bytes only through the capped reader
         with tarfile.open(fileobj=reader, mode="r|", tarinfo=_BoundedTarInfo) as archive:
             for count, member in enumerate(archive, start=1):
+                archive.members = []  # stream mode keeps every member read; only the count is needed
                 if count > MAX_ARCHIVE_ENTRIES:
                     raise BuildContextError(
                         f"build context has more than {MAX_ARCHIVE_ENTRIES} entries"
@@ -107,7 +111,7 @@ def check_archive(data: bytes, max_unpacked_bytes: int) -> None:
                     raise BuildContextError(
                         f"build context unpacks to more than {max_unpacked_bytes} bytes"
                     )
-    except (tarfile.TarError, OSError, EOFError, zlib.error) as exc:
+    except (tarfile.TarError, OSError, EOFError, zlib.error, RecursionError) as exc:
         raise BuildContextError("build context is not a gzipped tar archive") from exc
 
 
