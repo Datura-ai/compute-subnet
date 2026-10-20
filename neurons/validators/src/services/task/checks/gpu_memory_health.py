@@ -11,6 +11,7 @@ from ..messages import render_message
 from ..pipeline import CheckResult, Context
 from .banned_provider import has_live_rental
 from .gpu_fault_probe import OUTPUT_TAIL_CHARS, PROBE_SOURCE, _cap, _parse_report
+from .post_rental_gpu_recheck import RecheckMarker, record_marker
 
 # one NVML snapshot in a fork with its own 10 s deadline (miner_jobs/gpu_fault_probe.py), plus SSH
 TIMEOUT_SECONDS = 30
@@ -31,7 +32,8 @@ class GpuMemoryHealthCheck:
     keeps being verified and billed). DAH-4683: the failure is also a GPU_MEMORY_HEALTH_FAILED
     availability entry, so the backend hides the node and refuses new rentals while leaving a rental
     already on it alone: a split-rented node with one live pod otherwise kept its broken free card
-    listed. A node NVML could not read passes.
+    listed. A node NVML could not read passes. A card flagged under a live rental
+    also owes a post-rental every-card recheck (post_rental_gpu_recheck.py).
     """
 
     check_id = "gpu.validate.memory_health"
@@ -48,6 +50,11 @@ class GpuMemoryHealthCheck:
         if status == "flagged":
             flags = _cap(report.get("flags"))
             what["flags"] = flags if isinstance(flags, list) else []
+            if has_live_rental(ctx):
+                # DAH-4482: the node owes an every-card recheck on its next unrented cycle
+                await record_marker(
+                    ctx, RecheckMarker(self.check_id, "flagged", flags=what["flags"])
+                )
             if settings.GPU_MEMORY_HEALTH_ENFORCEMENT_ENABLED:
                 what["reach_source"] = str(ReachSource.VALIDATOR)
                 what["reach_target"] = str(ReachTarget.GPU)
