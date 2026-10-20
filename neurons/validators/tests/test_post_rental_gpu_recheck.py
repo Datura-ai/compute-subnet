@@ -2,7 +2,7 @@
 
 import json
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from neurons.validators.src.protocol.vc_protocol.compute_requests import RentedExecutorsResponse
@@ -34,9 +34,7 @@ class FakeValidation:
         self.all_cards = all_cards
         self.calls = 0
 
-    async def _probe_all_claimed_cards(
-        self, ssh_client, executor_info, default_extra, machine_spec
-    ):
+    async def probe_all_claimed_cards(self, ssh_client, executor_info, default_extra, machine_spec):
         self.calls += 1
         return self.all_cards
 
@@ -147,7 +145,7 @@ async def test_off_only_logs_what_it_would_require(context_factory, caplog):
         result = await PostRentalGpuRecheckCheck().run(ctx)
 
     assert result.passed and result.event.reason_code == Msg.WOULD_REQUIRE.reason
-    assert result.event.what_we_saw["marker"] == MARKER
+    assert result.event.what_we_saw["marker"].items() >= MARKER.items()
     assert runner.calls == [] and validation.calls == 0
     assert KEY in ctx.services.redis.store
     assert any(r.getMessage() == "POST_RENTAL_GPU_RECHECK_WOULD_REQUIRE" for r in caplog.records)
@@ -253,12 +251,48 @@ async def test_a_filler_cycle_renews_the_marker(context_factory, recheck_on):
     runner, validation = FakeRunner(), FakeValidation()
     ctx = _idle_ctx(context_factory, runner, validation)
 
-    with patch.object(module, "_get_filler_only_container", return_value={"id": "filler"}):
+    with patch.object(module, "get_filler_only_container", return_value={"id": "filler"}):
         result = await PostRentalGpuRecheckCheck().run(ctx)
 
     assert result.passed and result.event.reason_code == Msg.FILLER_SKIPPED.reason
     assert runner.calls == [] and validation.calls == 0
     assert ctx.services.redis.ttl[KEY] == module.MARKER_TTL_SECONDS
+    assert json.loads(ctx.services.redis.store[KEY])["filler_skips"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_node_that_always_runs_a_filler_is_probed_after_the_skip_limit(
+    context_factory, recheck_on
+):
+    filler = "filler_run-1"
+    runner, validation = FakeRunner(probe_stdout("ok")), FakeValidation(_all_cards("", ""))
+    ssh = AsyncMock()
+    ssh.run.return_value = SimpleNamespace(exit_status=0, stdout="", stderr="")
+    services = build_services(validation=validation)
+    services.redis.store[KEY] = json.dumps({**MARKER, "filler_skips": module.FILLER_SKIP_LIMIT})
+    uuid = default_executor().uuid
+    ctx = context_factory(
+        services=services,
+        config=build_context_config(),
+        state=build_state(
+            specs={"gpu": {"count": 2}},
+            rented_data=RentedExecutorsResponse(
+                all_filler_containers_by_executor={uuid: [filler]},
+                default_job_owner_by_executor={uuid: "lium"},
+                executors={},
+            ),
+        ),
+        runner=runner,
+        ssh=ssh,
+    )
+
+    result = await PostRentalGpuRecheckCheck().run(ctx)
+
+    assert ctx.ssh.run.await_args.args[0] == f"/usr/bin/docker rm -fv {filler}"
+    assert result.event.what_we_saw["removed_fillers"] == [filler]
+    assert validation.calls == 1
+    assert result.passed and result.event.reason_code == Msg.PASSED.reason
+    assert KEY not in ctx.services.redis.store
 
 
 # --- placement ----------------------------------------------------------------------------------------------

@@ -12,7 +12,7 @@ from core.utils import _m, get_extra_info
 from ..messages import GpuFaultProbeMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
-from .capability import _get_filler_only_container
+from .capability import get_filler_only_container
 
 # The probe runs on the executor's own interpreter, standard library only, and ships over stdin the way
 # the scrape source does (DAH-2794): nothing to upload, nothing the miner has to update.
@@ -87,8 +87,9 @@ class GpuFaultProbeCheck:
                 event=render_message(Msg.FIRST_PASS_SKIPPED, ctx=ctx, check_id=self.check_id),
             )
 
-        filler_container = _get_filler_only_container(ctx)
-        if filler_container:
+        filler_container = get_filler_only_container(ctx)
+        # enforce: the recheck only probes beside a filler after it removed the node's Lium fillers
+        if filler_container and not self.enforce:
             event = render_message(
                 Msg.FILLER_SKIPPED,
                 ctx=ctx,
