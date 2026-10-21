@@ -69,6 +69,7 @@ from .checks import (
     ScoreCheck,
     SpecChangeCheck,
     SshdAuthLogCheck,
+    StorageLimitCheck,
     StaleContainerCleanupCheck,
     StartGPUMonitorCheck,
     SshdBootstrapCheck,
@@ -311,6 +312,8 @@ class PipelineFactory:
                 # warning; below half its clock with a slowdown bit it fails an unrented node (score 0) until
                 # fixed. Before the rented short-circuit, so rented nodes get the warning too.
                 GpuThermalThrottleCheck(),
+                # a renter filling a node with no per-container disk limit fills the host (18 Oct): pure data, before the rented halt
+                StorageLimitCheck(),
                 # DAH-3484: a regex over specs.cpu.model, no SSH, never fatal. It has to run before
                 # TenantEnforcementCheck halts the pipeline for a rented executor: after that halt
                 # the published specs had no tdx_host_supported key and the backend stored false,
@@ -476,6 +479,8 @@ class PipelineFactory:
                 RentedGpuDropCheck(),
                 GpuLossHoldCheck(),
                 GpuThermalThrottleCheck(),
+                # a renter filling a node with no per-container disk limit fills the host (18 Oct): pure data, before the rented halt
+                StorageLimitCheck(),
                 TdxHostCheck(),
                 GpuCountCheck(),
                 GpuModelValidCheck(),
@@ -557,6 +562,8 @@ class PipelineFactory:
                 GpuLossHoldCheck(),
                 # ticket-0492: pure data, same place as in build_checks().
                 GpuThermalThrottleCheck(),
+                # a renter filling a node with no per-container disk limit fills the host (18 Oct): pure data, before the rented halt
+                StorageLimitCheck(),
                 # DAH-3484: before the rented halt, same as build_checks().
                 TdxHostCheck(),
                 GpuCountCheck(),

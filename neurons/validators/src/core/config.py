@@ -342,6 +342,10 @@ class Settings(BaseSettings):
     # flag on; the wave never does, so every scored verification is unchanged. Measured (Loki,
     # 2–6 Sep, idle runs): matmul p50 26 s (74 s on the fresh dogfood node), VerifyX p50 78 s.
     FIRST_PASS_FAST_PATH_ENABLED: bool = Field(env="FIRST_PASS_FAST_PATH_ENABLED", default=False)
+    # A node whose Docker cannot cap a container's disk (specs.storage_limit_supported) lets one renter fill the
+    # host's Docker storage and take every pod down. Off: a STORAGE_LIMIT_MISSING warning only, so providers get
+    # notice first. On: an unrented node without the limit scores 0 (StorageLimitCheck).
+    REQUIRE_STORAGE_LIMIT_SUPPORTED: bool = Field(env="REQUIRE_STORAGE_LIMIT_SUPPORTED", default=False)
     # The matmul is sized from min(card VRAM, this) instead of the whole card: same challenge,
     # seal and UUID check, 5–17x less data to generate and copy.
     FIRST_PASS_MATMUL_VRAM_MB: int = Field(env="FIRST_PASS_MATMUL_VRAM_MB", default=8192)
@@ -573,9 +577,6 @@ class Settings(BaseSettings):
     FOREIGN_GPU_WORKLOAD_ENFORCEMENT_ENABLED: bool = Field(
         env="FOREIGN_GPU_WORKLOAD_ENFORCEMENT_ENABLED", default=False
     )
-    # On: a pod container on an unrented node whose rental just ended or just started ends the run
-    # at the GPU usage check, scored as idle, instead of the orphaned-container zero.
-    RENTAL_TEARDOWN_DEFERRAL_ENABLED: bool = Field(env="RENTAL_TEARDOWN_DEFERRAL_ENABLED", default=False)
     # DAH-3035 — a ~6 s kernel-fault probe after the matmul: indexed/scattered access, atomics, a pointer
     # chase and a pinned-memory copy round-trip over a ~2 GB working set, plus NVML before/after: a rise in
     # uncorrected ECC or remapped rows, a pending or failed remap, or a required recovery action is a fault.
@@ -594,14 +595,10 @@ class Settings(BaseSettings):
     )
     # F-1599 — a 64 MB pinned-host-memory H2D/D2H round trip on every GPU of an idle node, compared on the host.
     # A TDX guest whose GPUs are not in CC mode passed every check yet could not DMA pinned memory (8x H200,
-    # 13 Oct). CHECK runs it; ENFORCEMENT lets wrong data, a copy error or a hung copy fail the node. CHECK is
-    # on (milliseconds of copy per card; a probe that cannot start is UNKNOWN, never a fault). ENFORCEMENT is off:
-    # every fault is logged (PINNED_MEMORY_PROBE_FAILED, enforced=false) and enforcement goes on by this flag
-    # after a review of one day of prod logs (owner, 15 Oct).
+    # 13 Oct). CHECK runs it; wrong data, a copy error or a hung copy fails the node (enforced since the shadow
+    # review of prod logs). CHECK is on (milliseconds of copy per card; a probe that cannot start is UNKNOWN,
+    # never a fault).
     PINNED_MEMORY_PROBE_CHECK_ENABLED: bool = Field(env="PINNED_MEMORY_PROBE_CHECK_ENABLED", default=True)
-    PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED: bool = Field(
-        env="PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED", default=False
-    )
     # A fault probe with no verdict passes. Five such cycles in a row on one node are logged
     # (GPU_FAULT_PROBE_UNKNOWN_STREAK); with this on they are judged like a fault, which fails the
     # node only while GPU_FAULT_PROBE_ENFORCEMENT_ENABLED is on too. Off by default.
@@ -616,7 +613,7 @@ class Settings(BaseSettings):
     # the container down through delete_container.
     # A failed step zeroes the score and clears the verified job (RENTAL_PROBE_FAILED), like the GPU
     # runtime quarantine, and the failed step stands in Redis until a probe passes: a later cycle with
-    # no verdict of its own (filler running, image gone, inconclusive) fails the node again with it; a
+    # no verdict of its own (image gone, inconclusive) fails the node again with it; a
     # rented node is left alone. An idle node with the image pulled is probed again every cycle until
     # it passes. DAH-4258: on by default, in shadow (enforcement below defaults off). Renters' most common
     # complaint after GPU faults is a pod they cannot reach (SSH refused, "error connection"), the exact
@@ -629,12 +626,6 @@ class Settings(BaseSettings):
     RENTAL_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="RENTAL_PROBE_ENFORCEMENT_ENABLED", default=False)
     RENTAL_PROBE_INTERVAL_HOURS: float = Field(env="RENTAL_PROBE_INTERVAL_HOURS", default=6.0, gt=0)
     RENTAL_PROBE_SSH_DEADLINE_SECONDS: int = Field(env="RENTAL_PROBE_SSH_DEADLINE_SECONDS", default=90, gt=0)
-    # On: an idle node running a Lium filler is probed too, beside the filler: the probe's create
-    # removes no filler_*, lifts no GPU power cap and reclaims no filler cache. Off: such a node is
-    # skipped ("filler running"). Only read while RENTAL_PROBE_ENABLED is on.
-    RENTAL_PROBE_BESIDE_FILLERS_ENABLED: bool = Field(
-        env="RENTAL_PROBE_BESIDE_FILLERS_ENABLED", default=False
-    )
     # A node whose containers cannot reach the internet passed every check. CHECK runs the rental probe's
     # `egress` step, which resolves and fetches pypi.org inside its renter container; ENFORCEMENT fails the
     # probe on it with NO_OUTBOUND_INTERNET (score 0). Slow still passes. Enforcement is off by default,
@@ -658,13 +649,10 @@ class Settings(BaseSettings):
     # NAT and runtime and can get 1000x less (297-588 Mbps on the host, under 1 Mbps from PyPI in a container). CHECK
     # reads up to 16 MiB of a pinned PyPI wheel and a pinned Hugging Face file from a throwaway container on idle
     # nodes once per INTERVAL_HOURS and logs CONTAINER_DOWNLOAD_SPEED; two failing readings in a row (30 min apart)
-    # are the finding. ENFORCEMENT fails the node (CONTAINER_DOWNLOAD_SLOW, score 0); off until the shadow logs are
-    # reviewed. MIN_MBPS is a fifth of NETWORK_MIN_PACKAGE_DOWNLOAD_SPEED_MBPS (50): one cold single-stream CDN object
+    # are the finding and fail the node (CONTAINER_DOWNLOAD_SLOW, score 0) when both were read on the rentals network.
+    # MIN_MBPS is a fifth of NETWORK_MIN_PACKAGE_DOWNLOAD_SPEED_MBPS (50): one cold single-stream CDN object
     # read 32-88 Mbps on healthy nodes (DAH-2959), so 50 would flag them; the defect is two orders of magnitude lower.
     CONTAINER_DOWNLOAD_SPEED_CHECK_ENABLED: bool = Field(env="CONTAINER_DOWNLOAD_SPEED_CHECK_ENABLED", default=True)
-    CONTAINER_DOWNLOAD_SPEED_ENFORCEMENT_ENABLED: bool = Field(
-        env="CONTAINER_DOWNLOAD_SPEED_ENFORCEMENT_ENABLED", default=False
-    )
     CONTAINER_DOWNLOAD_SPEED_MIN_MBPS: float = Field(env="CONTAINER_DOWNLOAD_SPEED_MIN_MBPS", default=10.0, gt=0)
     CONTAINER_DOWNLOAD_SPEED_INTERVAL_HOURS: float = Field(
         env="CONTAINER_DOWNLOAD_SPEED_INTERVAL_HOURS", default=6.0, gt=0
@@ -701,6 +689,13 @@ class Settings(BaseSettings):
     # idle moved to the burner, never an older vector.
     SETTLEMENT_MODE: Literal["off", "shadow", "enforce"] = Field(env="SETTLEMENT_MODE", default="off")
     DUPLICATE_EXECUTOR_DRY_RUN: bool = Field(env="DUPLICATE_EXECUTOR_DRY_RUN", default=True, description="Observe mode: detect duplicate executors but don't penalize")
+    # Two executors of ONE miner hotkey that report the same GPU UUID in one cycle are one set of
+    # cards listed twice. Always logged (GPU_ALIAS_SAME_MINER); with this on, every copy but one
+    # scores 0 for the cycle. Only the miner's own executors are compared, so another miner
+    # reporting the same UUIDs cannot cost it anything.
+    GPU_ALIAS_SAME_MINER_ENFORCEMENT_ENABLED: bool = Field(
+        env="GPU_ALIAS_SAME_MINER_ENFORCEMENT_ENABLED", default=False
+    )
     EXECUTOR_IMAGE_REF: str = Field(
         env="EXECUTOR_IMAGE_REF",
         default="daturaai/compute-subnet-executor:latest",

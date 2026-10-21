@@ -404,6 +404,13 @@ class RedisService:
         async with self.lock:
             return await self.redis.get(key)
 
+    async def mget(self, keys: list[str]) -> list:
+        """Several GETs in one round trip and one lock hold; None for a missing key."""
+        if not keys:
+            return []
+        async with self.lock:
+            return await self.redis.mget(keys)
+
     async def delete(self, key: str):
         """Remove a key from Redis."""
         async with self.lock:
