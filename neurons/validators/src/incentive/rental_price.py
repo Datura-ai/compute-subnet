@@ -297,13 +297,11 @@ class RentalPriceIncentive(DefaultIncentive):
 
     def _log_soft_price_limit(self, result: JobResult) -> None:
         # structured log for every unrented executor over the p90 soft ceiling
-        enforced = settings.ENABLE_UNRENTED_SOFT_PRICE_LIMIT
         p90 = shared_client.config.machine_prices_p90.get(result.gpu_model)
         rate = shared_client.config.soft_limit_price_rate
         logger.info(
             _m(
-                "Unrented executor over market p90 soft price limit"
-                + ("" if enforced else " (shadow only - flag off)"),
+                "Unrented executor over market p90 soft price limit",
                 extra={
                     "executor_id": str(result.executor_info.uuid),
                     "gpu_model": result.gpu_model,
@@ -312,9 +310,9 @@ class RentalPriceIncentive(DefaultIncentive):
                     "machine_price_p90": p90,
                     "soft_limit_rate": rate,
                     "soft_limit_threshold": p90 * rate if p90 else None,
-                    "enforced": enforced,
+                    "enforced": True,
                     "reason": ZeroIncentiveReason.PRICE_ABOVE_MARKET_P90_SOFT_LIMIT,
-                    "pool": "rental_excluded" if enforced else "rental_kept_shadow",
+                    "pool": "rental_excluded",
                 },
             )
         )
@@ -1284,21 +1282,18 @@ class RentalPriceIncentive(DefaultIncentive):
                 )
 
         # DAH-2250 soft price limit: an otherwise-eligible unrented executor priced
-        # above the market p90 ceiling forfeits the unrented incentive (node stays
-        # active). While the flag is off we only log the would-be exclusion (shadow).
-        soft_price_enforced: bool = settings.ENABLE_UNRENTED_SOFT_PRICE_LIMIT
+        # above the market p90 ceiling forfeits the unrented incentive (node stays active).
         if self._should_run_idle_pool_gate(
-            idle_pool_candidate, eligible_for_rental_share, soft_price_enforced
+            idle_pool_candidate, eligible_for_rental_share, True
         ) and self._is_over_soft_price_limit(job_result):
             if eligible_for_rental_share:
                 self._log_soft_price_limit(job_result)
-            if soft_price_enforced:
-                eligible_for_rental_share = False
-                p90: float | None = shared_client.config.machine_prices_p90.get(job_result.gpu_model)
-                reason: MinerLogLine = MinerLogLine.no_payout_because_price_above_market_soft_limit(
-                    job_result, p90, shared_client.config.soft_limit_price_rate
-                )
-                job_result.record_incentive_log(reason)
+            eligible_for_rental_share = False
+            p90: float | None = shared_client.config.machine_prices_p90.get(job_result.gpu_model)
+            reason: MinerLogLine = MinerLogLine.no_payout_because_price_above_market_soft_limit(
+                job_result, p90, shared_client.config.soft_limit_price_rate
+            )
+            job_result.record_incentive_log(reason)
 
         # DAH-2520 disk/VRAM gate: an idle machine without the required disk margin over its
         # GPU VRAM is not realistically rentable, so it forfeits the unrented incentive (node

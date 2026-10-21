@@ -745,11 +745,6 @@ class Settings(BaseSettings):
     # and the per-executor job-result dump after scoring; asyncssh and sqlalchemy keep their own levels.
     LOG_LEVEL: str = Field(env="LOG_LEVEL", default="INFO", description="Root log level (DEBUG, INFO, WARNING, ...)")
 
-    # DAH-2250 — unrented incentive soft price limit. When True, an unrented executor
-    # whose price_per_gpu exceeds market p90 * soft_limit_price_rate loses the unrented
-    # rental incentive while staying active. When False, the breach is only logged
-    # (shadow mode) so prod impact can be observed before enforcing.
-    ENABLE_UNRENTED_SOFT_PRICE_LIMIT: bool = Field(env="ENABLE_UNRENTED_SOFT_PRICE_LIMIT", default=False)
     # DAH-2520 — unrented VRAM/disk sanity gate. When True, an unrented executor whose
     # total GPU VRAM exceeds the machine's total disk loses the unrented rental incentive
     # while staying active. When False, the breach is only logged (shadow mode) so prod
