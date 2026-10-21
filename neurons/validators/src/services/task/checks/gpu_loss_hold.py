@@ -46,6 +46,7 @@ from .rented_gpu_drop import (
     _listed_uuids,
     _rented_gpu_count,
     judge_rented_gpus,
+    missing_gpus_under_reset,
 )
 
 logger = logging.getLogger(__name__)
@@ -117,6 +118,11 @@ class GpuLossHoldCheck:
 
     async def run(self, ctx: Context) -> CheckResult:
         pods = rented_pods(ctx)
+        # DAH-4658: the cards leave nvidia-smi while the renter resets them; that cycle neither starts nor clears a hold
+        if await missing_gpus_under_reset(ctx, list(ctx.state.gpu_details or [])):
+            return CheckResult(
+                passed=True, event=render_message(Msg.GPU_RESET_IN_PROGRESS, ctx=ctx, check_id=self.check_id)
+            )
         drop = judge_scrape(ctx, pods)
         key = _key(ctx)
         mark: DropMark | None = None

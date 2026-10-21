@@ -501,6 +501,13 @@ class GpuLossHoldMessages:
         category="env",
         impact="Proceed",
     )
+    GPU_RESET_IN_PROGRESS = MessageTemplate(
+        event="GPU loss hold skipped: the renter is resetting the pod's GPUs",
+        reason="GPU_LOST_GPU_RESET_IN_PROGRESS",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
 
 
 class GpuPowerLimitMessages:

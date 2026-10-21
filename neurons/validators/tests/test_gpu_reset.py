@@ -262,6 +262,21 @@ def test_topology_parse_reads_nvlink_cells_only():
     assert parse_nvlink_peers("\x1b[4m" + TOPO_PAIR01 + "\x1b[0m", hosts) == {U[0]: {U[1]}, U[1]: {U[0]}}
 
 
+def test_topology_parse_reads_an_8x_h200_header_without_its_leading_tab():
+    """`nvidia-smi topo -m` of an 8x H200 (NVSwitch, no /dev/nvidia-nvswitch*) as the runner returns it: stripped."""
+    h200 = [f"GPU-8{i}000000-0000-4000-8000-00000000000{i}" for i in range(8)]
+    hosts = parse_host_gpus("\n".join(f"{i}, {h200[i]}, 00000000:{i:02X}:00.0, Disabled" for i in range(8)))
+    gpus = "\t".join(f"GPU{i}" for i in range(8))
+    rows = [
+        f"GPU{i}\t" + "\t".join(" X " if j == i else "NV18" for j in range(8)) + f"\tSYS\t{'0-47' if i < 4 else '48-95'}\t{i // 4}\t\tN/A"
+        for i in range(8)
+    ]
+    topology = "\n".join([f"{gpus}\tNIC0\tCPU Affinity\tNUMA Affinity\tGPU NUMA ID", *rows, "", "Legend:", "  X    = Self"])
+    peers = parse_nvlink_peers(topology, hosts)
+    assert peers[h200[0]] == set(h200[1:])  # a 2-of-8 pod has peers outside it: the reset is refused
+    assert len(peers) == 8
+
+
 # --- the pending-pod mark and the checks that skip on it ------------------------------------------
 
 

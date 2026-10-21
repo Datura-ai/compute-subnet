@@ -111,7 +111,8 @@ def parse_nvlink_peers(topology: str, host_gpus: list[HostGpu]) -> dict[str, set
         tokens = line.split()
         if not tokens:
             continue
-        if not columns and _GPU_LABEL.fullmatch(tokens[0]) and not line[:1].strip():
+        # the header is the first line led by a GPU label: the runner strips its leading tab
+        if not columns and _GPU_LABEL.fullmatch(tokens[0]):
             columns = [int(token[3:]) for token in tokens if _GPU_LABEL.fullmatch(token)]
             continue
         if columns and _GPU_LABEL.fullmatch(tokens[0]):

@@ -270,6 +270,20 @@ def _listed_uuids(gpu_details: list[dict]) -> list[str]:
     ]
 
 
+async def missing_gpus_under_reset(ctx: Context, gpu_details: list[dict]) -> bool:
+    """DAH-4658: a GPU missing while the renter resets it is the renter's doing, but only when every missing
+    GPU is one being reset (as GpuUsageCheck); a mark that names no GPU covers the node. A dry run reads no Redis."""
+    if settings.DRY_RUN:
+        return False
+    resets = await renter_gpu_resets(ctx.services.redis, ctx.miner_hotkey, ctx.executor.uuid)
+    if not resets:
+        return False
+    missing = set(split_uuids((ctx.verified or {}).get(GPU_ANCHOR_KEY) or "")) - set(_listed_uuids(gpu_details))
+    return not all(mark.get("gpu_uuids") for mark in resets) or bool(
+        missing and missing <= {uuid for mark in resets for uuid in mark["gpu_uuids"]}
+    )
+
+
 def _rented_gpu_count(pods: list[RentedPod]) -> int | None:
     counts = [pod.gpu_count for pod in pods]
     return sum(counts) if counts and all(counts) else None
@@ -305,19 +319,9 @@ class RentedGpuDropCheck:
             return CheckResult(passed=True, event=event)
         specs = ctx.state.specs or {}
         gpu_details = list(ctx.state.gpu_details or [])
-        # DAH-4658: a GPU missing while the renter resets it is the renter's doing, but only when every missing
-        # GPU is one being reset (as GpuUsageCheck); a mark that names no GPU covers the node. A dry run reads no Redis.
-        if not settings.DRY_RUN and (
-            resets := await renter_gpu_resets(ctx.services.redis, ctx.miner_hotkey, ctx.executor.uuid)
-        ):
-            missing = set(split_uuids((ctx.verified or {}).get(GPU_ANCHOR_KEY) or "")) - set(
-                _listed_uuids(gpu_details)
-            )
-            if not all(mark.get("gpu_uuids") for mark in resets) or (
-                missing and missing <= {uuid for mark in resets for uuid in mark["gpu_uuids"]}
-            ):
-                event = render_message(Msg.GPU_RESET_IN_PROGRESS, ctx=ctx, check_id=self.check_id)
-                return CheckResult(passed=True, event=event)
+        if await missing_gpus_under_reset(ctx, gpu_details):
+            event = render_message(Msg.GPU_RESET_IN_PROGRESS, ctx=ctx, check_id=self.check_id)
+            return CheckResult(passed=True, event=event)
 
         nvml_count = ctx.state.gpu_count
         if nvml_count is None:
