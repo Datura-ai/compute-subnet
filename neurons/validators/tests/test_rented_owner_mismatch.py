@@ -5,7 +5,6 @@ rented UUID would halt as rented and keep its score without the matmul ever runn
 """
 
 import logging
-from unittest.mock import patch
 
 import pytest
 
@@ -73,33 +72,12 @@ async def test_own_rental_logs_no_mismatch(context_factory, caplog):
 
 
 @pytest.mark.asyncio
-async def test_another_miners_rental_is_logged_and_still_rented_by_default(context_factory, caplog):
+async def test_another_miners_rental_is_logged_and_validated_as_not_rented(context_factory, caplog):
     ctx = _ctx(context_factory, rental_miner_hotkey="other-miner-hotkey")
 
     with caplog.at_level(logging.WARNING, logger=rented_machine.logger.name):
         result = await TenantEnforcementCheck().run(ctx)
 
-    assert result.event.reason_code != Msg.NOT_RENTED.reason
-    assert len(_mismatch_logs(caplog)) == 1
-
-
-@pytest.mark.asyncio
-async def test_another_miners_rental_is_validated_as_not_rented_under_enforcement(
-    context_factory, caplog
-):
-    ctx = _ctx(context_factory, rental_miner_hotkey="other-miner-hotkey")
-
-    with patch.object(rented_machine.settings, "RENTED_OWNER_MISMATCH_ENFORCEMENT_ENABLED", True):
-        result = await TenantEnforcementCheck().run(ctx)
-
     assert result.event.reason_code == Msg.NOT_RENTED.reason
     assert result.updates["rented"] is False
-
-
-def test_enforcement_is_off_by_default():
-    assert (
-        type(rented_machine.settings)
-        .model_fields["RENTED_OWNER_MISMATCH_ENFORCEMENT_ENABLED"]
-        .default
-        is False
-    )
+    assert len(_mismatch_logs(caplog)) == 1

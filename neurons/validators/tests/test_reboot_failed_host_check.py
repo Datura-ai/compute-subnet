@@ -197,7 +197,7 @@ async def test_a_rental_another_miner_owns_runs_no_host_check(context_factory):
 
     result = await _run(_context(context_factory, runner, owner="other-miner"))
 
-    assert result.event.reason_code == Msg.POD_NOT_RUNNING.reason
+    assert result.event.reason_code == Msg.NOT_RENTED.reason
     assert runner.commands == []
 
 

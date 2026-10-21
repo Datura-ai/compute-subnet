@@ -510,12 +510,6 @@ class Settings(BaseSettings):
     # verified job is cleared, so the backend marks the executor inactive and billing stops. A transport
     # error or timeout decides nothing. Off by default: the pod keeps the plain POD_NOT_RUNNING verdict.
     REBOOT_FAILED_HOST_CHECK_ENABLED: bool = Field(env="REBOOT_FAILED_HOST_CHECK_ENABLED", default=False)
-    # The backend keys rentals by executor UUID, which is the miner's word: a box registered under another
-    # miner's rented UUID would halt as rented (score kept, no matmul). The mismatch is always logged
-    # (RENTED_OWNER_MISMATCH); with this on, such a node is validated as not rented. Off by default.
-    RENTED_OWNER_MISMATCH_ENFORCEMENT_ENABLED: bool = Field(
-        env="RENTED_OWNER_MISMATCH_ENFORCEMENT_ENABLED", default=False
-    )
     # Report a rented node that lost a GPU to the backend from the first cycle that sees it (a possible
     # glitch waits one more); observation only, no score change. Off by default.
     RENTED_GPU_DROP_CHECK_ENABLED: bool = Field(env="RENTED_GPU_DROP_CHECK_ENABLED", default=False)
