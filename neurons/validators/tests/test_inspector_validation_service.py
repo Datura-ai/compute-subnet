@@ -25,7 +25,6 @@ VALIDATOR_SHA256 = "abc123"
 @pytest.fixture(autouse=True)
 def enable_collector_ensure(monkeypatch):
     fake_settings = SimpleNamespace(
-        INSPECTOR_ENSURE_COLLECTOR_ON_RENTED_CHECK=True,
         INSPECTOR_LIBRARY_REFRESH_ENABLED=False,
         INSPECTOR_LIBRARY_FETCH_URL=FETCH_URL,
         verifyx=SimpleNamespace(LIBRARY_REFRESH_ENABLED=False),
@@ -226,38 +225,6 @@ async def test_validate_rented_executor_uses_interactive_json_protocol():
     assert created_validators[0].session_closed is True
     assert shell.remote_checksum_calls == 1
     assert shell.scp_checksum_calls == 0
-
-
-@pytest.mark.asyncio
-async def test_validate_rented_executor_skips_collector_ensure_when_disabled(monkeypatch):
-    monkeypatch.setattr(
-        "neurons.validators.src.services.inspector_validation_service.settings",
-        SimpleNamespace(INSPECTOR_ENSURE_COLLECTOR_ON_RENTED_CHECK=False),
-    )
-    service = InspectorValidationService()
-    ssh = FakeSSH()
-    ssh.process.stdout = FakeStdout([
-        json.dumps({"ok": True, "result": '{"hello": "executor"}'}) + "\n",
-        json.dumps({"ok": True, "result": "response-cipher"}) + "\n",
-        json.dumps({"ok": True, "result": ""}) + "\n",
-    ])
-    shell = FakeShell()
-    executor = SimpleNamespace(
-        uuid="exec-1",
-        python_path="/usr/bin/python3",
-        root_dir="/root/app",
-    )
-
-    result = await service.validate_rented_executor(
-        shell,
-        ssh,
-        executor,
-        {"executor_uuid": "exec-1"},
-    )
-
-    assert result.error is None
-    assert ssh.process.stdin.messages[0]["cmd"] == "handshake-reply"
-    assert "collector_ensure_error" not in (result.diagnostics or {})
 
 
 @pytest.mark.asyncio

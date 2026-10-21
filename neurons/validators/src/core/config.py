@@ -271,10 +271,6 @@ class Settings(BaseSettings):
     # DAH-2794: feed the obfuscated scrape to the executor's own interpreter over stdin
     # instead of freezing it into a ~13 MB onefile and uploading that every cycle.
     ENABLE_SCRAPE_SOURCE_DELIVERY: bool = Field(env="ENABLE_SCRAPE_SOURCE_DELIVERY", default=False)
-    INSPECTOR_ENSURE_COLLECTOR_ON_RENTED_CHECK: bool = Field(
-        env="INSPECTOR_ENSURE_COLLECTOR_ON_RENTED_CHECK",
-        default=True,
-    )
     # Rented cycles in a row in which the inspector saw nothing (error, failed canary, stopped or
     # just-started collector) are counted per node and logged as INSPECTOR_BLIND_STREAK from this
     # many on.
