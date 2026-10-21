@@ -56,12 +56,10 @@ def calculate_scores(
         )
 
     # Minimal-G5 CVM attestation gate: a CVM-flagged executor (it presented a TDX
-    # quote) whose attestation did not pass earns nothing while TCB enforcement is
-    # on. Non-CVM executors (no quote) are untouched — omitted-quote bypass by a
+    # quote) whose attestation did not pass earns nothing. Non-CVM executors (no quote) are untouched — omitted-quote bypass by a
     # known CVM is rejected upstream by the attestation ratchet.
     if (
         settings.ENABLE_TDX_ATTESTATION
-        and settings.ENABLE_TCB_ENFORCEMENT
         and ctx.executor.tdx_quote
         and not ctx.tdx_attestation_passed
     ):

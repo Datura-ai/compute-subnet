@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Redis set of executor UUIDs that have ever presented a valid TDX quote.
 # Minimal-G5 ratchet: once an executor is known-CVM, an omitted quote is treated
-# as a bypass attempt (fail-closed under ENABLE_TCB_ENFORCEMENT), not as a
+# as a bypass attempt (fail-closed), not as a
 # bare-metal node.
 TDX_ATTESTED_EXECUTOR_SET = "tdx_attested_executors"
 
@@ -266,20 +266,15 @@ class AttestationService:
             "violations": [
                 {"reason": reason, "value": value} for reason, value in violations
             ],
-            "enforced": settings.ENABLE_TCB_ENFORCEMENT,
         })
 
-        if settings.ENABLE_TCB_ENFORCEMENT:
-            reason, value = violations[0]
-            logger.warning(_m("TCB enforcement rejected TDX quote", extra=extra))
-            raise AttestationError(
-                f"TCB enforcement failed for executor {executor.address}:{executor.port}: "
-                f"{reason}={value!r}"
-                + (f" (+{len(violations) - 1} more violations)" if len(violations) > 1 else "")
-            )
-
-        # Warn-only telemetry window: size the blast radius before enforcing.
-        logger.warning(_m("TCB enforcement warning (not enforced)", extra=extra))
+        reason, value = violations[0]
+        logger.warning(_m("TCB enforcement rejected TDX quote", extra=extra))
+        raise AttestationError(
+            f"TCB enforcement failed for executor {executor.address}:{executor.port}: "
+            f"{reason}={value!r}"
+            + (f" (+{len(violations) - 1} more violations)" if len(violations) > 1 else "")
+        )
 
     def _validate_verifier_response(
         self,
@@ -341,7 +336,7 @@ class AttestationService:
                     "the issued attestation nonce (stale or replayed quote)"
                 )
 
-        # G4 — enforce TCB/advisory posture (warn-only unless ENABLE_TCB_ENFORCEMENT).
+        # G4 — enforce TCB/advisory posture (fail closed).
         self._enforce_tcb(details, executor)
 
     # ------------------------------------------------------------------
@@ -635,7 +630,7 @@ class AttestationService:
     async def _reject_omitted_quote_if_ratcheted(self, executor: ExecutorSSHInfo) -> None:
         """Minimal-G5 fail-closed: a previously attested executor cannot silently
         drop its quote to skip verification (host-key-only bypass)."""
-        if not (self.enabled and settings.ENABLE_TCB_ENFORCEMENT):
+        if not self.enabled:
             return
         if executor.tdx_quote or self.redis_service is None:
             return
