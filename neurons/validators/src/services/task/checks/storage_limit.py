@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from core.config import settings
 
+from ..availability import ReachSource, ReachTarget
 from ..messages import StorageLimitMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
@@ -47,6 +48,8 @@ class StorageLimitCheck:
             "rented": rented,
         }
         if settings.REQUIRE_STORAGE_LIMIT_SUPPORTED and not rented:
+            what["reach_source"] = str(ReachSource.VALIDATOR)
+            what["reach_target"] = str(ReachTarget.DOCKER_STORAGE)
             return CheckResult(
                 passed=False,
                 event=render_message(Msg.REQUIRED, ctx=ctx, check_id=self.check_id, what=what),

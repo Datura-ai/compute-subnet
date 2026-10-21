@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 from neurons.validators.tests.helpers import build_state
 from protocol.vc_protocol.compute_requests import RentedExecutor, RentedExecutorsResponse
+from services.task.availability import availability_errors
 from services.task.checks.rented_machine import TenantEnforcementCheck
 from services.task.checks.storage_limit import StorageLimitCheck
 from services.task.messages import StorageLimitMessages as Msg
@@ -69,6 +70,18 @@ async def test_enforced_an_unrented_node_without_the_limit_scores_zero(
     assert result.passed is False
     assert result.event.reason_code == Msg.REQUIRED.reason
     assert result.updates["score"] == 0.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rented", [False, True])
+async def test_enforced_only_an_unrented_node_is_hidden_from_new_rentals(
+    context_factory, enforced, rented
+):
+    # the backend hides a node whose cycle carried an availability error at once, not at the hourly sweep
+    result = await run(context_factory, {"storage_limit_supported": False}, rented=rented)
+
+    codes = [error.reason_code for error in availability_errors([result.event])]
+    assert codes == ([] if rented else ["STORAGE_LIMIT_REQUIRED"])
 
 
 @pytest.mark.asyncio
