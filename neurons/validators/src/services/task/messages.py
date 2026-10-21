@@ -423,6 +423,38 @@ class GpuThermalThrottleMessages:
     )
 
 
+class StorageLimitMessages:
+    MISSING = MessageTemplate(
+        event="Docker cannot limit a container's disk",
+        reason="STORAGE_LIMIT_MISSING",
+        severity="warning",
+        category="env",
+        impact="Proceed; score not changed while the requirement is not enforced (see enforced). A renter who "
+        "fills their disk fills the host's Docker storage and takes the host and every pod on it down",
+        remediation="Set up Docker storage that enforces a per-container limit (overlay2 on xfs mounted with "
+        "pquota): https://docs.lium.io/providers/nodes/docker-storage . Check with `sudo docker run --rm "
+        "--storage-opt size=1g --gpus all daturaai/compute-subnet-executor:latest nvidia-smi`.",
+    )
+    REQUIRED = MessageTemplate(
+        event="Node rejected: Docker cannot limit a container's disk",
+        reason="STORAGE_LIMIT_REQUIRED",
+        severity="error",
+        category="env",
+        impact="Job skipped; score set to 0 until the host enforces a per-container storage limit",
+        remediation="Set up Docker storage that enforces a per-container limit (overlay2 on xfs mounted with "
+        "pquota): https://docs.lium.io/providers/nodes/docker-storage . The node passes again on the next "
+        "validation once `sudo docker run --rm --storage-opt size=1g --gpus all "
+        "daturaai/compute-subnet-executor:latest nvidia-smi` works.",
+    )
+    OK = MessageTemplate(
+        event="Docker limits a container's disk",
+        reason="STORAGE_LIMIT_OK",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+
+
 class RentedGpuDropMessages:
     DROP = MessageTemplate(
         event="Rented node lost a GPU",
