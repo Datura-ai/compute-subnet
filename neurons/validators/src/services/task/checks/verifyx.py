@@ -518,8 +518,6 @@ def _is_cold_sample_below_gate(ctx: Context, result, prev_ema) -> bool:
     `rented_data` present is required — without the backend's answer every executor looks
     never-measured, and a backend blip must not double VerifyX for the whole fleet.
     """
-    if not settings.VERIFYX_COLD_SAMPLE_RETRY_ENABLED:
-        return False
     if ctx.state.rented_data is None:
         return False
     if prev_ema is not None and prev_ema.ema_verifyx_download_speed is not None:

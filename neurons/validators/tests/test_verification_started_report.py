@@ -359,7 +359,6 @@ async def test_the_report_carries_the_claimed_list_not_what_the_express_lane_hol
     order: list[str] = []
     service = _miner_service_recording(order)
     service.in_flight = {"exec-b": EXPRESS_LANE}
-    monkeypatch.setattr(settings, "EXPRESS_LANE_ENABLED", True)
     monkeypatch.setattr(settings, "USE_REST_API", False)
     monkeypatch.setattr(settings, "JOB_TIME_OUT", 300)
     monkeypatch.setattr(type(settings), "get_bittensor_wallet", lambda self: _wallet())
@@ -387,7 +386,6 @@ async def test_an_express_lane_run_reports_its_one_executor(monkeypatch):
     answers with more."""
     order: list[str] = []
     service = _miner_service_recording(order)
-    monkeypatch.setattr(settings, "EXPRESS_LANE_ENABLED", True)
     monkeypatch.setattr(settings, "USE_REST_API", False)
     monkeypatch.setattr(settings, "JOB_TIME_OUT", 300)
     monkeypatch.setattr(type(settings), "get_bittensor_wallet", lambda self: _wallet())

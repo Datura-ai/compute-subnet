@@ -119,9 +119,6 @@ class GpuUsageCheck:
         the verdict is logged, not scored. Returns None when the card is clean, leaving the
         legacy verdict to the caller.
         """
-        if not settings.FOREIGN_GPU_WORKLOAD_CHECK_ENABLED:
-            return None
-
         # No backend truth this cycle means no allowlist to judge against — an inability to
         # measure, which never withholds money here.
         if ctx.state.rented_data is None:
