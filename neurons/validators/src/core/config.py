@@ -306,11 +306,6 @@ class Settings(BaseSettings):
     # state in ONE ssh command and skip `docker plugin install` (a Docker Hub round trip) when the
     # plugin is already enabled — instead of five serial commands. Off: the per-command path.
     RENTAL_VOLUME_FAST_PATH_ENABLED: bool = Field(env="RENTAL_VOLUME_FAST_PATH_ENABLED", default=False)
-    # DAH-3257: on a rent, read the host listings the pre-run steps need (containers, volumes,
-    # mounted volumes, GPU minor map, device nodes, nvidia-smi power state, the image's
-    # encryption label) in ONE ssh command instead of ~8; every removal and write still runs its
-    # own command, and a probe that fails leaves every step on its own commands. Off: as before.
-    RENTAL_PRERUN_HOST_PROBE_ENABLED: bool = Field(env="RENTAL_PRERUN_HOST_PROBE_ENABLED", default=False)
     # On a rent, a Docker SDK call whose SSH channel dropped under it (paramiko EOFError, a 60 s
     # read timeout, the adapter's typed dropped-transport error) is retried ONCE after the SSH
     # session is re-opened; `containers/create` and `volumes/create` first check by name and adopt
