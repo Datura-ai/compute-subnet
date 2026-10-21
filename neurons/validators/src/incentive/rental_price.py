@@ -618,8 +618,6 @@ class RentalPriceIncentive(DefaultIncentive):
         self._merge_partially_rented_split_results(split_portions)
 
     def _expand_partially_rented_split_results(self) -> list[_PartiallyRentedSplitPortions]:
-        if not settings.ENABLE_SPLIT_PARTIAL_RENTAL_SCORING:
-            return []
         split_portions: list[_PartiallyRentedSplitPortions] = []
         for sibling_results in self.job_results.values():
             for result in list(sibling_results):
