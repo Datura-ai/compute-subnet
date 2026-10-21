@@ -814,7 +814,6 @@ async def test_the_pipeline_check_with_default_settings_logs_the_drop_and_posts_
             _ctx(context_factory, services, listed=UUIDS[:5], scrape_error="NVMLError(999)")
         )
 
-    # log mode: the drop is judged and logged, nothing is posted or marked
     assert result.passed and result.event.reason_code == Msg.DROP.reason
     services.backend.report_rented_gpu_drop.assert_not_awaited()
     assert services.redis.calls == 0 and services.redis.store == {}
