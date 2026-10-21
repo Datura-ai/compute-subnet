@@ -305,14 +305,15 @@ async def _processes_outside(
     if apps.exit_code != 0:
         raise GpuResetRefused(GpuResetErrorCode.ResetNotSupported, "could not list the GPU processes")
     pids = sorted({pid for pid, uuid in parse_compute_apps(apps.stdout or "") if uuid in targets})
-    if container_id is None:
+    if container_id is None and ignore_cgroup is None:
         return pids
     cgroups = await _cgroups(runner, pids)
     # a PID whose cgroup cannot be read is not proven to be the pod's
     return [
         pid
         for pid in pids
-        if container_id not in cgroups.get(pid, "") and (ignore_cgroup is None or cgroups.get(pid, "").strip() != ignore_cgroup)
+        if (container_id is None or container_id not in cgroups.get(pid, ""))
+        and (ignore_cgroup is None or cgroups.get(pid, "").strip() != ignore_cgroup)
     ]
 
 
@@ -351,10 +352,12 @@ async def reset_pod_gpus(
         )
         if stopped.exit_code != 0:
             raise GpuResetRefused(GpuResetErrorCode.ResetNotSupported, f"docker stop failed: {_tail(stopped.stderr)}")
-        # docker stop killed every process of the pod: anything still on the targets is someone else's
+        # docker stop killed every process of the pod: anything still on the targets is someone else's,
+        # except a probe of the validator's own session (as in the precheck)
+        own_cgroup = await _own_cgroup(runner)
         pids_still_on_targets: list[int] = []
         for attempt in range(3):
-            pids_still_on_targets = await _processes_outside(runner, plan.targets, None)
+            pids_still_on_targets = await _processes_outside(runner, plan.targets, None, ignore_cgroup=own_cgroup)
             if not pids_still_on_targets:
                 break
             if attempt < 2:

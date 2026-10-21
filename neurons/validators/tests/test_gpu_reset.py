@@ -447,6 +447,18 @@ async def test_the_validators_own_session_processes_do_not_block_the_reset():
 
 
 @pytest.mark.asyncio
+async def test_the_validators_own_probe_left_after_the_stop_does_not_refuse_the_reset():
+    own = "0::/user.slice/user-0.slice/session-7.scope"
+    host = FakeHost(apps_after_stop=[(900, U[0])], cgroups={900: own})
+    report, _ = await _reset(host)
+    assert report.ok and any(cmd.startswith("nvidia-smi -r") for cmd in host.commands)
+
+    stranger = FakeHost(apps_after_stop=[(901, U[0])], cgroups={901: "0::/system.slice/other.service"})
+    report, _ = await _reset(stranger)
+    assert not report.ok and report.error_code == GpuResetErrorCode.GpuInUseOutsidePod
+
+
+@pytest.mark.asyncio
 async def test_a_root_own_cgroup_ignores_nothing():
     host = FakeHost(apps=[(900, U[0])], cgroups={900: "0::/"}, own_cgroup="0::/")
     report, start = await _reset(host)
