@@ -227,6 +227,8 @@ class SubtensorClient:
     miners: list[bittensor.NeuronInfo] = []
     uid_to_evm_address: dict[int, str] = {}
     hotkey_to_evm_address: dict[str, str] = {}
+    # hotkeys of the opted-in providers, whose traffic goes through the central miner
+    central_miner_hotkeys: frozenset[str] = frozenset()
 
     @classmethod
     def get_instance(cls) -> Self:
@@ -656,6 +658,7 @@ class SubtensorClient:
         opted_in_by_hotkey = {
             opted_in.miner_hotkey: opted_in for opted_in in opted_in_miners
         }
+        self.central_miner_hotkeys = frozenset(opted_in_by_hotkey)
         for neuron in metagraph.neurons:
             opted_in = opted_in_by_hotkey.get(neuron.hotkey)
             if opted_in is not None:
