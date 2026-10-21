@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 
-from core.config import settings
+from services.redis_service import RedisWrites
 
 from ..messages import GpuAttestationIdentityMessages as Msg, render_message
 from ..pipeline import CheckResult, Context
@@ -207,8 +207,7 @@ class GpuAttestationIdentityCheck:
     not change UUID (on any executor or hotkey), and two UUIDs of one node may not present the same card.
 
     With Confidential Computing off NVML refuses to attest, so on most bare-metal hosts this logs
-    GPU_ATTESTATION_UNAVAILABLE and passes. Shadow by default: findings are warning events and the node
-    passes. Under GPU_ATTESTATION_IDENTITY_ENFORCEMENT_ENABLED a mismatch or forged evidence fails the node
+    GPU_ATTESTATION_UNAVAILABLE and passes. A mismatch or forged evidence fails the node
     (not fatal with a live rental, as HardwareIdentityCheck). Unavailable evidence never fails it, except a
     UUID that attested before and now does not (a downgrade), which counts as a mismatch.
 
@@ -281,28 +280,40 @@ class GpuAttestationIdentityCheck:
         host_key = f"{KEY_HOST}:{ctx.executor.address}:{ctx.executor.port}"
         try:
             redis = ctx.services.redis
+            # Every read in one MGET: each call holds the validator-wide Redis lock, and one call per key
+            # left a multi-GPU node waiting minutes behind the other jobs (p90 186 s, 20 Oct).
+            keys = [host_key]
             for gpu_uuid in reported:
-                pinned = _text(await redis.get(f"{KEY_UUID}:{gpu_uuid}"))
+                keys.append(f"{KEY_UUID}:{gpu_uuid}")
+                if identity := verified.get(gpu_uuid, {}).get("identity"):
+                    keys.append(f"{KEY_IDENTITY}:{identity}")
+                if hw := hw_by_uuid.get(gpu_uuid):
+                    keys.append(f"{KEY_HW}:{gpu_uuid}")
+                    if serial := _serial(hw):
+                        keys.append(f"{KEY_SERIAL}:{serial}")
+            stored = dict(zip(keys, (_text(v) for v in await redis.mget(keys))))
+            for gpu_uuid in reported:
+                pinned = stored[f"{KEY_UUID}:{gpu_uuid}"]
                 identity = verified.get(gpu_uuid, {}).get("identity")
                 if pinned and identity and pinned != identity:
                     moved[gpu_uuid] = "uuid_changed_identity"
                 elif pinned and gpu_uuid in unavailable:
                     moved[gpu_uuid] = "attested_before_unavailable_now"
                 if identity:
-                    owner = _text(await redis.get(f"{KEY_IDENTITY}:{identity}"))
+                    owner = stored[f"{KEY_IDENTITY}:{identity}"]
                     if owner and owner != gpu_uuid:
                         moved[gpu_uuid] = f"identity_was_under:{owner}"
                 hw = hw_by_uuid.get(gpu_uuid)
                 if hw:
-                    previous_hw = _text(await redis.get(f"{KEY_HW}:{gpu_uuid}"))
+                    previous_hw = stored[f"{KEY_HW}:{gpu_uuid}"]
                     if previous_hw and (fields := hw_changes(json.loads(previous_hw), hw)):
                         changed[gpu_uuid] = fields
                     if serial := _serial(hw):
-                        owner = _text(await redis.get(f"{KEY_SERIAL}:{serial}"))
+                        owner = stored[f"{KEY_SERIAL}:{serial}"]
                         if owner and owner != gpu_uuid:
                             moved[gpu_uuid] = f"serial_was_under:{owner}"
                             findings.append("serial_moved")
-            previous_host = _text(await redis.get(host_key))
+            previous_host = stored[host_key]
             previous_host = json.loads(previous_host) if previous_host else None
             if previous_host and slots and previous_host.get("slots") == slots and not set(previous_host.get("uuids") or []) & set(reported):
                 # every UUID new, same models in the same slots: renamed cards. Replacing one failed card keeps the
@@ -315,19 +326,20 @@ class GpuAttestationIdentityCheck:
             if changed:
                 findings.append("hardware_changed_under_uuid")
             if not findings:  # a node under a finding cannot rewrite its pins
+                writes = RedisWrites()
                 for gpu_uuid, v in verified.items():
-                    await redis.set(f"{KEY_UUID}:{gpu_uuid}", v["identity"], ex=KEY_TTL_SECONDS)
-                    await redis.set(f"{KEY_IDENTITY}:{v['identity']}", gpu_uuid, ex=KEY_TTL_SECONDS)
+                    writes.set(f"{KEY_UUID}:{gpu_uuid}", v["identity"], ex=KEY_TTL_SECONDS)
+                    writes.set(f"{KEY_IDENTITY}:{v['identity']}", gpu_uuid, ex=KEY_TTL_SECONDS)
                 for gpu_uuid, hw in hw_by_uuid.items():
-                    await redis.set(f"{KEY_HW}:{gpu_uuid}", json.dumps(hw), ex=KEY_TTL_SECONDS)
+                    writes.set(f"{KEY_HW}:{gpu_uuid}", json.dumps(hw), ex=KEY_TTL_SECONDS)
                     if serial := _serial(hw):
-                        await redis.set(f"{KEY_SERIAL}:{serial}", gpu_uuid, ex=KEY_TTL_SECONDS)
+                        writes.set(f"{KEY_SERIAL}:{serial}", gpu_uuid, ex=KEY_TTL_SECONDS)
                 if slots:
-                    await redis.set(host_key, json.dumps({"uuids": reported, "slots": slots}), ex=KEY_TTL_SECONDS)
+                    writes.set(host_key, json.dumps({"uuids": reported, "slots": slots}), ex=KEY_TTL_SECONDS)
+                await redis.write_atomically(writes)
         except Exception:
             logger.warning("gpu identity record unavailable", exc_info=True, extra=ctx.default_extra)
 
-        enforce = settings.GPU_ATTESTATION_IDENTITY_ENFORCEMENT_ENABLED
         findings = list(dict.fromkeys(findings))
         what = {
             "verified": verified,
@@ -337,7 +349,6 @@ class GpuAttestationIdentityCheck:
             "hardware_changed": changed,
             "hardware": hw_by_uuid,
             "findings": findings,
-            "enforced": enforce,
         }
         if findings:
             if SWAP_FINDINGS & set(findings):
@@ -346,16 +357,12 @@ class GpuAttestationIdentityCheck:
                 template = Msg.MISMATCH
             else:
                 template = Msg.INCONSISTENT
-            event = render_message(
-                template,
-                ctx=ctx,
-                check_id=self.check_id,
-                impact=None if enforce else "Shadow observation only: score was NOT changed",
-                what=what,
-            )
-            updates = {"gpu_attestation_identity_passed": False} if enforce else {}
+            event = render_message(template, ctx=ctx, check_id=self.check_id, what=what)
             return CheckResult(
-                passed=not enforce, event=event, fatal=not has_live_rental(ctx), updates=updates
+                passed=False,
+                event=event,
+                fatal=not has_live_rental(ctx),
+                updates={"gpu_attestation_identity_passed": False},
             )
         template = Msg.OK if verified and not unavailable else Msg.UNAVAILABLE
         return CheckResult(passed=True, event=render_message(template, ctx=ctx, check_id=self.check_id, what=what))

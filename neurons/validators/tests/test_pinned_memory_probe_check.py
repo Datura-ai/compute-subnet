@@ -1,6 +1,5 @@
 import ast
 import json
-import logging
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -24,10 +23,9 @@ from tests.helpers import build_context_config, build_services, build_state, def
 
 
 @contextmanager
-def probe_gate(*, check_enabled: bool = True, enforce: bool = True):
+def probe_gate(*, check_enabled: bool = True):
     with patch("neurons.validators.src.services.task.checks.pinned_memory_probe.settings") as s:
         s.PINNED_MEMORY_PROBE_CHECK_ENABLED = check_enabled
-        s.PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED = enforce
         yield s
 
 
@@ -98,10 +96,9 @@ def make_ctx(context_factory, runner):
     )
 
 
-def test_on_but_not_enforcing_by_default():
-    # a fault is logged; failing the node waits for a review of a day of prod logs
+def test_on_and_enforcing_by_default():
     assert type(settings).model_fields["PINNED_MEMORY_PROBE_CHECK_ENABLED"].default is True
-    assert type(settings).model_fields["PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED"].default is False
+    assert "PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED" not in type(settings).model_fields
     assert PinnedMemoryProbeCheck.fatal is True
 
 
@@ -163,23 +160,21 @@ async def test_a_tdx_guest_whose_gpu_cannot_see_pinned_memory_fails_the_node(con
     "fault",
     [
         "gpu 0: cuStreamSynchronize -> CUDA_ERROR_ILLEGAL_ADDRESS (700)",
-        "cuInit -> CUDA_ERROR_UNKNOWN (999)",  # a broken-GPU code: logged as a fault, node still passes
+        "cuInit -> CUDA_ERROR_UNKNOWN (999)",  # a broken-GPU code is a fault too
     ],
     ids=["copy-fault", "cuda-broken"],
 )
-async def test_without_enforcement_a_fault_warns_and_passes(context_factory, caplog, fault):
+async def test_a_fault_fails_the_node(context_factory, fault):
     stdout = probe_stdout("fault", faults=[fault])
-    with probe_gate(enforce=False), caplog.at_level(logging.WARNING):
+    with probe_gate():
         result = await PinnedMemoryProbeCheck().run(
             make_ctx(context_factory, FakeRunner(stdout, exit_code=1))
         )
 
-    assert result.passed is True
+    assert result.passed is False
     assert result.event.reason_code == "PINNED_MEMORY_PROBE_FAILED"
-    assert result.event.severity == "warning"
-    assert "NOT changed" in result.event.impact
+    assert result.event.severity == "error"
     assert result.event.what_we_saw["error"] == fault
-    assert any("PINNED_MEMORY_PROBE_FAILED" in record.getMessage() for record in caplog.records)
 
 
 @pytest.mark.parametrize(

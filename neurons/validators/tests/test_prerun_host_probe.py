@@ -39,7 +39,6 @@ import asyncssh
 import pytest
 from core.config import settings
 from payload_models.payloads import WorkloadKind
-from services import nvidia_devices as nd
 from services.docker_service import (
     DOCKER_FILLER_VOLUME_LS_NAME_DRIVER_CMD,
     DockerService,
@@ -767,8 +766,7 @@ async def test_image_label_failed_section_inspects_itself(docker_service):
 
 
 @pytest.mark.asyncio
-async def test_gpu_config_with_probe_matches_live_partial_rental(monkeypatch):
-    monkeypatch.setattr(nd.settings, "KERNEL_GPU_VERDICT_CHECK_ENABLED", False)
+async def test_gpu_config_with_probe_matches_live_partial_rental():
     proc = "GPU-1, 0\nGPU-2, 1\n"
     live = _ssh(_ssh_result(stdout=proc), _ssh_result(stdout="/dev/nvidiactl\n/dev/nvidia-uvm\n"))
     from_live = await build_gpu_docker_config_for_executor(live, ["GPU-2"])
@@ -789,8 +787,7 @@ async def test_gpu_config_with_probe_matches_live_partial_rental(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_gpu_config_with_probe_whole_host_gets_the_whole_host_nodes(monkeypatch):
-    monkeypatch.setattr(nd.settings, "KERNEL_GPU_VERDICT_CHECK_ENABLED", False)
+async def test_gpu_config_with_probe_whole_host_gets_the_whole_host_nodes():
     probe = _probe(
         gpu_minor_map_stdout="GPU-1, 0\nGPU-2, 1\n",
         gpu_device_nodes=("/dev/nvidia0", "/dev/nvidia1"),
@@ -813,8 +810,7 @@ async def test_gpu_config_with_probe_whole_host_gets_the_whole_host_nodes(monkey
 
 
 @pytest.mark.asyncio
-async def test_gpu_config_with_probe_missing_uuid_still_consults_xml_live(monkeypatch):
-    monkeypatch.setattr(nd.settings, "KERNEL_GPU_VERDICT_CHECK_ENABLED", False)
+async def test_gpu_config_with_probe_missing_uuid_still_consults_xml_live():
     probe = _probe(gpu_minor_map_stdout="GPU-1, 0\n", shared_nodes=("/dev/nvidiactl",))
     ssh = _ssh(_ssh_result(exit_status=1, stderr="no nvidia-smi"))
     config = await build_gpu_docker_config_for_executor(ssh, ["GPU-9"], host_probe=probe)
@@ -824,8 +820,7 @@ async def test_gpu_config_with_probe_missing_uuid_still_consults_xml_live(monkey
 
 
 @pytest.mark.asyncio
-async def test_gpu_config_failed_proc_section_queries_live(monkeypatch):
-    monkeypatch.setattr(nd.settings, "KERNEL_GPU_VERDICT_CHECK_ENABLED", False)
+async def test_gpu_config_failed_proc_section_queries_live():
     probe = _probe(gpu_minor_map_stdout=None, shared_nodes=("/dev/nvidiactl",))
     ssh = _ssh(_ssh_result(stdout="GPU-1, 0\n"))
     config = await build_gpu_docker_config_for_executor(ssh, ["GPU-1"], host_probe=probe)
@@ -1170,7 +1165,6 @@ async def test_create_container_pearl_filler_does_not_ask_for_power(svc_fixture,
 def _wire_early_probes(svc, monkeypatch, *, image_present: bool) -> list[int]:
     """Both probes on; returns how many host probes had started when the image inspect answered."""
     monkeypatch.setattr(settings, "RENTAL_PRERUN_HOST_PROBE_ENABLED", True)
-    monkeypatch.setattr(settings, "RENTAL_VOLUME_FAST_PATH_ENABLED", True)
     _wire(svc, monkeypatch, _deploy_ssh_client(inspect_exit=0 if image_present else 1), probe_result=_probe())
     monkeypatch.setattr(svc, "probe_volume_host", AsyncMock(return_value=None))
     monkeypatch.setattr(svc, "reclaim_dphn_cache_for_rental", AsyncMock(return_value=False))
@@ -1247,7 +1241,6 @@ def _wire_customer_create_over_the_host(
     ones over a stub SSH client, so every listing they run is a command on it. The host lists the
     probe's containers until the first rm, then ``ps_after_rm``."""
     monkeypatch.setattr(settings, "RENTAL_PRERUN_HOST_PROBE_ENABLED", True)
-    monkeypatch.setattr(settings, "RENTAL_VOLUME_FAST_PATH_ENABLED", True)
     ssh_client = _deploy_ssh_client()
     answer_as_the_deploy_host = ssh_client.run.side_effect
     names_on_host = list(probe.container_names or () if containers_on_host is None else containers_on_host)
@@ -1713,7 +1706,6 @@ _PORT_ALLOCATED_REFUSAL = RuntimeError(
 def _wire_real_docker_run(svc, monkeypatch, *, refusals: int) -> list[str]:
     """Probe on, the real `docker run` retry; returns the order of port-check waits and runs."""
     monkeypatch.setattr(settings, "RENTAL_PRERUN_HOST_PROBE_ENABLED", True)
-    monkeypatch.setattr(settings, "PORT_COLLISION_RETRY_ENABLED", False)
     _wire(svc, monkeypatch, _deploy_ssh_client(), probe_result=_probe())
     monkeypatch.delattr(svc, "_run_rental_docker_create_with_port_retry")  # the real retry loop
     monkeypatch.setattr(svc, "_remove_failed_rental_container_for_retry", AsyncMock())
