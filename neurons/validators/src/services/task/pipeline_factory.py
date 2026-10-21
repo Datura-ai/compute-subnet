@@ -264,7 +264,6 @@ class PipelineFactory:
                 port_public_key=public_key,
                 job_batch_id=miner_info.job_batch_id,
                 first_pass=first_pass,
-                express_first_pass=first_pass,
             ),
             state=ContextState(
                 upload_local_dir=encrypted_files.tmp_directory,

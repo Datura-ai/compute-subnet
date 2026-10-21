@@ -520,7 +520,7 @@ async def _skip_reason(ctx: Context) -> tuple[str | None, dict[str, Any]]:
     rented_executor = rented_data.executors.get(ctx.executor.uuid) if rented_data else None
     if rented_executor and rented_executor.pods:
         return "rented", {"pods": [pod.pod_id for pod in rented_executor.pods]}
-    if ctx.config.express_first_pass and not settings.RENTAL_PROBE_ENFORCEMENT_ENABLED:
+    if ctx.config.first_pass and not settings.RENTAL_PROBE_ENFORCEMENT_ENABLED:
         # a shadow verdict cannot fail the node, so the container create waits for the next cycle
         return "first pass", {}
     task_seconds_left = (
