@@ -474,8 +474,7 @@ class MinerService:
         (the cycle); a uuid asks for that one executor only (the express lane) — the miner already
         filters register_pubkey on it, exactly as it does for the rental key-submit.
         first_pass (DAH-3011): this is the executor's first, unscored verification; handed to
-        TaskService.create_task, where FIRST_PASS_FAST_PATH_ENABLED decides whether the probes
-        shrink. The cycle never sets it.
+        TaskService.create_task, where it shrinks the probes. The cycle never sets it.
         """
         if settings.USE_REST_API:
             logger.info(

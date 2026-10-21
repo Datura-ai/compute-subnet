@@ -314,10 +314,9 @@ class Settings(BaseSettings):
     # published spec-only, never scored) proves "this GPU exists, is the model claimed, the host is
     # reachable and rentable"; the VRAM-filling matmul and the 128 GB RAM proof exist to make a
     # SCORED cycle expensive to fake, and the next scored cycle runs them anyway. Only a caller that
-    # passes `first_pass=True` to TaskService.create_task gets the fast path, and only with this
-    # flag on; the wave never does, so every scored verification is unchanged. Measured (Loki,
+    # passes `first_pass=True` to TaskService.create_task gets the fast path (the settings below);
+    # the wave never does, so every scored verification is unchanged. Measured (Loki,
     # 2–6 Sep, idle runs): matmul p50 26 s (74 s on the fresh dogfood node), VerifyX p50 78 s.
-    FIRST_PASS_FAST_PATH_ENABLED: bool = Field(env="FIRST_PASS_FAST_PATH_ENABLED", default=False)
     # A node whose Docker cannot cap a container's disk (specs.storage_limit_supported) lets one renter fill the
     # host's Docker storage and take every pod down. Off: a STORAGE_LIMIT_MISSING warning only, so providers get
     # notice first. On: an unrented node without the limit scores 0 (StorageLimitCheck).

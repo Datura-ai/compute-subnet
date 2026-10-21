@@ -340,8 +340,7 @@ class ExpressLane:
                     default_docker_image_digests=inputs.default_image_digests,
                     executor_image_snapshot=inputs.executor_image_snapshot,
                     executor_id=executor_id,
-                    # Never scored, so the pipeline may right-size its probes (DAH-3011) — it
-                    # does only with FIRST_PASS_FAST_PATH_ENABLED on.
+                    # Never scored, so the pipeline right-sizes its probes (DAH-3011).
                     first_pass=True,
                 ),
                 timeout=settings.JOB_TIME_OUT,

@@ -179,8 +179,7 @@ class PipelineFactory:
             encrypted_files: Encrypted validation files
             tdx_attestation_passed: Whether TDX attestation passed
             gpu_attestation_passed: NVIDIA CC GPU attestation outcome (None = not performed)
-            first_pass: the executor's first, unscored verification (DAH-3011); takes effect
-                only with settings.FIRST_PASS_FAST_PATH_ENABLED
+            first_pass: the executor's first, unscored verification (DAH-3011)
 
         Returns:
             Configured Context ready for pipeline execution
@@ -264,7 +263,7 @@ class PipelineFactory:
                 port_private_key=private_key,
                 port_public_key=public_key,
                 job_batch_id=miner_info.job_batch_id,
-                first_pass=first_pass and settings.FIRST_PASS_FAST_PATH_ENABLED,
+                first_pass=first_pass,
                 express_first_pass=first_pass,
             ),
             state=ContextState(
