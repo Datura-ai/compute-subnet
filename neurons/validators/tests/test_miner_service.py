@@ -18,9 +18,7 @@ from uuid import uuid4
 import pytest
 
 from clients.compute_client import ComputeClient
-from core.config import settings
 from datura.requests.miner_requests import AcceptSSHKeyRequest, ExecutorSSHInfo
-from datura.requests.validator_requests import SSHPubKeyRemoveRequest
 from payload_models.payloads import (
     ContainerCreateRequest,
     CustomOptions,
@@ -154,12 +152,11 @@ async def test_create_request_delegates_to_create_container(mocker, miner_servic
 
 
 @pytest.mark.parametrize("miner_lists_the_executor", [True, False], ids=["reached_create_container", "executor_left_out"])
-@pytest.mark.parametrize("use_rest_api", [True, False], ids=["rest", "websocket"])
 @pytest.mark.asyncio
 async def test_create_reply_does_not_wait_for_the_validator_key_removal(
-    mocker, miner_service, caplog, use_rest_api, miner_lists_the_executor
+    mocker, miner_service, caplog, miner_lists_the_executor
 ):
-    """A miner holding or failing the key removal cannot hold or fail the created pod's reply, on either route; the
+    """A miner holding or failing the key removal cannot hold or fail the created pod's reply; the
     customer create counts against fillers on its executor while it runs and until its reply, and refuses a filler that
     started before it only once it reached create_container; the connector's shutdown waits for the removal."""
     executor_id = str(uuid4())
@@ -167,7 +164,6 @@ async def test_create_reply_does_not_wait_for_the_validator_key_removal(
     _wire_common_mocks(mocker, miner_service, executor_id)
     accept = AcceptSSHKeyRequest(executors=[_make_executor_info(executor_id)] if miner_lists_the_executor else [])
     mocker.patch("services.miner_service._parse_miner_response", return_value=accept)
-    mocker.patch.object(settings, "USE_REST_API", use_rest_api)
     created = Mock()
     customer_create_counted_while_it_ran: list[bool] = []
 
@@ -184,23 +180,13 @@ async def test_create_reply_does_not_wait_for_the_validator_key_removal(
         await removal_released.wait()
         return False
 
-    async def send_model(model) -> None:
-        if isinstance(model, SSHPubKeyRemoveRequest):
-            await removal_released.wait()
-            raise OSError("the miner closed its socket")
-
     mocker.patch.object(miner_service, "_remove_ssh_key_via_rest", rest_removal_held_by_the_miner)
-    miner_client = MagicMock(send_model=send_model)
-    miner_client.job_state.miner_accepted_ssh_key_or_failed_future = asyncio.get_running_loop().create_future()
-    miner_client.job_state.miner_accepted_ssh_key_or_failed_future.set_result(accept)
-    mocker.patch("services.miner_service.MinerClient", return_value=miner_client)
     filler = payload.model_copy(update={"workload_kind": WorkloadKind.FILLER})
 
     with caplog.at_level("INFO"), customer_creates.track(filler):
         result = await asyncio.wait_for(miner_service.handle_container(payload), 5)
         counted_after_the_reply = customer_creates.is_running(payload.miner_hotkey, executor_id)
         filler_refused_after_the_reply = customer_creates.ran_since_filler_started(filler)
-        socket_closes_before_the_removal = miner_client.__aexit__.await_count
         connector = ComputeClient.__new__(ComputeClient)
         connector.miner_drivers = asyncio.Queue()
         connector.miner_driver_awaiter_task = asyncio.create_task(connector.miner_driver_awaiter())
@@ -211,7 +197,6 @@ async def test_create_reply_does_not_wait_for_the_validator_key_removal(
     assert (customer_create_counted_while_it_ran, counted_after_the_reply) == ([True] * miner_lists_the_executor, False)
     if not miner_lists_the_executor:
         return
-    assert (socket_closes_before_the_removal, miner_client.__aexit__.await_count) == (0, 0 if use_rest_api else 1)
     assert any("Validator SSH key removal after reply finished" in r.getMessage() for r in caplog.records)
 
 
@@ -332,17 +317,6 @@ async def test_rest_twin_splits_unreachable_from_invalid_executor_id(
     assert result.msg == expected_headline
     # The key the miner accepted nowhere is still withdrawn, as before.
     remove_key.assert_awaited_once()
-
-
-def test_missing_executor_failure_is_shared_by_both_twins():
-    """The websocket twin (MinerService._route_container) and the REST twin (_handle_container)
-    both call _missing_executor_failure, so the split cannot drift between them."""
-    import inspect
-
-    from services.miner_service import MinerService
-
-    for method in (MinerService._route_container, MinerService._handle_container):
-        assert "_missing_executor_failure(msg, payload.executor_id, default_extra)" in inspect.getsource(method)
 
 
 def test_missing_executor_failure_reads_known_executor_ids():

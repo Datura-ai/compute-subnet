@@ -844,9 +844,6 @@ class Settings(BaseSettings):
     def get_scoring_excluded_hotkeys(self) -> set[str]:
         return {s.strip() for s in self.SCORING_EXCLUDED_HOTKEYS.split(",") if s.strip()}
 
-    # Use REST API instead of WebSocket for miner communication
-    USE_REST_API: bool = Field(env="USE_REST_API", default=False)
-
     # A rented node missing from its miner's answer for ONE cycle is mostly a key upload that missed the miner's 10 s
     # window: 86 of the 347 RENTED_EXECUTOR_NOT_LISTED rows on 19 Oct were back in the next answer. On: the row is
     # written from the second consecutive miss. Off by default: provider scoring, enabling it is the penalty owners' call.
