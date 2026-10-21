@@ -191,12 +191,7 @@ class Settings(BaseSettings):
     # A node this validator has just found without its recommended image is held as pending, not
     # failed, until the executor's first pre-pull sweep completes or GRACE_SECONDS after that first
     # sighting, whichever comes first. The express lane verifies a new node seconds after it is
-    # added, long before a multi-GB pull can finish. Off: the check fails the node as it did before
-    # the grace existed, and only logs the nodes the grace would have held. GRACE_SECONDS=0 turns
-    # the log off too.
-    CACHED_TEMPLATE_FRESH_NODE_GRACE_ENABLED: bool = Field(
-        env="CACHED_TEMPLATE_FRESH_NODE_GRACE_ENABLED", default=False
-    )
+    # added, long before a multi-GB pull can finish. GRACE_SECONDS=0 turns the grace off.
     CACHED_TEMPLATE_FRESH_NODE_GRACE_SECONDS: int = Field(
         env="CACHED_TEMPLATE_FRESH_NODE_GRACE_SECONDS", default=30 * 60, ge=0
     )
@@ -264,9 +259,7 @@ class Settings(BaseSettings):
     # A cycle that a check other than VerifyX failed publishes the VerifyX EMA the backend held
     # before it (none for a never-measured node) instead of one moved by its sample. A passing
     # cycle without the recommended image cached does not seed a never-measured node; a node with
-    # a stored EMA publishes its sample on every passing cycle. See verifyx_ema_hold_reason. Off:
-    # the EMA moves as before and the would-be hold is only logged.
-    VERIFYX_EMA_HOLD_ENABLED: bool = Field(env="VERIFYX_EMA_HOLD_ENABLED", default=False)
+    # a stored EMA publishes its sample on every passing cycle. See verifyx_ema_hold_reason.
     ENABLE_INSPECTOR: bool = True
     # DAH-2794: feed the obfuscated scrape to the executor's own interpreter over stdin
     # instead of freezing it into a ~13 MB onefile and uploading that every cycle.
@@ -638,8 +631,8 @@ class Settings(BaseSettings):
     )
     # A node whose containers cannot reach the internet passed every check. CHECK runs the rental probe's
     # `egress` step, which resolves and fetches pypi.org inside its renter container; ENFORCEMENT fails the
-    # probe on it with NO_OUTBOUND_INTERNET (score 0). Slow still passes. Enforcement is off by default,
-    # same review and decider as REGISTRY_PULL_ENFORCEMENT_ENABLED below.
+    # probe on it with NO_OUTBOUND_INTERNET (score 0). Slow still passes. Enforcement is off by default
+    # until its log-only window is reviewed. Decider: taiberium; backup jam6099.
     NO_OUTBOUND_INTERNET_CHECK_ENABLED: bool = Field(env="NO_OUTBOUND_INTERNET_CHECK_ENABLED", default=True)
     NO_OUTBOUND_INTERNET_ENFORCEMENT_ENABLED: bool = Field(
         env="NO_OUTBOUND_INTERNET_ENFORCEMENT_ENABLED", default=False
@@ -650,11 +643,9 @@ class Settings(BaseSettings):
     # daemon (registry-mirrors apply) under a 30 s bound on idle nodes, once per INTERVAL_HOURS at a
     # per-node phase (RETRY_MINUTES after a failed pull, so the confirming pull comes soon). A Docker Hub
     # 429 is no verdict. Two failed pulls in a row (timeout, DNS error, unreachable, manifest unknown) are
-    # the finding: logged as REGISTRY_PULL_FAILED_OBSERVED, or with ENFORCEMENT a fail
-    # (REGISTRY_PULL_FAILED, score 0). A failed pull counts only if the validator itself reaches Docker
-    # Hub. Nothing guards an outage only the nodes see (a CDN region, a shared mirror), so enforcement
-    # is off by default: it goes on after a 48 h log-only window with the OBSERVED rows reviewed
-    # (count, outcomes, mirrors, fleet-wide pattern). Decider: taiberium; backup jam6099.
+    # the finding: a fail (REGISTRY_PULL_FAILED, score 0). A failed pull counts only if the validator
+    # itself reaches Docker Hub. Nothing guards an outage only the nodes see (a CDN region, a shared
+    # mirror). Enforced since the log-only window's prod logs were clean (21 Oct 2026).
     # DAH-3420: the host-side speed test runs on the host network; a renter's container crosses the docker bridge,
     # NAT and runtime and can get 1000x less (297-588 Mbps on the host, under 1 Mbps from PyPI in a container). CHECK
     # reads up to 16 MiB of a pinned PyPI wheel and a pinned Hugging Face file from a throwaway container on idle
@@ -678,7 +669,6 @@ class Settings(BaseSettings):
     # SSHD_BOOTSTRAP_FAILED_OBSERVED, score unchanged.
     SSHD_BOOTSTRAP_ENFORCEMENT_ENABLED: bool = Field(env="SSHD_BOOTSTRAP_ENFORCEMENT_ENABLED", default=True)
     REGISTRY_PULL_CHECK_ENABLED: bool = Field(env="REGISTRY_PULL_CHECK_ENABLED", default=True)
-    REGISTRY_PULL_ENFORCEMENT_ENABLED: bool = Field(env="REGISTRY_PULL_ENFORCEMENT_ENABLED", default=False)
     REGISTRY_PULL_PROBE_INTERVAL_HOURS: float = Field(
         env="REGISTRY_PULL_PROBE_INTERVAL_HOURS", default=6.0, gt=0
     )
