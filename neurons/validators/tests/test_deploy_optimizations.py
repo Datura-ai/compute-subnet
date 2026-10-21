@@ -621,6 +621,8 @@ async def test_a_present_public_hub_image_rent_makes_the_same_host_calls(
         prerun_host_probe_command(
             docker_image=payload.docker_image, image_label=None, with_power=True, miner_hotkey=payload.miner_hotkey
         ),
+        # the volume-stage host probe (DAH-3240), started as soon as the SSH session is up
+        ds_module._volume_host_probe_command(with_df=svc.measures_host_for_volume_sizing(payload)),
         # then the host's kernel.pid_max — before any host side-effect (the filler removal below, the
         # stale-container cleanup, the pull, the volume) so a rental whose pids.max can't be clamped below
         # it is refused with nothing to undo; a bare cat bounded by asyncssh's timeout, no `timeout` binary

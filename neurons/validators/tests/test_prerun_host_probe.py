@@ -524,7 +524,7 @@ def test_probe_through_sh_prefix_failure_is_a_whole_probe_fallback(tmp_path):
 async def test_probe_prerun_host_runs_one_command_and_parses(docker_service):
     ssh = _ssh(_ssh_result(stdout=_stdout()))
     probe = await docker_service.probe_prerun_host(
-        ssh, docker_image=_IMAGE, with_power=True, miner_hotkey=_HOTKEY, log_extra={}
+        ssh, docker_image=_IMAGE, with_power=True, miner_hotkey=_HOTKEY, log_extra={}, with_label=True
     )
     assert probe is not None and probe.container_names == ("pod_a", "other")
     assert _cmds(ssh) == [
@@ -542,7 +542,7 @@ async def test_probe_prerun_host_ssh_error_is_none(docker_service):
     ssh = _ssh(ConnectionError("channel closed"))
     assert (
         await docker_service.probe_prerun_host(
-            ssh, docker_image=_IMAGE, with_power=True, miner_hotkey=_HOTKEY, log_extra={}
+            ssh, docker_image=_IMAGE, with_power=True, miner_hotkey=_HOTKEY, log_extra={}, with_label=True
         )
         is None
     )
@@ -557,7 +557,7 @@ async def test_probe_prerun_host_is_bounded_and_a_timeout_is_none(docker_service
     ssh = _ssh(asyncio.TimeoutError())
     assert (
         await docker_service.probe_prerun_host(
-            ssh, docker_image=_IMAGE, with_power=True, miner_hotkey=_HOTKEY, log_extra={}
+            ssh, docker_image=_IMAGE, with_power=True, miner_hotkey=_HOTKEY, log_extra={}, with_label=True
         )
         is None
     )
@@ -569,7 +569,7 @@ async def test_probe_prerun_host_garbage_is_none(docker_service):
     ssh = _ssh(_ssh_result(stdout="sh: t: not found\n"))
     assert (
         await docker_service.probe_prerun_host(
-            ssh, docker_image=_IMAGE, with_power=True, miner_hotkey=_HOTKEY, log_extra={}
+            ssh, docker_image=_IMAGE, with_power=True, miner_hotkey=_HOTKEY, log_extra={}, with_label=True
         )
         is None
     )
@@ -1163,7 +1163,6 @@ async def test_create_container_pearl_filler_does_not_ask_for_power(svc_fixture,
 
 def _wire_early_probes(svc, monkeypatch, *, image_present: bool) -> list[int]:
     """Both probes on; returns how many host probes had started when the image inspect answered."""
-    monkeypatch.setattr(settings, "RENTAL_VOLUME_FAST_PATH_ENABLED", True)
     _wire(svc, monkeypatch, _deploy_ssh_client(inspect_exit=0 if image_present else 1), probe_result=_probe())
     monkeypatch.setattr(svc, "probe_volume_host", AsyncMock(return_value=None))
     monkeypatch.setattr(svc, "reclaim_dphn_cache_for_rental", AsyncMock(return_value=False))
@@ -1239,7 +1238,6 @@ def _wire_customer_create_over_the_host(
     """Both early probes on; the cleanup, the sweeps and the port-check wait are the real
     ones over a stub SSH client, so every listing they run is a command on it. The host lists the
     probe's containers until the first rm, then ``ps_after_rm``."""
-    monkeypatch.setattr(settings, "RENTAL_VOLUME_FAST_PATH_ENABLED", True)
     ssh_client = _deploy_ssh_client()
     answer_as_the_deploy_host = ssh_client.run.side_effect
     names_on_host = list(probe.container_names or () if containers_on_host is None else containers_on_host)
@@ -1704,7 +1702,6 @@ _PORT_ALLOCATED_REFUSAL = RuntimeError(
 
 def _wire_real_docker_run(svc, monkeypatch, *, refusals: int) -> list[str]:
     """Probe on, the real `docker run` retry; returns the order of port-check waits and runs."""
-    monkeypatch.setattr(settings, "PORT_COLLISION_RETRY_ENABLED", False)
     _wire(svc, monkeypatch, _deploy_ssh_client(), probe_result=_probe())
     monkeypatch.delattr(svc, "_run_rental_docker_create_with_port_retry")  # the real retry loop
     monkeypatch.setattr(svc, "_remove_failed_rental_container_for_retry", AsyncMock())
