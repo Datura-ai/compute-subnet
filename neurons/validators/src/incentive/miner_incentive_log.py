@@ -506,18 +506,6 @@ class MinerLogLine(BaseModel):
     # ── Spot-node pay: an idle spot node that is not paid ────────────────────
 
     @staticmethod
-    def no_payout_because_spot_without_lium_filler(result: JobResult) -> MinerLogLine:
-        return MinerLogLine._no_payout(
-            result,
-            reason=ZeroIncentiveReason.SPOT_WITHOUT_LIUM_FILLER,
-            message=(
-                "No subnet incentive: this spot-tier executor is not running a Lium filler job. "
-                "Spot-tier executors earn only while Lium's filler jobs run on them."
-            ),
-            extra_fields={"has_lium_filler": result.has_lium_filler},
-        )
-
-    @staticmethod
     def no_payout_because_spot_no_filler_revenue_for_gpu_config(result: JobResult) -> MinerLogLine:
         return MinerLogLine._no_payout(
             result,

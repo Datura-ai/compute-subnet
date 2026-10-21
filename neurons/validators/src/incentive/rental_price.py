@@ -1089,28 +1089,6 @@ class RentalPriceIncentive(DefaultIncentive):
         )
 
     @staticmethod
-    def _qualify_spot_node(job_result: JobResult, excluded_from_both_pools: bool) -> JobResult:
-        """An idle spot node is never in the mining pool and never in a bucket. It is paid from
-        unbucketed_share, on top of the burn-capped rental share, priced in _price_spot_node, only
-        while it runs a Lium filler and its GPU configuration has a filler revenue average. The
-        idle-pool gates do not apply: the node is paid for the filler work it does, not for being
-        listed for rent."""
-        job_result.eligible_for_rental_share = False
-        job_result.mining_score = 0
-        if excluded_from_both_pools or not (job_result.score > 0 or job_result.job_score > 0):
-            return job_result
-        if not job_result.has_lium_filler:
-            job_result.record_incentive_log(MinerLogLine.no_payout_because_spot_without_lium_filler(job_result))
-            return job_result
-        if job_result.filler_revenue_per_gpu_hour is None:
-            job_result.record_incentive_log(
-                MinerLogLine.no_payout_because_spot_no_filler_revenue_for_gpu_config(job_result)
-            )
-            return job_result
-        job_result.spot_pay_candidate = True
-        return job_result
-
-    @staticmethod
     def _qualify_spot_node_by_the_secure_decision(job_result: JobResult) -> JobResult:
         """A spot node that a secure node in its place would be paid for is paid, whether or
         not a Lium filler runs on it; only the amount differs (_price_spot_node). One a secure node
@@ -1243,8 +1221,6 @@ class RentalPriceIncentive(DefaultIncentive):
             job_result.record_incentive_log(exclusion)
         excluded_from_both_pools: bool = excluded_for_outdated_image or bool(exclusions)
         on_spot_pay_path: bool = self._on_spot_pay_path(job_result)
-        if on_spot_pay_path and not settings.SPOT_IDLE_PAY_SECURE_DECISION_ENABLED:
-            return self._qualify_spot_node(job_result, excluded_from_both_pools)
         if excluded_from_both_pools and job_result.gpu_model not in BASE_GPU_MAP:
             # get_base_model_for_gpu raises on a model it does not know, and nothing above this
             # guards it: an excluded node keeps its reasons and scores 0 instead of stopping the cycle

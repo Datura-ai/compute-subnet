@@ -193,7 +193,6 @@ def floor_on(monkeypatch):
 @pytest.fixture(autouse=True)
 def flags_default_off(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_SPOT_NODE_PAY", False)
-    monkeypatch.setattr(settings, "SPOT_IDLE_PAY_SECURE_DECISION_ENABLED", False)
     monkeypatch.setattr(settings, "ENABLE_SECURE_FILLER_REVENUE_FLOOR", False)
     monkeypatch.setattr(settings, "ENABLE_SPOT_RENTAL_INCENTIVE", False)
 
@@ -251,16 +250,6 @@ async def test_spot_secure_side_is_zero_below_the_minimum_driver(spot_pay_on):
 
 
 @pytest.mark.asyncio
-async def test_spot_without_a_lium_filler_gets_zero(spot_pay_on):
-    spot = _spot(has_lium_filler=False, filler_revenue_per_gpu_hour=2.0)
-
-    await _run([spot])
-
-    assert spot.incentive == 0
-    assert _codes(spot) == [ZeroIncentiveReason.SPOT_WITHOUT_LIUM_FILLER]
-
-
-@pytest.mark.asyncio
 async def test_spot_whose_config_has_no_average_gets_zero(spot_pay_on):
     spot = _spot(filler_revenue_per_gpu_hour=None)
 
@@ -308,13 +297,8 @@ async def test_rented_spot_stays_out_of_both_pools(spot_pay_on):
 # ── DAH-4299: the secure decision on whether a spot node is paid ─────────────
 
 
-@pytest.fixture
-def secure_decision_on(spot_pay_on, monkeypatch):
-    monkeypatch.setattr(settings, "SPOT_IDLE_PAY_SECURE_DECISION_ENABLED", True)
-
-
 @pytest.mark.asyncio
-async def test_secure_decision_pays_an_idle_spot_node_no_lium_filler_runs_on(secure_decision_on):
+async def test_secure_decision_pays_an_idle_spot_node_no_lium_filler_runs_on(spot_pay_on):
     spot = _spot(has_lium_filler=False, filler_revenue_per_gpu_hour=2.0)
 
     incentive = await _run([spot, _node("secure-1")])
@@ -326,7 +310,7 @@ async def test_secure_decision_pays_an_idle_spot_node_no_lium_filler_runs_on(sec
 
 
 @pytest.mark.asyncio
-async def test_secure_decision_keeps_the_spot_amount_and_its_missing_average(secure_decision_on):
+async def test_secure_decision_keeps_the_spot_amount_and_its_missing_average(spot_pay_on):
     spot = _spot(filler_revenue_per_gpu_hour=None)
 
     await _run([spot])
@@ -337,7 +321,7 @@ async def test_secure_decision_keeps_the_spot_amount_and_its_missing_average(sec
 
 @pytest.mark.asyncio
 async def test_secure_decision_refuses_a_spot_node_an_idle_pool_gate_refuses(
-    secure_decision_on, monkeypatch
+    spot_pay_on, monkeypatch
 ):
     monkeypatch.setattr(settings, "ENABLE_UNRENTED_SOFT_PRICE_LIMIT", True)
     p90_config = shared_client.config.model_copy(update={"machine_prices_p90": {H100: 1.0}})
@@ -353,7 +337,7 @@ async def test_secure_decision_refuses_a_spot_node_an_idle_pool_gate_refuses(
 
 
 @pytest.mark.asyncio
-async def test_secure_decision_refuses_a_spot_gpu_model_outside_the_program(secure_decision_on):
+async def test_secure_decision_refuses_a_spot_gpu_model_outside_the_program(spot_pay_on):
     spot = _spot(filler_revenue_per_gpu_hour=2.0)
     config = _config()
     config.rental_incentive_gpu_types = []
@@ -365,7 +349,7 @@ async def test_secure_decision_refuses_a_spot_gpu_model_outside_the_program(secu
 
 
 @pytest.mark.asyncio
-async def test_secure_decision_leaves_a_rented_spot_node_out_of_both_pools(secure_decision_on):
+async def test_secure_decision_leaves_a_rented_spot_node_out_of_both_pools(spot_pay_on):
     spot = _spot(is_rented=True, has_lium_filler=False, filler_revenue_per_gpu_hour=2.0)
 
     await _run([spot])
@@ -375,8 +359,7 @@ async def test_secure_decision_leaves_a_rented_spot_node_out_of_both_pools(secur
 
 
 @pytest.mark.asyncio
-async def test_secure_decision_flag_alone_pays_no_spot_node(monkeypatch):
-    monkeypatch.setattr(settings, "SPOT_IDLE_PAY_SECURE_DECISION_ENABLED", True)
+async def test_spot_pay_off_pays_no_idle_spot_node_without_a_filler():
     spot = _spot(has_lium_filler=False, filler_revenue_per_gpu_hour=2.0)
 
     await _run([spot])
@@ -941,7 +924,7 @@ async def test_a_zero_rate_spot_node_at_the_cap_keeps_only_its_own_reason(
     assert incentive.unbucketed_share_raw > 0
     assert incentive.unbucketed_share == 0.0
     assert _codes(paid) == [ZeroIncentiveReason.SPOT_NO_HEADROOM_AT_BURN_CAP]
-    assert zero_rate.effective_rate == 0
+    assert not zero_rate.effective_rate  # None when refused before pricing (outside the program)
     assert zero_rate.incentive == 0
     assert _codes(zero_rate) == [own_reason]
 
