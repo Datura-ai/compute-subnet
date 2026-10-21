@@ -1919,11 +1919,7 @@ def _build_cache_volume_mounts(payload: ContainerCreateRequest, occupied_targets
 def _wants_quote_socket(payload: ContainerCreateRequest, *, in_cvm: bool) -> bool:
     # customer rentals on a dstack CVM guest; a FILLER (DPHN/PEARL) has no attestation use and a
     # bare-metal node has no guest agent to broker
-    return (
-        settings.ENABLE_CVM_POD_QUOTE_SOCKET
-        and in_cvm
-        and payload.workload_kind == WorkloadKind.CUSTOMER_RENTAL
-    )
+    return in_cvm and payload.workload_kind == WorkloadKind.CUSTOMER_RENTAL
 
 
 class PortCheckRemoval(NamedTuple):
