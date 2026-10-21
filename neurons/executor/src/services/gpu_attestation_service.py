@@ -31,9 +31,7 @@ class GPUAttestationService:
     """
 
     def __init__(self) -> None:
-        self.enabled: bool = bool(
-            settings.ENABLE_TDX_ATTESTATION and settings.ENABLE_GPU_ATTESTATION
-        )
+        self.enabled: bool = bool(settings.ENABLE_TDX_ATTESTATION)
         self.arch: str = settings.GPU_ATTESTATION_ARCH
 
     @staticmethod
