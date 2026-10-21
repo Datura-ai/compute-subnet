@@ -123,6 +123,9 @@ def _redis_service() -> RedisService:
     return service
 
 
+# --- MinerService: what the miner is asked for, and who holds an executor -----------------
+
+
 # --- ExpressLane: discovery, caps, publish, retries -----------------------------------------
 
 
@@ -177,6 +180,17 @@ class _Harness:
         if self.lane._tasks:
             await asyncio.gather(*self.lane._tasks)
         return launched
+
+
+@pytest.mark.asyncio
+async def test_nothing_runs_before_the_first_cycle_has_started(monkeypatch, wallet):
+    new_node = str(uuid4())
+    harness = _Harness(monkeypatch, {"miner-a": [_portal_executor(new_node)]}, [_Neuron("miner-a")])
+    harness.inputs = None  # Validator.express_lane_cycle_inputs returns None until the first cycle starts
+
+    assert await harness.tick_and_settle() == 0
+    harness.portal_api.get_all_executors.assert_not_awaited()
+    harness.miner_service.request_job_to_miner.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -270,3 +284,5 @@ def test_the_portal_auth_blob_is_what_signature_auth_miner_verifies():
 
     assert blob == json.dumps({"miner_hotkey": keypair.ss58_address, "timestamp": 1_757_174_400}, sort_keys=True)
     assert keypair.verify(blob, f"0x{keypair.sign(blob).hex()}")
+
+

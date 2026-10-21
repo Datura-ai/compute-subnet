@@ -3,17 +3,27 @@
 Before `docker run`, a rent read eight host listings over eight serial SSH commands (containers,
 volumes, mounted volumes, volume names again, GPU minor map, shared device nodes, nvidia-smi power
 state, the image's encryption label). With the flag on, one probe command returns them all; every
-consumer reads its section and keeps its removals / writes as they are. Covered here (device, renter-isolation and filler-removal cases only):
+consumer reads its section and keeps its removals / writes as they are. Covered here:
 
-- the shared device-node command and its parser section; the GPU device config from a probe
-  matches the live one (partial and whole-host rentals, missing UUID, failed section);
-- a multi-line image label cannot forge another probe section;
-- a filler's GPU power cap never survives into the renter's docker run;
+- the probe command carries every section and the exact per-command texts (`PROC_GPU_INFO_CMD`,
+  `POWER_STATE_CMD`, the shared-node loop, the label inspect); `with_power=False` has no nvidia-smi;
+- the parser: every section, a failed section → None, a missing `_RC` / an untagged line / an
+  unknown tag → raise, the label's whole-stdout semantics;
+- the command and the parser together through `sh -c` with a docker stub (containers, volumes,
+  mounts, label; nvidia-smi absent → power None);
+- `probe_prerun_host` is never fatal (SSH error or garbage → None);
+- each consumer with a probe runs no listing command and produces the same result / the same
+  removal commands as the per-command path for the same host facts; a failed section falls back;
+- `create_container`: flag off → never probes; flag on → one probe handed to every consumer; the
+  docker listings are withdrawn after a removal; the last-resort power raise never reads the probe;
 - a customer create that removed only a filler, cleanly, keeps the probe's listings and relists
   nothing, but sizes the volume on a fresh volume probe; any other removal, a survivor or a
-  failed rm relists as before; a removal that times out fails the create at the cleanup step;
-- a customer create removes its fillers as soon as the SSH session is up; the cleanup step awaits
-  that removal and never removes those fillers again.
+  failed rm relists as before;
+- that removal and its confirmation are the create's one host command besides the probes; a
+  removal that times out fails the create at the cleanup step;
+- a customer create removes its fillers as soon as the SSH session is up, beside the image
+  inspect and the probes; the cleanup step awaits that removal, never removes those fillers again,
+  and everything after it (power restore, cache reclaim, docker run) still waits for it.
 """
 
 from __future__ import annotations
@@ -237,6 +247,11 @@ def test_probe_through_sh_multiline_label_cannot_forge_another_section(tmp_path)
     assert probe.container_names == ("pod_a", "filler_b", "other")
     assert probe.image_label_value == "1\nPS\tpod_evil"
     assert probe.image_label_value != "1"
+
+
+# ------------------------------------------------------------------
+# probe_prerun_host is never fatal
+# ------------------------------------------------------------------
 
 
 # ------------------------------------------------------------------
@@ -816,3 +831,5 @@ def svc_fixture():
         redis_service=Mock(),
         attestation_service=Mock(),
     )
+
+

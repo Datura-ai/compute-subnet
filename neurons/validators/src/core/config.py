@@ -311,24 +311,11 @@ class Settings(BaseSettings):
     # encryption label) in ONE ssh command instead of ~8; every removal and write still runs its
     # own command, and a probe that fails leaves every step on its own commands. Off: as before.
     RENTAL_PRERUN_HOST_PROBE_ENABLED: bool = Field(env="RENTAL_PRERUN_HOST_PROBE_ENABLED", default=False)
-    # On a rent, a Docker SDK call whose SSH channel dropped under it (paramiko EOFError, a 60 s
-    # read timeout, the adapter's typed dropped-transport error) is retried ONCE after the SSH
-    # session is re-opened; `containers/create` and `volumes/create` first check by name and adopt
-    # what the lost first attempt made. Off: the call fails the rent as before. Either way the
-    # failure event carries `error_class: transport`.
-    DOCKER_TRANSPORT_RETRY_ENABLED: bool = Field(env="DOCKER_TRANSPORT_RETRY_ENABLED", default=False)
     # A rental container with a memory limit runs with swap off (--memory-swap = --memory) and
     # RENTAL_CONTAINER_OOM_SCORE_ADJ, so a host-wide OOM picks its processes before the executor. The
     # memory limit stays the backend's memory_gb. 0 or below would protect the renter over host services, and Docker
     # refuses anything past 1000, which would fail every rental create.
     RENTAL_CONTAINER_OOM_SCORE_ADJ: int = Field(env="RENTAL_CONTAINER_OOM_SCORE_ADJ", default=500, ge=1, le=1000)
-    # On a rent, when dockerd refuses to bind a host port the backend handed the pod (a stale
-    # container or a provider process holds it), the pod moves to the next free pair of the
-    # executor's advertised range (≤ 3 candidates, the host's listening sockets read once over the
-    # create's SSH session) and `docker run` is retried ONCE; the create's answer carries the port
-    # the pod really got. Off: the 90 s same-mapping wait as before. Either way the failure event
-    # carries `error_class: port_collision`.
-    PORT_COLLISION_RETRY_ENABLED: bool = Field(env="PORT_COLLISION_RETRY_ENABLED", default=False)
     # DAH-4537: the outside port prober (an AWS Lambda function URL) and its bearer token. Each batch
     # port check first fetches a few listening ports through it; when none answers it while the
     # validator reaches them, the node gets no verified ports. Unset URL: no outside probe.
@@ -443,13 +430,10 @@ class Settings(BaseSettings):
     )
     # Cross-check the reported GPU count and UUIDs against the kernel's GPU list
     # (/proc/driver/nvidia/gpus, the same read the ban checks make). CHECK_ENABLED evaluates and
-    # logs a verdict every validation (check_id gpu.validate.kernel_count) without changing the
-    # result. ENFORCEMENT_ENABLED makes a kernel list that is present and shorter than the
-    # reported GPU count fail the validation (GPU_KERNEL_COUNT_MISMATCH); a missing kernel list
-    # never fails. Enforcement is off by default: the verdict is logged (enforced=false) and
-    # enforcement goes on by this flag after a review of one day of prod logs (owner, 15 Oct).
+    # logs a verdict every validation (check_id gpu.validate.kernel_count); a kernel list that is
+    # present and shorter than the reported GPU count fails the validation
+    # (GPU_KERNEL_COUNT_MISMATCH). A missing kernel list never fails.
     GPU_KERNEL_COUNT_CHECK_ENABLED: bool = Field(env="GPU_KERNEL_COUNT_CHECK_ENABLED", default=True)
-    GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED: bool = Field(env="GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED", default=False)
     # Item 2a — corroborate the advertised CPU(s) count against sources the lscpu wrapper does not
     # author (/proc/cpuinfo, /sys present population, docker NCPU).
     CPU_TRUTH_CHECK_ENABLED: bool = Field(env="CPU_TRUTH_CHECK_ENABLED", default=True)
@@ -466,11 +450,6 @@ class Settings(BaseSettings):
     # from a real 8-GPU box show what that costs an honest miner.
     MATMUL_ALLCARDS_CHECK_ENABLED: bool = Field(env="MATMUL_ALLCARDS_CHECK_ENABLED", default=False)
     MATMUL_ALLCARDS_ENFORCEMENT_ENABLED: bool = Field(env="MATMUL_ALLCARDS_ENFORCEMENT_ENABLED", default=False)
-    # The sysbox probe container must run in a user namespace (sysbox always uses one); an identity uid map
-    # is logged as SYSBOX_IDENTITY_UID_MAP and, with this on, the node is not counted as running sysbox.
-    SYSBOX_USERNS_ENFORCEMENT_ENABLED: bool = Field(
-        env="SYSBOX_USERNS_ENFORCEMENT_ENABLED", default=False
-    )
     # Item 2b — send the advertised CPU-core count in the rental-verification health check so the
     # host's Docker daemon creates the probe with `--cpus=<advertised>` and rejects a count that
     # exceeds the machine's physical cores (a signal the lscpu wrapper cannot forge, since dockerd
@@ -514,12 +493,6 @@ class Settings(BaseSettings):
     # verified job is cleared, so the backend marks the executor inactive and billing stops. A transport
     # error or timeout decides nothing. Off by default: the pod keeps the plain POD_NOT_RUNNING verdict.
     REBOOT_FAILED_HOST_CHECK_ENABLED: bool = Field(env="REBOOT_FAILED_HOST_CHECK_ENABLED", default=False)
-    # The backend keys rentals by executor UUID, which is the miner's word: a box registered under another
-    # miner's rented UUID would halt as rented (score kept, no matmul). The mismatch is always logged
-    # (RENTED_OWNER_MISMATCH); with this on, such a node is validated as not rented. Off by default.
-    RENTED_OWNER_MISMATCH_ENFORCEMENT_ENABLED: bool = Field(
-        env="RENTED_OWNER_MISMATCH_ENFORCEMENT_ENABLED", default=False
-    )
     # Report a rented node that lost a GPU to the backend from the first cycle that sees it (a possible
     # glitch waits one more); observation only, no score change. Off by default.
     RENTED_GPU_DROP_CHECK_ENABLED: bool = Field(env="RENTED_GPU_DROP_CHECK_ENABLED", default=False)
@@ -595,14 +568,10 @@ class Settings(BaseSettings):
     )
     # F-1599 — a 64 MB pinned-host-memory H2D/D2H round trip on every GPU of an idle node, compared on the host.
     # A TDX guest whose GPUs are not in CC mode passed every check yet could not DMA pinned memory (8x H200,
-    # 13 Oct). CHECK runs it; ENFORCEMENT lets wrong data, a copy error or a hung copy fail the node. CHECK is
-    # on (milliseconds of copy per card; a probe that cannot start is UNKNOWN, never a fault). ENFORCEMENT is off:
-    # every fault is logged (PINNED_MEMORY_PROBE_FAILED, enforced=false) and enforcement goes on by this flag
-    # after a review of one day of prod logs (owner, 15 Oct).
+    # 13 Oct). CHECK runs it; wrong data, a copy error or a hung copy fails the node (enforced since the shadow
+    # review of prod logs). CHECK is on (milliseconds of copy per card; a probe that cannot start is UNKNOWN,
+    # never a fault).
     PINNED_MEMORY_PROBE_CHECK_ENABLED: bool = Field(env="PINNED_MEMORY_PROBE_CHECK_ENABLED", default=True)
-    PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED: bool = Field(
-        env="PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED", default=False
-    )
     # A fault probe with no verdict passes. Five such cycles in a row on one node are logged
     # (GPU_FAULT_PROBE_UNKNOWN_STREAK); with this on they are judged like a fault, which fails the
     # node only while GPU_FAULT_PROBE_ENFORCEMENT_ENABLED is on too. Off by default.
@@ -617,7 +586,7 @@ class Settings(BaseSettings):
     # the container down through delete_container.
     # A failed step zeroes the score and clears the verified job (RENTAL_PROBE_FAILED), like the GPU
     # runtime quarantine, and the failed step stands in Redis until a probe passes: a later cycle with
-    # no verdict of its own (filler running, image gone, inconclusive) fails the node again with it; a
+    # no verdict of its own (image gone, inconclusive) fails the node again with it; a
     # rented node is left alone. An idle node with the image pulled is probed again every cycle until
     # it passes. DAH-4258: on by default, in shadow (enforcement below defaults off). Renters' most common
     # complaint after GPU faults is a pod they cannot reach (SSH refused, "error connection"), the exact
@@ -630,12 +599,6 @@ class Settings(BaseSettings):
     RENTAL_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="RENTAL_PROBE_ENFORCEMENT_ENABLED", default=False)
     RENTAL_PROBE_INTERVAL_HOURS: float = Field(env="RENTAL_PROBE_INTERVAL_HOURS", default=6.0, gt=0)
     RENTAL_PROBE_SSH_DEADLINE_SECONDS: int = Field(env="RENTAL_PROBE_SSH_DEADLINE_SECONDS", default=90, gt=0)
-    # On: an idle node running a Lium filler is probed too, beside the filler: the probe's create
-    # removes no filler_*, lifts no GPU power cap and reclaims no filler cache. Off: such a node is
-    # skipped ("filler running"). Only read while RENTAL_PROBE_ENABLED is on.
-    RENTAL_PROBE_BESIDE_FILLERS_ENABLED: bool = Field(
-        env="RENTAL_PROBE_BESIDE_FILLERS_ENABLED", default=False
-    )
     # A node whose containers cannot reach the internet passed every check. CHECK runs the rental probe's
     # `egress` step, which resolves and fetches pypi.org inside its renter container; ENFORCEMENT fails the
     # probe on it with NO_OUTBOUND_INTERNET (score 0). Slow still passes. Enforcement is off by default,
@@ -659,13 +622,10 @@ class Settings(BaseSettings):
     # NAT and runtime and can get 1000x less (297-588 Mbps on the host, under 1 Mbps from PyPI in a container). CHECK
     # reads up to 16 MiB of a pinned PyPI wheel and a pinned Hugging Face file from a throwaway container on idle
     # nodes once per INTERVAL_HOURS and logs CONTAINER_DOWNLOAD_SPEED; two failing readings in a row (30 min apart)
-    # are the finding. ENFORCEMENT fails the node (CONTAINER_DOWNLOAD_SLOW, score 0); off until the shadow logs are
-    # reviewed. MIN_MBPS is a fifth of NETWORK_MIN_PACKAGE_DOWNLOAD_SPEED_MBPS (50): one cold single-stream CDN object
+    # are the finding and fail the node (CONTAINER_DOWNLOAD_SLOW, score 0) when both were read on the rentals network.
+    # MIN_MBPS is a fifth of NETWORK_MIN_PACKAGE_DOWNLOAD_SPEED_MBPS (50): one cold single-stream CDN object
     # read 32-88 Mbps on healthy nodes (DAH-2959), so 50 would flag them; the defect is two orders of magnitude lower.
     CONTAINER_DOWNLOAD_SPEED_CHECK_ENABLED: bool = Field(env="CONTAINER_DOWNLOAD_SPEED_CHECK_ENABLED", default=True)
-    CONTAINER_DOWNLOAD_SPEED_ENFORCEMENT_ENABLED: bool = Field(
-        env="CONTAINER_DOWNLOAD_SPEED_ENFORCEMENT_ENABLED", default=False
-    )
     CONTAINER_DOWNLOAD_SPEED_MIN_MBPS: float = Field(env="CONTAINER_DOWNLOAD_SPEED_MIN_MBPS", default=10.0, gt=0)
     CONTAINER_DOWNLOAD_SPEED_INTERVAL_HOURS: float = Field(
         env="CONTAINER_DOWNLOAD_SPEED_INTERVAL_HOURS", default=6.0, gt=0
@@ -879,12 +839,6 @@ class Settings(BaseSettings):
     # GPU evidence bound to the issued nonce; any failure raises AttestationError.
     ENABLE_GPU_ATTESTATION_ENFORCEMENT: bool = Field(
         env="ENABLE_GPU_ATTESTATION_ENFORCEMENT", default=False
-    )
-    # DAH-4551 - GpuAttestationIdentityCheck: each Hopper/Blackwell GPU's NVIDIA-signed identity, pinned to its
-    # UUID both ways. Shadow by default: a mismatch or forged evidence is logged as a warning event and the node
-    # passes. On = it fails the node (not fatal with a live rental). Unavailable evidence alone never fails it.
-    GPU_ATTESTATION_IDENTITY_ENFORCEMENT_ENABLED: bool = Field(
-        env="GPU_ATTESTATION_IDENTITY_ENFORCEMENT_ENABLED", default=False
     )
     # Hosted NRAS endpoint (interim verification locus; a local nv-verifier removes
     # this outbound SPOF before fleet enforcement — see remediation plan CD4).

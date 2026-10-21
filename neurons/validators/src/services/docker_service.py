@@ -360,7 +360,7 @@ def _port_allocated_phrase(exc: BaseException) -> str | None:
 def port_collision_error_class(exc: BaseException) -> str | None:
     """`port_collision` when the create died on a host port bind, for the failure event's counter.
 
-    Flag or no flag: a typed `RentalPortCollisionError`, or any refusal text in the exception's
+    A typed `RentalPortCollisionError`, or any refusal text in the exception's
     cause chain that names an already-bound host port.
     """
     seen: set[int] = set()
@@ -2144,10 +2144,7 @@ class DockerService:
         self.attestation_service = attestation_service
         self.rental_docker_client_factory = (
             rental_docker_client_factory
-            or RentalDockerSdkClientFactory(
-                pull_timeout_seconds=_DOCKER_PULL_TIMEOUT_SECONDS,
-                transport_retry_enabled=lambda: settings.DOCKER_TRANSPORT_RETRY_ENABLED,
-            )
+            or RentalDockerSdkClientFactory(pull_timeout_seconds=_DOCKER_PULL_TIMEOUT_SECONDS)
         )
         self.lock = asyncio.Lock()
         self.logs_queue: list[dict] = []
@@ -2341,13 +2338,13 @@ class DockerService:
         Returns the container's ID, or None when the client gave none. A ContainerCreateRefused of
         the spec's `before_create` or `before_start` (checked on every attempt) is raised as is.
 
-        Port collision (PORT_COLLISION_RETRY_ENABLED): when dockerd refuses the bind of a host port
+        Port collision: when dockerd refuses the bind of a host port
         and `port_maps` / `spare_port_pairs` are given, the colliding mapping moves to the next
         free pair of the executor's advertised range (at most `_PORT_COLLISION_CANDIDATE_CAP`
         candidates, the host's listening sockets read once over `ssh_client`) and the run is
         retried ONCE with the new mapping; `port_maps` is updated in place so the create's answer
         carries the port the pod really got. No free candidate, or a second bind refusal, fails the
-        create as `RentalPortCollisionError`. Flag off: the DAH-1991 same-command wait as before.
+        create as `RentalPortCollisionError`.
 
         `remove_port_checks_listed_live` runs once, on the first bind refusal, before either retry;
         when it removed a port check, the run is retried at once on the same mapping.
@@ -2423,7 +2420,6 @@ class DockerService:
                     ) from exc
                 if (
                     port_allocation_phrase
-                    and settings.PORT_COLLISION_RETRY_ENABLED
                     and port_maps is not None
                     and spare_port_pairs
                 ):

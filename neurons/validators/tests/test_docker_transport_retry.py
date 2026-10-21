@@ -23,6 +23,9 @@ from services.rental_docker_sdk import (
     RentalDockerSdkClientFactory,
 )
 
+# The three error texts of the cluster, as the validator logged them.
+# Answers from the daemon are not transport errors.
+
 
 def _not_found(what: str = "No such object") -> NotFound:
     return NotFound(what, response=Mock(status_code=404))
@@ -108,12 +111,17 @@ class _FakeApiClient:
         return {"ExitCode": 0}
 
 
-def _client(api_client: _FakeApiClient, *, enabled: bool = True) -> RentalDockerSdkClient:
-    return RentalDockerSdkClient(api_client, transport_retry_enabled=enabled)
+def _client(api_client: _FakeApiClient) -> RentalDockerSdkClient:
+    return RentalDockerSdkClient(api_client)
 
 
 def _run_spec(name: str = "pod_test") -> ContainerRunSpec:
     return ContainerRunSpec(image="lium/pod:1", name=name, network="lium-rentals")
+
+
+# ---------------------------------------------------------------------------
+# the class: which errors are a dropped transport
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +190,12 @@ async def test_exec_that_appends_is_not_retried_on_a_dropped_transport():
 
 
 # ---------------------------------------------------------------------------
-# rental connect: a stalled DNS lookup is held per miner
+# the adapter: a None channel is a typed error, never an AttributeError
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# the factory connect
 # ---------------------------------------------------------------------------
 
 
@@ -233,3 +246,15 @@ async def test_a_miner_whose_dns_stalls_cannot_stop_another_miners_rental_connec
         assert node_host._dns_busy.get("miner:hostile-hotkey", 0) <= node_host.NODE_DNS_PER_MINER
     finally:
         release.set()
+
+
+# ---------------------------------------------------------------------------
+# the failure event names the stage and the class
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# a real dropped link: a loopback socket stands in for the SSH channel and its far end goes away
+# ---------------------------------------------------------------------------
+
+

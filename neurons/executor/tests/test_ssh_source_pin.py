@@ -25,7 +25,12 @@ def test_prod_build_pins_the_nat_gateways():
     assert config.VALIDATOR_SSH_SOURCES == "54.163.250.18,13.223.237.157"
 
 
-def test_upload_is_pinned_and_removal_and_expiry_still_find_it(authorized_keys):
+def test_the_pin_is_off_by_default():
+    assert config.Settings.model_fields["EXECUTOR_SSH_SOURCE_PIN"].default is False
+
+
+def test_upload_is_pinned_and_removal_and_expiry_still_find_it(authorized_keys, monkeypatch):
+    monkeypatch.setattr(ssh_service.settings, "EXECUTOR_SSH_SOURCE_PIN", True)
     SSHService().add_pubkey_to_host(KEY)
     assert authorized_keys.read_text().startswith(RENTER_KEY + f'from="{config.VALIDATOR_SSH_SOURCES}" {KEY} ')
 

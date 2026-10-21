@@ -1,7 +1,6 @@
 """RENTED_GPU_DROP: a rented node that lost a GPU is reported the cycle it is seen, once per incident."""
 
 import json
-
 from unittest.mock import patch
 
 import pytest
@@ -19,6 +18,7 @@ from neurons.validators.src.services.task.checks.rented_gpu_drop import (
     judge_rented_gpus,
 )
 from neurons.validators.src.services.task.messages import RentedGpuDropMessages as Msg
+from neurons.validators.src.services.task.pipeline_factory import PipelineFactory
 from protocol.vc_protocol.compute_requests import (
     RentedExecutor,
     RentedExecutorsResponse,
@@ -307,6 +307,25 @@ async def test_a_healthy_memory_read_reports_nothing(context_factory):
 
     assert result.event.reason_code == Msg.OK.reason
     services.backend.report_rented_gpu_drop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_pipeline_check_with_default_settings_logs_the_drop_and_posts_nothing(
+    context_factory, monkeypatch
+):
+    monkeypatch.delenv("RENTED_GPU_DROP_CHECK_ENABLED", raising=False)
+    defaults = type(rented_gpu_drop.settings)(_env_file=None)
+    check = next(c for c in PipelineFactory.build_checks() if isinstance(c, RentedGpuDropCheck))
+    services = _services()
+
+    with patch.object(rented_gpu_drop, "settings", defaults):
+        result = await check.run(
+            _ctx(context_factory, services, listed=UUIDS[:5], scrape_error="NVMLError(999)")
+        )
+
+    assert result.passed and result.event.reason_code == Msg.DROP.reason
+    services.backend.report_rented_gpu_drop.assert_not_awaited()
+    assert services.redis.calls == 0 and services.redis.store == {}
 
 
 # --- an incident replayed ----------------------------------------------------------------------------------------------
