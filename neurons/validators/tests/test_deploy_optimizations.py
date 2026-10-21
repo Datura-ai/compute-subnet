@@ -615,7 +615,9 @@ async def test_a_present_public_hub_image_rent_makes_the_same_host_calls(
     assert _docker_client(svc).login_calls == []
     assert _pulled_images(svc) == []
     assert _ssh_run_cmds(ssh_client) == [
-        # the host's kernel.pid_max first — before any host side-effect (the filler removal below, the
+        # the volume-stage host probe (DAH-3240), started as soon as the SSH session is up
+        ds_module._volume_host_probe_command(with_df=svc.measures_host_for_volume_sizing(payload)),
+        # then the host's kernel.pid_max — before any host side-effect (the filler removal below, the
         # stale-container cleanup, the pull, the volume) so a rental whose pids.max can't be clamped below
         # it is refused with nothing to undo; a bare cat bounded by asyncssh's timeout, no `timeout` binary
         "cat /proc/sys/kernel/pid_max",
