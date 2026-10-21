@@ -114,7 +114,7 @@ def test_offline_executor_is_dropped_not_scored_and_does_not_stall_the_cycle():
     _, pub = lib.ssh_keypair()
     t0 = time.monotonic()
     r = lib.http("POST", f"{lib.MINER_URL}/api/validator/ssh-pubkey-submit", headers=lib.validator_rest_headers(vk), timeout=120,
-                 json={"message_type": "SSHPubKeySubmitRequest", "public_key": pub, "validator_signature": lib.sign(vk, pub), "miner_hotkey": lib.MINER_HOTKEY})
+                 json={"message_type": "SSHPubKeySubmitRequest", **lib.validator_key_fields(vk, pub)})
     took = time.monotonic() - t0
     assert r.status_code == 200, r.text
     uuids = [e["uuid"] for e in r.json()["executors"]]

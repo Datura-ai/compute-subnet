@@ -53,12 +53,7 @@ def test_miner_refuses_a_stranger_listing_executors():
 def _submit(headers: dict, body: dict | None = None):
     priv, pub = lib.ssh_keypair()
     vk = lib.validator_keypair()
-    body = body or {
-        "message_type": "SSHPubKeySubmitRequest",
-        "public_key": pub,
-        "validator_signature": lib.sign(vk, pub),
-        "miner_hotkey": lib.MINER_HOTKEY,
-    }
+    body = body or {"message_type": "SSHPubKeySubmitRequest", **lib.validator_key_fields(vk, pub)}
     return lib.http("POST", f"{lib.MINER_URL}/api/validator/ssh-pubkey-submit", json=body, headers=headers, timeout=60), priv, pub
 
 
