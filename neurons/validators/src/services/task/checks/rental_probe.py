@@ -211,7 +211,8 @@ class RentalProbeCheck:
     create returns. Anything the probe cannot read (backend, Redis) makes it skip or reach no verdict;
     it never penalises on missing data alone. RENTAL_PROBE_ENABLED is off by default.
 
-    An idle node running a Lium filler is probed too, beside the filler rather than in its place: create_container is told `beside_fillers`, so it
+    An idle node running a Lium filler is probed too, beside the filler rather than in its place:
+    create_container is told `beside_fillers`, so it
     removes no `filler_*`, lifts no GPU power cap and reclaims no filler cache. The validator cannot
     stop a filler run in the backend, so removing the container would read as the provider killing
     it, and lifting a PEARL filler's cap is DAH-2356's hard-ban case.
