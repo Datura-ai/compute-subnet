@@ -393,11 +393,6 @@ class Settings(BaseSettings):
     # GPU/RAM/disk/network probe next to a workload. Executor UUIDs are miner-chosen, so an entry
     # matches only that miner's executor at that SSH endpoint. Empty = none.
     LIUMD_SHADOW_RESERVED_EXECUTORS: str = Field(env="LIUMD_SHADOW_RESERVED_EXECUTORS", default="")
-    # DAH-2667: measure a RoCE fabric with ib_write_bw between the free hosts of one segment, rather
-    # than inferring it from the addresses alone. The backend reads a flag of the SAME name to decide
-    # whether a fabric must be measured before it is sold, so the feature has one switch across both
-    # services. On by default: a fabric nobody measured is one nobody should be selling.
-    ROCE_LINK_PROBE_ENABLED: bool = Field(env="ROCE_LINK_PROBE_ENABLED", default=True)
     # DAH-3338: send every container state a cycle saw on a node to the backend as PodStatesReport
     # chunks (256 states each) after the cycle's spec, so a node with 256 rented pods still reports
     # its reaped orphans the same cycle. The spec keeps a bounded copy either way. Turn on once the
