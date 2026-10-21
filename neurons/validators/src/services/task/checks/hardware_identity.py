@@ -5,7 +5,6 @@ import hashlib
 import json
 import logging
 
-from core.config import settings
 
 from ..messages import HardwareIdentityMessages as Msg, render_message
 from ..pipeline import CheckResult, Context
@@ -104,9 +103,7 @@ class HardwareIdentityCheck:
     fingerprint (a hash of the kernel's GPU UUIDs, NVML's when the kernel list is unreadable) and
     the DMI hash are logged on every event.
 
-    Shadow by default: a finding is a warning event and the node passes. Under
-    HARDWARE_FINGERPRINT_ENFORCEMENT_ENABLED it fails the node. An unreadable host, SSH error or
-    Redis outage decides nothing.
+    A finding fails the node. An unreadable host, SSH error or Redis outage decides nothing.
     """
 
     check_id = "host.validate.hardware_identity"
@@ -160,18 +157,10 @@ class HardwareIdentityCheck:
             "reported_gpu_uuids": reported,
             "dmi_overlays": overlays,
             "findings": findings,
-            "enforced": settings.HARDWARE_FINGERPRINT_ENFORCEMENT_ENABLED,
         }
         if not findings:
             return CheckResult(passed=True, event=render_message(Msg.OK, ctx=ctx, check_id=self.check_id, what=what))
 
-        enforce = settings.HARDWARE_FINGERPRINT_ENFORCEMENT_ENABLED
-        event = render_message(
-            Msg.SPOOFED,
-            ctx=ctx,
-            check_id=self.check_id,
-            impact=None if enforce else "Shadow observation only: score was NOT changed",
-            what=what,
-        )
+        event = render_message(Msg.SPOOFED, ctx=ctx, check_id=self.check_id, what=what)
         # like the ban checks: a node with a live pod keeps being verified (TenantEnforcementCheck still runs)
-        return CheckResult(passed=not enforce, event=event, fatal=not has_live_rental(ctx))
+        return CheckResult(passed=False, event=event, fatal=not has_live_rental(ctx))

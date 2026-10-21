@@ -1,8 +1,8 @@
-"""DAH-4547 - HardwareIdentityCheck: DMI overlay, NVML vs kernel GPU disagreement, DMI drift; shadow vs enforced."""
+"""DAH-4547 - HardwareIdentityCheck: DMI overlay, NVML vs kernel GPU disagreement, DMI drift; fails the node."""
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 from neurons.validators.src.services.task.checks.hardware_identity import (
@@ -19,7 +19,6 @@ from protocol.vc_protocol.compute_requests import RentedExecutor, RentedExecutor
 
 from tests.helpers import build_services, build_state, default_executor
 
-SETTINGS = "neurons.validators.src.services.task.checks.hardware_identity.settings"
 SYSFS_ROW = f"{DMI_ID_PATH}/product_uuid sysfs\n{DMI_ID_PATH}/product_uuid|regular file\n"
 SYS_MOUNT = "25 20 0:22 / /sys ro,nosuid - sysfs sysfs ro\n"
 
@@ -67,35 +66,31 @@ def _stdout(mounts=SYS_MOUNT, rows=SYSFS_ROW, values="uuid-1|serial-1|"):
     return f"{mounts}{HW_ID_FS_SEPARATOR}\n{rows}{HW_ID_VALUES_SEPARATOR}\n{values}"
 
 
-async def _run(ctx, enforce):
-    with patch(SETTINGS) as s:
-        s.HARDWARE_FINGERPRINT_ENFORCEMENT_ENABLED = enforce
-        return await HardwareIdentityCheck().run(ctx)
+async def _run(ctx):
+    return await HardwareIdentityCheck().run(ctx)
 
 
 @pytest.mark.asyncio
 async def test_clean_host_passes_and_logs_fingerprint(context_factory):
-    result = await _run(_ctx(context_factory, stdout=_stdout()), enforce=True)
+    result = await _run(_ctx(context_factory, stdout=_stdout()))
     assert result.passed is True
     assert result.event.reason_code == Msg.OK.reason
     assert result.event.what_we_saw["gpu_fingerprint"]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("enforce", [False, True])
-async def test_overlay_fails_only_when_enforced(context_factory, enforce):
+async def test_overlay_fails(context_factory):
     stdout = _stdout(rows=f"{DMI_ID_PATH}/product_uuid tmpfs\n")
-    result = await _run(_ctx(context_factory, stdout=stdout), enforce=enforce)
-    assert result.passed is (not enforce)
+    result = await _run(_ctx(context_factory, stdout=stdout))
+    assert result.passed is False
     assert result.event.reason_code == Msg.SPOOFED.reason
     assert result.event.what_we_saw["findings"] == ["dmi_overlaid"]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("enforce", [False, True])
-async def test_nvml_kernel_mismatch_fails_only_when_enforced(context_factory, enforce):
-    result = await _run(_ctx(context_factory, stdout=_stdout(), kernel=("GPU-b",)), enforce=enforce)
-    assert result.passed is (not enforce)
+async def test_nvml_kernel_mismatch_fails(context_factory):
+    result = await _run(_ctx(context_factory, stdout=_stdout(), kernel=("GPU-b",)))
+    assert result.passed is False
     assert result.event.what_we_saw["findings"] == ["gpu_sources_disagree"]
 
 
@@ -103,9 +98,9 @@ async def test_nvml_kernel_mismatch_fails_only_when_enforced(context_factory, en
 async def test_dmi_change_under_same_gpus_is_flagged(context_factory):
     ctx = _ctx(context_factory, stdout=_stdout(values="uuid-1|serial-1|"))
     redis = ctx.services.redis
-    assert (await _run(ctx, enforce=True)).passed is True
+    assert (await _run(ctx)).passed is True
 
-    result = await _run(_ctx(context_factory, stdout=_stdout(values="uuid-2|serial-1|"), redis=redis), enforce=True)
+    result = await _run(_ctx(context_factory, stdout=_stdout(values="uuid-2|serial-1|"), redis=redis))
     assert result.passed is False
     assert result.event.what_we_saw["findings"] == ["dmi_changed_under_same_gpus"]
 
@@ -118,7 +113,7 @@ async def test_unreadable_host_passes(context_factory):
     ctx = context_factory(
         state=build_state(gpu_uuids="GPU-a", kernel_gpu_uuids_read_attempted=True), ssh=SimpleNamespace(run=run)
     )
-    result = await _run(ctx, enforce=True)
+    result = await _run(ctx)
     assert result.passed is True
 
 
@@ -149,7 +144,7 @@ def _rented(executor):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rented", [True, False])
-async def test_enforced_finding_is_fatal_only_without_a_live_rental(context_factory, rented):
+async def test_finding_is_fatal_only_without_a_live_rental(context_factory, rented):
     executor = default_executor()
     ctx = _ctx(
         context_factory,
@@ -157,12 +152,10 @@ async def test_enforced_finding_is_fatal_only_without_a_live_rental(context_fact
         rented_data=_rented(executor) if rented else None,
         executor=executor,
     )
-    result = await _run(ctx, enforce=True)
+    result = await _run(ctx)
     assert result.passed is False
     assert result.fatal is (not rented)
 
     nxt = _Next()
-    with patch(SETTINGS) as s:
-        s.HARDWARE_FINGERPRINT_ENFORCEMENT_ENABLED = True
-        await Pipeline(checks=[HardwareIdentityCheck(), nxt], sink=AsyncMock()).run(ctx)
+    await Pipeline(checks=[HardwareIdentityCheck(), nxt], sink=AsyncMock()).run(ctx)
     assert nxt.ran is rented  # with a live pod the pipeline goes on to TenantEnforcementCheck

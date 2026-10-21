@@ -786,7 +786,7 @@ class BannedProviderMessages:
 
 
 class HardwareIdentityMessages:
-    # DAH-4547: emitted as a warning in shadow; fails the node under HARDWARE_FINGERPRINT_ENFORCEMENT_ENABLED.
+    # DAH-4547: fails the node.
     SPOOFED = MessageTemplate(
         event="Host hardware identity does not match the hardware",
         reason="HARDWARE_IDENTITY_SPOOFED",
