@@ -104,3 +104,28 @@ def test_the_check_runs_before_the_rented_halt_in_every_pipeline(build):
     ids = [check.check_id for check in build()]
 
     assert ids.index(StorageLimitCheck.check_id) < ids.index(TenantEnforcementCheck.check_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capable", [None, True])
+async def test_enforced_a_capable_or_unknown_host_scores_zero(context_factory, enforced, capable):
+    specs = {"storage_limit_supported": False}
+    if capable is not None:
+        specs["storage_limit_capable"] = capable
+
+    result = await run(context_factory, specs)
+
+    assert result.passed is False
+    assert result.event.reason_code == Msg.REQUIRED.reason
+
+
+@pytest.mark.asyncio
+async def test_enforced_a_single_disk_host_only_warns(context_factory, enforced):
+    """DAH-1997 (Fish 21 Oct): required only of hosts that can build the limit."""
+    result = await run(
+        context_factory, {"storage_limit_supported": False, "storage_limit_capable": False}
+    )
+
+    assert result.passed is True
+    assert result.event.reason_code == Msg.MISSING.reason
+    assert "score" not in result.updates

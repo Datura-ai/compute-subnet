@@ -1674,10 +1674,11 @@ def mounts_holding(mounts_text: str, path: str) -> list[str]:
 class MountLine:
     # Plain class rather than a dataclass/NamedTuple: obfuscator.py only carries the imports on its
     # allowlist into the packaged scrape, so this file must not grow new ones.
-    def __init__(self, source: str, mount_point: str, options: list[str]) -> None:
+    def __init__(self, source: str, mount_point: str, options: list[str], fstype: str = "") -> None:
         self.source = source
         self.mount_point = mount_point
         self.options = options
+        self.fstype = fstype
 
 
 def covering_mount(mounts_text: str, path: str) -> MountLine | None:
@@ -1696,7 +1697,7 @@ def covering_mount(mounts_text: str, path: str) -> MountLine | None:
         if path != mount_point and not path.startswith(mount_point.rstrip("/") + "/"):
             continue
         if covering is None or len(mount_point) >= len(covering.mount_point):
-            covering = MountLine(fields[0], mount_point, fields[3].split(","))
+            covering = MountLine(fields[0], mount_point, fields[3].split(","), fields[2])
     return covering
 
 
@@ -1930,6 +1931,68 @@ def get_docker_root_disk_type() -> str:
     return disk_type_of(block_device_holding(mounts_text, docker_root_dir))
 
 
+# DAH-1997 (Fish 21 Oct): the storage limit is required only of hosts that can build it - docker's data
+# root already on xfs (only `pquota` missing), or a spare disk or partition big enough for it. A host
+# with one disk, all of it in use, cannot, and keeps the warning only.
+STORAGE_CAPABLE_MIN_BYTES = 100 * 1000 ** 3
+SYSFS_SECTOR_BYTES = 512
+PROC_SWAPS_PATH = "/proc/swaps"
+NOT_A_SPARE_DISK_PREFIXES = ("loop", "ram", "zram", "sr", "fd", "nbd", "dm-", "md")
+
+
+def spare_block_device(mounts_text: str) -> str | None:
+    """The kernel name of a disk or partition of STORAGE_CAPABLE_MIN_BYTES or more that nothing uses:
+    not mounted, not swap, not under LVM / RAID / dm-crypt (no holders), not read-only, and for a whole
+    disk, not partitioned. None when there is none. Free space inside an LVM volume group or after the
+    last partition is not seen."""
+    in_use = set()
+    for line in mounts_text.splitlines():
+        fields = line.split()
+        if fields and fields[0].startswith("/dev/"):
+            in_use.add(
+                kernel_name_of_device_node(f"{HOST_ROOT_PREFIX}{fields[0]}") or os.path.basename(fields[0])
+            )
+    try:
+        with open(PROC_SWAPS_PATH) as swaps_file:
+            in_use.update(os.path.basename(line.split()[0]) for line in swaps_file.read().splitlines()[1:] if line.split())
+    except OSError:
+        pass
+    try:
+        names = sorted(os.listdir(SYS_CLASS_BLOCK_PATH))
+    except OSError:
+        return None
+    for name in names:
+        device_path = f"{SYS_CLASS_BLOCK_PATH}/{name}"
+        if name.startswith(NOT_A_SPARE_DISK_PREFIXES) or name in in_use:
+            continue
+        try:
+            size_bytes = int(read_sysfs_text(f"{device_path}/size") or 0) * SYSFS_SECTOR_BYTES
+            holders = os.listdir(f"{device_path}/holders") if os.path.isdir(f"{device_path}/holders") else []
+            partitioned = any(os.path.exists(f"{device_path}/{child}/partition") for child in os.listdir(device_path))
+        except (OSError, ValueError):
+            continue
+        if size_bytes < STORAGE_CAPABLE_MIN_BYTES or holders or partitioned:
+            continue
+        if read_sysfs_text(f"{device_path}/ro") == "1":
+            continue
+        return name
+    return None
+
+
+def storage_limit_capable() -> bool:
+    """True when this host could give docker a per-container storage limit (see STORAGE_CAPABLE_MIN_BYTES)."""
+    try:
+        docker_root_dir = (docker_api_get("/info") or {}).get("DockerRootDir") or "/var/lib/docker"
+    except Exception:
+        docker_root_dir = "/var/lib/docker"
+    with open(HOST_MOUNTS_PATH) as mounts_file:
+        mounts_text = mounts_file.read()
+    covering = covering_mount(mounts_text, docker_root_dir)
+    if covering is not None and covering.fstype == "xfs":
+        return True
+    return spare_block_device(mounts_text) is not None
+
+
 def write_probe_failure_reason(errno_value) -> str:
     """The reason a write failed because of the disk itself - a container cannot start on any of
     these - or '' when the errno says where the scrape runs from (EACCES, ENOENT), not what the disk
@@ -2121,6 +2184,10 @@ def get_machine_specs():
     data["data_storage_limit_supported"] = is_supported
     if not is_supported:
         data["data_storage_limit_scrape_error"] = log_text
+        try:
+            data["data_storage_limit_capable"] = storage_limit_capable()
+        except Exception:
+            data["data_storage_limit_capable"] = None  # unknown: the check keeps requiring the limit
     data["data_vloopback_check"] = vloopback_check_payload(is_supported, data["data_sysbox_runtime"])
 
     ncu_profiling = check_ncu_profiling_access()
