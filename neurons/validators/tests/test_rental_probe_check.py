@@ -765,7 +765,7 @@ async def test_create_payload_is_what_a_renter_gets():
     assert payload.docker_image == IMAGE.image_ref
     assert payload.gpu_uuids == ["GPU-aaaa", "GPU-bbbb"]
     # the backend's whole-node limit (64 GiB less the 4 GiB reserve), so create_container never takes
-    # the no-memory-limit path that reads the host's /dev/nvidia* count (taiberium on #1714)
+    # the no-memory-limit path that reads the host's /dev/nvidia* count
     assert payload.memory_gb == 60
     assert (
         payload.ships_sshd is True and payload.is_sysbox is True and payload.enable_jupyter is False
@@ -867,6 +867,19 @@ async def test_a_create_that_raises_still_removes_the_container_by_name():
     assert any(f"volume_{probe_pod_id}" in cmd for cmd in shell_commands)
     assert redis.removed_rented == [f"pod_{probe_pod_id}"]
     assert redis.removed_pending == [(MINER, EXECUTOR.uuid, probe_pod_id)]
+
+
+@pytest.mark.asyncio
+async def test_a_create_that_cannot_open_its_ssh_session_is_inconclusive():
+    # Regression: a failed `ssh_connect` zeroed nodes that took renters' pods the same day
+    ctx, docker, redis = make_probe_context(
+        docker=FakeDocker(create_result=create_failed("ssh_connect"))
+    )
+    with probe_settings(), renter_path():
+        result = await RentalProbeCheck().run(ctx)
+    assert result.passed is True
+    assert result.event.reason_code == Msg.INCONCLUSIVE.reason
+    assert not redis.stamped() and redis.standing_failure() is None
 
 
 @pytest.mark.asyncio

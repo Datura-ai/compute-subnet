@@ -45,8 +45,8 @@ STEP_EGRESS = "egress"
 STEP_TEARDOWN = "teardown"
 
 # create_container's failure_step values that fail before the validator has talked to the host over
-# SSH. A failure there is the validator's (its Redis, its key, the attestation verifier), so the probe
-# reaches no verdict about the node instead of penalising it. `cancelled_by_delete` is not positional:
+# SSH. A failure there is the validator's (its Redis, its key, the attestation verifier, its own route
+# to the host at `ssh_connect`), so the probe reaches no verdict about the node instead of penalising it. `cancelled_by_delete` is not positional:
 # a delete_container for the same pod id cut the create short and removed the container itself.
 _CREATE_STEPS_BEFORE_THE_HOST = frozenset(
     {
@@ -60,6 +60,8 @@ _CREATE_STEPS_BEFORE_THE_HOST = frozenset(
         "docker_sdk_ssh_host_key",
         "build_input_empty",
         "cancelled_by_delete",
+        # renters got pods on the nodes whose probe create failed here on 21 Oct
+        "ssh_connect",
     }
 )
 
@@ -429,7 +431,6 @@ class RentalProbeCheck:
                 },
             },
         )
-
 
     def _carried(self, ctx: Context, standing: _Failure, *, no_verdict: str) -> CheckResult:
         """This cycle reached no verdict of its own and the last probe failed: fail the node again with
@@ -803,7 +804,7 @@ def _probe_memory_gb(ctx: Context) -> int | None:
     """The memory limit the backend would send for a whole-node rental: (host RAM less the reserve) in GiB.
 
     Without it create_container takes the path for a rental sent with no memory limit, which reads host
-    RAM and the /dev/nvidia* count, a path no renter's pod takes (taiberium on lium-io#1714). None when the
+    RAM and the /dev/nvidia* count, a path no renter's pod takes. None when the
     scraped specs carry no RAM total; create_container then sizes the limit itself as before."""
     from services.docker_service import DockerService  # docker_service imports this package
 

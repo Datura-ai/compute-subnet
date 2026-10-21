@@ -43,8 +43,6 @@ async def test_a_host_fault_stands_as_a_failed_probe_and_drops_the_interval_stam
     redis_service.delete.assert_awaited_once_with(f"rental_probe_ok:{EXECUTOR_UUID}")
 
 
-
-
 @pytest.mark.asyncio
 async def test_a_renter_side_failure_is_not_stamped():
     service, redis_service = _service()

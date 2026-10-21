@@ -621,7 +621,7 @@ class Settings(BaseSettings):
     # rented node is left alone. An idle node with the image pulled is probed again every cycle until
     # it passes. Renters' most common complaint after GPU faults is a pod they cannot reach (SSH refused,
     # "error connection"), the exact path this probe walks. It rents a container on every idle node every
-    # 6 h. Always on and enforcing (DAH-4258: the prod shadow run was clean, so the flags were removed).
+    # 6 h. Always on and enforcing.
     RENTAL_PROBE_INTERVAL_HOURS: float = Field(env="RENTAL_PROBE_INTERVAL_HOURS", default=6.0, gt=0)
     RENTAL_PROBE_SSH_DEADLINE_SECONDS: int = Field(env="RENTAL_PROBE_SSH_DEADLINE_SECONDS", default=90, gt=0)
     # On: an idle node running a Lium filler is probed too, beside the filler: the probe's create
