@@ -152,7 +152,7 @@ async def test_mismatch_zeroes_the_final_score(context_factory, enforce, expecte
     ):
         s.CPU_TRUTH_CHECK_ENABLED = True
         s.CPU_TRUTH_ENFORCEMENT_ENABLED = enforce
-        score_s.ENABLE_TDX_ATTESTATION = False
+        score_s.ENABLE_TCB_ENFORCEMENT = False
         pipeline = Pipeline([CpuTruthCheck(), ScoreCheck()], _NullSink())
         _, _, final_ctx = await pipeline.run(ctx)
 
