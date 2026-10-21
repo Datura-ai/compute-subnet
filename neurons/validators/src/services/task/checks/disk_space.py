@@ -7,7 +7,7 @@ from services.const import MAX_DISK_UTILIZATION_PERCENT, MIN_FREE_DISK_GB
 from ..messages import DiskSpaceMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
-from .rented_machine import _rental_of_validated_miner
+from .rented_machine import _every_listed_pod_stale, _rental_of_validated_miner
 
 KB_PER_GB = 1024 * 1024
 
@@ -63,8 +63,11 @@ class DiskSpaceCheck:
         rental = _rental_of_validated_miner(
             ctx, rented_data.executors.get(ctx.executor.uuid) if rented_data else None
         )
-        # ctx.rented is TenantEnforcementCheck's verdict: False once the listed rental ended
-        if rental and rental.pods and ctx.rented:
+        # TenantEnforcementCheck clears ctx.rented at the first stale pod, so a split node can still
+        # hold a live pod; the helper skips index 0 as known stale, hence the leading duplicate
+        if rental and rental.pods and (
+            ctx.rented or not await _every_listed_pod_stale(ctx, [rental.pods[0], *rental.pods], 0)
+        ):
             event = render_message(
                 template,
                 ctx=ctx,

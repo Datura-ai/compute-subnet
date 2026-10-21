@@ -9,7 +9,8 @@ from services.task.checks.disk_space import KB_PER_GB, DiskSpaceCheck
 from services.task.messages import DiskSpaceMessages as Msg
 from services.task.pipeline_factory import PipelineFactory
 
-from tests.helpers import build_state
+from tests.helpers import build_services, build_state
+from tests.test_port_floor_listing import PerPodBackendClient, PerPodSSHClient
 
 
 def _disk(utilization: float, free_gb: float) -> dict:
@@ -49,7 +50,6 @@ async def test_idle_node_fails_the_listing_disk_floor(context_factory, specs, re
         ("miner-hotkey", "127.0.0.1", "8080", True, True),  # this miner's rental
         ("other-hotkey", "127.0.0.1", "22", True, True),  # another miner, same endpoint: the pod is here
         ("other-hotkey", "10.0.0.1", "22", True, False),  # another miner elsewhere
-        ("miner-hotkey", "127.0.0.1", "8080", False, False),  # rental ended since the cycle started
         (None, None, None, False, False),  # no rental
     ],
 )
@@ -68,6 +68,45 @@ async def test_live_rental_is_not_failed_for_its_disk(
     rented_data = RentedExecutorsResponse(executors=executors)
     ctx = context_factory(
         state=build_state(specs=_disk(95, 500), rented_data=rented_data), rented=live
+    )
+
+    result = await DiskSpaceCheck().run(ctx)
+
+    assert result.passed is exempt
+    assert result.event.reason_code == Msg.TOO_FULL.reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "pod_ids, live, exempt",
+    [
+        (["pod-a", "pod-b"], {"pod-b"}, True),  # split node: A ended, B still rented
+        (["pod-a", "pod-b"], {"pod-a"}, True),
+        (["pod-a", "pod-b"], set(), False),  # every listed pod ended
+        (["pod-a"], set(), False),  # the only rental ended since the cycle started
+    ],
+)
+async def test_ended_rental_exempts_only_while_a_listed_pod_is_live(
+    context_factory, pod_ids, live, exempt
+):
+    rented_data = RentedExecutorsResponse(
+        executors={
+            "executor-123": RentedExecutor(
+                miner_hotkey="miner-hotkey",
+                executor_ip_address="127.0.0.1",
+                executor_ip_port="8080",
+                pods=[
+                    RentedPod(pod_id=p, container_name=f"container_{p}", rented_ports=[])
+                    for p in pod_ids
+                ],
+            )
+        }
+    )
+    ctx = context_factory(
+        state=build_state(specs=_disk(95, 500), rented_data=rented_data),
+        services=build_services(backend=PerPodBackendClient(active=live)),
+        ssh=PerPodSSHClient(running={f"container_{p}" for p in live}),
+        rented=False,
     )
 
     result = await DiskSpaceCheck().run(ctx)
