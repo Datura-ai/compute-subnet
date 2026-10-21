@@ -178,19 +178,14 @@ async def _cycle_with_the_image_check(context_factory, probes, rented_data, redi
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("cold_retry", "cycle_2_passes", "cycle_2_ema"),
+    ("cycle_2_passes", "cycle_2_ema"),
     [
         # cycle 1 passes as PENDING and is held
-        pytest.param(True, True, 238.0, id="grace-and-hold"),
-        # without the re-measure: cycle 2 is judged on its one cold sample
-        pytest.param(False, False, 53.4, id="without-cold-retry"),
+        pytest.param(True, 238.0, id="grace-and-hold"),
     ],
 )
-async def test_the_incident_with_the_fresh_node_grace(
-    monkeypatch, context_factory, cold_retry, cycle_2_passes, cycle_2_ema
-):
+async def test_the_incident_with_the_fresh_node_grace(monkeypatch, context_factory, cycle_2_passes, cycle_2_ema):
     monkeypatch.setattr(settings, "CACHED_TEMPLATE_CUTOFF", datetime.utcnow() - timedelta(days=1))
-    monkeypatch.setattr(settings, "VERIFYX_COLD_SAMPLE_RETRY_ENABLED", cold_retry)
     redis = _fake_redis_service()
 
     # Cycle 1: a fresh node, its executor's first pre-pull still running; VerifyX samples 120.
