@@ -342,6 +342,10 @@ class Settings(BaseSettings):
     # flag on; the wave never does, so every scored verification is unchanged. Measured (Loki,
     # 2–6 Sep, idle runs): matmul p50 26 s (74 s on the fresh dogfood node), VerifyX p50 78 s.
     FIRST_PASS_FAST_PATH_ENABLED: bool = Field(env="FIRST_PASS_FAST_PATH_ENABLED", default=False)
+    # A node whose Docker cannot cap a container's disk (specs.storage_limit_supported) lets one renter fill the
+    # host's Docker storage and take every pod down. Off: a STORAGE_LIMIT_MISSING warning only, so providers get
+    # notice first. On: an unrented node without the limit scores 0 (StorageLimitCheck).
+    REQUIRE_STORAGE_LIMIT_SUPPORTED: bool = Field(env="REQUIRE_STORAGE_LIMIT_SUPPORTED", default=False)
     # The matmul is sized from min(card VRAM, this) instead of the whole card: same challenge,
     # seal and UUID check, 5–17x less data to generate and copy.
     FIRST_PASS_MATMUL_VRAM_MB: int = Field(env="FIRST_PASS_MATMUL_VRAM_MB", default=8192)
@@ -573,9 +577,6 @@ class Settings(BaseSettings):
     FOREIGN_GPU_WORKLOAD_ENFORCEMENT_ENABLED: bool = Field(
         env="FOREIGN_GPU_WORKLOAD_ENFORCEMENT_ENABLED", default=False
     )
-    # On: a pod container on an unrented node whose rental just ended or just started ends the run
-    # at the GPU usage check, scored as idle, instead of the orphaned-container zero.
-    RENTAL_TEARDOWN_DEFERRAL_ENABLED: bool = Field(env="RENTAL_TEARDOWN_DEFERRAL_ENABLED", default=False)
     # DAH-3035 — a ~6 s kernel-fault probe after the matmul: indexed/scattered access, atomics, a pointer
     # chase and a pinned-memory copy round-trip over a ~2 GB working set, plus NVML before/after: a rise in
     # uncorrected ECC or remapped rows, a pending or failed remap, or a required recovery action is a fault.
@@ -701,6 +702,13 @@ class Settings(BaseSettings):
     # idle moved to the burner, never an older vector.
     SETTLEMENT_MODE: Literal["off", "shadow", "enforce"] = Field(env="SETTLEMENT_MODE", default="off")
     DUPLICATE_EXECUTOR_DRY_RUN: bool = Field(env="DUPLICATE_EXECUTOR_DRY_RUN", default=True, description="Observe mode: detect duplicate executors but don't penalize")
+    # Two executors of ONE miner hotkey that report the same GPU UUID in one cycle are one set of
+    # cards listed twice. Always logged (GPU_ALIAS_SAME_MINER); with this on, every copy but one
+    # scores 0 for the cycle. Only the miner's own executors are compared, so another miner
+    # reporting the same UUIDs cannot cost it anything.
+    GPU_ALIAS_SAME_MINER_ENFORCEMENT_ENABLED: bool = Field(
+        env="GPU_ALIAS_SAME_MINER_ENFORCEMENT_ENABLED", default=False
+    )
     EXECUTOR_IMAGE_REF: str = Field(
         env="EXECUTOR_IMAGE_REF",
         default="daturaai/compute-subnet-executor:latest",

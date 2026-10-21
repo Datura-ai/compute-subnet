@@ -278,6 +278,12 @@ def run_script(
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="bash installer")
 
 
+# ── kernel ───────────────────────────────────────────────────────────────────
+
+
+# ── docker ───────────────────────────────────────────────────────────────────
+
+
 def test_docker_29_0_passes_but_says_untested(tmp_path):
     rc, out, _ = run_check(tmp_path, "check_docker", env={"STUB_DOCKER_VERSION": "29.0.1"})
     assert rc == 0
@@ -288,6 +294,12 @@ def test_docker_29_1_passes_plainly(tmp_path):
     rc, out, _ = run_check(tmp_path, "check_docker", env={"STUB_DOCKER_VERSION": "29.1.3"})
     assert rc == 0
     assert "PASS Docker 29.1.3.\n" in out
+
+
+# ── nvidia ───────────────────────────────────────────────────────────────────
+
+
+# ── iptables modules (ticket-0309) ───────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
@@ -309,6 +321,9 @@ def test_blackwell_without_a_driver_gets_the_open_module_from_pci(tmp_path):
     rc, out, _ = run_check(tmp_path, "check_nvidia_driver", env=env, without=("nvidia-smi",))
     assert rc == 1
     assert "sudo apt-get install -y nvidia-driver-580-server-open" in out
+
+
+# ── disk >= 1.5x VRAM (validators' MIN_DISK_TO_VRAM_RATE) ────────────────────
 
 
 # ── free disk for the node's images and VerifyX's storage test ───────────────
@@ -336,6 +351,12 @@ def test_free_disk_just_below_100_gib_is_not_rounded_up(tmp_path):
     assert "FIX  Free disk 100.0 GB on " in out
 
 
+# ── ports ────────────────────────────────────────────────────────────────────
+
+
+# ── sysbox probe ─────────────────────────────────────────────────────────────
+
+
 # ── vloopback: size-limited volumes (ticket-0331) ────────────────────────────
 # ticket-0331, 22 Sep 2026: the fix support sent the provider by hand was "give the plugin an absolute data
 # directory, then run `docker volume create -d vloopback -o size=10G t && docker volume inspect t`; the
@@ -357,11 +378,27 @@ def _plugin_changes(tmp_path: Path) -> list[str]:
     return [call for call in _docker_calls(tmp_path) if call.startswith(MUTATIONS)]
 
 
+@pytest.mark.parametrize("seed", ["absent", "relative"])
+def test_check_asks_for_the_disk_limit_where_rentals_get_none(tmp_path, seed):
+    rc, out, fix = run_check(
+        tmp_path, "check_vloopback", env={"STUB_VLOOPBACK": seed, "STUB_STORAGE_OPT_UNSUPPORTED": "1"}
+    )
+    assert rc == 1 and fix == 1
+    assert "FIX  Docker here cannot limit a container's disk" in out
+    assert "sudo lium gpu-splitting setup --device" in out
+    assert not [call for call in _docker_calls(tmp_path) if call.startswith(("volume ", "plugin "))]
+
+
 def test_install_mode_does_not_change_the_plugin_under_a_rental(tmp_path):
     proc = run_script(tmp_path, env={"STUB_VLOOPBACK": "relative", "STUB_PODS": "pod_4f1c"})
     assert proc.returncode == 1
     assert "do not work on this host: rentals found (pod_4f1c)" in proc.stdout
     assert _plugin_changes(tmp_path) == []
+
+# ── fuse3 ───────────────────────────────────────────────────────────────────
+
+
+# ── the script as a provider runs it ─────────────────────────────────────────
 
 
 def test_install_mode_stops_on_a_stopped_rental(tmp_path):
@@ -381,3 +418,8 @@ def test_install_mode_loads_the_iptables_modules_itself(tmp_path):
     assert "The preflight printed" not in proc.stdout
     conf = tmp_path / "root" / "etc" / "modules-load.d" / "lium-iptables.conf"
     assert conf.read_text() == "ip_tables\niptable_nat\niptable_filter\n"
+
+
+# ── failure diagnostics (the block printed when the verify container does not start) ─────────
+
+
