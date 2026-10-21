@@ -386,7 +386,6 @@ class Settings(BaseSettings):
     #
     # Item 1 — surface the kernel (procfs) GPU verdict the validator already computes and throws
     # away, and refuse the spoofable nvidia-smi XML fallback when it disagrees with the kernel map.
-    KERNEL_GPU_VERDICT_CHECK_ENABLED: bool = Field(env="KERNEL_GPU_VERDICT_CHECK_ENABLED", default=True)
     KERNEL_GPU_VERDICT_ENFORCEMENT_ENABLED: bool = Field(env="KERNEL_GPU_VERDICT_ENFORCEMENT_ENABLED", default=False)
     # DAH-2662 — match provider/GPU bans against the kernel's GPU UUIDs (/proc/driver/nvidia) as well
     # as the host-reported ones. Shadow by default: the kernel list is read, recorded on specs and
