@@ -136,21 +136,6 @@ class InflightBackendCreate(BaseModel):
     started_at_unix_seconds: int
 
 
-class _PassThroughLock:
-    """`RedisService.lock` with REDIS_COMMAND_LOCK_ENABLED off (DAH-3006): every `async with
-    self.lock:` site stays as it is, but nothing waits — each call is one atomic Redis command
-    and the pool bounds the concurrency."""
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
-
-    def locked(self) -> bool:
-        return False
-
-
 class RedisWrite(NamedTuple):
     """One queued write of a `RedisWrites` batch."""
 
@@ -222,7 +207,7 @@ class RedisService:
                 retry_on_error=[redis.exceptions.ConnectionError, redis.exceptions.TimeoutError],
             )
         )
-        self.lock = asyncio.Lock() if settings.REDIS_COMMAND_LOCK_ENABLED else _PassThroughLock()
+        self.lock = asyncio.Lock()
 
     @asynccontextmanager
     async def acquire_executor_lock(
