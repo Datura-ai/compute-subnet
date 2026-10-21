@@ -159,6 +159,7 @@ from services.storage_operations import (
     start_storage_operation,
     supports_bootstrap_restore,
     supports_storage_operation,
+    upload_secrets_file,
     wait_for_storage_operation,
 )
 from services.task.runner import SSHCommandRunner
@@ -9353,16 +9354,12 @@ class DockerService:
             restore.restore_path or local_volume_path,
             "--backup-source-path",
             restore.legacy_object_key or "",
-            "--auth-token",
-            restore.auth_token,
+            "--secrets-file",
+            await upload_secrets_file(ssh_client, restore.auth_token, restore.backup_volume_info),
             "--restore-log-id",
             restore.restore_log_id,
             "--backup-volume-name",
             restore.backup_volume_info.name,
-            "--backup-volume-iam_user_access_key",
-            restore.backup_volume_info.iam_user_access_key,
-            "--backup-volume-iam_user_secret_key",
-            restore.backup_volume_info.iam_user_secret_key,
             "--target-volume-path",
             local_volume_path,
         ]
