@@ -801,7 +801,9 @@ async def test_a_failed_mark_delete_does_not_hide_the_next_incident(context_fact
 
 
 @pytest.mark.asyncio
-async def test_the_pipeline_check_with_default_settings_posts_nothing(context_factory, monkeypatch):
+async def test_the_pipeline_check_with_default_settings_logs_the_drop_and_posts_nothing(
+    context_factory, monkeypatch
+):
     monkeypatch.delenv("RENTED_GPU_DROP_CHECK_ENABLED", raising=False)
     defaults = type(rented_gpu_drop.settings)(_env_file=None)
     check = next(c for c in PipelineFactory.build_checks() if isinstance(c, RentedGpuDropCheck))
@@ -812,7 +814,8 @@ async def test_the_pipeline_check_with_default_settings_posts_nothing(context_fa
             _ctx(context_factory, services, listed=UUIDS[:5], scrape_error="NVMLError(999)")
         )
 
-    assert result.passed and result.event.reason_code == Msg.DISABLED.reason
+    # log mode: the drop is judged and logged, nothing is posted or marked
+    assert result.passed and result.event.reason_code == Msg.DROP.reason
     services.backend.report_rented_gpu_drop.assert_not_awaited()
     assert services.redis.calls == 0 and services.redis.store == {}
 

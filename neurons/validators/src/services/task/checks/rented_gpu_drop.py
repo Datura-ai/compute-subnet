@@ -336,11 +336,6 @@ class RentedGpuDropCheck:
     fatal = False
 
     async def run(self, ctx: Context) -> CheckResult:
-        if not settings.RENTED_GPU_DROP_CHECK_ENABLED:
-            return CheckResult(
-                passed=True, event=render_message(Msg.DISABLED, ctx=ctx, check_id=self.check_id)
-            )
-
         rented_data = ctx.state.rented_data
         rented_executor = rented_data.executors.get(ctx.executor.uuid) if rented_data else None
         # The executor UUID is miner-reported: a rental held under another miner's hotkey is not this node's.
@@ -374,9 +369,10 @@ class RentedGpuDropCheck:
         )
 
         now_iso = datetime.now(UTC).isoformat()
-        # A dry run shares Redis with the live validator, so it leaves the live incidents alone.
+        # A dry run shares Redis with the live validator, so it leaves the live incidents alone; with the
+        # check off the drop is only logged (log mode), so prod logs show what it would report.
         outcomes: list[dict[str, Any]] = []
-        if not settings.DRY_RUN:
+        if not settings.DRY_RUN and settings.RENTED_GPU_DROP_CHECK_ENABLED:
             for pod in pods:
                 outcome = await self._track_pod(
                     ctx, pod, drop, rented_total, nvml_count, now_iso, broken_uuids is None
