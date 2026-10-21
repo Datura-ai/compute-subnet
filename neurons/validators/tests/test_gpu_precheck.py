@@ -265,6 +265,7 @@ _EXPECTED_WINDOWS: dict[str, list[tuple[int, int]]] = {
     "NVIDIA H800 NVL": [(86630, 101069)],
     "NVIDIA H800 PCIe": [(73728, 86016)],
     "NVIDIA GeForce RTX 5090": [(29491, 34406)],
+    "NVIDIA GeForce RTX 5090 D": [(29491, 34406)],
     "NVIDIA GeForce RTX 5080": [(14746, 17203)],
     "NVIDIA GeForce RTX 5070 Ti": [(14746, 17203)],
     "NVIDIA GeForce RTX 5070": [(11059, 12902)],
