@@ -268,9 +268,6 @@ class Settings(BaseSettings):
     # the EMA moves as before and the would-be hold is only logged.
     VERIFYX_EMA_HOLD_ENABLED: bool = Field(env="VERIFYX_EMA_HOLD_ENABLED", default=False)
     ENABLE_INSPECTOR: bool = True
-    # DAH-2794: feed the obfuscated scrape to the executor's own interpreter over stdin
-    # instead of freezing it into a ~13 MB onefile and uploading that every cycle.
-    ENABLE_SCRAPE_SOURCE_DELIVERY: bool = Field(env="ENABLE_SCRAPE_SOURCE_DELIVERY", default=False)
     INSPECTOR_ENSURE_COLLECTOR_ON_RENTED_CHECK: bool = Field(
         env="INSPECTOR_ENSURE_COLLECTOR_ON_RENTED_CHECK",
         default=True,
