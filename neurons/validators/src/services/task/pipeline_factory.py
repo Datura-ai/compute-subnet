@@ -247,11 +247,7 @@ class PipelineFactory:
                 # DAH-2794: an executor that can run the source needs no upload at all. The
                 # binary stays built because the miner picks the executor image, and one that
                 # predates a dependency the scrape imports has to keep the self-contained path.
-                machine_scrape_source=(
-                    encrypted_files.machine_scrape_source
-                    if settings.ENABLE_SCRAPE_SOURCE_DELIVERY
-                    else None
-                ),
+                machine_scrape_source=encrypted_files.machine_scrape_source,
                 machine_scrape_timeout=JOB_LENGTH,
                 obfuscation_keys=encrypted_files.all_keys,
                 default_docker_image_digests=default_docker_image_digests,
