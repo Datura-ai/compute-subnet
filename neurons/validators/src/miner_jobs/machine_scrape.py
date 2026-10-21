@@ -2050,6 +2050,13 @@ def get_machine_specs():
             "gpu_details": []
         }
 
+        # GPU processes of every card before any power limit: the validator caps a PEARL filler's GPUs
+        # before it creates the container, so a filler listed here was capped before the limits below
+        # were read, and the backend's power-cap guard judges only such runs (DAH-4941).
+        for i in range(device_count):
+            for proc in nvmlDeviceGetComputeRunningProcesses_v2(nvmlDeviceGetHandleByIndex(i)):
+                gpu_process_ids.add(proc.c_nvmlProcessInfo_v2_t_pid)
+
         for i in range(device_count):
             handle = nvmlDeviceGetHandleByIndex(i)
             cuda_compute_capability = nvmlDeviceGetCudaComputeCapability(handle)
@@ -2101,11 +2108,6 @@ def get_machine_specs():
                 }
             )
 
-            processes = nvmlDeviceGetComputeRunningProcesses_v2(handle)
-
-            # Collect process IDs
-            for proc in processes:
-                gpu_process_ids.add(proc.c_nvmlProcessInfo_v2_t_pid)
 
         nvmlShutdown()
     except Exception as exc:
