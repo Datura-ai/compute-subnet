@@ -799,6 +799,18 @@ async def _rented_meanwhile(ctx: Context, fillers_beside: frozenset[str]) -> str
     return ""
 
 
+def _probe_memory_gb(ctx: Context) -> int | None:
+    """The memory limit the backend would send for a whole-node rental: (host RAM less the reserve) in GiB.
+
+    Without it create_container takes the path for a rental sent with no memory limit, which reads host
+    RAM and the /dev/nvidia* count, a path no renter's pod takes (taiberium on lium-io#1714). None when the
+    scraped specs carry no RAM total; create_container then sizes the limit itself as before."""
+    from services.docker_service import DockerService  # docker_service imports this package
+
+    total_kib = ((ctx.state.specs or {}).get("ram") or {}).get("total")
+    return DockerService._rental_memory_gb(None, int(total_kib)) if total_kib else None
+
+
 def _probe_payload(
     ctx: Context, *, pod_id: str, image_ref: str, public_key: str
 ) -> ContainerCreateRequest:
@@ -811,6 +823,7 @@ def _probe_payload(
         docker_image=image_ref,
         user_public_keys=[public_key],
         gpu_uuids=_gpu_uuids(ctx),
+        memory_gb=_probe_memory_gb(ctx),
         is_sysbox=ctx.state.sysbox_runtime,
         # the default renter image runs its own sshd; the same flag the backend sets for it
         ships_sshd=True,

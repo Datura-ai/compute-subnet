@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import time
 from contextlib import contextmanager
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncssh
@@ -278,6 +279,7 @@ def make_probe_context(
         specs={
             "verified_ports": [ext for _, ext in port_pairs],
             "gpu": {"driver": "580.65.06", "details": GPU_DETAILS},
+            "ram": {"total": 64 * 1024 * 1024},
         },
         gpu_model="RTX 5090",
         gpu_count=2,
@@ -406,8 +408,6 @@ def renter_path(
         yield seen
 
 
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "rented,expected_reason",
@@ -425,8 +425,6 @@ async def test_never_rents_beside_a_renter_or_a_filler(rented, expected_reason):
     assert result.passed and result.event.reason_code == Msg.SKIPPED.reason
     assert result.event.what_we_saw["reason"] == expected_reason
     assert docker.create_calls == []
-
-
 
 
 @pytest.mark.asyncio
@@ -766,6 +764,9 @@ async def test_create_payload_is_what_a_renter_gets():
     assert private_key == ctx.executor_ssh_private_key_encrypted
     assert payload.docker_image == IMAGE.image_ref
     assert payload.gpu_uuids == ["GPU-aaaa", "GPU-bbbb"]
+    # the backend's whole-node limit (64 GiB less the 4 GiB reserve), so create_container never takes
+    # the no-memory-limit path that reads the host's /dev/nvidia* count (taiberium on #1714)
+    assert payload.memory_gb == 60
     assert (
         payload.ships_sshd is True and payload.is_sysbox is True and payload.enable_jupyter is False
     )
@@ -780,6 +781,12 @@ async def test_create_payload_is_what_a_renter_gets():
         login_key.export_public_key().decode().split()[:2]
         == payload.user_public_keys[0].split()[:2]
     )
+
+
+def test_no_ram_total_in_the_specs_sends_no_memory_limit():
+    ctx, _, _ = make_probe_context()
+    no_ram = ctx.model_copy(update={"state": replace(ctx.state, specs={})})
+    assert module._probe_memory_gb(no_ram) is None
 
 
 @pytest.mark.asyncio
@@ -1451,16 +1458,6 @@ async def test_pipeline_carries_the_failed_step_to_the_reset_evidence():
         STEP_SSHD_LISTEN,
         STEP_TEARDOWN,
     ]
-
-
-
-
-
-
-
-
-
-
 
 
 @pytest.mark.asyncio
