@@ -39,7 +39,6 @@ import asyncssh
 import pytest
 from core.config import settings
 from payload_models.payloads import WorkloadKind
-from services import nvidia_devices as nd
 from services.docker_service import (
     DOCKER_FILLER_VOLUME_LS_NAME_DRIVER_CMD,
     DockerService,
@@ -767,8 +766,7 @@ async def test_image_label_failed_section_inspects_itself(docker_service):
 
 
 @pytest.mark.asyncio
-async def test_gpu_config_with_probe_matches_live_partial_rental(monkeypatch):
-    monkeypatch.setattr(nd.settings, "KERNEL_GPU_VERDICT_CHECK_ENABLED", False)
+async def test_gpu_config_with_probe_matches_live_partial_rental():
     proc = "GPU-1, 0\nGPU-2, 1\n"
     live = _ssh(_ssh_result(stdout=proc), _ssh_result(stdout="/dev/nvidiactl\n/dev/nvidia-uvm\n"))
     from_live = await build_gpu_docker_config_for_executor(live, ["GPU-2"])
@@ -789,8 +787,7 @@ async def test_gpu_config_with_probe_matches_live_partial_rental(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_gpu_config_with_probe_whole_host_gets_the_whole_host_nodes(monkeypatch):
-    monkeypatch.setattr(nd.settings, "KERNEL_GPU_VERDICT_CHECK_ENABLED", False)
+async def test_gpu_config_with_probe_whole_host_gets_the_whole_host_nodes():
     probe = _probe(
         gpu_minor_map_stdout="GPU-1, 0\nGPU-2, 1\n",
         gpu_device_nodes=("/dev/nvidia0", "/dev/nvidia1"),
@@ -813,8 +810,7 @@ async def test_gpu_config_with_probe_whole_host_gets_the_whole_host_nodes(monkey
 
 
 @pytest.mark.asyncio
-async def test_gpu_config_with_probe_missing_uuid_still_consults_xml_live(monkeypatch):
-    monkeypatch.setattr(nd.settings, "KERNEL_GPU_VERDICT_CHECK_ENABLED", False)
+async def test_gpu_config_with_probe_missing_uuid_still_consults_xml_live():
     probe = _probe(gpu_minor_map_stdout="GPU-1, 0\n", shared_nodes=("/dev/nvidiactl",))
     ssh = _ssh(_ssh_result(exit_status=1, stderr="no nvidia-smi"))
     config = await build_gpu_docker_config_for_executor(ssh, ["GPU-9"], host_probe=probe)
@@ -824,8 +820,7 @@ async def test_gpu_config_with_probe_missing_uuid_still_consults_xml_live(monkey
 
 
 @pytest.mark.asyncio
-async def test_gpu_config_failed_proc_section_queries_live(monkeypatch):
-    monkeypatch.setattr(nd.settings, "KERNEL_GPU_VERDICT_CHECK_ENABLED", False)
+async def test_gpu_config_failed_proc_section_queries_live():
     probe = _probe(gpu_minor_map_stdout=None, shared_nodes=("/dev/nvidiactl",))
     ssh = _ssh(_ssh_result(stdout="GPU-1, 0\n"))
     config = await build_gpu_docker_config_for_executor(ssh, ["GPU-1"], host_probe=probe)
