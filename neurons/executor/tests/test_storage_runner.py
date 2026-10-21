@@ -1542,7 +1542,7 @@ def _renewing_runner(
                 self.stdout = iter(['{"message_type":"status","percent_done":0.5}\n', EXPIRED_LINE])
             elif first_line and len(environments) == 1:
                 summary = json.dumps({"message_type": "summary", "snapshot_id": SNAPSHOT_ID})
-                self.stdout = iter([first_line, summary + "\n"])
+                self.stdout = iter([*first_line.splitlines(keepends=True), summary + "\n"])
 
     monkeypatch.setattr("storage.restic.subprocess.Popen", _Popen)
     monkeypatch.setattr(runner, "_terminate_process", MagicMock())
@@ -1571,6 +1571,21 @@ def _renewing_runner(
             '"during":"archival","item":"/workspace/ExpiredToken.java"}\n',
             0,
         ),
+        # restic keeps relative source paths: removing the absolute item leaves "open ExpiredToken.java: ..."
+        (
+            json.dumps(
+                {
+                    "message_type": "error",
+                    "during": "archival",
+                    "item": "/workspace/ExpiredToken.java",
+                    "error": {"message": "/workspace/ExpiredToken.java: open ExpiredToken.java: permission denied"},
+                }
+            )
+            + "\n",
+            0,
+        ),
+        # expiry while restic removes its lock after the snapshot was saved
+        (json.dumps({"message_type": "summary", "snapshot_id": SNAPSHOT_ID}) + "\n" + EXPIRED_LINE, 0),
     ],
 )
 def test_backup_renews_expired_credentials_and_reruns(

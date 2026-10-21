@@ -530,7 +530,8 @@ class ResticStorageRunner:
                 try:
                     payload = json.loads(line)
                 except json.JSONDecodeError:
-                    self._raise_if_credentials_expired(line)
+                    if not _snapshot_id(summary):
+                        self._raise_if_credentials_expired(line)
                     self._events.diagnostic(_redact(line, self._secret_values()))
                     continue
                 if not isinstance(payload, dict):
@@ -538,7 +539,9 @@ class ResticStorageRunner:
                     continue
                 if payload.get("message_type") == "exit_error" and payload.get("message") == SNAPSHOT_EMPTY_MESSAGE:
                     self._snapshot_empty = True
-                self._raise_if_credentials_expired(_error_text(payload))
+                # an expiry after the summary (restic's lock cleanup) must not rerun a finished backup
+                if not _snapshot_id(summary):
+                    self._raise_if_credentials_expired(_error_text(payload))
                 self._events.restic_event(payload)
                 self._events.heartbeat_if_due()
                 self._cancel_if_requested(process)
@@ -795,9 +798,10 @@ def _is_retryable_repository_failure(failure_detail: str) -> bool:
 
 
 def _credentials_expired(error_text: str) -> bool:
-    # S3: "ExpiredToken: The provided token has expired."; minio-go often prints only the message
-    normalized = "".join(error_text.casefold().split())
-    return "expiredtoken" in normalized or "theprovidedtokenhasexpired" in normalized
+    # S3: "ExpiredToken: The provided token has expired."; minio-go often prints only the message.
+    # Only the last ": " component counts, so a file name like "open ExpiredToken.java: ..." never matches.
+    normalized = "".join(error_text.rsplit(":", 1)[-1].casefold().split()).rstrip(".")
+    return normalized in ("expiredtoken", "theprovidedtokenhasexpired")
 
 
 def _error_text(payload: Mapping[str, object]) -> str:
