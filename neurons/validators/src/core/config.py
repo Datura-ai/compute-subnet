@@ -443,13 +443,10 @@ class Settings(BaseSettings):
     )
     # Cross-check the reported GPU count and UUIDs against the kernel's GPU list
     # (/proc/driver/nvidia/gpus, the same read the ban checks make). CHECK_ENABLED evaluates and
-    # logs a verdict every validation (check_id gpu.validate.kernel_count) without changing the
-    # result. ENFORCEMENT_ENABLED makes a kernel list that is present and shorter than the
-    # reported GPU count fail the validation (GPU_KERNEL_COUNT_MISMATCH); a missing kernel list
-    # never fails. Enforcement is off by default: the verdict is logged (enforced=false) and
-    # enforcement goes on by this flag after a review of one day of prod logs (owner, 15 Oct).
+    # logs a verdict every validation (check_id gpu.validate.kernel_count); a kernel list that is
+    # present and shorter than the reported GPU count fails the validation
+    # (GPU_KERNEL_COUNT_MISMATCH). A missing kernel list never fails.
     GPU_KERNEL_COUNT_CHECK_ENABLED: bool = Field(env="GPU_KERNEL_COUNT_CHECK_ENABLED", default=True)
-    GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED: bool = Field(env="GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED", default=False)
     # Item 2a — corroborate the advertised CPU(s) count against sources the lscpu wrapper does not
     # author (/proc/cpuinfo, /sys present population, docker NCPU).
     CPU_TRUTH_CHECK_ENABLED: bool = Field(env="CPU_TRUTH_CHECK_ENABLED", default=True)
