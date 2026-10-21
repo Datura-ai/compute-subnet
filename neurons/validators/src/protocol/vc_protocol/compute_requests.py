@@ -188,6 +188,9 @@ class RentedExecutorsResponse(BaseModel):
     # executor_ids whose rentals drew hardware-fault reports from at least two distinct renters in the
     # backend's report window (DAH-4482): each owes a post-rental GPU recheck. Additive with an empty default.
     renter_hardware_fault_executor_ids: list[str] = []
+    # executor_ids inside a running provider maintenance window (DAH-4709): no incentive from either pool,
+    # rented or not. Additive with an empty default: an older backend names nobody.
+    maintenance_executor_ids: list[str] = []
     # executor_id → "miner" | "lium"; absent = no default job. Parsed leniently as str for
     # forward-compatibility (a future owner value must not break parsing of the whole response).
     default_job_owner_by_executor: dict[str, str] = {}

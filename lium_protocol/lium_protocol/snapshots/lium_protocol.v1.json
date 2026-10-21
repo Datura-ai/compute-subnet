@@ -4704,6 +4704,14 @@
           "title": "Gpu Splitting Config",
           "type": "object"
         },
+        "maintenance_executor_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Maintenance Executor Ids",
+          "type": "array"
+        },
         "manual_rental_executors": {
           "additionalProperties": {
             "$ref": "#/$defs/ManualRentalInfo"
@@ -5790,7 +5798,7 @@
       "$ref": "#/$defs/RentedExecutorsResponse"
     }
   },
-  "protocol_version": "1.12.0",
+  "protocol_version": "1.13.0",
   "socket_replies": {
     "RentedMachineResponse": {
       "$ref": "#/$defs/RentedMachineResponse"

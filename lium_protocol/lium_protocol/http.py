@@ -95,6 +95,8 @@ class RentedExecutorsResponse(pydantic.BaseModel):
     provider_email_held_executor_ids: list[str] = []
     # executor_ids whose rentals drew hardware-fault reports from at least two distinct renters
     renter_hardware_fault_executor_ids: list[str] = []
+    # executor_ids inside a running provider maintenance window: no incentive from either pool, rented or not
+    maintenance_executor_ids: list[str] = []
     default_job_owner_by_executor: dict[str, str] = {}  # executor_id → "miner" | "lium"
     manual_rental_executors: dict[str, ManualRentalInfo] = {}
     # average filler revenue per GPU configuration, read by the spot-node pay and the secure floor
