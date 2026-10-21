@@ -121,7 +121,7 @@ def make_ctx(*answers: str, redis=None, rented_data=None):
     return ctx, runner, redis
 
 
-def test_defaults_shadow_and_bounded():
+def test_defaults_are_bounded():
     fields = type(module.settings).model_fields
     assert fields["CONTAINER_DOWNLOAD_SPEED_CHECK_ENABLED"].default is True
     assert fields["CONTAINER_DOWNLOAD_SPEED_MIN_MBPS"].default == 10.0
