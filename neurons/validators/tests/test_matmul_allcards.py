@@ -5,7 +5,7 @@ RED→GREEN: before this change the work-proof ran ONE process with no device se
 own challenge, pinned with CUDA_VISIBLE_DEVICES=<index>, timed in aggregate on the validator:
   - a 1-real-card host under an 8-GPU claim fails device selection → fails under enforcement;
   - an honest 8-card host passes;
-  - an aggregate wall-clock over threshold fails under enforcement, only emits under shadow;
+  - an aggregate wall-clock over threshold fails;
   - a single-card (legacy) executor is never judged by the all-cards path (probe returns None).
 """
 import asyncio
@@ -60,16 +60,13 @@ def _ssh(real_cards: int):
     return SimpleNamespace(run=run)
 
 
-def _flags(monkeypatch, *, enforce):
+def _flags(monkeypatch):
     monkeypatch.setattr(mvs.settings, "MATMUL_ALLCARDS_CHECK_ENABLED", True, raising=False)
-    monkeypatch.setattr(
-        mvs.settings, "MATMUL_ALLCARDS_ENFORCEMENT_ENABLED", enforce, raising=False
-    )
 
 
 @pytest.mark.asyncio
 async def test_spoof_one_card_under_eight_claim_fails_under_enforcement(svc, monkeypatch):
-    _flags(monkeypatch, enforce=True)
+    _flags(monkeypatch)
     result = await svc.validate_gpu_model_and_process_job(
         ssh_client=_ssh(real_cards=1),
         executor_info=_executor(),
@@ -82,7 +79,7 @@ async def test_spoof_one_card_under_eight_claim_fails_under_enforcement(svc, mon
 
 @pytest.mark.asyncio
 async def test_a_filler_sample_skips_the_all_cards_probe(svc, monkeypatch):
-    _flags(monkeypatch, enforce=True)
+    _flags(monkeypatch)
     result = await svc.validate_gpu_model_and_process_job(
         ssh_client=_ssh(real_cards=1),
         executor_info=_executor(),
@@ -104,7 +101,7 @@ async def test_honest_eight_cards_probe_passes(svc):
 
 @pytest.mark.asyncio
 async def test_wall_clock_over_threshold_fails_under_enforcement(svc, monkeypatch):
-    _flags(monkeypatch, enforce=True)
+    _flags(monkeypatch)
     # -1s threshold: any real elapsed trips it even though every card ran fine (models serialisation).
     monkeypatch.setattr(mvs, "MATMUL_ALLCARDS_WALL_CLOCK_SECONDS", -1, raising=False)
     result = await svc.validate_gpu_model_and_process_job(
@@ -115,23 +112,6 @@ async def test_wall_clock_over_threshold_fails_under_enforcement(svc, monkeypatc
     )
     assert result.success is False
     assert "wall-clock" in result.error_message
-
-
-@pytest.mark.asyncio
-async def test_wall_clock_over_threshold_only_emits_under_shadow(svc, monkeypatch, caplog):
-    _flags(monkeypatch, enforce=False)
-    monkeypatch.setattr(mvs, "MATMUL_ALLCARDS_WALL_CLOCK_SECONDS", -1, raising=False)
-    with caplog.at_level("WARNING"):
-        result = await svc.validate_gpu_model_and_process_job(
-            ssh_client=_ssh(real_cards=8),
-            executor_info=_executor(),
-            default_extra={},
-            machine_spec=_spec(8),
-        )
-    # shadow: the probe never turns into a returned all-cards failure.
-    assert not result.error_message.startswith("All-cards GPU work-proof failed")
-    # but the observation is emitted.
-    assert any("All-cards GPU work-proof" in rec.message for rec in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -198,7 +178,7 @@ async def test_card_fan_out_stays_under_sshd_max_sessions(svc):
 async def test_timeout_sweeps_orphan_matmul(svc, monkeypatch):
     # Finding 2: a timed-out per-card run must trigger _kill_remote_matmul, or the orphaned remote
     # process keeps holding VRAM into the fatal single-card matmul that runs next in the same call.
-    _flags(monkeypatch, enforce=False)
+    _flags(monkeypatch)
     killed = AsyncMock()
     monkeypatch.setattr(svc, "_kill_remote_matmul", killed)
 
@@ -216,7 +196,7 @@ async def test_timeout_sweeps_orphan_matmul(svc, monkeypatch):
 async def test_ssh_error_sweeps_orphan_matmul(svc, monkeypatch):
     # A channel that dies mid-run leaves the remote matmul untouched, exactly like a timeout — and
     # the fatal single-card matmul that follows lands on device 0 and OOMs against it.
-    _flags(monkeypatch, enforce=False)
+    _flags(monkeypatch)
     killed = AsyncMock()
     monkeypatch.setattr(svc, "_kill_remote_matmul", killed)
 
@@ -234,7 +214,7 @@ async def test_ssh_error_sweeps_orphan_matmul(svc, monkeypatch):
 async def test_a_plain_card_failure_does_not_sweep(svc, monkeypatch):
     # A card that answered (non-zero exit) has no process left to kill; sweeping there would pkill
     # the fatal single-card matmul of a concurrent validator run on the same host for nothing.
-    _flags(monkeypatch, enforce=False)
+    _flags(monkeypatch)
     killed = AsyncMock()
     monkeypatch.setattr(svc, "_kill_remote_matmul", killed)
 

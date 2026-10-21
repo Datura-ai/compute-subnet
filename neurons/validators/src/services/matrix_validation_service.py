@@ -374,7 +374,7 @@ class ValidationService:
             "over_wall_clock": over_wall_clock,
             "per_card": per_card,
             "passed": passed,
-            "enforced": settings.MATMUL_ALLCARDS_ENFORCEMENT_ENABLED,
+            "enforced": True,
         }
         log = logger.info if passed else logger.warning
         log(_m("All-cards GPU work-proof", extra=get_extra_info(log_extra)))
@@ -705,9 +705,8 @@ class ValidationService:
         # The SSH transport of the capability matmul: prepare_matmul_challenge → one remote
         # `decrypt_challenge.py` run → evaluate_matmul_output. The local transport (checks/
         # local_verify.py) calls the same two functions around `POST /verify`.
-        # DAH-2671 item 3: all-claimed-cards work-proof. Shadow (MATMUL_ALLCARDS_CHECK_ENABLED
-        # without enforcement) logs timing + per-card outcome and NEVER changes the returned result;
-        # enforcement fails a count lie (device-selection error / OOM / serialised aggregate
+        # DAH-2671 item 3: all-claimed-cards work-proof (MATMUL_ALLCARDS_CHECK_ENABLED). It fails a
+        # count lie (device-selection error / OOM / serialised aggregate
         # wall-clock). Single-card / unknown-model hosts skip it (probe returns None), which also
         # keeps a not-yet-relevant fleet — and the legacy single-card path below — unchanged.
         # a filler-node sample runs beside the filler, so it never probes every card
@@ -715,11 +714,7 @@ class ValidationService:
             all_cards = await self.probe_all_claimed_cards(
                 ssh_client, executor_info, default_extra, machine_spec
             )
-            if (
-                settings.MATMUL_ALLCARDS_ENFORCEMENT_ENABLED
-                and all_cards is not None
-                and not all_cards.passed
-            ):
+            if all_cards is not None and not all_cards.passed:
                 return ValidationResult(
                     success=False,
                     error_message=f"All-cards GPU work-proof failed: {all_cards.failure_reason}",
