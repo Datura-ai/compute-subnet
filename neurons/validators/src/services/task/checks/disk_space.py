@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from services.const import DEFAULT_JOB_OWNER_LIUM, MAX_DISK_UTILIZATION_PERCENT, MIN_FREE_DISK_GB
+from services.const import MAX_DISK_UTILIZATION_PERCENT, MIN_FREE_DISK_GB
 
 from ..messages import DiskSpaceMessages as Msg
 from ..messages import render_message
@@ -25,8 +25,7 @@ class DiskSpaceCheck:
 
     Pure data on ``specs.hard_disk`` (free in KB, utilization in percent) as VerifyX leaves it, so it
     sits right after VerifyXCheck: the published figure is the one judged. Only idle nodes get here
-    (TenantEnforcementCheck halts a rented one); a live rental, or Lium's own Default Job or filler
-    on the node, is never failed for the disk it uses.
+    (TenantEnforcementCheck halts a rented one); a live rental is never failed for its disk.
     """
 
     check_id = "executor.validate.disk_space"
@@ -65,18 +64,12 @@ class DiskSpaceCheck:
             ctx, rented_data.executors.get(ctx.executor.uuid) if rented_data else None
         )
         if rental and rental.pods:
-            impact = "Proceed; a live rental is not failed"
-        elif rented_data and (
-            rented_data.get_default_job_owner(ctx.executor.uuid) == DEFAULT_JOB_OWNER_LIUM
-            or rented_data.get_filler_containers(ctx.executor.uuid)
-        ):
-            # the disk may be held by Lium's own Default Job / filler; the node keeps its idle score
-            impact = "Proceed; Lium's Default Job may hold this disk"
-        else:
-            impact = None
-        if impact:
             event = render_message(
-                template, ctx=ctx, check_id=self.check_id, what=what, impact=impact
+                template,
+                ctx=ctx,
+                check_id=self.check_id,
+                what=what,
+                impact="Proceed; a live rental is not failed",
             )
             return CheckResult(passed=True, event=event)
         return CheckResult(

@@ -81,20 +81,19 @@ def test_disk_space_runs_right_after_verifyx_in_both_pipelines():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "fields, exempt",
+    "fields",
     [
-        ({"default_job_owner_by_executor": {"executor-123": "lium"}}, True),
-        ({"all_filler_containers_by_executor": {"executor-123": ["filler_run-1"]}}, True),
-        ({"default_job_owner_by_executor": {"executor-123": "miner"}}, False),
-        ({"default_job_owner_by_executor": {"other-executor": "lium"}}, False),
+        {"default_job_owner_by_executor": {"executor-123": "lium"}},
+        {"all_filler_containers_by_executor": {"executor-123": ["filler_run-1"]}},
+        {"default_job_owner_by_executor": {"executor-123": "miner"}},
     ],
 )
-async def test_lium_default_job_is_not_failed_for_its_disk(context_factory, fields, exempt):
-    """An idle node running Lium's own Default Job or filler keeps its score; a miner's own job does not."""
+async def test_default_job_or_filler_does_not_exempt_a_full_disk(context_factory, fields):
+    """Only a live rental is exempt; an idle node with a Default Job or filler still fails."""
     rented_data = RentedExecutorsResponse(executors={}, **fields)
     ctx = context_factory(state=build_state(specs=_disk(95, 500), rented_data=rented_data))
 
     result = await DiskSpaceCheck().run(ctx)
 
-    assert result.passed is exempt
+    assert result.passed is False
     assert result.event.reason_code == Msg.TOO_FULL.reason
