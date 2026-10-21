@@ -46,7 +46,7 @@ class CapabilityCheck:
             )
             return CheckResult(passed=False, event=event)
 
-        filler_container = _get_filler_only_container(ctx)
+        filler_container = get_filler_only_container(ctx)
         if filler_container:
             what_filler: dict = {"filler_container": filler_container}
             if _filler_matmul_sample_due(ctx):
@@ -367,7 +367,7 @@ def _sample_error_kind(result: ValidationResult) -> str:
     return "no_answer"  # no CUDA device / CUDA not ready
 
 
-def _get_filler_only_container(ctx: Context) -> str | None:
+def get_filler_only_container(ctx: Context) -> str | None:
     rented_data = ctx.state.rented_data
     if not rented_data:
         return None

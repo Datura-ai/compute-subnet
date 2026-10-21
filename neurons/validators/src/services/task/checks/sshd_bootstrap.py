@@ -99,7 +99,7 @@ class SshdBootstrapCheck:
             and rented_data
             and rented_data.get_default_job_owner(ctx.executor.uuid) == DEFAULT_JOB_OWNER_LIUM
         ):
-            what["removed_fillers"] = await self._remove_lium_fillers(
+            what["removed_fillers"] = await remove_lium_fillers(
                 ctx, rented_data.get_filler_containers(ctx.executor.uuid)
             )
         return CheckResult(
@@ -159,24 +159,25 @@ class SshdBootstrapCheck:
                 return True
         return False
 
-    async def _remove_lium_fillers(self, ctx: Context, fillers: list[str]) -> list[str]:
-        """`docker rm -fv` each filler, then report it missing so the backend closes its run; never raises."""
-        removed: list[str] = []
-        for name in fillers:
-            try:
-                result = await ctx.ssh.run(DockerCommand.remove_with_volumes(shlex.quote(name)), timeout=60)
-                if result.exit_status != 0:
-                    continue
-                removed.append(name)
-                await ctx.services.backend.get_filler_run_active(
-                    name.removeprefix(FILLER_CONTAINER_PREFIX), container_missing=True
-                )
-            except Exception:
-                logger.warning(
-                    _m(
-                        "Filler on a node failing the sshd check could not be removed",
-                        extra=get_extra_info({**ctx.default_extra, "container_name": name}),
-                    ),
-                    exc_info=True,
-                )
-        return removed
+
+async def remove_lium_fillers(ctx: Context, fillers: list[str]) -> list[str]:
+    """`docker rm -fv` each filler, then report it missing so the backend closes its run; never raises."""
+    removed: list[str] = []
+    for name in fillers:
+        try:
+            result = await ctx.ssh.run(DockerCommand.remove_with_volumes(shlex.quote(name)), timeout=60)
+            if result.exit_status != 0:
+                continue
+            removed.append(name)
+            await ctx.services.backend.get_filler_run_active(
+                name.removeprefix(FILLER_CONTAINER_PREFIX), container_missing=True
+            )
+        except Exception:
+            logger.warning(
+                _m(
+                    "Filler could not be removed",
+                    extra=get_extra_info({**ctx.default_extra, "container_name": name}),
+                ),
+                exc_info=True,
+            )
+    return removed

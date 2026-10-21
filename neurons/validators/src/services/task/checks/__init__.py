@@ -28,8 +28,10 @@ from .machine_spec_scrape import MachineSpecScrapeCheck
 from .nvml_digest import NvmlDigestCheck
 from .pinned_memory_probe import PinnedMemoryProbeCheck
 from .port_connectivity import PortConnectivityCheck
+from .post_rental_gpu_recheck import PostRentalGpuRecheckCheck
 from .provider_side_load import ProviderSideLoadCheck
 from .registry_pull import RegistryPullCheck
+from .container_download_speed import ContainerDownloadSpeedCheck
 from .rental_probe import RentalProbeCheck
 from .port_count import PortCountCheck
 from .rental_verification import RentalVerificationCheck
@@ -38,6 +40,7 @@ from .rented_gpu_drop import RentedGpuDropCheck
 from .rented_machine import TenantEnforcementCheck
 from .score import ScoreCheck
 from .spec_change import SpecChangeCheck
+from .storage_limit import StorageLimitCheck
 from .sshd_bootstrap import SshdBootstrapCheck
 from .sshd_auth_log import SshdAuthLogCheck
 from .stale_container_cleanup import StaleContainerCleanupCheck
@@ -81,8 +84,10 @@ __all__ = [
     "PinnedMemoryProbeCheck",
     "PortConnectivityCheck",
     "PortCountCheck",
+    "PostRentalGpuRecheckCheck",
     "ProviderSideLoadCheck",
     "RegistryPullCheck",
+    "ContainerDownloadSpeedCheck",
     "RentalProbeCheck",
     "RentalVerificationCheck",
     "RentedGpuDropCheck",
@@ -93,6 +98,7 @@ __all__ = [
     "StartGPUMonitorCheck",
     "SysboxRequiredCheck",
     "SpecChangeCheck",
+    "StorageLimitCheck",
     "SshdBootstrapCheck",
     "UploadFilesCheck",
     "VerifyXCheck",

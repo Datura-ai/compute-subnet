@@ -283,6 +283,12 @@ class Settings(BaseSettings):
     INSPECTOR_BLIND_STREAK_ENFORCEMENT_ENABLED: bool = Field(
         env="INSPECTOR_BLIND_STREAK_ENFORCEMENT_ENABLED", default=False
     )
+    # DAH-4548: on, the sensor's rental-interference verdict of a host write into a rented pod fails
+    # the Inspector check and zeroes the score. Off: unchanged, logged as INSPECTOR_HOST_WRITE with
+    # enforced=false. A read is only logged either way.
+    INSPECTOR_HOST_WRITE_ENFORCEMENT_ENABLED: bool = Field(
+        env="INSPECTOR_HOST_WRITE_ENFORCEMENT_ENABLED", default=False
+    )
     # On a libinspector.so hash mismatch a RENTED executor, during the rental, curls
     # INSPECTOR_LIBRARY_FETCH_URL once into a temp file beside /usr/lib/libinspector.so, and the
     # file replaces the library (one rename) only if its sha256 is the validator's own. This is a
@@ -336,6 +342,10 @@ class Settings(BaseSettings):
     # flag on; the wave never does, so every scored verification is unchanged. Measured (Loki,
     # 2–6 Sep, idle runs): matmul p50 26 s (74 s on the fresh dogfood node), VerifyX p50 78 s.
     FIRST_PASS_FAST_PATH_ENABLED: bool = Field(env="FIRST_PASS_FAST_PATH_ENABLED", default=False)
+    # A node whose Docker cannot cap a container's disk (specs.storage_limit_supported) lets one renter fill the
+    # host's Docker storage and take every pod down. Off: a STORAGE_LIMIT_MISSING warning only, so providers get
+    # notice first. On: an unrented node without the limit scores 0 (StorageLimitCheck).
+    REQUIRE_STORAGE_LIMIT_SUPPORTED: bool = Field(env="REQUIRE_STORAGE_LIMIT_SUPPORTED", default=False)
     # The matmul is sized from min(card VRAM, this) instead of the whole card: same challenge,
     # seal and UUID check, 5–17x less data to generate and copy.
     FIRST_PASS_MATMUL_VRAM_MB: int = Field(env="FIRST_PASS_MATMUL_VRAM_MB", default=8192)
@@ -526,6 +536,11 @@ class Settings(BaseSettings):
     # DAH-4457: a node whose GPU dropped out stays hidden (GPU_LOST availability entry, no new rentals) until its
     # cards have read clean this long after the last faulty cycle (GpuLossHoldCheck).
     GPU_LOSS_HOLD_SECONDS: int = Field(env="GPU_LOSS_HOLD_SECONDS", default=7200, gt=0)
+    # DAH-4482: a node GpuMemoryHealthCheck flagged while rented must pass the all-cards matmul and the
+    # kernel-fault probe on every card on its next unrented cycle, whatever the MATMUL_ALLCARDS_* /
+    # GPU_FAULT_PROBE_* flags say; a failure fails the node until a recheck passes. Off: that cycle only logs
+    # POST_RENTAL_GPU_RECHECK_WOULD_REQUIRE.
+    POST_RENTAL_GPU_RECHECK_ENABLED: bool = Field(env="POST_RENTAL_GPU_RECHECK_ENABLED", default=False)
     # DAH-2735 — judge an idle node's GPU by WHO holds it, not by utilization: a competitor's
     # rental idling on the card (Nodexo/SN106) passes every percentage gate. CHECK_ENABLED
     # observes and logs the verdict; ENFORCEMENT additionally zeroes the score. Enforcement
@@ -562,9 +577,6 @@ class Settings(BaseSettings):
     FOREIGN_GPU_WORKLOAD_ENFORCEMENT_ENABLED: bool = Field(
         env="FOREIGN_GPU_WORKLOAD_ENFORCEMENT_ENABLED", default=False
     )
-    # On: a pod container on an unrented node whose rental just ended or just started ends the run
-    # at the GPU usage check, scored as idle, instead of the orphaned-container zero.
-    RENTAL_TEARDOWN_DEFERRAL_ENABLED: bool = Field(env="RENTAL_TEARDOWN_DEFERRAL_ENABLED", default=False)
     # DAH-3035 — a ~6 s kernel-fault probe after the matmul: indexed/scattered access, atomics, a pointer
     # chase and a pinned-memory copy round-trip over a ~2 GB working set, plus NVML before/after: a rise in
     # uncorrected ECC or remapped rows, a pending or failed remap, or a required recovery action is a fault.
@@ -643,6 +655,21 @@ class Settings(BaseSettings):
     # Hub. Nothing guards an outage only the nodes see (a CDN region, a shared mirror), so enforcement
     # is off by default: it goes on after a 48 h log-only window with the OBSERVED rows reviewed
     # (count, outcomes, mirrors, fleet-wide pattern). Decider: taiberium; backup jam6099.
+    # DAH-3420: the host-side speed test runs on the host network; a renter's container crosses the docker bridge,
+    # NAT and runtime and can get 1000x less (297-588 Mbps on the host, under 1 Mbps from PyPI in a container). CHECK
+    # reads up to 16 MiB of a pinned PyPI wheel and a pinned Hugging Face file from a throwaway container on idle
+    # nodes once per INTERVAL_HOURS and logs CONTAINER_DOWNLOAD_SPEED; two failing readings in a row (30 min apart)
+    # are the finding. ENFORCEMENT fails the node (CONTAINER_DOWNLOAD_SLOW, score 0); off until the shadow logs are
+    # reviewed. MIN_MBPS is a fifth of NETWORK_MIN_PACKAGE_DOWNLOAD_SPEED_MBPS (50): one cold single-stream CDN object
+    # read 32-88 Mbps on healthy nodes (DAH-2959), so 50 would flag them; the defect is two orders of magnitude lower.
+    CONTAINER_DOWNLOAD_SPEED_CHECK_ENABLED: bool = Field(env="CONTAINER_DOWNLOAD_SPEED_CHECK_ENABLED", default=True)
+    CONTAINER_DOWNLOAD_SPEED_ENFORCEMENT_ENABLED: bool = Field(
+        env="CONTAINER_DOWNLOAD_SPEED_ENFORCEMENT_ENABLED", default=False
+    )
+    CONTAINER_DOWNLOAD_SPEED_MIN_MBPS: float = Field(env="CONTAINER_DOWNLOAD_SPEED_MIN_MBPS", default=10.0, gt=0)
+    CONTAINER_DOWNLOAD_SPEED_INTERVAL_HOURS: float = Field(
+        env="CONTAINER_DOWNLOAD_SPEED_INTERVAL_HOURS", default=6.0, gt=0
+    )
     # A filler create runs the validator's sshd bootstrap in Lium's own image. When sshd is installed but
     # never runs or listens there (e.g. a host runtime that leaves /run/sshd group/world-writable), no
     # renter can SSH into any container on the node either. The connector stamps that per executor and
@@ -675,6 +702,13 @@ class Settings(BaseSettings):
     # idle moved to the burner, never an older vector.
     SETTLEMENT_MODE: Literal["off", "shadow", "enforce"] = Field(env="SETTLEMENT_MODE", default="off")
     DUPLICATE_EXECUTOR_DRY_RUN: bool = Field(env="DUPLICATE_EXECUTOR_DRY_RUN", default=True, description="Observe mode: detect duplicate executors but don't penalize")
+    # Two executors of ONE miner hotkey that report the same GPU UUID in one cycle are one set of
+    # cards listed twice. Always logged (GPU_ALIAS_SAME_MINER); with this on, every copy but one
+    # scores 0 for the cycle. Only the miner's own executors are compared, so another miner
+    # reporting the same UUIDs cannot cost it anything.
+    GPU_ALIAS_SAME_MINER_ENFORCEMENT_ENABLED: bool = Field(
+        env="GPU_ALIAS_SAME_MINER_ENFORCEMENT_ENABLED", default=False
+    )
     EXECUTOR_IMAGE_REF: str = Field(
         env="EXECUTOR_IMAGE_REF",
         default="daturaai/compute-subnet-executor:latest",
