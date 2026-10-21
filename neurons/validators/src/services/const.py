@@ -18,6 +18,8 @@ GPU_MODEL_RATES = {
     "NVIDIA GeForce RTX 5060 Ti": 0.0,
     "NVIDIA GeForce RTX 5060": 0.0,
     "NVIDIA GeForce RTX 5090": 0.025,
+    # DAH-3289: the China SKU; supported, but excluded from the unrented pool by default.
+    "NVIDIA GeForce RTX 5090 D": 0.0,
     # Supported operationally, but excluded from the unrented pool by default.
     "NVIDIA GeForce RTX 4080 SUPER": 0.0,
     "NVIDIA GeForce RTX 4080": 0.0,

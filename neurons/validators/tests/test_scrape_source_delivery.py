@@ -1,4 +1,4 @@
-"""DAH-2794: with ENABLE_SCRAPE_SOURCE_DELIVERY the scrape is not frozen and not uploaded —
+"""DAH-2794: the scrape is not frozen and not uploaded —
 it is piped to the executor's own interpreter over the SSH channel's stdin.
 
 The old path builds a ~13 MB PyInstaller onefile every cycle and SFTP-puts it to every
@@ -20,7 +20,7 @@ from neurons.validators.src.services.task.runner import SSHCommandRunner
 def test_source_delivery_carries_runnable_source_alongside_the_binary(monkeypatch):
     # Arrange
     # The obfuscator and the key substitution are the parts under test; freezing the result
-    # costs ~40s of PyInstaller and is exercised by the flag-off path in production.
+    # costs ~40s of PyInstaller and is exercised by the binary fallback in production.
     monkeypatch.setattr(FileEncryptService, "make_binary_file", lambda self, tmp, path: "scrape")
     service = FileEncryptService(ssh_service=None)
 

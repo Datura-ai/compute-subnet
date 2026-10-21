@@ -21,3 +21,10 @@ def test_b300_sxm6_pc_matches_the_ac_card():
     cfg = DEFAULT_SHARED_CONFIG
     assert cfg.machine_prices["NVIDIA B300 SXM6 PC"] == cfg.machine_prices["NVIDIA B300 SXM6 AC"]
     assert cfg.required_deposit_amount["NVIDIA B300 SXM6 PC"] == cfg.required_deposit_amount["NVIDIA B300 SXM6 AC"]
+
+
+def test_rtx_5090_d_is_its_own_class_below_the_5090():
+    # DAH-3289: the China SKU gets its own price class, as the 4090 D does, not the 5090's price
+    prices = DEFAULT_SHARED_CONFIG.machine_prices
+    assert prices["NVIDIA GeForce RTX 5090 D"] < prices["NVIDIA GeForce RTX 5090"]
+    assert "NVIDIA GeForce RTX 5090 D" in DEFAULT_SHARED_CONFIG.required_deposit_amount
