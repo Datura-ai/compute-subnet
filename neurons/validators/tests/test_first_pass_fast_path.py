@@ -286,7 +286,6 @@ async def test_first_pass_cold_sample_retry_measures_with_the_same_smaller_confi
 ):
     """DAH-2959 + DAH-3011 compose: with the retry flag on, the cold-sample retry is a first-pass
     probe too — the 128 GB / 5 GB write must not come back on the second sample."""
-    monkeypatch.setattr(settings, "VERIFYX_COLD_SAMPLE_RETRY_ENABLED", True)
     service = _ConfigAwareSequence(_probe(59.9), _probe(500.0))
 
     result = await VerifyXCheck().run(_ctx(context_factory, service, first_pass=True, rented_data=_never_measured()))
