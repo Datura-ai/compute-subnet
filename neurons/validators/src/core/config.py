@@ -406,20 +406,17 @@ class Settings(BaseSettings):
     # reaped ids; on a node with more than 224 rented pods the last rented pods' states are cut
     # until the queue drains.
     POD_STATES_REPORT_ENABLED: bool = Field(env="POD_STATES_REPORT_ENABLED", default=False)
-    # ISSUE-050 filler liveness. CHECK_ENABLED is the master switch: shadow mode runs the SSH
-    # probe + backend re-check and logs the verdict, but never withholds incentive; switching it
-    # off disables the probe entirely. ENFORCEMENT (only effective while CHECK_ENABLED is on)
-    # additionally fails the fatal check — no unrented incentive — when a host killed the Lium
-    # filler container. Rollout: shadow first, flip enforcement after the shadow data is clean.
+    # ISSUE-050 filler liveness. CHECK_ENABLED is the master switch: the SSH probe + backend
+    # re-check fail the fatal check — no unrented incentive — when a host killed the Lium filler
+    # container; switching it off disables the probe entirely.
     FILLER_LIVENESS_CHECK_ENABLED: bool = Field(env="FILLER_LIVENESS_CHECK_ENABLED", default=True)
-    FILLER_LIVENESS_ENFORCEMENT_ENABLED: bool = Field(env="FILLER_LIVENESS_ENFORCEMENT_ENABLED", default=False)
     # GPU work inside a filler container counts as the filler's only while the container runs the
     # image the validator started it from (recorded at create). A mismatch is always logged
     # (FILLER_IMAGE_MISMATCH); with this on, the GPU usage check judges that work as foreign.
     FILLER_IMAGE_IDENTITY_ENFORCEMENT_ENABLED: bool = Field(
         env="FILLER_IMAGE_IDENTITY_ENFORCEMENT_ENABLED", default=False
     )
-    # DAH-2671 spec-truth checks. Each pair mirrors the FILLER_LIVENESS precedent above:
+    # DAH-2671 spec-truth checks. Each pair follows the shadow-first pattern:
     # CHECK_ENABLED is the master switch — shadow mode computes the signal and emits the event/log
     # but returns passed=True and never changes score; ENFORCEMENT (only effective while
     # CHECK_ENABLED is on) additionally lets the signal fail closed / fail the check. No enforcement
