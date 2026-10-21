@@ -60,8 +60,7 @@ def calculate_scores(
     # on. Non-CVM executors (no quote) are untouched — omitted-quote bypass by a
     # known CVM is rejected upstream by the attestation ratchet.
     if (
-        settings.ENABLE_TDX_ATTESTATION
-        and settings.ENABLE_TCB_ENFORCEMENT
+        settings.ENABLE_TCB_ENFORCEMENT
         and ctx.executor.tdx_quote
         and not ctx.tdx_attestation_passed
     ):

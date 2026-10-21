@@ -2969,18 +2969,6 @@ async def test_create_container_no_quote_socket_for_filler_on_cvm_node(docker_se
 
 
 @pytest.mark.asyncio
-async def test_create_container_quote_socket_kill_switch(docker_service, monkeypatch):
-    monkeypatch.setattr("services.docker_service.settings.ENABLE_CVM_POD_QUOTE_SOCKET", False)
-    run_spy, ensure_broker = _patch_quote_socket_path(docker_service, monkeypatch)
-
-    await _create(docker_service, _cvm_socket_payload(), tdx_quote='{"quote": "0xdeadbeef"}')
-
-    ensure_broker.assert_not_awaited()
-    run_spec = run_spy.await_args.kwargs["run_spec"]
-    assert DSTACK_GUEST_SOCKET_PATH not in {m.target for m in run_spec.volumes}
-
-
-@pytest.mark.asyncio
 async def test_create_filler_starts_inspector_collector(docker_service, monkeypatch):
     monkeypatch.setattr("services.docker_service.settings.ENABLE_INSPECTOR", True)
     _patch_create_container_happy_path(docker_service, monkeypatch)
@@ -7878,7 +7866,6 @@ async def test_recover_pod_remounts_an_encrypted_volume_at_the_path_the_backend_
 ):
     # DAH-2545: with the plaintext path in hand the encrypted pod is recoverable, and the path is
     # handed on untouched — a guessed one would write the customer's data out in the clear
-    monkeypatch.setattr(docker_service_module.settings, "RECOVER_ENCRYPTED_VOLUMES", True)
     monkeypatch.setattr(
         docker_service_module.settings,
         "VOLUME_MASTER_SECRET",
@@ -7898,28 +7885,6 @@ async def test_recover_pod_remounts_an_encrypted_volume_at_the_path_the_backend_
 
     assert recovered is True
     assert start_existing_container.await_args.kwargs["local_volume_path"] == "/workspace"
-
-
-@pytest.mark.asyncio
-async def test_recover_pod_declines_an_encrypted_volume_when_the_kill_switch_is_off(
-    docker_service, monkeypatch
-):
-    monkeypatch.setattr(docker_service_module.settings, "RECOVER_ENCRYPTED_VOLUMES", False)
-    monkeypatch.setattr(
-        docker_service_module.settings,
-        "VOLUME_MASTER_SECRET",
-        "test-master-secret-32-chars-long!!",
-    )
-    start_existing_container = AsyncMock()
-    monkeypatch.setattr(docker_service, "start_existing_container", start_existing_container)
-    ssh_client = _recovery_ssh_client(mount_destinations="/lium-cipher\n/mnt\n")
-
-    recovered = await _attempt_stale_mount_recovery(
-        docker_service, _STALE_MOUNT_ERROR, ssh_client, "/workspace"
-    )
-
-    assert recovered is False
-    start_existing_container.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -7943,7 +7908,6 @@ async def test_recover_pod_declines_an_unusable_plaintext_path(
     # leading slash, so this gate is the only thing keeping a traversal out of the mount command.
     # Asserted on the gate directly as well as on the outcome: the outcome alone would stay green
     # for any of the other reasons recovery can decline.
-    monkeypatch.setattr(docker_service_module.settings, "RECOVER_ENCRYPTED_VOLUMES", True)
     monkeypatch.setattr(
         docker_service_module.settings,
         "VOLUME_MASTER_SECRET",
@@ -7972,7 +7936,6 @@ async def test_recover_pod_declines_an_unusable_plaintext_path(
     ],
 )
 def test_a_plain_absolute_plaintext_path_is_accepted(monkeypatch, local_volume_path):
-    monkeypatch.setattr(docker_service_module.settings, "RECOVER_ENCRYPTED_VOLUMES", True)
     monkeypatch.setattr(
         docker_service_module.settings,
         "VOLUME_MASTER_SECRET",
@@ -8013,7 +7976,6 @@ async def test_recover_pod_stops_the_container_when_the_start_is_cancelled(
     # the check runs under an outer timeout, so cancellation can land after `docker start` but
     # before gocryptfs is remounted, leaving the customer a running pod whose plaintext path is an
     # ordinary container dir writing to the miner's disk. The stop has to survive the cancellation.
-    monkeypatch.setattr(docker_service_module.settings, "RECOVER_ENCRYPTED_VOLUMES", True)
     monkeypatch.setattr(
         docker_service_module.settings,
         "VOLUME_MASTER_SECRET",

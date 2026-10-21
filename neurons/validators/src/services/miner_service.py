@@ -288,12 +288,12 @@ class MinerService:
         # DAH-2958: executor uuid -> CYCLE_LANE | EXPRESS_LANE while its pipeline is running, then
         # CYCLE_DONE until the cycle's publish is recorded. The wave and the express lane run in
         # this one process, so a plain dict is the whole coordination: each lane skips what the
-        # other holds. Stays empty with the flag off.
+        # other holds.
         self.in_flight: dict[str, str] = {}
         # miner hotkey -> job_batch_id of the wave that has not received that miner's executor
         # list yet. The express lane publishes under the cycle's job_batch_id; it waits for the
         # wave's list of the node's miner, or the wave could verify and publish the node again
-        # under the same id once the lane let go of it. Stays empty with the flag off.
+        # under the same id once the lane let go of it.
         self.miners_awaiting_wave_list: dict[str, str] = {}
         # per miner hotkey, the rented executor uuids it left out of its previous answer (RENTED_NOT_LISTED_ONE_CYCLE_GRACE).
         # shortcut: in memory, so a restart costs one extra cycle before a real outage is reported.
@@ -301,8 +301,7 @@ class MinerService:
 
     def start_awaiting_wave_lists(self, job_batch_id: str, miner_hotkeys: list[str]) -> None:
         """Validator.sync(), in the same step that publishes the cycle's inputs to the lane."""
-        if settings.EXPRESS_LANE_ENABLED:
-            self.miners_awaiting_wave_list = {hotkey: job_batch_id for hotkey in miner_hotkeys}
+        self.miners_awaiting_wave_list = {hotkey: job_batch_id for hotkey in miner_hotkeys}
 
     def _stop_awaiting_wave_list(self, payload: MinerJobRequestPayload) -> None:
         """The wave has this miner's list, or its request ended without one. An older wave's
@@ -320,16 +319,13 @@ class MinerService:
         verifying at this moment, so a new node's hardware tests never run twice concurrently
         (DAH-2958). The lane holds only executors registered after the first cycle since start
         that no cycle has published yet, so a long-known executor's scoring is untouched.
-        Flag off: the list minus repeats.
 
-        An executor uuid the miner lists more than once is kept once (its first entry), with or
-        without the flag: each entry starts its own pipeline, and a repeat would be validated,
-        and counted in its idle tier, twice in one cycle.
+        An executor uuid the miner lists more than once is kept once (its first entry): each entry
+        starts its own pipeline, and a repeat would be validated, and counted in its idle tier,
+        twice in one cycle.
         """
         self._stop_awaiting_wave_list(payload)
         executors = self._first_entry_per_uuid(executors, default_extra)
-        if not settings.EXPRESS_LANE_ENABLED:
-            return executors
         claimed: list[ExecutorSSHInfo] = []
         for executor in executors:
             if self.in_flight.get(executor.uuid) == EXPRESS_LANE:
@@ -398,8 +394,6 @@ class MinerService:
     def _release_cycle_claims(self, executors: list[ExecutorSSHInfo]) -> None:
         """The wave is done with these executors; they stay in in_flight as CYCLE_DONE until the
         cycle has seeded the validated set (forget_cycle_done), so the lane keeps skipping them."""
-        if not settings.EXPRESS_LANE_ENABLED:
-            return
         for executor in executors:
             if self.in_flight.get(executor.uuid) == CYCLE_LANE:
                 self.in_flight[executor.uuid] = CYCLE_DONE
@@ -480,8 +474,7 @@ class MinerService:
         (the cycle); a uuid asks for that one executor only (the express lane) — the miner already
         filters register_pubkey on it, exactly as it does for the rental key-submit.
         first_pass (DAH-3011): this is the executor's first, unscored verification; handed to
-        TaskService.create_task, where FIRST_PASS_FAST_PATH_ENABLED decides whether the probes
-        shrink. The cycle never sets it.
+        TaskService.create_task, where it shrinks the probes. The cycle never sets it.
         """
         if settings.USE_REST_API:
             logger.info(
