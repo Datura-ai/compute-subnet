@@ -103,7 +103,7 @@ def _ctx(
 
 
 @pytest.fixture
-def enforcing(monkeypatch):
+def check_enabled(monkeypatch):
     monkeypatch.setattr(settings, "GPU_KERNEL_COUNT_CHECK_ENABLED", True)
 
 
@@ -112,8 +112,8 @@ def test_the_check_is_on_by_default():
 
 
 @pytest.mark.asyncio
-async def test_kernel_one_reported_eight_fails_the_validation_under_enforcement(
-    context_factory, enforcing
+async def test_kernel_one_reported_eight_fails_the_validation(
+    context_factory, check_enabled
 ):
     ctx = _ctx(context_factory, reported=[REAL[0], *OTHER_CARDS], kernel=[REAL[0]])
 
@@ -129,8 +129,8 @@ async def test_kernel_one_reported_eight_fails_the_validation_under_enforcement(
 
 
 @pytest.mark.asyncio
-async def test_mismatch_on_a_rented_node_fails_but_does_not_stop_the_run_under_enforcement(
-    context_factory, enforcing
+async def test_mismatch_on_a_rented_node_fails_but_does_not_stop_the_run(
+    context_factory, check_enabled
 ):
     # same rule as the ban checks: a node with a renter's pod on it keeps being verified
     ctx = _ctx(context_factory, reported=[REAL[0], *OTHER_CARDS], kernel=[REAL[0]])
@@ -156,7 +156,7 @@ async def test_mismatch_on_a_rented_node_fails_but_does_not_stop_the_run_under_e
 
 
 @pytest.mark.asyncio
-async def test_mismatch_on_an_idle_node_is_fatal_under_enforcement(context_factory, enforcing):
+async def test_mismatch_on_an_idle_node_is_fatal(context_factory, check_enabled):
     ctx = _ctx(context_factory, reported=[REAL[0], *OTHER_CARDS], kernel=[REAL[0]])
 
     result = await GpuKernelCountCheck().run(ctx)
@@ -167,7 +167,7 @@ async def test_mismatch_on_an_idle_node_is_fatal_under_enforcement(context_facto
 
 @pytest.mark.asyncio
 async def test_reported_count_above_the_listed_cards_is_judged_on_the_count(
-    context_factory, enforcing
+    context_factory, check_enabled
 ):
     # the node claims 8 and lists one card: the claim is what is compared
     ctx = _ctx(context_factory, reported=[REAL[0]], kernel=[REAL[0]], count=8)
@@ -197,7 +197,7 @@ def test_container_read_is_the_same_command_and_the_host_read_goes_through_pid_1
 
 @pytest.mark.asyncio
 async def test_container_one_host_four_reported_four_matches_on_the_host_view(
-    context_factory, enforcing
+    context_factory, check_enabled
 ):
     ctx = _ctx(context_factory, reported=REAL[:4], kernel=[REAL[0]], host=_host_stdout(REAL[:4]))
 
@@ -220,7 +220,7 @@ async def test_container_one_host_four_reported_four_matches_on_the_host_view(
 
 @pytest.mark.asyncio
 async def test_host_listing_more_cards_than_reported_matches_on_the_host_view(
-    context_factory, enforcing
+    context_factory, check_enabled
 ):
     ctx = _ctx(context_factory, reported=REAL[:4], kernel=[REAL[0]], host=_host_stdout(REAL))
 
@@ -232,8 +232,8 @@ async def test_host_listing_more_cards_than_reported_matches_on_the_host_view(
 
 
 @pytest.mark.asyncio
-async def test_container_one_host_one_reported_eight_still_fails_under_enforcement(
-    context_factory, enforcing
+async def test_container_one_host_one_reported_eight_still_fails(
+    context_factory, check_enabled
 ):
     ctx = _ctx(
         context_factory,
@@ -255,8 +255,8 @@ async def test_container_one_host_one_reported_eight_still_fails_under_enforceme
 
 
 @pytest.mark.asyncio
-async def test_host_with_fewer_cards_than_reported_still_fails_under_enforcement(
-    context_factory, enforcing
+async def test_host_with_fewer_cards_than_reported_still_fails(
+    context_factory, check_enabled
 ):
     ctx = _ctx(context_factory, reported=REAL, kernel=[REAL[0]], host=_host_stdout(REAL[:4]))
 
@@ -283,7 +283,7 @@ async def test_host_with_fewer_cards_than_reported_still_fails_under_enforcement
         _host_stdout(REAL[:4], kind="symbolic link"),
     ],
 )
-async def test_host_view_behind_a_foreign_mount_is_ignored(context_factory, enforcing, host):
+async def test_host_view_behind_a_foreign_mount_is_ignored(context_factory, check_enabled, host):
     ctx = _ctx(context_factory, reported=REAL[:4], kernel=[REAL[0]], host=host)
 
     result = await GpuKernelCountCheck().run(ctx)
@@ -298,7 +298,7 @@ async def test_host_view_behind_a_foreign_mount_is_ignored(context_factory, enfo
 
 
 @pytest.mark.asyncio
-async def test_host_uuid_rows_without_procfs_evidence_are_ignored(context_factory, enforcing):
+async def test_host_uuid_rows_without_procfs_evidence_are_ignored(context_factory, check_enabled):
     uuid_rows_only = "\n".join(
         [
             KERNEL_GPU_FS_SEPARATOR,
@@ -319,7 +319,7 @@ async def test_host_uuid_rows_without_procfs_evidence_are_ignored(context_factor
     "host", [OSError("connection lost"), NO_HOST_VIEW, "", "not the expected output"]
 )
 async def test_host_read_error_or_empty_host_view_is_a_mismatch_and_never_raises(
-    context_factory, enforcing, host
+    context_factory, check_enabled, host
 ):
     ctx = _ctx(context_factory, reported=REAL[:4], kernel=[REAL[0]], host=host)
 
@@ -332,7 +332,7 @@ async def test_host_read_error_or_empty_host_view_is_a_mismatch_and_never_raises
 
 
 @pytest.mark.asyncio
-async def test_host_read_non_zero_exit_is_a_mismatch(context_factory, enforcing):
+async def test_host_read_non_zero_exit_is_a_mismatch(context_factory, check_enabled):
     ctx = _ctx(context_factory, reported=REAL[:4], kernel=[REAL[0]])
     ctx.ssh.run = AsyncMock(
         return_value=SimpleNamespace(exit_status=1, stdout=_host_stdout(REAL[:4]), stderr="")
@@ -346,7 +346,7 @@ async def test_host_read_non_zero_exit_is_a_mismatch(context_factory, enforcing)
 
 @pytest.mark.asyncio
 async def test_host_read_timeout_is_a_mismatch_and_never_raises(
-    context_factory, enforcing, monkeypatch
+    context_factory, check_enabled, monkeypatch
 ):
     monkeypatch.setattr(nvidia_devices, "KERNEL_GPU_UUID_READ_TIMEOUT_SECONDS", 0.01)
     ctx = _ctx(context_factory, reported=REAL[:4], kernel=[REAL[0]])
@@ -364,7 +364,7 @@ async def test_host_read_timeout_is_a_mismatch_and_never_raises(
 
 
 @pytest.mark.asyncio
-async def test_no_ssh_connection_leaves_the_mismatch_as_it_was(context_factory, enforcing):
+async def test_no_ssh_connection_leaves_the_mismatch_as_it_was(context_factory, check_enabled):
     with_ssh = _ctx(context_factory, reported=REAL[:4], kernel=[REAL[0]])
     ctx = context_factory(state=with_ssh.state, ssh=None)
     assert ctx.ssh is None
@@ -377,7 +377,7 @@ async def test_no_ssh_connection_leaves_the_mismatch_as_it_was(context_factory, 
 
 @pytest.mark.asyncio
 async def test_host_has_the_count_but_not_a_reported_uuid_is_not_a_match(
-    context_factory, enforcing
+    context_factory, check_enabled
 ):
     reported = [*REAL[:3], OTHER_CARDS[0]]
     ctx = _ctx(context_factory, reported=reported, kernel=[REAL[0]], host=_host_stdout(REAL[:4]))
@@ -400,7 +400,7 @@ async def test_host_has_the_count_but_not_a_reported_uuid_is_not_a_match(
     [(REAL[:4], REAL[:4]), (REAL[:2], REAL[:4]), ([*REAL[:3], OTHER_CARDS[0]], REAL[:4])],
 )
 async def test_host_view_is_not_read_when_the_container_list_is_long_enough(
-    context_factory, enforcing, reported, kernel
+    context_factory, check_enabled, reported, kernel
 ):
     ctx = _ctx(context_factory, reported=reported, kernel=kernel, host=_host_stdout(REAL))
 
@@ -413,7 +413,7 @@ async def test_host_view_is_not_read_when_the_container_list_is_long_enough(
 
 
 @pytest.mark.asyncio
-async def test_host_view_is_not_read_when_the_container_list_is_missing(context_factory, enforcing):
+async def test_host_view_is_not_read_when_the_container_list_is_missing(context_factory, check_enabled):
     ctx = _ctx(context_factory, reported=REAL[:4], kernel=None, host=_host_stdout(REAL))
 
     result = await GpuKernelCountCheck().run(ctx)
@@ -426,7 +426,7 @@ async def test_host_view_is_not_read_when_the_container_list_is_missing(context_
 
 
 @pytest.mark.asyncio
-async def test_kernel_eight_reported_eight_passes(context_factory, enforcing):
+async def test_kernel_eight_reported_eight_passes(context_factory, check_enabled):
     # the kernel prints the same UUIDs; letter case is not a difference
     ctx = _ctx(context_factory, reported=REAL, kernel=[u.upper() for u in reversed(REAL)])
 
@@ -441,7 +441,7 @@ async def test_kernel_eight_reported_eight_passes(context_factory, enforcing):
 
 
 @pytest.mark.asyncio
-async def test_kernel_listing_more_cards_than_reported_passes(context_factory, enforcing):
+async def test_kernel_listing_more_cards_than_reported_passes(context_factory, check_enabled):
     ctx = _ctx(context_factory, reported=REAL[:2], kernel=REAL[:4])
 
     result = await GpuKernelCountCheck().run(ctx)
@@ -457,7 +457,7 @@ async def test_kernel_listing_more_cards_than_reported_passes(context_factory, e
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kernel", [None, []])
 async def test_missing_kernel_list_is_not_evaluated_and_never_fails(
-    context_factory, enforcing, kernel
+    context_factory, check_enabled, kernel
 ):
     ctx = _ctx(context_factory, reported=REAL, kernel=kernel)
 
@@ -477,7 +477,7 @@ async def test_missing_kernel_list_is_not_evaluated_and_never_fails(
 
 @pytest.mark.asyncio
 async def test_kernel_list_withheld_behind_a_foreign_mount_is_not_evaluated(
-    context_factory, enforcing
+    context_factory, check_enabled
 ):
     ctx = _ctx(context_factory, reported=REAL, kernel=None)
     mounts = ["/proc/driver/nvidia/gpus tmpfs"]
@@ -492,7 +492,7 @@ async def test_kernel_list_withheld_behind_a_foreign_mount_is_not_evaluated(
 
 
 @pytest.mark.asyncio
-async def test_failed_kernel_read_is_not_evaluated(context_factory, enforcing):
+async def test_failed_kernel_read_is_not_evaluated(context_factory, check_enabled):
     # BannedProviderCheck did not run: the check reads the list itself, and the read fails
     ctx = _ctx(context_factory, reported=REAL, kernel=None, read_attempted=False)
     ctx.ssh.run = AsyncMock(side_effect=OSError("connection lost"))
@@ -504,7 +504,7 @@ async def test_failed_kernel_read_is_not_evaluated(context_factory, enforcing):
 
 
 @pytest.mark.asyncio
-async def test_malformed_specs_never_fail_the_check(context_factory, enforcing):
+async def test_malformed_specs_never_fail_the_check(context_factory, check_enabled):
     ctx = _ctx(context_factory, reported=REAL, kernel=REAL)
     specs = {"gpu": "x"}
     state = replace(ctx.state, specs=specs)
@@ -531,7 +531,7 @@ async def test_disabled_check_reads_nothing(context_factory, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_reported_uuid_absent_from_kernel_list_is_flagged_not_failed(
-    context_factory, enforcing
+    context_factory, check_enabled
 ):
     reported = [*REAL[:7], "GPU-99999999-5281-aabc-1a90-c91764f90d19"]
     ctx = _ctx(context_factory, reported=reported, kernel=REAL)
