@@ -232,7 +232,6 @@ async def test_a_sweep_that_hangs_gives_up_instead_of_failing_the_miners_cycle(
     async def never_finishes(*_args: object, **_kwargs: object) -> None:
         await asyncio.sleep(60)
 
-    monkeypatch.setattr(roce_link_probe.settings, "ROCE_LINK_PROBE_ENABLED", True)
     monkeypatch.setattr(roce_link_probe, "PROBE_BUDGET_SECONDS", 0.05)
     monkeypatch.setattr(roce_link_probe, "PROBE_MINIMUM_BUDGET_SECONDS", 0.0)
     monkeypatch.setattr(roce_link_probe, "_measure_every_pair", never_finishes)
@@ -264,7 +263,6 @@ async def test_a_sweep_is_skipped_when_the_cycle_has_no_room_for_it(
     async def record(*_args: object, **_kwargs: object) -> None:
         measured.append("ran")
 
-    monkeypatch.setattr(roce_link_probe.settings, "ROCE_LINK_PROBE_ENABLED", True)
     monkeypatch.setattr(roce_link_probe, "_measure_every_pair", record)
     results = [job_result("a", [roce_port("ac10:0506")]), job_result("b", [roce_port("ac10:0507")])]
     spent_seconds = roce_link_probe.settings.JOB_TIME_OUT - roce_link_probe.CYCLE_JOB_WAIT_SECONDS
@@ -296,7 +294,6 @@ async def test_a_probe_that_raises_never_reaches_the_caller(monkeypatch: pytest.
     def explode(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("specs are not what the probe expected")
 
-    monkeypatch.setattr(roce_link_probe.settings, "ROCE_LINK_PROBE_ENABLED", True)
     monkeypatch.setattr(roce_link_probe, "pairs_to_measure", explode)
 
     await measure_and_attach(
