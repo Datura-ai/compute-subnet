@@ -1713,7 +1713,6 @@ _PORT_ALLOCATED_REFUSAL = RuntimeError(
 def _wire_real_docker_run(svc, monkeypatch, *, refusals: int) -> list[str]:
     """Probe on, the real `docker run` retry; returns the order of port-check waits and runs."""
     monkeypatch.setattr(settings, "RENTAL_PRERUN_HOST_PROBE_ENABLED", True)
-    monkeypatch.setattr(settings, "PORT_COLLISION_RETRY_ENABLED", False)
     _wire(svc, monkeypatch, _deploy_ssh_client(), probe_result=_probe())
     monkeypatch.delattr(svc, "_run_rental_docker_create_with_port_retry")  # the real retry loop
     monkeypatch.setattr(svc, "_remove_failed_rental_container_for_retry", AsyncMock())
