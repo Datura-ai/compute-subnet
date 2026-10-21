@@ -333,10 +333,10 @@ class _Harness:
 
 
 @pytest.mark.asyncio
-async def test_nothing_runs_before_the_first_cycle_has_completed(monkeypatch, wallet):
+async def test_nothing_runs_before_the_first_cycle_has_started(monkeypatch, wallet):
     new_node = str(uuid4())
     harness = _Harness(monkeypatch, {"miner-a": [_portal_executor(new_node)]}, [_Neuron("miner-a")])
-    harness.inputs = None  # Validator.express_lane_cycle_inputs returns None until then
+    harness.inputs = None  # Validator.express_lane_cycle_inputs returns None until the first cycle starts
 
     assert await harness.tick_and_settle() == 0
     harness.portal_api.get_all_executors.assert_not_awaited()
