@@ -1517,6 +1517,11 @@ def _renewing_runner(
             '"item":"/workspace/ExpiredToken.java"}\n',
             0,
         ),
+        (
+            '{"message_type":"error","error":{"message":"open /workspace/ExpiredToken.java: permission denied"},'
+            '"during":"archival","item":"/workspace/ExpiredToken.java"}\n',
+            0,
+        ),
     ],
 )
 def test_backup_renews_expired_credentials_and_reruns(

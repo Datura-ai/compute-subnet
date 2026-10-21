@@ -796,7 +796,11 @@ def _error_text(payload: Mapping[str, object]) -> str:
         return ""
     error = payload.get("error")
     message = error.get("message") if isinstance(error, Mapping) else payload.get("message")
-    return message if isinstance(message, str) else ""
+    if not isinstance(message, str):
+        return ""
+    item = payload.get("item")
+    # restic repeats the file name in the message ("open /workspace/ExpiredToken.java: permission denied")
+    return message.replace(item, "") if isinstance(item, str) and item else message
 
 
 def _snapshot_id(summary: Mapping[str, object] | None) -> str | None:
