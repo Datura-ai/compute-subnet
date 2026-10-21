@@ -144,7 +144,7 @@ The validator code here is open so anyone can read what it checks and how it sco
 flowchart LR
     R["Renters<br/>lium.io · CLI · SDK · API"] --> P["Lium platform"]
     P <-->|"WebSocket<br/>lium_protocol"| V["Validator<br/>neurons/validators"]
-    V <-->|"WebSocket<br/>datura"| M["Provider coordinator<br/>neurons/miners"]
+    V <-->|"REST<br/>datura"| M["Provider coordinator<br/>neurons/miners"]
     M -->|"signed HTTP"| E["Node agent<br/>neurons/executor<br/>on each GPU host"]
     V -->|"SSH: checks<br/>and rental pods"| E
     R -.->|"SSH into the pod"| E

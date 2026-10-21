@@ -1,6 +1,5 @@
-import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from datura.requests.miner_requests import (
@@ -112,22 +111,6 @@ async def _create_task_result(**kwargs):
     return SimpleNamespace(executor_info=kwargs["executor_info"], score=1)
 
 
-class _FakeMinerClient:
-    def __init__(self, accepted_message: AcceptSSHKeyRequest):
-        future = asyncio.get_running_loop().create_future()
-        future.set_result(accepted_message)
-        self.job_state = SimpleNamespace(
-            miner_accepted_ssh_key_or_failed_future=future
-        )
-        self.send_model = AsyncMock()
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return None
-
-
 def test_rented_executors_response_defaults_new_rentals_paused_executor_ids():
     """Older backend responses without paused IDs remain compatible."""
     result = RentedExecutorsResponse.model_validate({"executors": {}})
@@ -237,41 +220,6 @@ def test_result_handler_reads_provider_discord_connected_executor_ids():
 
     assert ResultHandler._get_provider_discord_connected(connected_context) is True
     assert ResultHandler._get_provider_discord_connected(disconnected_context) is False
-
-
-@pytest.mark.asyncio
-async def test_websocket_request_job_validates_paused_unrented_executors(monkeypatch):
-    """Paused executors are still scheduled for validation and spec updates."""
-    service = _miner_service()
-    service.task_service.create_task = AsyncMock(side_effect=_create_task_result)
-    keypair = _keypair()
-    fake_client = _FakeMinerClient(
-        _accepted_response("paused-executor", "available-executor")
-    )
-    rented_data = _rented_data(paused_ids=["paused-executor"])
-
-    monkeypatch.setattr(settings, "USE_REST_API", False)
-    monkeypatch.setattr(settings, "JOB_TIME_OUT", 300)
-    monkeypatch.setattr(
-        type(settings),
-        "get_bittensor_wallet",
-        lambda self: _wallet(keypair),
-    )
-
-    with patch("services.miner_service.MinerClient", return_value=fake_client):
-        result = await service.request_job_to_miner(
-            _payload(),
-            MagicMock(),
-            rented_data,
-            {},
-        )
-
-    assert [job.executor_info.uuid for job in result["results"]] == ["paused-executor", "available-executor"]
-    created_executor_ids = [
-        call.kwargs["executor_info"].uuid
-        for call in service.task_service.create_task.call_args_list
-    ]
-    assert created_executor_ids == ["paused-executor", "available-executor"]
 
 
 @pytest.mark.asyncio
