@@ -1468,7 +1468,11 @@ class _RenewalSession:
 
 
 def _renewing_runner(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, session: _RenewalSession, expired_runs: int
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    session: _RenewalSession,
+    expired_runs: int,
+    first_line: str | None = None,
 ) -> tuple[ResticStorageRunner, list[dict[str, str]]]:
     spec = ReporterSpec(api_url="https://api.test", auth_token="op-token", resource=ReporterResource.BACKUP)
     reporter = StorageEventReporter(
@@ -1487,6 +1491,9 @@ def _renewing_runner(
             environments.append(dict(kwargs["env"]))
             if len(environments) <= expired_runs:
                 self.stdout = iter(['{"message_type":"status","percent_done":0.5}\n', EXPIRED_LINE])
+            elif first_line and len(environments) == 1:
+                summary = json.dumps({"message_type": "summary", "snapshot_id": SNAPSHOT_ID})
+                self.stdout = iter([first_line, summary + "\n"])
 
     monkeypatch.setattr("storage.restic.subprocess.Popen", _Popen)
     monkeypatch.setattr(runner, "_terminate_process", MagicMock())
@@ -1497,22 +1504,45 @@ def _renewing_runner(
     return runner, environments
 
 
-def test_backup_renews_expired_credentials_and_reruns(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("line", "renewals"),
+    [
+        (EXPIRED_LINE, 1),
+        ("client.PutObject: The provided token has expired.\n", 1),
+        ('{"message_type":"error","error":{"message":"The provided token has expired."}}\n', 1),
+        ('{"message_type":"exit_error","message":"The provided token has expired."}\n', 1),
+        ('{"message_type":"status","current_files":["/workspace/ExpiredToken.java"]}\n', 0),
+        (
+            '{"message_type":"error","error":{"message":"permission denied"},'
+            '"item":"/workspace/ExpiredToken.java"}\n',
+            0,
+        ),
+    ],
+)
+def test_backup_renews_expired_credentials_and_reruns(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, line: str, renewals: int
+) -> None:
     session = _RenewalSession()
-    runner, environments = _renewing_runner(monkeypatch, tmp_path, session, expired_runs=1)
+    runner, environments = _renewing_runner(
+        monkeypatch, tmp_path, session, expired_runs=0, first_line=line
+    )
 
     result = runner.run()
 
-    assert result.status == "COMPLETED" and result.snapshot_id == SNAPSHOT_ID
-    assert [env["AWS_SESSION_TOKEN"] for env in environments] == ["session-token", "token-1"]
-    assert environments[1]["AWS_ACCESS_KEY_ID"] == "key-1"
-    (post,) = session.posts
-    assert post["url"] == f"https://api.test/backup-logs/{OPERATION_ID}/credentials"
-    assert post["headers"] == {"Authorization": "Bearer op-token"}
+    assert (result.status, result.snapshot_id) == ("COMPLETED", SNAPSHOT_ID)
+    assert (len(environments), len(session.posts)) == (renewals + 1, renewals)
+    if renewals:
+        assert [env["AWS_SESSION_TOKEN"] for env in environments] == ["session-token", "token-1"]
+        assert environments[1]["AWS_ACCESS_KEY_ID"] == "key-1"
+        (post,) = session.posts
+        assert post["url"] == f"https://api.test/backup-logs/{OPERATION_ID}/credentials"
+        assert post["headers"] == {"Authorization": "Bearer op-token"}
 
 
 def test_backup_fails_when_the_backend_refuses_renewal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    runner, environments = _renewing_runner(monkeypatch, tmp_path, _RenewalSession(410), expired_runs=1)
+    runner, environments = _renewing_runner(
+        monkeypatch, tmp_path, _RenewalSession(410), expired_runs=1
+    )
 
     with pytest.raises(ResticOperationError, match="could not be renewed"):
         runner.run()

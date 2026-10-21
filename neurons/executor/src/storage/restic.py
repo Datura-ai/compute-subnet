@@ -511,9 +511,6 @@ class ResticStorageRunner:
                 line = raw_line.strip()
                 if not line:
                     continue
-                # restic 0.19 retries an expired session for 15 minutes before failing; stop it now
-                if self._operation.repository.session_token and _credentials_expired(line):
-                    raise CredentialsExpired("storage credentials expired")
                 checkpoint = _restore_checkpoint(line)
                 if checkpoint is not None and restore_stats is not None:
                     self._events.restic_event(
@@ -525,11 +522,13 @@ class ResticStorageRunner:
                 try:
                     payload = json.loads(line)
                 except json.JSONDecodeError:
+                    self._raise_if_credentials_expired(line)
                     self._events.diagnostic(_redact(line, self._secret_values()))
                     continue
                 if not isinstance(payload, dict):
                     self._events.diagnostic("restic emitted a non-object JSON message")
                     continue
+                self._raise_if_credentials_expired(_error_text(payload))
                 self._events.restic_event(payload)
                 self._events.heartbeat_if_due()
                 self._cancel_if_requested(process)
@@ -545,6 +544,11 @@ class ResticStorageRunner:
             raise
         finally:
             output_reader.join(timeout=1)
+
+    def _raise_if_credentials_expired(self, error_text: str) -> None:
+        # restic 0.19 retries an expired session for 15 minutes before failing; stop it now
+        if self._operation.repository.session_token and _credentials_expired(error_text):
+            raise CredentialsExpired("storage credentials expired")
 
     def _cancel_if_requested(self, process: subprocess.Popen[str]) -> None:
         if not self._events.cancellation_requested:
@@ -780,9 +784,19 @@ def _is_retryable_repository_failure(failure_detail: str) -> bool:
     return any(marker in normalized_detail for marker in retryable_failure_markers)
 
 
-def _credentials_expired(line: str) -> bool:
-    # S3's code for an expired session token: "ExpiredToken: The provided token has expired."
-    return "expiredtoken" in "".join(line.casefold().split())
+def _credentials_expired(error_text: str) -> bool:
+    # S3: "ExpiredToken: The provided token has expired."; minio-go often prints only the message
+    normalized = "".join(error_text.casefold().split())
+    return "expiredtoken" in normalized or "theprovidedtokenhasexpired" in normalized
+
+
+def _error_text(payload: Mapping[str, object]) -> str:
+    """the message of a restic error/exit_error event, never its file names (item, current_files)"""
+    if payload.get("message_type") not in ("error", "exit_error"):
+        return ""
+    error = payload.get("error")
+    message = error.get("message") if isinstance(error, Mapping) else payload.get("message")
+    return message if isinstance(message, str) else ""
 
 
 def _snapshot_id(summary: Mapping[str, object] | None) -> str | None:
