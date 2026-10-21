@@ -293,6 +293,11 @@ class InspectorRentedCheck:
             ctx=ctx,
             check_id=self.check_id,
             impact=impact,
+            remediation=(
+                "Stop host-side writes (docker update/exec/cp) into rented pods; the score stays zero while they continue."
+                if enforced
+                else None
+            ),
             what=what,
             extra=extra,
         )

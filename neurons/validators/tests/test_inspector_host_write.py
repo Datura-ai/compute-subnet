@@ -69,6 +69,7 @@ async def test_write_verdict_fails_the_node(context_factory, caplog):
     assert result.passed is False
     assert result.updates["inspector_host_write_passed"] is False
     assert "node failed" in result.event.impact
+    assert "score stays zero" in result.event.remediation
     logs = _logs(caplog, "INSPECTOR_HOST_WRITE")
     assert [log["enforced"] for log in logs] == [True]
     assert "dmi-cloak-inner.sh" in logs[0]["commands"][0]
