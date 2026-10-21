@@ -1809,8 +1809,7 @@ class GpuFaultProbeMessages:
 
 
 class PinnedMemoryProbeMessages:
-    """F-1599 — the pinned-host-memory H2D/D2H round trip on every GPU. On by default in shadow mode:
-    PROBE_FAILED is a logged warning with passed=True; with PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED it fails
+    """F-1599 — the pinned-host-memory H2D/D2H round trip on every GPU. On by default: PROBE_FAILED fails
     the fatal check and keeps the node unrentable."""
 
     DISABLED = MessageTemplate(

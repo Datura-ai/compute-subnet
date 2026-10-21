@@ -1,19 +1,15 @@
 from __future__ import annotations
 
 import json
-import logging
 import shlex
 from pathlib import Path
 from typing import Any
 
 from core.config import settings
-from core.utils import _m, get_extra_info
 
 from ..messages import PinnedMemoryProbeMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
-
-logger = logging.getLogger(__name__)
 
 # Stdlib-only, shipped over stdin like the kernel-fault probe (DAH-3035): nothing to upload or update.
 PROBE_SOURCE_PATH = Path(__file__).resolve().parents[3] / "miner_jobs" / "pinned_memory_probe.py"
@@ -40,9 +36,8 @@ class PinnedMemoryProbeCheck:
     allocates 64 MB with cuMemAllocHost on each card, copies it H2D and back through the async copy engines and
     compares it on the host; it also reports the cpuinfo tdx_guest flag and `nvidia-smi conf-compute -f` as evidence.
 
-    PINNED_MEMORY_PROBE_CHECK_ENABLED runs it, PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED lets a fault fail the
-    (fatal) check, which keeps the node unrentable. CHECK defaults on (a few-ms copy per card), ENFORCEMENT off:
-    a fault is logged with its verdict and the node passes. Wrong data, a copy error, a copy that hangs or a
+    PINNED_MEMORY_PROBE_CHECK_ENABLED (default on, a few-ms copy per card) runs it; a fault fails the (fatal)
+    check, which keeps the node unrentable. Wrong data, a copy error, a copy that hangs or a
     driver error naming a broken GPU (BROKEN_GPU_CODES) counts as a fault. A probe that could not run (no libcuda, a
     context or allocation refused, a memlock limit) passes with PINNED_MEMORY_PROBE_UNKNOWN.
     """
@@ -98,26 +93,9 @@ class PinnedMemoryProbeCheck:
                 if isinstance(faults, list)
                 else ""
             )
-            enforce = settings.PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED
             what["error"] = (error or "fault")[: MAX_FAULT_LINES * MAX_FAULT_CHARS]
-            # logged directly: a passing check's event is not the cycle's log line, and the shadow count needs one
-            logger.warning(
-                _m(
-                    "PINNED_MEMORY_PROBE_FAILED",
-                    extra=get_extra_info(
-                        {**ctx.default_extra, "enforced": enforce, "error": what["error"]}
-                    ),
-                )
-            )
-            event = render_message(
-                Msg.PROBE_FAILED,
-                ctx=ctx,
-                check_id=self.check_id,
-                severity=None if enforce else "warning",
-                impact=None if enforce else "Shadow observation only: score was NOT changed",
-                what=what,
-            )
-            return CheckResult(passed=not enforce, event=event)
+            event = render_message(Msg.PROBE_FAILED, ctx=ctx, check_id=self.check_id, what=what)
+            return CheckResult(passed=False, event=event)
         what["error"] = _cap(report.get("error")) or f"probe status {_cap(status)!r}"
         return CheckResult(
             passed=True,
