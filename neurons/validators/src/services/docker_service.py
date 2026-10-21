@@ -1982,8 +1982,7 @@ def _should_encrypt_local_volume(
         bool(local_volume)
         and workload_kind != WorkloadKind.FILLER
         and bool(is_sysbox)
-        and enable_volume_encryption
-        and settings.ENABLE_VOLUME_ENCRYPTION
+        and bool(enable_volume_encryption)
     )
 
 

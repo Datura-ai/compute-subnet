@@ -1103,7 +1103,6 @@ class Settings(BaseSettings):
         ),
     )
     
-    ENABLE_VOLUME_ENCRYPTION: bool = Field(env="ENABLE_VOLUME_ENCRYPTION", default=True)
     VOLUME_MASTER_SECRET: str | None = Field(env="VOLUME_MASTER_SECRET", default=None)
     # DAH-2545 switch, off until the plaintext window is closed. A restarted container runs its own
     # entrypoint and startup_commands before gocryptfs can be mounted into it, so writes to the
@@ -1121,21 +1120,15 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_volume_encryption_secret(self) -> "Settings":
-        if self.ENABLE_VOLUME_ENCRYPTION:
-            secret = self.VOLUME_MASTER_SECRET
-            if secret is None or len(secret) < 32:
-                raise ValueError(
-                    "ENABLE_VOLUME_ENCRYPTION requires VOLUME_MASTER_SECRET "
-                    "of at least 32 characters"
-                )
-            # one unit of up to 8 bytes repeated holds at most 64 bits however long it is; a random secret
-            # of 32+ characters is never one (odds about 2^-96 for hex). A warning, not a refusal: the
-            # remedy, a new secret, leaves every volume encrypted under the old one unreadable
-            encoded = secret.encode()
-            if any(encoded[period:] == encoded[:-period] for period in range(1, 9)):
-                logger.warning(
-                    "VOLUME_MASTER_SECRET repeats a unit of at most 8 bytes, so it holds at most 64 bits"
-                )
+        secret = self.VOLUME_MASTER_SECRET
+        if secret is None or len(secret) < 32:
+            raise ValueError("VOLUME_MASTER_SECRET is required and must be at least 32 characters")
+        # one unit of up to 8 bytes repeated holds at most 64 bits however long it is; a random secret
+        # of 32+ characters is never one (odds about 2^-96 for hex). A warning, not a refusal: the
+        # remedy, a new secret, leaves every volume encrypted under the old one unreadable
+        encoded = secret.encode()
+        if any(encoded[period:] == encoded[:-period] for period in range(1, 9)):
+            logger.warning("VOLUME_MASTER_SECRET repeats a unit of at most 8 bytes, so it holds at most 64 bits")
         return self
 
     def get_bittensor_wallet(self) -> "Wallet":

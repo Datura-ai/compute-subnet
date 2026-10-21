@@ -6319,7 +6319,6 @@ async def test_create_container_fresh_sizing_uses_effective_values(
 
 
 def test_should_encrypt_local_volume_requires_local_sysbox_customer_volume(monkeypatch):
-    monkeypatch.setattr(docker_service_module.settings, "ENABLE_VOLUME_ENCRYPTION", True)
     monkeypatch.setattr(
         docker_service_module.settings,
         "VOLUME_MASTER_SECRET",
@@ -6427,7 +6426,6 @@ async def test_create_container_refuses_an_encrypted_restore_while_the_hold_is_o
     # DAH-3274 (review, 14 Sep): the image's entrypoint runs while a create-time restore writes
     # under /root through the pod's mount; until the workload can be held stopped, the create
     # refuses before the probes, the volume and the pod. A plain volume is not affected.
-    monkeypatch.setattr(docker_service_module.settings, "ENABLE_VOLUME_ENCRYPTION", True)
     monkeypatch.setattr(
         docker_service_module.settings, "VOLUME_MASTER_SECRET", "test-master-secret-32-chars-long!!"
     )
@@ -6471,7 +6469,6 @@ async def test_create_container_bootstrap_restore_order_follows_the_volume_kind(
     # an encrypted one only after its gocryptfs mount exists inside the running pod, through
     # that pod — so the executor is never handed the passphrase.
     _lift_encrypted_bootstrap_restore_hold(monkeypatch)
-    monkeypatch.setattr(docker_service_module.settings, "ENABLE_VOLUME_ENCRYPTION", True)
     monkeypatch.setattr(
         docker_service_module.settings,
         "VOLUME_MASTER_SECRET",
@@ -6640,7 +6637,6 @@ async def test_create_container_ends_the_log_stream_when_attestation_fails(docke
 @pytest.mark.asyncio
 async def test_create_container_encrypted_keys_ride_in_the_volume_setup_exec(docker_service, monkeypatch):
     # without a restore between mount and keys, the keys go in with the mount: no second exec
-    monkeypatch.setattr(docker_service_module.settings, "ENABLE_VOLUME_ENCRYPTION", True)
     monkeypatch.setattr(
         docker_service_module.settings, "VOLUME_MASTER_SECRET", "test-master-secret-32-chars-long!!"
     )
@@ -6671,7 +6667,6 @@ async def test_create_container_initialises_only_a_volume_it_created(
     docker_service, monkeypatch, local_volume, allow_init
 ):
     # a reboot re-runs create with the pod's volume: a missing gocryptfs.conf there must fail, not start empty
-    monkeypatch.setattr(docker_service_module.settings, "ENABLE_VOLUME_ENCRYPTION", True)
     monkeypatch.setattr(
         docker_service_module.settings, "VOLUME_MASTER_SECRET", "test-master-secret-32-chars-long!!"
     )
@@ -6703,7 +6698,6 @@ async def test_create_container_encrypted_restore_stops_before_docker_run_on_an_
     # DAH-3274 (review): an executor image without `workspace.bootstrap` would ignore the key and
     # refuse the non-empty target after the pod is up; the create fails before `docker run` instead.
     _lift_encrypted_bootstrap_restore_hold(monkeypatch)
-    monkeypatch.setattr(docker_service_module.settings, "ENABLE_VOLUME_ENCRYPTION", True)
     monkeypatch.setattr(
         docker_service_module.settings, "VOLUME_MASTER_SECRET", "test-master-secret-32-chars-long!!"
     )
@@ -6744,7 +6738,6 @@ async def test_create_container_encrypted_restore_stops_before_docker_run_withou
     # DAH-3274 (review): new models but no restic binary used to fail inside _run_bootstrap_restore,
     # with the pod already built; the engine check now runs next to the models probe.
     _lift_encrypted_bootstrap_restore_hold(monkeypatch)
-    monkeypatch.setattr(docker_service_module.settings, "ENABLE_VOLUME_ENCRYPTION", True)
     monkeypatch.setattr(
         docker_service_module.settings, "VOLUME_MASTER_SECRET", "test-master-secret-32-chars-long!!"
     )
@@ -6786,7 +6779,6 @@ async def test_create_container_encrypted_local_volume_docker_run_flags(
     docker_service,
     monkeypatch,
 ):
-    monkeypatch.setattr(docker_service_module.settings, "ENABLE_VOLUME_ENCRYPTION", True)
     monkeypatch.setattr(
         docker_service_module.settings,
         "VOLUME_MASTER_SECRET",
@@ -6855,7 +6847,6 @@ async def test_create_container_uses_plain_volume_when_encrypted_label_missing(
     docker_service,
     monkeypatch,
 ):
-    monkeypatch.setattr(docker_service_module.settings, "ENABLE_VOLUME_ENCRYPTION", True)
     monkeypatch.setattr(
         docker_service_module.settings,
         "VOLUME_MASTER_SECRET",
@@ -6920,7 +6911,6 @@ async def test_create_container_volume_encryption_opt_out_skips_image_inspect(
     docker_service,
     monkeypatch,
 ):
-    monkeypatch.setattr(docker_service_module.settings, "ENABLE_VOLUME_ENCRYPTION", True)
     _patch_create_container_happy_path(docker_service, monkeypatch)
     inspect_spy = AsyncMock()
     monkeypatch.setattr(docker_service, "_image_has_encrypted_volume_label", inspect_spy)
@@ -6981,7 +6971,6 @@ async def test_create_container_fails_when_encrypted_label_inspect_raises(
     docker_service,
     monkeypatch,
 ):
-    monkeypatch.setattr(docker_service_module.settings, "ENABLE_VOLUME_ENCRYPTION", True)
     monkeypatch.setattr(
         docker_service_module.settings,
         "VOLUME_MASTER_SECRET",
@@ -7047,7 +7036,6 @@ async def test_create_container_encrypted_setup_runs_before_ssh_bootstrap(
     docker_service,
     monkeypatch,
 ):
-    monkeypatch.setattr(docker_service_module.settings, "ENABLE_VOLUME_ENCRYPTION", True)
     monkeypatch.setattr(
         docker_service_module.settings,
         "VOLUME_MASTER_SECRET",
@@ -7117,7 +7105,6 @@ async def test_create_container_encrypted_setup_failure_cleans_up(
     docker_service,
     monkeypatch,
 ):
-    monkeypatch.setattr(docker_service_module.settings, "ENABLE_VOLUME_ENCRYPTION", True)
     monkeypatch.setattr(
         docker_service_module.settings,
         "VOLUME_MASTER_SECRET",
@@ -7187,7 +7174,6 @@ async def test_create_container_s3fs_external_volume_keeps_encrypted_local_mount
     docker_service,
     monkeypatch,
 ):
-    monkeypatch.setattr(docker_service_module.settings, "ENABLE_VOLUME_ENCRYPTION", True)
     monkeypatch.setattr(
         docker_service_module.settings,
         "VOLUME_MASTER_SECRET",
@@ -7263,7 +7249,6 @@ async def test_create_container_filler_skips_encrypted_volume_setup(
     docker_service,
     monkeypatch,
 ):
-    monkeypatch.setattr(docker_service_module.settings, "ENABLE_VOLUME_ENCRYPTION", True)
     monkeypatch.setattr(
         docker_service_module.settings,
         "VOLUME_MASTER_SECRET",
@@ -8427,7 +8412,6 @@ async def test_a_key_injection_failure_whose_inspect_fails_keeps_the_exec_error(
 
 
 async def _create_with_volume_setup_exit(docker_service, monkeypatch, *, exit_status, state):
-    monkeypatch.setattr(docker_service_module.settings, "ENABLE_VOLUME_ENCRYPTION", True)
     monkeypatch.setattr(
         docker_service_module.settings, "VOLUME_MASTER_SECRET", "test-master-secret-32-chars-long!!"
     )

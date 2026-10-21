@@ -919,8 +919,6 @@ async def test_a_failed_docker_rm_is_not_reported_removed(docker_service):
 
 def _wire(svc, monkeypatch, ssh_client, *, probe_result):
     _patch_happy(svc, monkeypatch, ssh_client)
-    # so a payload with is_sysbox + enable_volume_encryption reaches the label check
-    monkeypatch.setattr(settings, "ENABLE_VOLUME_ENCRYPTION", True)
     monkeypatch.setattr(svc, "probe_prerun_host", AsyncMock(return_value=probe_result))
     monkeypatch.setattr(svc, "clean_existing_containers", AsyncMock(return_value=[]))
     monkeypatch.setattr(svc, "clean_stale_vloopback_volumes", AsyncMock(return_value=[]))
