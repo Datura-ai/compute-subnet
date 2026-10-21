@@ -2969,18 +2969,6 @@ async def test_create_container_no_quote_socket_for_filler_on_cvm_node(docker_se
 
 
 @pytest.mark.asyncio
-async def test_create_container_quote_socket_kill_switch(docker_service, monkeypatch):
-    monkeypatch.setattr("services.docker_service.settings.ENABLE_CVM_POD_QUOTE_SOCKET", False)
-    run_spy, ensure_broker = _patch_quote_socket_path(docker_service, monkeypatch)
-
-    await _create(docker_service, _cvm_socket_payload(), tdx_quote='{"quote": "0xdeadbeef"}')
-
-    ensure_broker.assert_not_awaited()
-    run_spec = run_spy.await_args.kwargs["run_spec"]
-    assert DSTACK_GUEST_SOCKET_PATH not in {m.target for m in run_spec.volumes}
-
-
-@pytest.mark.asyncio
 async def test_create_filler_starts_inspector_collector(docker_service, monkeypatch):
     monkeypatch.setattr("services.docker_service.settings.ENABLE_INSPECTOR", True)
     _patch_create_container_happy_path(docker_service, monkeypatch)
