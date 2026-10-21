@@ -283,11 +283,6 @@ class Settings(BaseSettings):
         default="https://raw.githubusercontent.com/Datura-ai/lium-io/main/neurons/executor/libinspector.so",
         description="Raw GitHub URL the executor curls when the libinspector.so refresh is on and the hash does not match",
     )
-    # DAH-3257: on a rent, read the host listings the pre-run steps need (containers, volumes,
-    # mounted volumes, GPU minor map, device nodes, nvidia-smi power state, the image's
-    # encryption label) in ONE ssh command instead of ~8; every removal and write still runs its
-    # own command, and a probe that fails leaves every step on its own commands. Off: as before.
-    RENTAL_PRERUN_HOST_PROBE_ENABLED: bool = Field(env="RENTAL_PRERUN_HOST_PROBE_ENABLED", default=False)
     # A rental container with a memory limit runs with swap off (--memory-swap = --memory) and
     # RENTAL_CONTAINER_OOM_SCORE_ADJ, so a host-wide OOM picks its processes before the executor. The
     # memory limit stays the backend's memory_gb. 0 or below would protect the renter over host services, and Docker
