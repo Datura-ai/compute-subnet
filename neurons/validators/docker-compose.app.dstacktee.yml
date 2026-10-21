@@ -44,7 +44,6 @@ services:
       - REDIS_PORT=6379
       - ENABLE_TDX_ATTESTATION=true
       - TDX_VERIFIER_URL=http://dstack-verifier:8080/verify
-      - ENABLE_ATTESTATION_WHITELIST=true
       - DEPLOY_ENV=PROD
     ports:
       - ${EXTERNAL_PORT}:${INTERNAL_PORT}

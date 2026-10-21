@@ -843,7 +843,6 @@ class Settings(BaseSettings):
     # TDX Attestation settings
     ENABLE_TDX_ATTESTATION: bool = Field(env="ENABLE_TDX_ATTESTATION", default=False)
     TDX_VERIFIER_URL: str | None = Field(env="TDX_VERIFIER_URL", default=None)
-    ENABLE_ATTESTATION_WHITELIST: bool = Field(env="ENABLE_ATTESTATION_WHITELIST", default=False)
 
     # G4 — TCB/advisory enforcement (CVM attestation gap remediation).
     # Off = warn-only telemetry: violations are logged with structured reasons but do

@@ -122,7 +122,6 @@ def _nras_response(
 def service(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_TDX_ATTESTATION", True)
     monkeypatch.setattr(settings, "TDX_VERIFIER_URL", "https://verifier.example/verify")
-    monkeypatch.setattr(settings, "ENABLE_ATTESTATION_WHITELIST", False)
     monkeypatch.setattr(settings, "ENABLE_TCB_ENFORCEMENT", False)
     monkeypatch.setattr(settings, "ENABLE_GPU_ATTESTATION_ENFORCEMENT", False)
     monkeypatch.setattr(settings, "ENABLE_ATTESTATION_NONCE", False)

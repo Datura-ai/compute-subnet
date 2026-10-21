@@ -43,10 +43,13 @@ async def test_attestation_service_accepts_fixture_quote(monkeypatch):
     monkeypatch.setattr(asyncssh, "import_public_key", lambda value: object())
     monkeypatch.setattr(settings, "ENABLE_TDX_ATTESTATION", True)
     monkeypatch.setattr(settings, "TDX_VERIFIER_URL", "https://verifier.example/verify")
+
     # This test exercises the verify-and-accept happy path; whitelist gating is a
-    # separate concern. Pin it off so the test is deterministic regardless of a
-    # developer's local .env (which may set ENABLE_ATTESTATION_WHITELIST=True).
-    monkeypatch.setattr(settings, "ENABLE_ATTESTATION_WHITELIST", False)
+    # separate concern, so accept the fixture's digest.
+    async def accept_whitelist(self, **kwargs) -> bool:
+        return True
+
+    monkeypatch.setattr(AttestationService, "_check_whitelist", accept_whitelist)
 
     service = AttestationService()
     assert service.enabled is True
