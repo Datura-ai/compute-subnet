@@ -328,3 +328,27 @@ def test_the_check_runs_after_the_scrape_and_before_the_gpu_checks_and_the_rente
     at = kinds.index(GpuLossHoldCheck)
     assert kinds.index(MachineSpecScrapeCheck) < kinds.index(RentedGpuDropCheck) < at
     assert at < kinds.index(GpuModelValidCheck) < kinds.index(TenantEnforcementCheck)
+
+
+@pytest.mark.asyncio
+async def test_a_card_missing_while_the_renter_resets_it_neither_starts_nor_clears_a_hold(context_factory):
+    """DAH-4658: the cards leave nvidia-smi for ~4-40 s during a renter's reset; that scrape is not a GPU loss."""
+    from services.redis_service import RedisService
+
+    class PendingRedis(FakeRedis):
+        get_pending_pods = RedisService.get_pending_pods
+        add_pending_pod = RedisService.add_pending_pod
+        gpu_reset_marks = RedisService.gpu_reset_marks
+
+    redis = PendingRedis()
+    ctx = _ctx(context_factory, redis, listed=UUIDS[:2], count=2, pods=(2, 2))
+    await redis.add_pending_pod(ctx.miner_hotkey, ctx.executor.uuid, "pod2", kind="gpu_reset", gpu_uuids=UUIDS[2:])
+
+    result = await GpuLossHoldCheck().run(ctx)
+
+    assert result.passed and result.event.reason_code == Msg.GPU_RESET_IN_PROGRESS.reason
+    assert await redis.get(gpu_loss_hold._key(ctx)) is None
+
+    # a card of the other pod missing during the reset is still a loss
+    other = _ctx(context_factory, redis, listed=UUIDS[1:], count=3, pods=(2, 2))
+    assert (await GpuLossHoldCheck().run(other)).event.reason_code != Msg.GPU_RESET_IN_PROGRESS.reason

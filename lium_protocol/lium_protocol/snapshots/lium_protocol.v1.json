@@ -5222,6 +5222,14 @@
           "title": "Provider Spot Executor Ids",
           "type": "array"
         },
+        "renter_hardware_fault_executor_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Renter Hardware Fault Executor Ids",
+          "type": "array"
+        },
         "spot_executor_ids": {
           "default": [],
           "items": {

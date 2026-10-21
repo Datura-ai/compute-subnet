@@ -107,6 +107,13 @@ def calculate_scores(
         job_score = 0.0
         warning_messages.append("GPU identity changed or could not be verified against the card")
 
+    # Host-write gate (DAH-4548): same mechanics; it reads only the sensor's verdict that the host
+    # wrote into a rented pod under enforcement, and shadow leaves the flag True.
+    if not ctx.inspector_host_write_passed:
+        actual_score = 0.0
+        job_score = 0.0
+        warning_messages.append("The host wrote into a renter's container")
+
     # EMA verifyx download speed check — threshold enforced upstream in VerifyXCheck
     ema_verifyx_download = ((ctx.state.specs or {}).get("network") or {}).get(
         "ema_verifyx_download_speed"

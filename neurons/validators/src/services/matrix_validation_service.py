@@ -288,7 +288,7 @@ class ValidationService:
                 )
             )
 
-    async def _probe_all_claimed_cards(
+    async def probe_all_claimed_cards(
         self, ssh_client, executor_info, default_extra: dict, machine_spec: dict
     ) -> AllCardsProbe | None:
         # concurrent per-card work-proof: one independent challenge per claimed card (own seed + own
@@ -712,7 +712,7 @@ class ValidationService:
         # keeps a not-yet-relevant fleet — and the legacy single-card path below — unchanged.
         # a filler-node sample runs beside the filler, so it never probes every card
         if settings.MATMUL_ALLCARDS_CHECK_ENABLED and probe_all_cards:
-            all_cards = await self._probe_all_claimed_cards(
+            all_cards = await self.probe_all_claimed_cards(
                 ssh_client, executor_info, default_extra, machine_spec
             )
             if (

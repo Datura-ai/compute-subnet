@@ -262,6 +262,21 @@ def test_topology_parse_reads_nvlink_cells_only():
     assert parse_nvlink_peers("\x1b[4m" + TOPO_PAIR01 + "\x1b[0m", hosts) == {U[0]: {U[1]}, U[1]: {U[0]}}
 
 
+def test_topology_parse_reads_an_8x_h200_header_without_its_leading_tab():
+    """`nvidia-smi topo -m` of an 8x H200 (NVSwitch, no /dev/nvidia-nvswitch*) as the runner returns it: stripped."""
+    h200 = [f"GPU-8{i}000000-0000-4000-8000-00000000000{i}" for i in range(8)]
+    hosts = parse_host_gpus("\n".join(f"{i}, {h200[i]}, 00000000:{i:02X}:00.0, Disabled" for i in range(8)))
+    gpus = "\t".join(f"GPU{i}" for i in range(8))
+    rows = [
+        f"GPU{i}\t" + "\t".join(" X " if j == i else "NV18" for j in range(8)) + f"\tSYS\t{'0-47' if i < 4 else '48-95'}\t{i // 4}\t\tN/A"
+        for i in range(8)
+    ]
+    topology = "\n".join([f"{gpus}\tNIC0\tCPU Affinity\tNUMA Affinity\tGPU NUMA ID", *rows, "", "Legend:", "  X    = Self"])
+    peers = parse_nvlink_peers(topology, hosts)
+    assert peers[h200[0]] == set(h200[1:])  # a 2-of-8 pod has peers outside it: the reset is refused
+    assert len(peers) == 8
+
+
 # --- the pending-pod mark and the checks that skip on it ------------------------------------------
 
 
@@ -429,6 +444,18 @@ async def test_the_validators_own_session_processes_do_not_block_the_reset():
     host = FakeHost(apps=[(4242, U[0]), (900, U[1])], cgroups={900: own})
     report, _ = await _reset(host)
     assert report.ok and any(cmd.startswith("nvidia-smi -r") for cmd in host.commands)
+
+
+@pytest.mark.asyncio
+async def test_the_validators_own_probe_left_after_the_stop_does_not_refuse_the_reset():
+    own = "0::/user.slice/user-0.slice/session-7.scope"
+    host = FakeHost(apps_after_stop=[(900, U[0])], cgroups={900: own})
+    report, _ = await _reset(host)
+    assert report.ok and any(cmd.startswith("nvidia-smi -r") for cmd in host.commands)
+
+    stranger = FakeHost(apps_after_stop=[(901, U[0])], cgroups={901: "0::/system.slice/other.service"})
+    report, _ = await _reset(stranger)
+    assert not report.ok and report.error_code == GpuResetErrorCode.GpuInUseOutsidePod
 
 
 @pytest.mark.asyncio
