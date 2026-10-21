@@ -1463,13 +1463,13 @@ class ContainerDownloadSpeedMessages:
         impact="Score set to 0",
         remediation=CONTAINER_DOWNLOAD_SLOW_REMEDIATION,
     )
-    # the same finding while CONTAINER_DOWNLOAD_SPEED_ENFORCEMENT_ENABLED is off: logged, score unchanged
+    # the same finding when a failing reading in the streak was not on the rentals network: logged, score unchanged
     SLOW_OBSERVED = MessageTemplate(
         event="Downloads from inside a container on this node are too slow (not enforced)",
         reason="CONTAINER_DOWNLOAD_SLOW_OBSERVED",
         severity="warning",
         category="runtime",
-        impact="None: CONTAINER_DOWNLOAD_SPEED_ENFORCEMENT_ENABLED is off",
+        impact="None: a failing reading was not taken on the rentals network",
         remediation=CONTAINER_DOWNLOAD_SLOW_REMEDIATION,
     )
     SLOW_ONCE = MessageTemplate(
