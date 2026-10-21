@@ -322,13 +322,6 @@ class Settings(BaseSettings):
     # memory limit stays the backend's memory_gb. 0 or below would protect the renter over host services, and Docker
     # refuses anything past 1000, which would fail every rental create.
     RENTAL_CONTAINER_OOM_SCORE_ADJ: int = Field(env="RENTAL_CONTAINER_OOM_SCORE_ADJ", default=500, ge=1, le=1000)
-    # On a rent, when dockerd refuses to bind a host port the backend handed the pod (a stale
-    # container or a provider process holds it), the pod moves to the next free pair of the
-    # executor's advertised range (≤ 3 candidates, the host's listening sockets read once over the
-    # create's SSH session) and `docker run` is retried ONCE; the create's answer carries the port
-    # the pod really got. Off: the 90 s same-mapping wait as before. Either way the failure event
-    # carries `error_class: port_collision`.
-    PORT_COLLISION_RETRY_ENABLED: bool = Field(env="PORT_COLLISION_RETRY_ENABLED", default=False)
     # DAH-4537: the outside port prober (an AWS Lambda function URL) and its bearer token. Each batch
     # port check first fetches a few listening ports through it; when none answers it while the
     # validator reaches them, the node gets no verified ports. Unset URL: no outside probe.
