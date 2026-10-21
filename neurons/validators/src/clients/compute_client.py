@@ -913,7 +913,8 @@ class ComputeClient:
                     "Backend command reply replay failed open",
                     extra=get_extra_info({**self.logging_extra, "command_id": command_id}),
                 ))
-                return await self._run_miner_job(job_request)
+                await self._run_miner_job(job_request)
+                return
             async with self.lock:
                 for reply in replies:
                     self.message_queue.append(reply)
