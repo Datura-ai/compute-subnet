@@ -2911,9 +2911,6 @@ class MinerService:
 
         try:
             base_url = f"http://{payload.miner_address}:{payload.miner_port}"
-            headers = self._generate_auth_headers(my_key, payload.miner_hotkey)
-            headers["Content-Type"] = "application/json"
-            
             # Generate SSH key and send it to miner
             private_key, public_key = self.ssh_service.generate_ssh_key(my_key.ss58_address)
 
@@ -2938,6 +2935,9 @@ class MinerService:
             # yet, so a create waits that out instead of failing the renter's pod.
             deadline = time.monotonic() + MINER_RESTART_WAIT_S
             while True:
+                # The miner accepts a signed timestamp for 10 s only, so each attempt signs anew.
+                headers = self._generate_auth_headers(my_key, payload.miner_hotkey)
+                headers["Content-Type"] = "application/json"
                 try:
                     status, response_data = await self._make_rest_request(
                         method="POST",

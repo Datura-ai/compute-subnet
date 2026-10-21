@@ -378,11 +378,16 @@ async def test_a_create_waits_out_a_miner_that_refuses_connections_while_it_rest
     accepted = (200, {"message_type": "AcceptSSHKeyRequest"})
     miner_service._make_rest_request.side_effect = [_refused(), _refused(), accepted]
     mocker.patch("services.miner_service.asyncio.sleep", AsyncMock())
+    stamps = iter(range(100))
+    mocker.patch.object(miner_service, "_generate_auth_headers", side_effect=lambda *_: {"X-Timestamp": next(stamps)})
     create_mock = mocker.patch("services.miner_service.DockerService.create_container", AsyncMock(return_value=Mock()))
 
     await miner_service._handle_container(_make_create_payload(executor_id))
 
     create_mock.assert_awaited_once()
+    # the miner rejects a signed timestamp older than 10 s, so every attempt must be signed anew
+    sent = [c.kwargs["headers"]["X-Timestamp"] for c in miner_service._make_rest_request.await_args_list[:3]]
+    assert sent == [0, 1, 2]
 
 
 @pytest.mark.asyncio
