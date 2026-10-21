@@ -79,6 +79,7 @@ from services.docker_service import create_steps_after_reply, inflight_creates
 from services.miner_service import MinerService
 from incentive.rental_price import ExecutorEstimateParams, RentalPriceSnapshot, estimate_executor
 from services.redis_service import (
+    BackendCommand,
     DUPLICATED_MACHINE_SET,
     EXECUTORS_UPTIME_PREFIX,
     GPU_ESTIMATES_CHANNEL,
@@ -862,7 +863,7 @@ class ComputeClient:
             return await self._run_miner_job(job_request)
         command_id = job_request.command_id
         redis_service = self.miner_service.redis_service
-        claim = json.dumps({"state": "running", "owner": uuid4().hex})
+        claim = BackendCommand(state="running", owner=uuid4().hex).model_dump_json()
         try:
             existing = await redis_service.claim_backend_command(command_id, claim)
         except Exception:
@@ -872,30 +873,7 @@ class ComputeClient:
             ))
             return await self._run_miner_job(job_request)
         if existing is not None:
-            if existing["state"] == "finished":
-                try:
-                    replies = [BaseValidatorResponse.parse(raw) for raw in existing["responses"]]
-                except Exception:
-                    logger.exception(_m(
-                        "Backend command reply replay failed open",
-                        extra=get_extra_info({**self.logging_extra, "command_id": command_id}),
-                    ))
-                    return await self._run_miner_job(job_request)
-                async with self.lock:
-                    for reply in replies:
-                        self.message_queue.append(reply)
-            else:
-                logger.info(
-                    _m(
-                        "Ignoring running backend command duplicate",
-                        extra=get_extra_info({
-                            **self.logging_extra,
-                            "command_id": command_id,
-                            "request_type": job_request.message_type.value,
-                        }),
-                    )
-                )
-            return
+            return await self._handle_backend_command_duplicate(job_request, existing)
 
         responses: list[str] = []
         token = command_responses.set(responses)
@@ -912,7 +890,7 @@ class ComputeClient:
                 await heartbeat
             # A failure without any answer releases the claim so a retry can run.
             value = (
-                json.dumps({"state": "finished", "responses": responses})
+                BackendCommand(state="finished", responses=responses).model_dump_json()
                 if succeeded or responses
                 else ""
             )
@@ -922,6 +900,34 @@ class ComputeClient:
                 )
             except Exception:
                 logger.exception("Failed to finish backend command: %s", command_id)
+
+    async def _handle_backend_command_duplicate(
+        self, job_request: BaseServerRequest, existing: BackendCommand
+    ) -> None:
+        command_id = job_request.command_id
+        if existing.state == "finished":
+            try:
+                replies = [BaseValidatorResponse.parse(raw) for raw in existing.responses]
+            except Exception:
+                logger.exception(_m(
+                    "Backend command reply replay failed open",
+                    extra=get_extra_info({**self.logging_extra, "command_id": command_id}),
+                ))
+                return await self._run_miner_job(job_request)
+            async with self.lock:
+                for reply in replies:
+                    self.message_queue.append(reply)
+        else:
+            logger.info(
+                _m(
+                    "Ignoring running backend command duplicate",
+                    extra=get_extra_info({
+                        **self.logging_extra,
+                        "command_id": command_id,
+                        "request_type": job_request.message_type.value,
+                    }),
+                )
+            )
 
     async def _refresh_backend_command(self, command_id: str, claim: str) -> None:
         ttl = settings.BACKEND_COMMAND_CLAIM_TTL_SECONDS

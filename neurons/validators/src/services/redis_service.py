@@ -3,7 +3,7 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 from pydantic import BaseModel, ValidationError
 from payload_models.payloads import WorkloadKind
@@ -128,6 +128,12 @@ REDIS_RETRY_ATTEMPTS = 3
 REDIS_HEALTH_CHECK_INTERVAL_SECONDS = 30
 
 logger = logging.getLogger(__name__)
+
+
+class BackendCommand(BaseModel):
+    state: Literal["running", "finished"]
+    owner: str = ""
+    responses: list[str] = []
 
 
 class InflightBackendCreate(BaseModel):
@@ -581,7 +587,7 @@ class RedisService:
         else:
             await self.hdel(PENDING_PODS_PREFIX, f"{miner_hotkey}:{executor_id}")
 
-    async def claim_backend_command(self, command_id: str, claim: str) -> dict | None:
+    async def claim_backend_command(self, command_id: str, claim: str) -> BackendCommand | None:
         key = f"{BACKEND_COMMAND_PREFIX}{command_id}"
         while True:
             if await self.redis.set(
@@ -590,9 +596,9 @@ class RedisService:
                 return None
             existing = await self.redis.get(key)
             if existing is not None:
-                existing = json.loads(existing)
+                existing = BackendCommand.model_validate_json(existing)
                 # Redis may retry SET NX after storing our claim but losing the reply.
-                return None if existing == json.loads(claim) else existing
+                return None if existing == BackendCommand.model_validate_json(claim) else existing
 
     async def update_backend_command(
         self, command_id: str, claim: str, value: str, ttl: int
@@ -617,7 +623,7 @@ class RedisService:
     async def clear_running_backend_commands(self) -> None:
         async for key in self.redis.scan_iter(match=f"{BACKEND_COMMAND_PREFIX}*", count=100):
             value = await self.redis.get(key)
-            if value is not None and json.loads(value)["state"] == "running":
+            if value is not None and BackendCommand.model_validate_json(value).state == "running":
                 await self.redis.delete(key)
 
     async def add_inflight_backend_create(
