@@ -141,8 +141,7 @@ class Settings(BaseSettings):
     )
     # DAH-2977: also keep the top-N official templates warm (the backend lists them with
     # `pre_pull: true` when asked). Pulled one per refresh sweep, only while the node is
-    # idle. Off by default: the loop then behaves exactly as before and never asks.
-    PRE_PULL_TEMPLATES_ENABLED: bool = Field(env="PRE_PULL_TEMPLATES_ENABLED", default=False)
+    # idle.
     # Free space the docker root must keep after a pre-pull; least-recently-used
     # pre-pulled images are evicted first to stay above it.
     PRE_PULL_MIN_FREE_GB: int = Field(env="PRE_PULL_MIN_FREE_GB", default=200)

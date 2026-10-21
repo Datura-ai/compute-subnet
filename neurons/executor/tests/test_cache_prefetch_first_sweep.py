@@ -9,6 +9,7 @@ checking the node for that image.
 
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import docker
@@ -89,8 +90,12 @@ def _drive_loop(monkeypatch, ensure_outcomes: list, sleeps_before_stop: int, tmp
     """Run the loop with one template until `sleeps_before_stop` sleeps; return the delays."""
     monkeypatch.setattr(cache_template_service.settings, "COMPUTE_REST_API_URL", "https://backend")
     monkeypatch.setattr(cache_template_service.settings, "CACHE_TEMPLATE_REFRESH_SECONDS", 900)
-    monkeypatch.setattr(cache_template_service.settings, "PRE_PULL_TEMPLATES_ENABLED", False)
     monkeypatch.setattr(cache_template_service.docker, "from_env", MagicMock())
+    # the pre-pull sweep is its own task with its own tests; a fixed clock keeps the refresh sleep whole
+    monkeypatch.setattr(
+        cache_template_service, "PrePuller", MagicMock(return_value=MagicMock(sweep=AsyncMock()))
+    )
+    monkeypatch.setattr(cache_template_service, "time", SimpleNamespace(monotonic=lambda: 0.0))
     gpu = gpu or (lambda: ("NVIDIA H100", "580", None))
     monkeypatch.setattr(cache_template_service, "_get_gpu_info", gpu)
     monkeypatch.setattr(
