@@ -15,6 +15,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, Mock
 from uuid import uuid4
 
+import aiohttp
 import pytest
 
 from clients.compute_client import ComputeClient
@@ -337,3 +338,41 @@ def test_missing_executor_failure_reads_known_executor_ids():
     assert not_listed.extra["reason_code"] == "EXECUTOR_NOT_LISTED_BY_MINER"
     # A miner without known_executor_ids keeps DAH-3508's wording, not the old "Invalid executor id".
     assert str(_missing_executor_failure(old_miner, executor_id, extra)[0]) == "Error: no executor accepted the SSH key"
+
+
+def _refused():
+    return aiohttp.ClientConnectorError(Mock(host="10.0.0.1", port=8000, ssl=None), OSError(111, "Connect call failed"))
+
+
+@pytest.mark.asyncio
+async def test_a_create_waits_out_a_miner_that_refuses_connections_while_it_restarts(mocker, miner_service):
+    # a miner redeploy refuses connections for about a minute; a create used to fail on the first refusal
+    executor_id = str(uuid4())
+    _wire_common_mocks(mocker, miner_service, executor_id)
+    accepted = (200, {"message_type": "AcceptSSHKeyRequest"})
+    miner_service._make_rest_request.side_effect = [_refused(), _refused(), accepted]
+    mocker.patch("services.miner_service.asyncio.sleep", AsyncMock())
+    stamps = iter(range(100))
+    mocker.patch.object(miner_service, "_generate_auth_headers", side_effect=lambda *_: {"X-Timestamp": next(stamps)})
+    create_mock = mocker.patch("services.miner_service.DockerService.create_container", AsyncMock(return_value=Mock()))
+
+    await miner_service._handle_container(_make_create_payload(executor_id))
+
+    create_mock.assert_awaited_once()
+    # the miner rejects a signed timestamp older than 10 s, so every attempt must be signed anew
+    sent = [c.kwargs["headers"]["X-Timestamp"] for c in miner_service._make_rest_request.await_args_list[:3]]
+    assert sent == [0, 1, 2]
+
+
+@pytest.mark.asyncio
+async def test_a_create_gives_up_once_the_miner_stays_unreachable_past_the_wait(mocker, miner_service):
+    executor_id = str(uuid4())
+    _wire_common_mocks(mocker, miner_service, executor_id)
+    miner_service._make_rest_request.side_effect = _refused()
+    mocker.patch("services.miner_service.MINER_RESTART_WAIT_S", 0)
+    create_mock = mocker.patch("services.miner_service.DockerService.create_container", AsyncMock())
+
+    result = await miner_service._handle_container(_make_create_payload(executor_id))
+
+    create_mock.assert_not_awaited()
+    assert result.msg == "Resulted in an exception"

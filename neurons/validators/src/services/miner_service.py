@@ -253,6 +253,8 @@ REST_SSH_SUBMIT_TIMEOUT = 30  # Timeout for SSH key submission requests
 REST_CONTAINER_OP_TIMEOUT = 30  # Timeout for container operations
 REST_POD_LOGS_TIMEOUT = 30  # Timeout for pod logs requests
 REST_SSH_REMOVE_TIMEOUT = 10  # Timeout for SSH key removal requests
+MINER_RESTART_WAIT_S = 90  # how long a create waits for a miner that refuses connections
+MINER_RESTART_RETRY_S = 5
 
 # Emitted instead of a validation result for an executor under a special manual (bare-metal)
 # rental. Distinct string so manual passes are greppable in Loki and can never be mistaken for a
@@ -2003,9 +2005,6 @@ class MinerService:
 
         try:
             base_url = f"http://{payload.miner_address}:{payload.miner_port}"
-            headers = self._generate_auth_headers(my_key, payload.miner_hotkey)
-            headers["Content-Type"] = "application/json"
-            
             # Generate SSH key and send it to miner
             private_key, public_key = self.ssh_service.generate_ssh_key(my_key.ss58_address)
 
@@ -2026,15 +2025,29 @@ class MinerService:
                 _m("Sent SSH key to miner via REST API.", extra=get_extra_info(default_extra)),
             )
 
-            status, response_data = await self._make_rest_request(
-                method="POST",
-                url=f"{base_url}/api/validator/ssh-pubkey-submit",
-                json_data=self._serialize_request(ssh_request),
-                headers=headers,
-                timeout=REST_CONTAINER_OP_TIMEOUT,
-                log_extra=default_extra,
-                operation_name="SSH key submit",
-            )
+            # A restarting miner refuses connections for about a minute. Nothing has reached it
+            # yet, so a create waits that out instead of failing the renter's pod.
+            deadline = time.monotonic() + MINER_RESTART_WAIT_S
+            while True:
+                # The miner accepts a signed timestamp for 10 s only, so each attempt signs anew.
+                headers = self._generate_auth_headers(my_key, payload.miner_hotkey)
+                headers["Content-Type"] = "application/json"
+                try:
+                    status, response_data = await self._make_rest_request(
+                        method="POST",
+                        url=f"{base_url}/api/validator/ssh-pubkey-submit",
+                        json_data=self._serialize_request(ssh_request),
+                        headers=headers,
+                        timeout=REST_CONTAINER_OP_TIMEOUT,
+                        log_extra=default_extra,
+                        operation_name="SSH key submit",
+                    )
+                    break
+                except aiohttp.ClientConnectorError:
+                    is_create = isinstance(payload, ContainerCreateRequest)
+                    if not is_create or time.monotonic() >= deadline:
+                        raise
+                    await asyncio.sleep(MINER_RESTART_RETRY_S)
 
             if status != 200 or response_data is None:
                 error_msg = "Failed to submit SSH key"
