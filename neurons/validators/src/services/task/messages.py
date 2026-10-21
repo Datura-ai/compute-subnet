@@ -2317,9 +2317,7 @@ class LocalVerifyMessages:
 
 class RentedPodResourcesMessages:
     """DAH-4564 — a host script `docker update --cpuset-cpus`-pins a rented pod, or cuts its CPU quota,
-    below 95% of the cores rented. Shadow (RENTED_POD_RESOURCES_CHECK_ENABLED without enforcement)
-    renders RESOURCES_REDUCED as a warning and keeps passed=True; only
-    RENTED_POD_RESOURCES_ENFORCEMENT_ENABLED zeroes the score. A raised oom_score_adj is recorded
+    below 95% of the cores rented: RESOURCES_REDUCED zeroes the score. A raised oom_score_adj is recorded
     in the event and never scored: a renter running as root can raise it himself."""
 
     RESOURCES_OK = MessageTemplate(
