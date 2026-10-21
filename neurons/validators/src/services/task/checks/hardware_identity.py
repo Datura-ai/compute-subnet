@@ -5,8 +5,6 @@ import hashlib
 import json
 import logging
 
-from core.config import settings
-
 from ..messages import HardwareIdentityMessages as Msg, render_message
 from ..pipeline import CheckResult, Context
 from .banned_provider import has_live_rental, kernel_gpu_view, reported_gpu_uuids
@@ -75,8 +73,11 @@ def dmi_overlay_findings(mountinfo: str, file_fs: str) -> list[str]:
 
 
 def gpu_sources_disagree(reported: list[str], kernel: list[str] | None) -> bool:
-    """NVML (the scrape) and the kernel's procfs list name different cards; unknown when the kernel list is unreadable."""
-    return kernel is not None and set(reported) != set(kernel)
+    """NVML (the scrape) names a card the kernel's procfs list does not; unknown when the kernel list is unreadable.
+
+    A kernel card the node does not report is not a disagreement: a split host or a card kept out of the listing.
+    """
+    return kernel is not None and not set(reported) <= set(kernel)
 
 
 def digest(values: list[str]) -> str:
@@ -99,14 +100,12 @@ class HardwareIdentityCheck:
 
     DMI (`/sys/class/dmi/id`) is text a script can overlay (provider 5E5GpE1b's dmi-cloak); the GPU
     UUID the kernel driver reads from the card is not. The node is flagged when DMI files are not
-    served by sysfs, when NVML and the kernel name different GPUs, or when DMI identity
+    served by sysfs, when NVML names a GPU the kernel does not list, or when DMI identity
     (product_uuid, board_serial) changes between checks while the GPU set stays the same. The
     fingerprint (a hash of the kernel's GPU UUIDs, NVML's when the kernel list is unreadable) and
     the DMI hash are logged on every event.
 
-    Shadow by default: a finding is a warning event and the node passes. Under
-    HARDWARE_FINGERPRINT_ENFORCEMENT_ENABLED it fails the node. An unreadable host, SSH error or
-    Redis outage decides nothing.
+    A finding fails the node. An unreadable host, SSH error or Redis outage decides nothing.
     """
 
     check_id = "host.validate.hardware_identity"
@@ -160,18 +159,10 @@ class HardwareIdentityCheck:
             "reported_gpu_uuids": reported,
             "dmi_overlays": overlays,
             "findings": findings,
-            "enforced": settings.HARDWARE_FINGERPRINT_ENFORCEMENT_ENABLED,
         }
         if not findings:
             return CheckResult(passed=True, event=render_message(Msg.OK, ctx=ctx, check_id=self.check_id, what=what))
 
-        enforce = settings.HARDWARE_FINGERPRINT_ENFORCEMENT_ENABLED
-        event = render_message(
-            Msg.SPOOFED,
-            ctx=ctx,
-            check_id=self.check_id,
-            impact=None if enforce else "Shadow observation only: score was NOT changed",
-            what=what,
-        )
+        event = render_message(Msg.SPOOFED, ctx=ctx, check_id=self.check_id, what=what)
         # like the ban checks: a node with a live pod keeps being verified (TenantEnforcementCheck still runs)
-        return CheckResult(passed=not enforce, event=event, fatal=not has_live_rental(ctx))
+        return CheckResult(passed=False, event=event, fatal=not has_live_rental(ctx))
