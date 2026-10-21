@@ -174,7 +174,6 @@ class _ProbeGate:
     # the last probe's failed step, standing until a probe passes; None when there is none
     standing: _Failure | None
     # the fillers the backend listed under the lock, which the probe runs beside and leaves alone
-    # (RENTAL_PROBE_BESIDE_FILLERS_ENABLED); empty otherwise
     fillers_beside: frozenset[str] = frozenset()
 
 
@@ -212,11 +211,10 @@ class RentalProbeCheck:
     create returns. Anything the probe cannot read (backend, Redis) makes it skip or reach no verdict;
     it never penalises on missing data alone. RENTAL_PROBE_ENABLED is off by default.
 
-    With RENTAL_PROBE_BESIDE_FILLERS_ENABLED on, an idle node running a Lium filler is probed too,
-    beside the filler rather than in its place: create_container is told `beside_fillers`, so it
+    An idle node running a Lium filler is probed too, beside the filler rather than in its place: create_container is told `beside_fillers`, so it
     removes no `filler_*`, lifts no GPU power cap and reclaims no filler cache. The validator cannot
     stop a filler run in the backend, so removing the container would read as the provider killing
-    it, and lifting a PEARL filler's cap is DAH-2356's hard-ban case. Off by default.
+    it, and lifting a PEARL filler's cap is DAH-2356's hard-ban case.
 
     With RENTAL_PROBE_ENFORCEMENT_ENABLED off (shadow) the probe runs the same way, but a failed step is
     logged as RENTAL_PROBE_FAILED_OBSERVED and the check passes: no score, job score or verified-job
@@ -387,7 +385,7 @@ class RentalProbeCheck:
         self, ctx: Context, standing: _Failure | None
     ) -> CheckResult | frozenset[str]:
         """Re-read the node's idleness under the create lock; the result that stops the cycle,
-        or the fillers the probe may run beside (empty unless RENTAL_PROBE_BESIDE_FILLERS_ENABLED).
+        or the fillers the probe may run beside (empty on a node without a filler).
 
         ctx.state.rented_data is the snapshot the cycle started from, minutes ago for the last check
         in the pipeline. create_container sweeps every pod_* container it is not told about, so the
@@ -521,9 +519,6 @@ async def _skip_reason(ctx: Context) -> tuple[str | None, dict[str, Any]]:
     rented_executor = rented_data.executors.get(ctx.executor.uuid) if rented_data else None
     if rented_executor and rented_executor.pods:
         return "rented", {"pods": [pod.pod_id for pod in rented_executor.pods]}
-    filler_containers = rented_data.get_filler_containers(ctx.executor.uuid) if rented_data else []
-    if filler_containers and not settings.RENTAL_PROBE_BESIDE_FILLERS_ENABLED:
-        return "filler running", {"filler_containers": filler_containers}
     if ctx.config.express_first_pass and not settings.RENTAL_PROBE_ENFORCEMENT_ENABLED:
         # a shadow verdict cannot fail the node, so the container create waits for the next cycle
         return "first pass", {}
@@ -566,7 +561,7 @@ _RENTED_NOW = frozenset({_RENTED_SINCE_CYCLE_START, _RENT_IN_PROGRESS})
 class _BusyNow:
     # why the node is not idle right now, "" when it is, None when that could not be read
     busy: str | None
-    # the fillers on it the probe may run beside (only with RENTAL_PROBE_BESIDE_FILLERS_ENABLED)
+    # the fillers on it the probe runs beside
     fillers_beside: frozenset[str] = frozenset()
 
 
@@ -583,8 +578,6 @@ async def _busy_now(ctx: Context) -> _BusyNow:
     if rented_executor and rented_executor.pods:
         return _BusyNow(_RENTED_SINCE_CYCLE_START)
     fillers = frozenset(rented.get_filler_containers(ctx.executor.uuid))
-    if fillers and not settings.RENTAL_PROBE_BESIDE_FILLERS_ENABLED:
-        return _BusyNow("filler started since the cycle started")
     try:
         if await ctx.services.redis.renting_in_progress(ctx.miner_hotkey, ctx.executor.uuid):
             return _BusyNow(_RENT_IN_PROGRESS)

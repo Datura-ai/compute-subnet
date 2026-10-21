@@ -75,11 +75,9 @@ def probe_settings(
     egress_check: bool = False,
     egress_enforced: bool = False,
     enforced: bool = True,
-    beside_fillers: bool = False,
 ):
     with patch("neurons.validators.src.services.task.checks.rental_probe.settings") as s:
         s.RENTAL_PROBE_ENABLED = enabled
-        s.RENTAL_PROBE_BESIDE_FILLERS_ENABLED = beside_fillers
         s.RENTAL_PROBE_ENFORCEMENT_ENABLED = enforced
         s.RENTAL_PROBE_INTERVAL_HOURS = interval_hours
         s.RENTAL_PROBE_SSH_DEADLINE_SECONDS = deadline
@@ -423,21 +421,14 @@ async def test_off_rents_nothing():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "rented,expected_reason",
-    [
-        (rented_data(pods=1), "rented"),
-        (rented_data(fillers=1), "filler running"),
-    ],
-)
-async def test_never_rents_beside_a_renter_or_a_filler(rented, expected_reason):
-    """Regression: create_container sweeps every pod_/filler_ container it was not told about and lifts GPU
-    power caps, so a probe beside a renter or a PEARL filler destroys their container or uncaps their card."""
-    ctx, docker, _ = make_probe_context(rented=rented)
+async def test_never_rents_beside_a_renter():
+    """Regression: create_container sweeps every pod_ container it was not told about, so a probe beside
+    a renter destroys their container. A filler node is probed beside its filler (see below)."""
+    ctx, docker, _ = make_probe_context(rented=rented_data(pods=1))
     with probe_settings():
         result = await RentalProbeCheck().run(ctx)
     assert result.passed and result.event.reason_code == Msg.SKIPPED.reason
-    assert result.event.what_we_saw["reason"] == expected_reason
+    assert result.event.what_we_saw["reason"] == "rented"
     assert docker.create_calls == []
 
 
@@ -514,10 +505,6 @@ async def test_a_failed_probe_clears_an_earlier_pass_stamp_and_records_the_faile
 @pytest.mark.parametrize(
     "make_ctx, no_verdict",
     [
-        (
-            lambda redis: make_probe_context(redis=redis, rented=rented_data(fillers=1)),
-            "skipped: filler running",
-        ),
         (
             lambda redis: make_probe_context(redis=redis, image_present=False),
             "skipped: default renter image is not pulled on the node",
@@ -1071,7 +1058,7 @@ async def test_a_node_rented_during_the_probe_is_not_penalised():
 
     # self-review: a filler's create goes through the same create_container and sweeps pod_<probe> too;
     # its pending mark is gone by the time the probe looks, and a false failure would then stand for the
-    # filler's whole run ("skipped: filler running")
+    # filler's whole run
     ctx, docker, redis = make_probe_context(rented_now=[rented_data(), rented_data(fillers=1)])
     with probe_settings(deadline=1), renter_path(sshd_listens=False):
         result = await RentalProbeCheck().run(ctx)
@@ -1238,7 +1225,6 @@ def test_a_volume_rm_that_fails_is_a_leftover_not_a_clean_teardown():
     "rented_now,redis,expected_reason",
     [
         ([rented_data(pods=1)], FakeRedis(), "rented since the cycle started"),
-        ([rented_data(fillers=1)], FakeRedis(), "filler started since the cycle started"),
         ([rented_data()], FakeRedis(renting=True), "a rent is being created on the node"),
     ],
 )
@@ -1670,9 +1656,7 @@ async def test_egress_step_without_a_reading_records_nothing():
 async def test_a_standing_egress_failure_is_dropped_once_enforcement_is_off():
     """Regression: switching NO_OUTBOUND_INTERNET_ENFORCEMENT_ENABLED off leaves nodes failing on the
     egress step they failed while it was on, until a probe passes."""
-    ctx, _, _ = make_probe_context(
-        redis=FakeRedis(failed_step=STEP_EGRESS), rented=rented_data(fillers=1)
-    )
+    ctx, _, _ = make_probe_context(redis=FakeRedis(failed_step=STEP_EGRESS), image_present=False)
     with probe_settings(egress_check=True):
         result = await RentalProbeCheck().run(ctx)
     assert result.passed and result.event.reason_code == Msg.SKIPPED.reason
@@ -1709,18 +1693,13 @@ async def test_wait_for_sshd_uses_the_rented_probes_identification_rule(greeting
     assert (error is None) is sshd_up, error
 
 
-def test_probing_beside_fillers_is_off_by_default():
-    fields = type(module.settings).model_fields
-    assert fields["RENTAL_PROBE_BESIDE_FILLERS_ENABLED"].default is False
-
-
 @pytest.mark.asyncio
-async def test_a_filler_node_is_probed_beside_its_filler_when_enabled():
+async def test_a_filler_node_is_probed_beside_its_filler():
     """Regression: an idle node running a Lium filler is never probed, so a node whose renter
     container cannot start is only found by the renter who preempts the filler."""
     fillers = rented_data(fillers=1)
     ctx, docker, redis = make_probe_context(rented=fillers, rented_now=fillers)
-    with probe_settings(beside_fillers=True), renter_path():
+    with probe_settings(), renter_path():
         result = await RentalProbeCheck().run(ctx)
 
     assert result.passed and result.event.reason_code == Msg.PROBE_OK.reason
@@ -1731,7 +1710,7 @@ async def test_a_filler_node_is_probed_beside_its_filler_when_enabled():
 @pytest.mark.asyncio
 async def test_a_probe_on_a_node_without_a_filler_creates_with_beside_fillers_off():
     ctx, docker, _ = make_probe_context()
-    with probe_settings(beside_fillers=True), renter_path():
+    with probe_settings(), renter_path():
         await RentalProbeCheck().run(ctx)
 
     assert docker.create_options == [{"beside_fillers": False}]
@@ -1743,7 +1722,7 @@ async def test_a_failure_beside_the_filler_it_started_with_fails_the_node():
     given during the probe, so a broken filler node is never failed."""
     fillers = rented_data(fillers=1)
     ctx, docker, redis = make_probe_context(rented=fillers, rented_now=[fillers, fillers])
-    with probe_settings(beside_fillers=True, deadline=1), renter_path(sshd_listens=False):
+    with probe_settings(deadline=1), renter_path(sshd_listens=False):
         result = await RentalProbeCheck().run(ctx)
 
     assert result.passed is False and result.event.reason_code == Msg.PROBE_FAILED.reason
@@ -1758,7 +1737,7 @@ async def test_a_filler_given_during_a_probe_beside_another_is_no_verdict():
         rented=rented_data(fillers=1),
         rented_now=[rented_data(fillers=1), rented_data(fillers=2)],
     )
-    with probe_settings(beside_fillers=True, deadline=1), renter_path(sshd_listens=False):
+    with probe_settings(deadline=1), renter_path(sshd_listens=False):
         result = await RentalProbeCheck().run(ctx)
 
     assert result.passed is True and result.event.reason_code == Msg.INCONCLUSIVE.reason
