@@ -1,5 +1,4 @@
-"""The liumd shadow comparison is logged, never scored, and runs nothing
-with VALIDATOR_LIUMD_SHADOW off."""
+"""The liumd shadow comparison is logged and never scored."""
 
 from __future__ import annotations
 
@@ -730,18 +729,19 @@ async def _cycle(pipeline_ctx, *, ok=True, events=PASSED, first_pass=False) -> J
         pytest.param(dict(result=RuntimeError("boom")), id="shadow-crashes"),
     ],
 )
-async def test_the_result_is_identical_with_the_shadow_on_and_off(
+async def test_the_result_is_identical_with_and_without_the_shadow(
     keypair, monkeypatch, verifyx_service, liumd
 ):
     fake = FakeLiumd(**liumd)
     monkeypatch.setattr(liumd_shadow, "_default_client", fake.factory)
     ctx = _ctx(keypair, monkeypatch, verifyx_service)
 
-    monkeypatch.setattr(settings, "VALIDATOR_LIUMD_SHADOW", False)
+    real_shadow = task_service_module.run_liumd_shadow
+    monkeypatch.setattr(task_service_module, "run_liumd_shadow", AsyncMock())
     off = await _cycle(ctx)
     assert fake.intents == []
 
-    monkeypatch.setattr(settings, "VALIDATOR_LIUMD_SHADOW", True)
+    monkeypatch.setattr(task_service_module, "run_liumd_shadow", real_shadow)
     on = await _cycle(ctx)
     assert len(fake.intents) == 1
 
@@ -750,14 +750,11 @@ async def test_the_result_is_identical_with_the_shadow_on_and_off(
 
 
 @pytest.mark.asyncio
-async def test_flag_off_or_dry_run_never_calls_the_shadow(keypair, monkeypatch, verifyx_service):
+async def test_dry_run_or_first_pass_never_calls_the_shadow(keypair, monkeypatch, verifyx_service):
     shadow = AsyncMock()
     monkeypatch.setattr(task_service_module, "run_liumd_shadow", shadow)
     ctx = _ctx(keypair, monkeypatch, verifyx_service)
 
-    monkeypatch.setattr(settings, "VALIDATOR_LIUMD_SHADOW", False)
-    await _cycle(ctx)
-    monkeypatch.setattr(settings, "VALIDATOR_LIUMD_SHADOW", True)
     monkeypatch.setattr(settings, "DRY_RUN", True)
     await _cycle(ctx)
     assert shadow.await_count == 0

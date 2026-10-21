@@ -255,7 +255,7 @@ class TaskService:
                     result.failure_reason_code = last_event.reason_code
                 # The liumd shadow is logged only; the result above is final before it starts.
                 # Never on a first pass: the express lane publishes only after this returns.
-                if settings.VALIDATOR_LIUMD_SHADOW and not settings.DRY_RUN and not first_pass:
+                if not settings.DRY_RUN and not first_pass:
                     await run_liumd_shadow(
                         last_context,
                         ok=ok,

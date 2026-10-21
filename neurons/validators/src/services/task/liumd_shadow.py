@@ -1,8 +1,7 @@
 """The shadow comparison of `liumd run` with today's verify.
 
 `TaskService.create_task` calls `run_liumd_shadow` once per node, after the pipeline has run and
-the node's `JobResult` is built, on the SSH session the pipeline used. With
-`VALIDATOR_LIUMD_SHADOW` off nothing here runs. With it on, the GPU steps today's run executed
+the node's `JobResult` is built, on the SSH session the pipeline used. The GPU steps today's run executed
 (the capability matmul, VerifyX) are prepared again the way their checks prepare them, sent in one
 signed intent through `liumd run` (`LiumdExecClient`), judged with the same functions
 (`evaluate_matmul_output`, `evaluate_verifyx_capture`), and compared with today's verdicts read from

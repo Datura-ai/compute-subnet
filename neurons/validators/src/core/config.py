@@ -378,11 +378,11 @@ class Settings(BaseSettings):
     # `GET /version` (connect, and twice this as its whole budget) and the tunnel's local bind and
     # connect; the direct-tcpip channel open on the executor runs inside the whole-call budget.
     LOCAL_VERIFY_CONNECT_TIMEOUT_SECONDS: int = Field(env="LOCAL_VERIFY_CONNECT_TIMEOUT_SECONDS", default=5)
-    # The liumd shadow: after the pipeline has produced the node's result, run the same
-    # GPU steps again through `liumd run` on an SSH exec channel of the same session and log one
-    # `[liumd_shadow] comparison` line per node (per-step verdicts, agreement, durations). Nothing
-    # it finds is scored or stored: the result is built before it starts. Off: nothing new runs.
-    VALIDATOR_LIUMD_SHADOW: bool = Field(env="VALIDATOR_LIUMD_SHADOW", default=False)
+    # The liumd shadow (always on, only on LIUMD_SHADOW_RESERVED_EXECUTORS): after the pipeline has
+    # produced the node's result, run the same GPU steps again through `liumd run` on an SSH exec
+    # channel of the same session and log one `[liumd_shadow] comparison` line per node (per-step
+    # verdicts, agreement, durations). Nothing it finds is scored or stored: the result is built
+    # before it starts.
     # The shadow's whole-call budget (seconds), clipped to what the executor task has left; the
     # intent's `deadline_s` is this − 30. Sized for a scored cycle, where VerifyX (p90 about 150 s)
     # and the matmul (at most 120 s) run one after the other.
