@@ -77,3 +77,24 @@ def test_disk_space_runs_right_after_verifyx_in_both_pipelines():
     for checks in (PipelineFactory.build_checks(), PipelineFactory.build_fast_path_checks()):
         names = [type(c).__name__ for c in checks]
         assert names[names.index("VerifyXCheck") + 1] == "DiskSpaceCheck"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fields, exempt",
+    [
+        ({"default_job_owner_by_executor": {"executor-123": "lium"}}, True),
+        ({"all_filler_containers_by_executor": {"executor-123": ["filler_run-1"]}}, True),
+        ({"default_job_owner_by_executor": {"executor-123": "miner"}}, False),
+        ({"default_job_owner_by_executor": {"other-executor": "lium"}}, False),
+    ],
+)
+async def test_lium_default_job_is_not_failed_for_its_disk(context_factory, fields, exempt):
+    """An idle node running Lium's own Default Job or filler keeps its score; a miner's own job does not."""
+    rented_data = RentedExecutorsResponse(executors={}, **fields)
+    ctx = context_factory(state=build_state(specs=_disk(95, 500), rented_data=rented_data))
+
+    result = await DiskSpaceCheck().run(ctx)
+
+    assert result.passed is exempt
+    assert result.event.reason_code == Msg.TOO_FULL.reason
