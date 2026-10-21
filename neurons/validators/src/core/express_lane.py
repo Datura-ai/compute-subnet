@@ -11,8 +11,7 @@ cycle since start began and that no cycle has published yet, and runs the SAME p
 runs — same job files, digests and image snapshot, same checks, as a first pass (DAH-3011) — on
 each one, alone, then publishes the result spec-only (scored_at stays None, so the backend creates
 the executor row but writes no incentive ledger row) under that cycle's job_batch_id, so its
-prod_executors row lands on the cycle's time. The next scored cycle overwrites it as today. Off by
-default (settings.EXPRESS_LANE_ENABLED).
+prod_executors row lands on the cycle's time. The next scored cycle overwrites it as today.
 """
 
 import asyncio
