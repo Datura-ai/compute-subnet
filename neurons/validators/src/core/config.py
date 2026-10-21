@@ -561,9 +561,6 @@ class Settings(BaseSettings):
     # Flip after reading a week of the warn-mode rows.
     GPU_ANCHOR_HARD_ENABLED: bool = Field(env="GPU_ANCHOR_HARD_ENABLED", default=False)
     PROVIDER_SIDE_LOAD_CHECK_ENABLED: bool = Field(env="PROVIDER_SIDE_LOAD_CHECK_ENABLED", default=True)
-    PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED: bool = Field(
-        env="PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED", default=False
-    )
     # The executor's own stack is excused from the provider-side load by image digest, and any
     # container started from that image carries it. Cores excused that way above this number are
     # logged (PROVIDER_SIDE_LOAD_STACK_EXCUSE_HIGH); with the cap on, the tier then excuses nothing.

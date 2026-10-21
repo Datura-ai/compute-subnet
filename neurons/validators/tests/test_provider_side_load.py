@@ -161,11 +161,10 @@ def _rented_state(specs: dict[str, object]) -> ContextState:
 
 
 @contextmanager
-def provider_load_gate(*, enforce: bool = True, check_enabled: bool = True, stack_cap: bool = False):
+def provider_load_gate(*, check_enabled: bool = True, stack_cap: bool = False):
     """DAH-2734 ships shadow-first, like every other money-withholding gate."""
     with patch("neurons.validators.src.services.task.checks.provider_side_load.settings") as s:
         s.PROVIDER_SIDE_LOAD_CHECK_ENABLED = check_enabled
-        s.PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED = enforce
         s.PROVIDER_SIDE_LOAD_STACK_EXCUSE_CORES = 8.0
         s.PROVIDER_SIDE_LOAD_STACK_EXCUSE_CAP_ENABLED = stack_cap
         yield s
@@ -178,7 +177,7 @@ async def test_enforcement_zeroes_the_score_on_a_rented_machine(context_factory)
         runner=confirming_runner(10.56, 32, [("c1", "pod_renter", 158.0)]),
     )
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is False
@@ -199,25 +198,12 @@ async def test_idle_machine_is_judged_the_same_as_a_rented_one(context_factory):
         runner=confirming_runner(10.56, 32, [("c1", "pod_renter", 158.0)]),
     )
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is False
     assert result.event.what_we_saw["is_rented"] is False
     assert result.event.what_we_saw["provider_cpu_cores"] == 10.5  # nothing of Lium's to subtract
-
-
-@pytest.mark.asyncio
-async def test_shadow_logs_the_verdict_and_keeps_the_score(context_factory):
-    ctx = context_factory(state=_rented_state(SN13_SPECS))
-
-    with provider_load_gate(enforce=False):
-        result = await ProviderSideLoadCheck().run(ctx)
-
-    assert result.passed is True
-    assert "provider_side_load_passed" not in result.updates
-    assert result.event.reason_code == Msg.LOAD_ABOVE_LIMIT.reason
-    assert result.event.severity == "warning"
 
 
 @pytest.mark.asyncio
@@ -230,7 +216,7 @@ async def test_load_below_the_limits_passes(context_factory):
     }
     ctx = context_factory(state=_rented_state(specs))
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is True
@@ -241,7 +227,7 @@ async def test_load_below_the_limits_passes(context_factory):
 async def test_unmeasurable_signal_never_withholds_money(context_factory):
     ctx = context_factory(state=build_state(specs={"gpu": {"count": 1}}))
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is True
@@ -253,7 +239,7 @@ async def test_unmeasurable_signal_never_withholds_money(context_factory):
 async def test_disabled_check_skips_entirely(context_factory):
     ctx = context_factory(state=_rented_state(SN13_SPECS))
 
-    with provider_load_gate(enforce=True, check_enabled=False):
+    with provider_load_gate(check_enabled=False):
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is True
@@ -274,7 +260,7 @@ async def test_the_executor_container_is_subtracted_without_being_rented(context
     }
     ctx = context_factory(state=build_state(specs=specs, rented_data=_no_rentals()))
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is True
@@ -300,7 +286,7 @@ async def test_a_foreign_container_zeroes_the_score_of_a_rented_machine(context_
         runner=confirming_runner(10.56, 32, [("c1", "pod_renter", 158.0), ("c2", "sn13_miner", 700.0)]),
     )
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is False
@@ -314,7 +300,7 @@ async def test_no_backend_truth_voids_the_cpu_verdict(context_factory):
     # foreign-GPU twin gives no verdict in that case and neither does this gate.
     ctx = context_factory(state=build_state(specs=CPU_ONLY_SPECS))  # rented_data defaults to None
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is True
@@ -337,7 +323,7 @@ async def test_a_forged_rental_name_is_counted_and_reported(context_factory):
         runner=confirming_runner(6.4, 32, [("c1", "pod_fresh", 300.0)]),
     )
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.event.what_we_saw["provider_cpu_cores"] == 6.4
@@ -360,7 +346,7 @@ async def test_a_custom_image_build_is_not_the_providers_load(context_factory):
     }
     ctx = context_factory(state=_rented_state(specs))
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is True
@@ -384,7 +370,7 @@ async def test_the_monitor_container_shares_the_executor_image_and_is_ours(conte
     }
     ctx = context_factory(state=build_state(specs=specs, rented_data=_no_rentals()))
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is True
@@ -400,7 +386,7 @@ async def test_a_spike_that_is_gone_on_the_second_look_costs_nothing(context_fac
         runner=confirming_runner(1.9, 32, [("c1", "pod_renter", 30.0)]),
     )
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is True
@@ -413,7 +399,7 @@ async def test_an_unreadable_second_look_withholds_nothing(context_factory):
     # ssh is down, so the load cannot be confirmed. The CPU verdict voids.
     ctx = context_factory(state=_rented_state(CPU_ONLY_SPECS))  # runner defaults to None
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is True
@@ -430,7 +416,7 @@ async def test_a_docker_that_does_not_answer_the_second_look_withholds_nothing(c
     )
     ctx = context_factory(state=_rented_state(CPU_ONLY_SPECS), runner=runner)
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is True
@@ -451,7 +437,7 @@ async def test_the_roce_link_probe_is_not_the_providers_load(context_factory):
     }
     ctx = context_factory(state=build_state(specs=specs, rented_data=_no_rentals()))
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is True
@@ -475,7 +461,7 @@ async def test_a_pod_started_after_the_snapshot_is_not_the_providers_load(contex
         active=True, executor_id=ctx.executor.uuid
     )
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is True
@@ -500,7 +486,7 @@ async def test_a_miner_wearing_an_infra_name_is_not_excused(context_factory):
         runner=confirming_runner(8.0, 32, [("c1", "container_sn13", 700.0)]),
     )
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is False
@@ -518,7 +504,7 @@ async def test_a_quiet_port_probe_is_still_excused(context_factory):
     }
     ctx = context_factory(state=build_state(specs=specs, rented_data=_no_rentals()))
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is True
@@ -534,7 +520,7 @@ async def test_a_lium_image_pull_is_not_the_providers_load(context_factory):
         runner=confirming_runner(3.5, 32, [("c1", "pod_renter", 158.0)], dockerd_cores=1.9),
     )
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is True
@@ -559,7 +545,7 @@ async def test_many_forged_infra_names_do_not_stack_the_excuse(context_factory):
         runner=confirming_runner(9.6, 32, [(f"c{worker}", f"container_sn13_{worker}", 150.0) for worker in range(6)]),
     )
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is False
@@ -573,7 +559,7 @@ async def test_a_disk_only_verdict_never_withholds_money(context_factory):
     disk_only_specs = {"hard_disk": SN13_SPECS["hard_disk"]}
     ctx = context_factory(state=_rented_state(disk_only_specs))
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is True
@@ -600,7 +586,7 @@ async def test_the_rest_of_the_executor_stack_is_not_the_providers_load(context_
     }
     ctx = context_factory(state=build_state(specs=specs, rented_data=_no_rentals()))
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is True
@@ -620,7 +606,7 @@ async def test_a_half_finished_stats_run_withholds_nothing(context_factory):
     )
     ctx = context_factory(state=_rented_state(CPU_ONLY_SPECS), runner=runner)
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is True
@@ -636,7 +622,7 @@ async def test_a_miner_renamed_dockerd_is_capped_like_every_other_forged_name(co
         runner=confirming_runner(10.56, 32, [("c1", "pod_renter", 158.0)], dockerd_cores=9.0),
     )
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is False
@@ -663,7 +649,7 @@ def _miner_on_the_executor_image() -> dict[str, object]:
 async def test_a_workload_on_the_executor_image_is_excused_and_recorded_by_default(context_factory):
     ctx = context_factory(state=build_state(specs=_miner_on_the_executor_image(), rented_data=_no_rentals()))
 
-    with provider_load_gate(enforce=True):
+    with provider_load_gate():
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is True
@@ -683,7 +669,7 @@ async def test_under_the_cap_a_workload_on_the_executor_image_is_the_providers_l
         ),
     )
 
-    with provider_load_gate(enforce=True, stack_cap=True):
+    with provider_load_gate(stack_cap=True):
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is False
@@ -697,7 +683,7 @@ async def test_under_the_cap_the_honest_stack_is_still_excused(context_factory):
     specs["docker"]["host_cpu_percent"] = 6.0
     ctx = context_factory(state=build_state(specs=specs, rented_data=_no_rentals()))
 
-    with provider_load_gate(enforce=True, stack_cap=True):
+    with provider_load_gate(stack_cap=True):
         result = await ProviderSideLoadCheck().run(ctx)
 
     assert result.passed is True
