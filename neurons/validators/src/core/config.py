@@ -595,14 +595,10 @@ class Settings(BaseSettings):
     )
     # F-1599 — a 64 MB pinned-host-memory H2D/D2H round trip on every GPU of an idle node, compared on the host.
     # A TDX guest whose GPUs are not in CC mode passed every check yet could not DMA pinned memory (8x H200,
-    # 13 Oct). CHECK runs it; ENFORCEMENT lets wrong data, a copy error or a hung copy fail the node. CHECK is
-    # on (milliseconds of copy per card; a probe that cannot start is UNKNOWN, never a fault). ENFORCEMENT is off:
-    # every fault is logged (PINNED_MEMORY_PROBE_FAILED, enforced=false) and enforcement goes on by this flag
-    # after a review of one day of prod logs (owner, 15 Oct).
+    # 13 Oct). CHECK runs it; wrong data, a copy error or a hung copy fails the node (enforced since the shadow
+    # review of prod logs). CHECK is on (milliseconds of copy per card; a probe that cannot start is UNKNOWN,
+    # never a fault).
     PINNED_MEMORY_PROBE_CHECK_ENABLED: bool = Field(env="PINNED_MEMORY_PROBE_CHECK_ENABLED", default=True)
-    PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED: bool = Field(
-        env="PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED", default=False
-    )
     # A fault probe with no verdict passes. Five such cycles in a row on one node are logged
     # (GPU_FAULT_PROBE_UNKNOWN_STREAK); with this on they are judged like a fault, which fails the
     # node only while GPU_FAULT_PROBE_ENFORCEMENT_ENABLED is on too. Off by default.
