@@ -640,7 +640,7 @@ class LoopbackPluginDisabledError(Exception):
 @dataclass
 class VolumeHostProbe:
     """What one SSH round trip learns about the host before a local volume is created
-    (RENTAL_VOLUME_FAST_PATH_ENABLED). The same facts the fresh-sizing path collected over
+    (DAH-3240). The same facts the fresh-sizing path collected over
     three commands, plus the loopback plugin state that lets `create_local_volume` skip
     `docker plugin install` — a Docker Hub round trip — when the plugin is already enabled."""
 
@@ -6050,13 +6050,13 @@ class DockerService:
         with_df: bool,
         log_extra: dict,
     ) -> VolumeHostProbe | None:
-        """RENTAL_VOLUME_FAST_PATH_ENABLED: the volume-stage host facts in one SSH round trip.
+        """DAH-3240: the volume-stage host facts in one SSH round trip.
 
         Replaces `docker info` + the df helper container + `docker volume ls` (fresh sizing) and the
         second `docker info` + the unconditional `docker plugin install` (create) — five serial
         commands, one of them a Docker Hub round trip — with one command and, when vloopback
         volumes exist, the same `docker volume inspect` as before. Never fatal: on any failure it
-        returns None and the callers take the exact path they take with the flag off.
+        returns None and the callers take the per-command path.
         """
         started = now_ms()
         try:
@@ -6097,7 +6097,7 @@ class DockerService:
     ) -> VolumeSizingResult:
         """Resolve effective volume/storage limits for a new pod volume (DAH-2183).
 
-        With `host_probe` (RENTAL_VOLUME_FAST_PATH_ENABLED) the fresh path reads DockerRootDir,
+        With `host_probe` (DAH-3240) the fresh path reads DockerRootDir,
         df and the vloopback volume names from the probe instead of running three commands;
         only `docker volume inspect` still goes to the host, and only when volumes exist.
 
@@ -7528,9 +7528,7 @@ class DockerService:
             # probe runs again at its own step.
             early_probes_allowed = not is_custom_build and not local_volume
             measures_host = self.measures_host_for_volume_sizing(payload)
-            wants_volume_probe = settings.RENTAL_VOLUME_FAST_PATH_ENABLED and bool(
-                measures_host or payload.volume_limit_gb
-            )
+            wants_volume_probe = bool(measures_host or payload.volume_limit_gb)
             brings_own_power_cap = payload.workload_kind == WorkloadKind.FILLER and bool(
                 payload.gpu_power_limits
             )
@@ -8277,7 +8275,7 @@ class DockerService:
                         )
                 if not local_volume:
                     # DAH-3240: one round trip for the host facts the sizing and the create need
-                    # (flag off → None → the per-command path below, unchanged).
+                    # (a failed probe → None → the per-command path below).
                     volume_probe: VolumeHostProbe | None = None
                     # probe only when something reads it: the host-measuring sizing (df) or a limited
                     # volume's plugin install (root dir + plugin state); an unlimited volume on a

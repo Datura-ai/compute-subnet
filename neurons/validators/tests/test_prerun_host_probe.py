@@ -1170,7 +1170,6 @@ async def test_create_container_pearl_filler_does_not_ask_for_power(svc_fixture,
 def _wire_early_probes(svc, monkeypatch, *, image_present: bool) -> list[int]:
     """Both probes on; returns how many host probes had started when the image inspect answered."""
     monkeypatch.setattr(settings, "RENTAL_PRERUN_HOST_PROBE_ENABLED", True)
-    monkeypatch.setattr(settings, "RENTAL_VOLUME_FAST_PATH_ENABLED", True)
     _wire(svc, monkeypatch, _deploy_ssh_client(inspect_exit=0 if image_present else 1), probe_result=_probe())
     monkeypatch.setattr(svc, "probe_volume_host", AsyncMock(return_value=None))
     monkeypatch.setattr(svc, "reclaim_dphn_cache_for_rental", AsyncMock(return_value=False))
@@ -1247,7 +1246,6 @@ def _wire_customer_create_over_the_host(
     ones over a stub SSH client, so every listing they run is a command on it. The host lists the
     probe's containers until the first rm, then ``ps_after_rm``."""
     monkeypatch.setattr(settings, "RENTAL_PRERUN_HOST_PROBE_ENABLED", True)
-    monkeypatch.setattr(settings, "RENTAL_VOLUME_FAST_PATH_ENABLED", True)
     ssh_client = _deploy_ssh_client()
     answer_as_the_deploy_host = ssh_client.run.side_effect
     names_on_host = list(probe.container_names or () if containers_on_host is None else containers_on_host)
