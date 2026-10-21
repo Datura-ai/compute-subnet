@@ -428,12 +428,10 @@ class RentalPriceIncentive(DefaultIncentive):
         self, result: JobResult, missing: MissingFlagshipCapability
     ) -> None:
         # structured log for every rental-eligible 8x flagship executor lacking all capabilities
-        enforced = settings.ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT
         logger.info(
             _m(
                 "Unrented flagship executor has no NCU profiling, GPU splitting "
-                "or confidential computing"
-                + ("" if enforced else " (shadow only - flag off)"),
+                "or confidential computing",
                 extra={
                     "executor_id": str(result.executor_info.uuid),
                     "gpu_model": result.gpu_model,
@@ -446,9 +444,9 @@ class RentalPriceIncentive(DefaultIncentive):
                     # separates a self-declared CVM whose TDX quote did not verify from an
                     # ordinary host; attestation_digest is None on every line emitted here
                     "tdx_quote_present": bool(result.executor_info.tdx_quote),
-                    "enforced": enforced,
+                    "enforced": True,
                     "reason": ZeroIncentiveReason.FLAGSHIP_WITHOUT_NCU_OR_SPLIT,
-                    "pool": "rental_excluded" if enforced else "rental_kept_shadow",
+                    "pool": "rental_excluded",
                 },
             )
         )
@@ -1319,22 +1317,20 @@ class RentalPriceIncentive(DefaultIncentive):
                 )
                 job_result.record_incentive_log(reason)
 
-        # DAH-2546 flagship capability gate; shadow-only while the flag is off
-        flagship_enforced: bool = settings.ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT
+        # DAH-2546 flagship capability gate
         missing_capability = (
             self._missing_flagship_capability(job_result, base_model)
-            if self._should_run_idle_pool_gate(idle_pool_candidate, eligible_for_rental_share, flagship_enforced)
+            if self._should_run_idle_pool_gate(idle_pool_candidate, eligible_for_rental_share, True)
             else None
         )
         if missing_capability is not None:
             if eligible_for_rental_share:
                 self._log_flagship_capability_limit(job_result, missing_capability)
-            if flagship_enforced:
-                eligible_for_rental_share = False
-                reason: MinerLogLine = MinerLogLine.no_payout_because_flagship_without_ncu_or_split(
-                    job_result, missing_capability
-                )
-                job_result.record_incentive_log(reason)
+            eligible_for_rental_share = False
+            reason: MinerLogLine = MinerLogLine.no_payout_because_flagship_without_ncu_or_split(
+                job_result, missing_capability
+            )
+            job_result.record_incentive_log(reason)
 
         # DAH-2715 power cap gate: an idle machine whose container cannot apply a GPU power
         # cap is not fully usable for Lium's own jobs, so it forfeits the unrented incentive
