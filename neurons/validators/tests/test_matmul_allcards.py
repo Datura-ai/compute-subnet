@@ -61,7 +61,6 @@ def _ssh(real_cards: int):
 
 
 def _flags(monkeypatch, *, enforce):
-    monkeypatch.setattr(mvs.settings, "MATMUL_ALLCARDS_CHECK_ENABLED", True, raising=False)
     monkeypatch.setattr(
         mvs.settings, "MATMUL_ALLCARDS_ENFORCEMENT_ENABLED", enforce, raising=False
     )

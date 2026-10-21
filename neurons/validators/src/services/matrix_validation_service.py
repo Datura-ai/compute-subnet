@@ -705,13 +705,13 @@ class ValidationService:
         # The SSH transport of the capability matmul: prepare_matmul_challenge → one remote
         # `decrypt_challenge.py` run → evaluate_matmul_output. The local transport (checks/
         # local_verify.py) calls the same two functions around `POST /verify`.
-        # DAH-2671 item 3: all-claimed-cards work-proof. Shadow (MATMUL_ALLCARDS_CHECK_ENABLED
-        # without enforcement) logs timing + per-card outcome and NEVER changes the returned result;
+        # DAH-2671 item 3: all-claimed-cards work-proof. Shadow (without
+        # MATMUL_ALLCARDS_ENFORCEMENT_ENABLED) logs timing + per-card outcome and NEVER changes the returned result;
         # enforcement fails a count lie (device-selection error / OOM / serialised aggregate
         # wall-clock). Single-card / unknown-model hosts skip it (probe returns None), which also
         # keeps a not-yet-relevant fleet — and the legacy single-card path below — unchanged.
         # a filler-node sample runs beside the filler, so it never probes every card
-        if settings.MATMUL_ALLCARDS_CHECK_ENABLED and probe_all_cards:
+        if probe_all_cards:
             all_cards = await self.probe_all_claimed_cards(
                 ssh_client, executor_info, default_extra, machine_spec
             )

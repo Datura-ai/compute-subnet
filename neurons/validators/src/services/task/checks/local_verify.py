@@ -15,10 +15,8 @@ that arrived later than the SSH
 path's own cap for that step (`ROUND_TRIP_CAP_MS_BY_STEP`, measured on the validator's clock) — leaves
 that step to the SSH path, so the new transport can only save time, never change a verdict on its
 own. The matmul is not asked for
-at all while `MATMUL_ALLCARDS_CHECK_ENABLED` is on (the all-cards work-proof runs inside the SSH
-matmul path and a consumed local pass must not skip it), nor when VerifyX runs full size and in
-series with it (`ctx.config.first_pass` off): the round trip then measures both steps
-and is no bound on the matmul alone, see `_matmul_ssh_reason`. Every outcome is one
+at all (the all-cards work-proof runs inside the SSH matmul path and a consumed local pass must not
+skip it), see `_matmul_ssh_reason`. Every outcome is one
 `[local_verify] outcome` log line with `outcome`, `step` and `reason` (the per-outcome metric).
 Off by default (VALIDATOR_LOCAL_VERIFY_ENABLED).
 """
@@ -87,26 +85,14 @@ def _over_time(name: str, answer: LocalVerifyAnswer) -> bool:
 
 
 def _matmul_ssh_reason(ctx: Context) -> str | None:
-    """Why the matmul is not asked for in the one call, or None when it is.
+    """Why the matmul is not asked for in the one call: always `allcards_ssh` (DAH-2671 item 3).
 
-    `allcards_ssh` (DAH-2671 item 3): the all-cards work-proof (`probe_all_claimed_cards`, one
-    pinned run per card) lives inside the SSH matmul path only. While that check is on, the matmul
-    stays on SSH so a consumed local pass can never skip the probe or its enforcement; phase 2
-    carries `devices` in the intent and judges the per-card output here.
-
-    `scored_ssh`: with `ctx.config.first_pass` off (a scored cycle, or any cycle while
-    FIRST_PASS_FAST_PATH_ENABLED is off) VerifyX is full size and the two GPU steps run one after
-    the other (`parallel_gpu` off). The round trip is the only clock the validator holds, and it
-    then holds the whole VerifyX run (80 s p50, 149 s p90 in SWEEP_provider_verify) on top of the
-    matmul, so `ROUND_TRIP_CAP_MS_BY_STEP["matmul"]` (120 s) fails a passing matmul on a large
-    share of hosts and measures it on none. The matmul is not asked for; the executor does not run
-    it twice.
+    The all-cards work-proof (`probe_all_claimed_cards`, one pinned run per card) lives inside the
+    SSH matmul path only, so the matmul stays on SSH and a consumed local pass can never skip the
+    probe or its enforcement; phase 2 carries `devices` in the intent and judges the per-card
+    output here.
     """
-    if settings.MATMUL_ALLCARDS_CHECK_ENABLED:
-        return "allcards_ssh"
-    if not ctx.config.first_pass:
-        return "scored_ssh"
-    return None
+    return "allcards_ssh"
 
 
 class _NothingToSend(Exception):

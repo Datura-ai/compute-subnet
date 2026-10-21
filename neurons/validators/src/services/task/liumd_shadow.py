@@ -190,8 +190,7 @@ async def _compare(
 ) -> dict[str, Any]:
     today = today_verdicts(ok, events)
     steps = {name: _today_fields(step) for name, step in today.items()}
-    if settings.MATMUL_ALLCARDS_CHECK_ENABLED:
-        steps["matmul"]["liumd_reason"] = "allcards_ssh"
+    steps["matmul"]["liumd_reason"] = "allcards_ssh"
     # A pod or filler started after the cycle's snapshot is not seen below, so the shadow runs only
     # on reserved, non-rentable dev executors.
     # Executor UUIDs are miner-chosen: an entry matches only its miner's executor at its endpoint.
@@ -203,8 +202,7 @@ async def _compare(
         return _skipped("workload", steps=steps)
     # All-cards enforcement can reject a card before today's matmul; the shadow's one ordinary
     # matmul is not comparable (checks/local_verify.py `allcards_ssh`).
-    allcards = settings.MATMUL_ALLCARDS_CHECK_ENABLED
-    ask_matmul = today["matmul"].verdict in RAN and not allcards
+    ask_matmul = False
     # On a never-measured executor today's check may re-measure a cold sample below the gate
     # (DAH-2959) and pass on the second; the shadow's one sample is not comparable.
     cold_retry = _cold_retry_possible(ctx)

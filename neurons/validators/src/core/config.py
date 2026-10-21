@@ -460,11 +460,8 @@ class Settings(BaseSettings):
     # Item 3 — run the GPU work-proof on every claimed card concurrently (own challenge per card,
     # sized from the registry SKU) and time the aggregate on the validator, so a count lie either
     # fails device selection or serialises past a wide wall-clock threshold.
-    # Defaults to False like RENTAL_CPU_LIMIT_CHECK_ENABLED: "shadow" here only means the verdict is
-    # not scored — the GPU work itself is real, so an 8-card host would run 8 near-full-VRAM matmuls
-    # on top of the legacy single-card one every cycle. Flip it on once elapsed/VRAM/host-RSS numbers
-    # from a real 8-GPU box show what that costs an honest miner.
-    MATMUL_ALLCARDS_CHECK_ENABLED: bool = Field(env="MATMUL_ALLCARDS_CHECK_ENABLED", default=False)
+    # Always runs (shadow unless MATMUL_ALLCARDS_ENFORCEMENT_ENABLED): the GPU work is real, an 8-card
+    # host runs 8 near-full-VRAM matmuls on top of the legacy single-card one every cycle.
     MATMUL_ALLCARDS_ENFORCEMENT_ENABLED: bool = Field(env="MATMUL_ALLCARDS_ENFORCEMENT_ENABLED", default=False)
     # The sysbox probe container must run in a user namespace (sysbox always uses one); an identity uid map
     # is logged as SYSBOX_IDENTITY_UID_MAP and, with this on, the node is not counted as running sysbox.

@@ -11,7 +11,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.config import settings
 from neurons.validators.src.services.task.checks import matmul_speed_log as speed_log
 from neurons.validators.src.services.task.checks.capability import CapabilityCheck
 from neurons.validators.src.services.task.messages import CapabilityMessages as Msg
@@ -311,7 +310,6 @@ def test_failed_seal_authentication_is_not_marked_sealed(monkeypatch):
 @pytest.mark.asyncio
 async def test_ssh_run_times_the_remote_command(monkeypatch):
     validation = matmul_service(monkeypatch)
-    monkeypatch.setattr(settings, "MATMUL_ALLCARDS_CHECK_ENABLED", False)
     clock = iter([100.0, 107.5])
     monkeypatch.setattr(mvs.time, "perf_counter", lambda: next(clock))
 
@@ -323,7 +321,7 @@ async def test_ssh_run_times_the_remote_command(monkeypatch):
             return SimpleNamespace(stdout=stdout, stderr="")
 
     result = await validation.validate_gpu_model_and_process_job(
-        _SSH(), SimpleNamespace(root_dir="/root/app", python_path="python"), {}, SPECS
+        _SSH(), SimpleNamespace(root_dir="/root/app", python_path="python"), {}, SPECS, probe_all_cards=False
     )
 
     assert result.success is True

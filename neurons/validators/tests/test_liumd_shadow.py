@@ -511,7 +511,6 @@ async def test_an_outdated_verifyx_library_disagrees(keypair, monkeypatch, verif
 
 @pytest.mark.asyncio
 async def test_all_cards_mode_does_not_compare_the_matmul(keypair, monkeypatch, verifyx_service):
-    monkeypatch.setattr(settings, "MATMUL_ALLCARDS_CHECK_ENABLED", True)
     fake = FakeLiumd()
 
     record = await _shadow(_ctx(keypair, monkeypatch, verifyx_service), fake)

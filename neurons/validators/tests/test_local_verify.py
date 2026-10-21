@@ -1150,7 +1150,6 @@ async def test_all_cards_check_keeps_the_matmul_on_ssh(
     """DAH-2671 item 3: `probe_all_claimed_cards` runs inside the SSH matmul path only. With the
     check on, the intent carries no matmul, CapabilityCheck runs the SSH path (probe included) and
     VerifyX is still consumed locally."""
-    monkeypatch.setattr(settings, "MATMUL_ALLCARDS_CHECK_ENABLED", True)
     validation = matmul_service(monkeypatch)
     ssh_matmul = AsyncMock(return_value=mvs.ValidationResult(success=True, metrics={"from": "ssh"}))
     validation.validate_gpu_model_and_process_job = ssh_matmul
