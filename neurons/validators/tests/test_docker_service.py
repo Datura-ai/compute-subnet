@@ -87,6 +87,7 @@ class _FakeRentalDockerClient:
         self.run_specs = []
         self.exec_specs = []
         self.started_containers = []
+        self.start_networks = []
         self.stopped_containers = []
         self.stop_grace_seconds_calls = []
         self.removed_containers = []
@@ -159,8 +160,9 @@ class _FakeRentalDockerClient:
             oom_killed=False,
         )
 
-    async def start(self, *, container_name: str) -> None:
+    async def start(self, *, container_name: str, network: str | None = None) -> None:
         self.started_containers.append(container_name)
+        self.start_networks.append(network)
         if self.start_error is not None:
             raise self.start_error
 
@@ -196,6 +198,7 @@ class _FakeRentalDockerClient:
         driver: str | None = None,
         driver_opts: dict[str, str] | None = None,
         timeout: int | None = None,
+        labels: dict[str, str] | None = None,
     ) -> None:
         self.created_volumes.append(
             {
@@ -3229,7 +3232,10 @@ def test_ssh_bootstrap_script_supports_multi_distro_install(docker_service):
     script = docker_service._ssh_bootstrap_script_path().read_text()
 
     assert "apt-get update" in script
-    assert "apt-get install -y openssh-server" in script
+    assert (
+        "apt-get install -y --no-install-recommends openssh-server ncurses-term xauth python3 wget ca-certificates"
+        in script
+    )
     assert "apk add --no-cache openssh" in script
     assert "dnf install -y openssh-server" in script
     assert "yum install -y openssh-server" in script
@@ -3291,6 +3297,7 @@ async def test_start_container_restarts_ssh_after_docker_start(docker_service, m
     assert docker_service.rental_docker_client_factory.client.started_containers == [
         "pod_test"
     ]
+    assert docker_service.rental_docker_client_factory.client.start_networks == ["lium-rentals"]
     docker_service.install_open_ssh_server_and_start_ssh_service_with_rental_docker.assert_awaited_once_with(
         docker_client=docker_service.rental_docker_client_factory.client,
         container_name="pod_test",
@@ -6658,6 +6665,36 @@ async def test_create_container_encrypted_keys_ride_in_the_volume_setup_exec(doc
     keys_spy.assert_not_awaited()
 
 
+@pytest.mark.parametrize("local_volume, allow_init", [(None, True), ("volume_reused", False)])
+@pytest.mark.asyncio
+async def test_create_container_initialises_only_a_volume_it_created(
+    docker_service, monkeypatch, local_volume, allow_init
+):
+    # a reboot re-runs create with the pod's volume: a missing gocryptfs.conf there must fail, not start empty
+    monkeypatch.setattr(docker_service_module.settings, "ENABLE_VOLUME_ENCRYPTION", True)
+    monkeypatch.setattr(
+        docker_service_module.settings, "VOLUME_MASTER_SECRET", "test-master-secret-32-chars-long!!"
+    )
+    _patch_create_container_happy_path(docker_service, monkeypatch)
+    monkeypatch.setattr(docker_service, "_image_has_encrypted_volume_label", AsyncMock(return_value=True))
+    monkeypatch.setattr(docker_service, "_run_rental_docker_create_with_port_retry", AsyncMock())
+    setup_spy = AsyncMock()
+    monkeypatch.setattr(docker_service, "setup_encrypted_local_volume", setup_spy)
+    payload = _create_payload(str(uuid4()), encrypted=True).model_copy(
+        update={"bootstrap_restore": None, "local_volume": local_volume}
+    )
+
+    result = await docker_service.create_container(
+        payload=payload,
+        executor_info=_executor_info_for(payload, tdx_quote=None),
+        keypair=Mock(ss58_address="validator-hotkey"),
+        private_key="encrypted",
+    )
+
+    assert isinstance(result, ContainerCreated), getattr(result, "detail", result)
+    assert setup_spy.await_args.kwargs["allow_init"] is allow_init
+
+
 @pytest.mark.asyncio
 async def test_create_container_encrypted_restore_stops_before_docker_run_on_an_old_executor(
     docker_service,
@@ -8488,8 +8525,12 @@ async def test_a_failed_mount_in_the_volume_setup_exec_fails_the_encryption(
 
 
 @pytest.mark.asyncio
-async def test_finish_stream_logs_sends_the_last_batch_without_waiting_for_the_next_tick(docker_service):
-    # Arrange: the stream loop is mid-wait when the create logs its last line and finishes
+async def test_finish_stream_logs_sends_the_last_batch_without_waiting_for_the_next_tick(
+    docker_service, monkeypatch
+):
+    # Arrange: the stream loop waits on a tick far longer than the timeout below,
+    # so only a finish that wakes it early passes
+    monkeypatch.setattr(docker_service_module, "LOG_STREAM_INTERVAL", 60)
     docker_service.redis_service.publish = AsyncMock()
     docker_service.log_task = asyncio.create_task(
         docker_service.handle_stream_logs(miner_hotkey="m", executor_id="e", pod_id="p")
@@ -8497,13 +8538,10 @@ async def test_finish_stream_logs_sends_the_last_batch_without_waiting_for_the_n
     await asyncio.sleep(0.05)
     await docker_service.stream_log("last line", "success", "container_creation")
 
-    # Act
-    loop = asyncio.get_running_loop()
-    finish_started_at = loop.time()
-    await docker_service.finish_stream_logs()
+    # Act: a finish that waited for the next tick would hit this timeout
+    await asyncio.wait_for(docker_service.finish_stream_logs(), timeout=5)
 
-    # Assert: well under LOG_STREAM_INTERVAL, and the last line went out
-    assert loop.time() - finish_started_at < 0.1
+    # Assert: the last line went out
     docker_service.redis_service.publish.assert_awaited_once()
     published_logs = docker_service.redis_service.publish.await_args.args[1]["logs"]
     assert [log["log_text"] for log in published_logs] == ["last line"]

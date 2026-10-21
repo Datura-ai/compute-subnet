@@ -24,7 +24,7 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 SCRIPT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "nvidia_docker_sysbox_setup.sh"))
 
 # the real tools the check functions call, so PATH can be built without the host's jq
-REAL_TOOLS = ["bash", "grep", "sed", "awk", "head", "tail", "cut", "ls", "dirname", "cat", "seq", "rm"]
+REAL_TOOLS = ["bash", "grep", "sed", "awk", "head", "tail", "cut", "ls", "dirname", "cat", "seq", "rm", "mkdir"]
 
 STUBS = {
     "id": '#!/bin/bash\necho "${STUB_UID:-0}"\n',
@@ -34,22 +34,89 @@ STUBS = {
         case "$1" in -r) echo "${STUB_KERNEL:-6.8.0-45-generic}" ;; -m) echo "${STUB_ARCH:-x86_64}" ;; esac
         """
     ),
+    # The vloopback plugin and its volumes are state in $SYSBOX_SETUP_HOST_ROOT/.stub-docker: `plugin` holds
+    # "<enabled> <DATA_DIR>" (seeded once from STUB_VLOOPBACK: ok / absent / relative / disabled), `calls` every
+    # docker command line, `volumes` / `removed` the volumes created and removed. Mountpoints are <MOUNT_DIR>/<name>
+    # as upstream builds them; STUB_RELATIVE_MOUNTPOINT forces a malformed one.
     "docker": textwrap.dedent(
         """\
         #!/bin/bash
         [ -z "${STUB_NO_DOCKER_DAEMON:-}" ] || { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
+        st="$SYSBOX_SETUP_HOST_ROOT/.stub-docker"
+        echo "$*" >> "$st/calls"
+        root="${STUB_DOCKER_ROOT:-$SYSBOX_SETUP_HOST_ROOT/var/lib/docker}"
+        if [ ! -e "$st/seeded" ]; then
+            : > "$st/seeded"
+            case "${STUB_VLOOPBACK:-ok}" in
+                ok) echo "true $root/loopback" > "$st/plugin" ;;
+                relative) echo "true loopback" > "$st/plugin" ;;
+                disabled) echo "false $root/loopback" > "$st/plugin" ;;
+            esac
+        fi
+        [ -f "$st/plugin" ] && read -r enabled data_dir < "$st/plugin"
         case "$1 $2" in
             "version --format") echo "${STUB_DOCKER_VERSION:-28.5.2}" ;;
             "ps ") exit 0 ;;
-            "ps -a") echo "${STUB_STOPPED_POD:-}" ;;   # every container, stopped ones too
-            "ps --filter") echo "${STUB_PORT_CONTAINER:-executor-1}" ;;
+            "ps --format") [ -z "${STUB_RUNNING:-}" ] || echo "$STUB_RUNNING" ;;   # install mode's running-container sort
+            "ps -a")   # every container, stopped ones too
+                [ -z "${STUB_PS_A_HANGS:-}" ] || exit 124
+                echo "${STUB_STOPPED_POD:-}"
+                [ "$4" != name=pod_ ] || [ -z "${STUB_PODS:-}" ] || echo "$STUB_PODS" ;;
+            "ps --filter")
+                case "$3" in
+                    name=pod_) [ -z "${STUB_PODS:-}" ] || echo "$STUB_PODS" ;;
+                    *) echo "${STUB_PORT_CONTAINER:-executor-1}" ;;
+                esac ;;
             "info ") echo " Runtimes: io.containerd.runc.v2 nvidia runc sysbox-runc" ;;   # the "already working?" probe of install mode
             "info --format")
                 case "$3" in
-                    *DockerRootDir*) echo "${STUB_DOCKER_ROOT:-$SYSBOX_SETUP_HOST_ROOT/var/lib/docker}" ;;
+                    *DockerRootDir*) echo "$root" ;;
                     *Runtimes*) echo "${STUB_DOCKER_RUNTIMES:-\\"runc\\", \\"sysbox-runc\\"}" ;;
                 esac ;;
-            "run --rm") [ -z "${STUB_SYSBOX_RUN_FAILS:-}" ] && echo ok || { echo "OCI runtime create failed" >&2; exit 125; } ;;
+            "plugin inspect")
+                # the real one prints a blank line on stdout before it fails on a missing plugin
+                [ -f "$st/plugin" ] || { echo; echo "Error: No such plugin: $5" >&2; exit 1; }
+                case "$4" in
+                    *Enabled*) echo "$enabled" ;;
+                    *Env*) echo "DATA_DIR=$data_dir"; echo "LOG_LEVEL=2" ;;
+                esac ;;
+            "plugin install")
+                [ -z "${STUB_PLUGIN_INSTALL_FAILS:-}" ] || { echo "Error response from daemon: Head https://registry-1.docker.io/v2/ashald/docker-volume-loopback/manifests/latest: net/http: TLS handshake timeout" >&2; exit 1; }
+                for arg in "$@"; do case "$arg" in DATA_DIR=*) echo "true ${arg#DATA_DIR=}" > "$st/plugin" ;; esac; done ;;
+            "plugin disable")
+                [ -z "${STUB_PLUGIN_IN_USE:-}" ] || { echo "Error response from daemon: plugin vloopback:latest is in use" >&2; exit 1; }
+                echo "false $data_dir" > "$st/plugin" ;;
+            "plugin set") echo "$enabled ${4#DATA_DIR=}" > "$st/plugin" ;;
+            "plugin enable") echo "true $data_dir" > "$st/plugin" ;;
+            "image inspect") [ -z "${STUB_NO_VERIFY_IMAGE:-}${STUB_NO_EXECUTOR_IMAGE:-}" ] || { echo "Error: No such image: $3" >&2; exit 1; } ;;
+            "volume create")
+                [ -z "${STUB_VOLUME_CREATE_FAILS:-}" ] || { echo "Error response from daemon: create ${!#}: VolumeDriver.Create: no space left on device" >&2; exit 1; }
+                echo "${!#}" >> "$st/volumes"
+                # the daemon finished creating it after `timeout` killed the CLI
+                [ -z "${STUB_VOLUME_CREATE_HANGS:-}" ] || exit 124
+                echo "${!#}" ;;
+            "volume inspect") if [ -n "${STUB_RELATIVE_MOUNTPOINT:-}" ]; then echo "${!#}"; else echo "/mnt/${!#}"; fi ;;
+            "volume rm")
+                [ -z "${STUB_VOLUME_RM_FAILS:-}" ] || { echo "Error response from daemon: remove ${!#}: VolumeDriver.Unmount: context deadline exceeded" >&2; exit 1; }
+                if [ -s "$st/containers" ]; then echo "Error response from daemon: remove ${!#}: volume is in use - [$(head -1 "$st/containers")]" >&2; exit 1; fi
+                echo "${!#}" >> "$st/removed" ;;
+            "rm -f") grep -vx "$3" "$st/containers" > "$st/containers.new" 2>/dev/null; cat "$st/containers.new" > "$st/containers" ;;
+            "run --rm")
+                case " $* " in
+                    *" -v "*)
+                        # `timeout` killed the CLI; the container keeps running with the volume attached
+                        [ -z "${STUB_VLOOPBACK_RUN_HANGS:-}" ] || { echo "$4" >> "$st/containers"; exit 124; }
+                        # the probe printed its token, then docker run failed (exit) or hung (124) before completing
+                        [ -z "${STUB_VLOOPBACK_RUN_EXIT:-}" ] || { echo lium-vloopback-ok; [ "$STUB_VLOOPBACK_RUN_EXIT" != 124 ] || echo "$4" >> "$st/containers"; exit "$STUB_VLOOPBACK_RUN_EXIT"; }
+                        [ -z "${STUB_VLOOPBACK_MOUNT_FAILS:-}" ] && echo lium-vloopback-ok || {
+                            echo "docker: Error response from daemon: failed to create task for container: OCI runtime create failed: error during container init: error setting up ID-mapped mount on path 206/fs (likely means idmapped mounts are not supported on the filesystem at this path): lstat 206: no such file or directory: unknown." >&2
+                            exit 125; } ;;
+                    *" --storage-opt "*)
+                        [ -z "${STUB_STORAGE_OPT_UNSUPPORTED:-}" ] || { echo "docker: Error response from daemon: --storage-opt is supported only for overlay over xfs with 'pquota' mount option." >&2; exit 125; }
+                        [ "${STUB_STORAGE_OPT_PROBE:-}" != hangs ] || exit 124
+                        [ "${STUB_STORAGE_OPT_PROBE:-}" != errors ] || { echo "docker: Error response from daemon: failed to create task for container: context deadline exceeded" >&2; exit 125; } ;;
+                    *) [ -z "${STUB_SYSBOX_RUN_FAILS:-}" ] && echo ok || { echo "OCI runtime create failed" >&2; exit 125; } ;;
+                esac ;;
         esac
         """
     ),
@@ -58,15 +125,27 @@ STUBS = {
         #!/bin/bash
         case "$1" in
             --query-gpu=driver_version) echo "${STUB_NV_DRIVER:-580.65.06}" ;;
+            --query-gpu=name) for _ in $(seq "${STUB_NV_GPUS:-8}"); do echo "${STUB_NV_NAME:-NVIDIA H100 80GB HBM3}"; done ;;
             --query-gpu=memory.total) for _ in $(seq "${STUB_NV_GPUS:-8}"); do echo "${STUB_NV_MEM_MIB:-81559}"; done ;;
             --list-gpus) for i in $(seq "${STUB_NV_GPUS:-8}"); do echo "GPU $((i - 1)): NVIDIA H100 80GB HBM3"; done ;;
         esac
         """
     ),
+    # records "<seconds> <command>" in .stub-docker/timeouts, then runs the command
+    "timeout": '#!/bin/bash\necho "$*" >> "$SYSBOX_SETUP_HOST_ROOT/.stub-docker/timeouts"\nshift\nexec "$@"\n',
     "nvidia-container-cli": '#!/bin/bash\nprintf "cli-version: 1.17.8\\nlib-version: 1.17.8\\n"\n',
     # the real `sysbox-runc --version`: the name alone on line 1, the version on line 2
     "sysbox-runc": '#!/bin/bash\nprintf "sysbox-runc\\n\\tversion:\\t${STUB_SYSBOX_VERSION:-0.7.1}\\n\\tcommit:\\tabc123\\n"\n',
     "fusermount3": "#!/bin/bash\nexit 0\n",
+    "lspci": '#!/bin/bash\necho "${STUB_LSPCI:-17:00.0 3D controller: NVIDIA Corporation GH100 [H100 SXM5 80GB] (rev a1)}"\n',
+    # loads the legacy iptables modules into the fixture /proc/modules, or fails with STUB_MODPROBE_FAILS
+    "modprobe": textwrap.dedent(
+        """\
+        #!/bin/bash
+        [ -z "${STUB_MODPROBE_FAILS:-}" ] || exit 1
+        printf "ip_tables 1 0\\niptable_nat 1 0\\niptable_filter 1 0\\n" >> "$SYSBOX_SETUP_HOST_ROOT/proc/modules"
+        """
+    ),
     "ss": textwrap.dedent(
         """\
         #!/bin/bash
@@ -81,7 +160,7 @@ STUBS = {
         """\
         #!/bin/bash
         echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
-        echo "/dev/nvme0n1p1 ${STUB_DF_TOTAL_KB:-1048576000} 1 1 1% /"
+        echo "/dev/nvme0n1p1 ${STUB_DF_TOTAL_KB:-1048576000} 1 ${STUB_DF_AVAIL_KB:-943718400} 1% /"
         """
     ),
 }
@@ -121,6 +200,7 @@ def _bin_dir(tmp_path: Path, *, with_jq: bool, without: tuple[str, ...] = ()) ->
 def _host_root(tmp_path: Path, files: dict[str, str | None] | None = None) -> Path:
     """The fixture tree the script reads through SYSBOX_SETUP_HOST_ROOT; a None value leaves that file out."""
     root = tmp_path / "root"
+    (root / ".stub-docker").mkdir(parents=True, exist_ok=True)
     for rel, content in {**GOOD_FILES, **(files or {})}.items():
         if content is None:
             continue
@@ -255,10 +335,16 @@ def test_docker_daemon_down_names_systemctl(tmp_path):
     assert "sudo systemctl enable --now docker" in out
 
 
-def test_docker_29_1_passes_but_says_untested(tmp_path):
-    rc, out, _ = run_check(tmp_path, "check_docker", env={"STUB_DOCKER_VERSION": "29.1.0"})
+def test_docker_29_0_passes_but_says_untested(tmp_path):
+    rc, out, _ = run_check(tmp_path, "check_docker", env={"STUB_DOCKER_VERSION": "29.0.1"})
     assert rc == 0
-    assert "PASS Docker 29.1.0 (29.0–29.1 is untested with sysbox" in out
+    assert "PASS Docker 29.0.1 (29.0 is untested with sysbox" in out
+
+
+def test_docker_29_1_passes_plainly(tmp_path):
+    rc, out, _ = run_check(tmp_path, "check_docker", env={"STUB_DOCKER_VERSION": "29.1.3"})
+    assert rc == 0
+    assert "PASS Docker 29.1.3.\n" in out
 
 
 @pytest.mark.parametrize("with_jq", [False, True])
@@ -400,6 +486,29 @@ def test_iptables_built_in_modules_count_as_loaded(tmp_path):
     assert rc == 0, out
 
 
+@pytest.mark.parametrize(
+    ("env", "files", "package"),
+    [
+        ({"STUB_NV_DRIVER": "570.1.1"}, {}, "nvidia-driver-580-server &&"),
+        ({"STUB_NV_DRIVER": "570.1.1"}, {"proc/driver/nvidia/version": "NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  570.1.1\n"}, "nvidia-driver-580-server-open"),
+        ({"STUB_NV_DRIVER": "570.1.1", "STUB_NV_NAME": "NVIDIA GeForce RTX 5090"}, {}, "nvidia-driver-580-server-open"),
+    ],
+)
+def test_driver_fix_keeps_the_open_module_where_it_is_needed(tmp_path, env, files, package):
+    rc, out, _ = run_check(tmp_path, "check_nvidia_driver", env=env, files=files)
+    assert rc == 1
+    assert f"sudo apt-get install -y {package}" in out
+
+
+def test_blackwell_without_a_driver_gets_the_open_module_from_pci(tmp_path):
+    env = {"STUB_LSPCI": "17:00.0 3D controller: NVIDIA Corporation GB100 [B200] (rev a1)"}
+    rc, out, _ = run_check(tmp_path, "check_nvidia_driver", env=env, without=("nvidia-smi",))
+    assert rc == 1
+    assert "sudo apt-get install -y nvidia-driver-580-server-open" in out
+
+
+
+
 # ── disk >= 1.5x VRAM (validators' MIN_DISK_TO_VRAM_RATE) ────────────────────
 
 
@@ -434,6 +543,31 @@ def test_disk_rule_is_skipped_without_a_gpu(tmp_path):
     rc, out, fix = run_check(tmp_path, "check_total_disk_for_vram", without=("nvidia-smi",))
     assert rc == 0 and fix == 0
     assert "SKIP Disk >= 1.5x VRAM — no NVIDIA driver" in out
+
+
+# ── free disk for the node's images and VerifyX's storage test ───────────────
+
+
+def test_free_disk_needs_room_for_the_images_before_the_first_pull(tmp_path):
+    # a 100 GB disk passes the 1.5x VRAM rule for one 48 GB card and then fails VerifyX
+    env = {"STUB_DF_AVAIL_KB": str(97 * 1024 * 1024), "STUB_NO_EXECUTOR_IMAGE": "1"}
+    rc, out, _ = run_check(tmp_path, "check_free_disk_for_node", env=env)
+    assert rc == 1
+    assert "FIX  Free disk 97.0 GB on " in out and "is below 140 GB" in out
+    assert "Use a disk of at least 150 GB" in out
+
+
+def test_free_disk_needs_only_the_storage_test_once_the_images_are_pulled(tmp_path):
+    rc, out, _ = run_check(tmp_path, "check_free_disk_for_node", env={"STUB_DF_AVAIL_KB": str(120 * 1024 * 1024)})
+    assert rc == 0, out
+    assert "PASS Free disk 120.0 GB on " in out and ">= 100 GB" in out
+
+
+def test_free_disk_just_below_100_gib_is_not_rounded_up(tmp_path):
+    env = {"STUB_DF_AVAIL_KB": str(100 * 1024 * 1024 - 40000)}
+    rc, out, _ = run_check(tmp_path, "check_free_disk_for_node", env=env)
+    assert rc == 1, out
+    assert "FIX  Free disk 100.0 GB on " in out
 
 
 # ── ports ────────────────────────────────────────────────────────────────────
@@ -592,6 +726,297 @@ def test_sysbox_container_start_failure_is_a_fix(tmp_path):
     assert "docker run --rm --runtime=sysbox-runc alpine echo ok' fails" in out
 
 
+# ── vloopback: size-limited volumes (ticket-0331) ────────────────────────────
+# ticket-0331, 22 Sep 2026: the fix support sent the provider by hand was "give the plugin an absolute data
+# directory, then run `docker volume create -d vloopback -o size=10G t && docker volume inspect t`; the
+# Mountpoint must start with /". Install mode now does that itself; these pin the three host shapes.
+
+MUTATIONS = ("plugin install", "plugin disable", "plugin set", "plugin enable")
+
+
+def _stub_state(tmp_path: Path) -> Path:
+    return tmp_path / "root" / ".stub-docker"
+
+
+def _docker_calls(tmp_path: Path) -> list[str]:
+    calls = _stub_state(tmp_path) / "calls"
+    return calls.read_text().splitlines() if calls.exists() else []
+
+
+def _plugin_changes(tmp_path: Path) -> list[str]:
+    return [call for call in _docker_calls(tmp_path) if call.startswith(MUTATIONS)]
+
+
+def _plugin(tmp_path: Path) -> str:
+    return (_stub_state(tmp_path) / "plugin").read_text().strip()
+
+
+def _test_volumes_left(tmp_path: Path) -> set[str]:
+    state = _stub_state(tmp_path)
+    created = set((state / "volumes").read_text().split()) if (state / "volumes").exists() else set()
+    removed = set((state / "removed").read_text().split()) if (state / "removed").exists() else set()
+    return created - removed
+
+
+def test_vloopback_already_fixed_changes_nothing_and_mounts_a_volume(tmp_path):
+    rc, out, _ = run_check(tmp_path, "setup_vloopback")
+    assert rc == 0, out
+    assert _plugin_changes(tmp_path) == []
+    assert "vloopback: a size-limited volume mounts, takes a write and unmounts in a sysbox container." in out
+    runs = [call for call in _docker_calls(tmp_path) if call.startswith("run --rm ")]
+    assert len(runs) == 2
+    assert runs[0] == "run --rm --storage-opt size=1g daturaai/compute-subnet-executor:latest true"
+    assert re.fullmatch(
+        r"run --rm --name (lium_vloopback_check_\d+) --runtime=sysbox-runc -v \1:/lium-vol "
+        r"daturaai/compute-subnet-executor:latest sh -c echo lium-vloopback-ok > /lium-vol/probe && cat /lium-vol/probe",
+        runs[1],
+    ), runs[1]
+    assert _test_volumes_left(tmp_path) == set()
+
+
+PINNED_PLUGIN = "ashald/docker-volume-loopback@sha256:caafc80c60c3630812433c6e5ebb4df5ca514333cbec4af6a3a5164c150fd170"
+
+
+LOOPBACK_DIR = "{root}/var/lib/docker/loopback"
+
+
+@pytest.mark.parametrize(
+    "seed, changes, message",
+    [
+        # installed like the validators install it, pinned by digest
+        (
+            "absent",
+            [f"plugin install {PINNED_PLUGIN} --alias vloopback --grant-all-permissions DATA_DIR={LOOPBACK_DIR}"],
+            f"vloopback: installed the vloopback plugin with DATA_DIR={LOOPBACK_DIR}.",
+        ),
+        # a plugin with a relative DATA_DIR (upstream refuses to start with one) gets the absolute one
+        (
+            "relative",
+            ["plugin disable vloopback", f"plugin set vloopback DATA_DIR={LOOPBACK_DIR}", "plugin enable vloopback"],
+            f"vloopback: set the vloopback plugin's DATA_DIR from 'loopback' to {LOOPBACK_DIR}.",
+        ),
+        ("disabled", ["plugin enable vloopback"], "vloopback: enabled the vloopback plugin."),
+    ],
+)
+def test_vloopback_fix_is_idempotent(tmp_path, seed, changes, message):
+    # the first run fixes the plugin and mounts a volume; the second finds it fixed and changes nothing
+    root = tmp_path / "root"
+    rc, out, _ = run_check(tmp_path, "setup_vloopback", env={"STUB_VLOOPBACK": seed})
+    assert rc == 0, out
+    first = _plugin_changes(tmp_path)
+    assert first == [change.format(root=root) for change in changes]
+    assert message.format(root=root) in out
+    assert _plugin(tmp_path) == f"true {LOOPBACK_DIR.format(root=root)}"
+    assert _test_volumes_left(tmp_path) == set()
+    rc, out, _ = run_check(tmp_path, "setup_vloopback", env={"STUB_VLOOPBACK": seed})
+    assert rc == 0, out
+    assert _plugin_changes(tmp_path) == first
+    assert "vloopback: installed" not in out and "vloopback: set" not in out and "vloopback: enabled" not in out
+
+
+@pytest.mark.parametrize(
+    "env, reason",
+    [
+        # the host cannot mount it into sysbox at all: runc's error is the reason, not a guess
+        ({"STUB_VLOOPBACK_MOUNT_FAILS": "1"}, "a vloopback volume does not mount into a sysbox container: docker: Error response from daemon: failed to create task for container: OCI runtime create failed: error during container init: error setting up ID-mapped mount on path 206/fs"),
+        ({"STUB_VLOOPBACK": "absent", "STUB_PLUGIN_INSTALL_FAILS": "1"}, f"docker plugin install {PINNED_PLUGIN} failed: Error response from daemon: Head https://registry-1.docker.io"),
+        ({"STUB_VLOOPBACK_RUN_HANGS": "1"}, "a vloopback volume does not mount into a sysbox container: the container did not finish within 120s"),
+        ({"STUB_VLOOPBACK_RUN_EXIT": "124"}, "a vloopback volume does not mount into a sysbox container: the container did not finish within 120s"),
+        ({"STUB_VLOOPBACK_RUN_EXIT": "1"}, "a vloopback volume does not mount into a sysbox container: the container exited with status 1"),
+        ({"STUB_VOLUME_CREATE_HANGS": "1"}, "docker volume create -d vloopback -o size=1G failed: timed out after 30s"),
+        ({"STUB_VLOOPBACK": "relative", "STUB_PLUGIN_IN_USE": "1"}, "the vloopback plugin has DATA_DIR 'loopback' and cannot be disabled to change it: Error response from daemon: plugin vloopback:latest is in use"),
+        ({"STUB_VOLUME_CREATE_FAILS": "1"}, "docker volume create -d vloopback -o size=1G failed: Error response from daemon: create lium_vloopback_check_"),
+        ({"STUB_VOLUME_RM_FAILS": "1"}, "the test volume lium_vloopback_check_"),
+        ({"STUB_DOCKER_ROOT": "docker"}, "Docker reports the data-root 'docker', not an absolute path"),
+        # a malformed Mountpoint is caught before a container tries to mount it
+        ({"STUB_RELATIVE_MOUNTPOINT": "1"}, "the vloopback plugin reports the Mountpoint 'lium_vloopback_check_"),
+        # a rental that appeared after the installer's first check, or a docker that hangs: no exit, the caller restarts the executor
+        ({"STUB_VLOOPBACK": "relative", "STUB_PODS": "pod_4f1c"}, "rentals found (pod_4f1c); the vloopback plugin's DATA_DIR 'loopback' is not changed under them."),
+        ({"STUB_VLOOPBACK": "relative", "STUB_PS_A_HANGS": "1"}, "could not check for rentals before changing the vloopback plugin: timed out after 30s"),
+    ],
+)
+def test_vloopback_unfixable_host_fails_with_the_cause(tmp_path, env, reason):
+    rc, out, _ = run_check(tmp_path, "setup_vloopback || fail_vloopback", env=env)
+    assert rc == 0  # fail_vloopback's own status; the install-mode exit code is pinned below
+    assert f"Size-limited volumes (vloopback) do not work on this host: {reason}" in out
+    assert "What to do: https://github.com/Datura-ai/lium-io/blob/main/neurons/executor/README.md#volume-plugin-vloopback" in out
+    assert "vloopback: a size-limited volume mounts" not in out
+    # nothing left but the volume that will not remove; a hung container goes before its volume
+    calls = _docker_calls(tmp_path)
+    for name in {call.split()[-1] for call in calls if call.startswith("volume create ")}:
+        assert calls.index(f"rm -f {name}") < calls.index(f"volume rm -f {name}")
+    containers = _stub_state(tmp_path) / "containers"
+    assert not containers.exists() or containers.read_text() == ""
+    if "STUB_VOLUME_RM_FAILS" not in env:
+        assert _test_volumes_left(tmp_path) == set()
+
+
+def test_vloopback_volume_that_will_not_remove_names_the_unmount(tmp_path):
+    rc, out, _ = run_check(tmp_path, "vloopback_mount_test; echo \"REASON=$VLOOPBACK_REASON\"", env={"STUB_VOLUME_RM_FAILS": "1"})
+    assert re.search(r"REASON=the test volume lium_vloopback_check_\d+ did not unmount and remove: .*VolumeDriver.Unmount", out), out
+
+
+@pytest.mark.parametrize(
+    "seed, plugin_calls",
+    [
+        ("absent", ["300 docker plugin install"]),
+        ("disabled", ["30 docker plugin enable vloopback"]),
+        ("relative", ["30 docker plugin disable vloopback", "30 docker plugin set vloopback", "30 docker plugin enable vloopback"]),
+    ],
+)
+def test_vloopback_install_and_mount_test_run_under_timeouts(tmp_path, seed, plugin_calls):
+    # the fix and the mount test: a hung daemon cannot keep full install from restarting the executor
+    rc, out, _ = run_check(tmp_path, "setup_vloopback", env={"STUB_VLOOPBACK": seed})
+    assert rc == 0, out
+    calls = (_stub_state(tmp_path) / "timeouts").read_text().splitlines()
+    for plugin_call in plugin_calls:
+        assert any(call.startswith(plugin_call) for call in calls), calls
+    assert any(call.startswith("30 docker info --format {{.DockerRootDir}}") for call in calls)
+    assert any(call.startswith("30 docker plugin inspect") for call in calls)
+    limits = {" ".join(line.split()[1:3]): line.split()[0] for line in calls if "plugin" not in line}
+    expected = {"docker info": "30", "docker volume": "30", "docker run": "120", "docker rm": "30"}
+    if seed == "relative":
+        expected["docker ps"] = "30"  # the rental check before DATA_DIR changes
+    assert limits == expected
+
+
+def test_interrupted_mount_test_is_cleaned_up_by_the_exit_trap(tmp_path):
+    # Ctrl-C while the test container hangs: the EXIT trap removes the container, then the volume
+    stubs = _bin_dir(tmp_path, with_jq=False)
+    root = _host_root(tmp_path)
+    snippet = (
+        f"SYSBOX_SETUP_LIB=1 . {SCRIPT}\n"
+        "VLOOPBACK_TEST_NAME=lium_vloopback_check_77\n"
+        "docker volume create -d vloopback -o size=1G lium_vloopback_check_77 >/dev/null\n"
+        "STUB_VLOOPBACK_RUN_HANGS=1 docker run --rm --name lium_vloopback_check_77 -v lium_vloopback_check_77:/lium-vol img sh\n"
+        "kill -TERM $$\n"
+    )
+    subprocess.run(
+        ["bash", "-c", snippet],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env={"PATH": str(stubs), "SYSBOX_SETUP_HOST_ROOT": str(root)},
+    )
+    calls = _docker_calls(tmp_path)
+    assert calls[-2:] == ["rm -f lium_vloopback_check_77", "volume rm -f lium_vloopback_check_77"]
+    assert _test_volumes_left(tmp_path) == set()
+
+
+def test_check_vloopback_passes_on_a_fixed_host(tmp_path):
+    rc, out, fix = run_check(tmp_path, "check_vloopback")
+    assert rc == 0 and fix == 0
+    assert f"PASS vloopback plugin (DATA_DIR={tmp_path / 'root'}/var/lib/docker/loopback): a 1 GB volume mounts" in out
+
+
+@pytest.mark.parametrize(
+    "seed, fix_line, command",
+    [
+        ("absent", "FIX  The vloopback volume plugin is not installed; the mount test cannot run until it is.", "bash   # installs it with DATA_DIR=<Docker data-root>/loopback"),
+        ("relative", "FIX  The vloopback plugin's DATA_DIR is 'loopback', not an absolute path", "bash   # sets DATA_DIR=<Docker data-root>/loopback"),
+        ("disabled", "FIX  The vloopback volume plugin is not enabled; the mount test cannot run until it is.", "docker plugin enable vloopback"),
+    ],
+)
+def test_check_vloopback_reports_the_fix_and_changes_nothing(tmp_path, seed, fix_line, command):
+    rc, out, fix = run_check(tmp_path, "check_vloopback", env={"STUB_VLOOPBACK": seed})
+    assert rc == 1 and fix == 1
+    assert fix_line in out and command in out
+    assert _plugin_changes(tmp_path) == []
+
+
+def test_check_vloopback_mount_failure_is_a_fix_with_the_doc_link(tmp_path):
+    rc, out, fix = run_check(tmp_path, "check_vloopback", env={"STUB_VLOOPBACK_MOUNT_FAILS": "1"})
+    assert rc == 1 and fix == 1
+    assert "FIX  vloopback volumes fail on this host: a vloopback volume does not mount into a sysbox container" in out
+    assert "See https://github.com/Datura-ai/lium-io/blob/main/neurons/executor/README.md#volume-plugin-vloopback" in out
+
+
+def test_check_vloopback_is_skipped_until_sysbox_is_registered(tmp_path):
+    rc, out, fix = run_check(tmp_path, "check_vloopback", env={"STUB_DOCKER_RUNTIMES": '{"runc":{}}'})
+    assert rc == 0 and fix == 0
+    assert "SKIP vloopback volumes — the test mounts one into a sysbox container" in out
+    assert not [call for call in _docker_calls(tmp_path) if call.startswith("volume ")]
+
+
+def test_check_vloopback_is_skipped_until_the_test_image_is_pulled(tmp_path):
+    # --check pulls nothing: a pull inside the mount test's timeout would read as a broken plugin
+    rc, out, fix = run_check(tmp_path, "check_vloopback", env={"STUB_NO_VERIFY_IMAGE": "1"})
+    assert rc == 0 and fix == 0
+    assert "SKIP vloopback volumes — the test runs daturaai/compute-subnet-executor:latest, which is not on this host yet" in out
+    assert not [call for call in _docker_calls(tmp_path) if call.startswith("volume ")]
+
+
+@pytest.mark.parametrize("seed", ["absent", "relative"])
+def test_check_asks_for_the_disk_limit_where_rentals_get_none(tmp_path, seed):
+    rc, out, fix = run_check(
+        tmp_path, "check_vloopback", env={"STUB_VLOOPBACK": seed, "STUB_STORAGE_OPT_UNSUPPORTED": "1"}
+    )
+    assert rc == 1 and fix == 1
+    assert "FIX  Docker here cannot limit a container's disk" in out
+    assert "sudo lium gpu-splitting setup --device" in out
+    assert not [call for call in _docker_calls(tmp_path) if call.startswith(("volume ", "plugin "))]
+
+
+@pytest.mark.parametrize("seed", ["absent", "relative"])
+def test_install_mode_leaves_the_plugin_alone_where_rentals_get_no_disk_limit(tmp_path, seed):
+    # main printed SUCCESS here; installing a root plugin no rental uses, or failing on it, is a regression
+    proc = run_script(
+        tmp_path, env={"STUB_VLOOPBACK": seed, "STUB_VLOOPBACK_MOUNT_FAILS": "1", "STUB_STORAGE_OPT_UNSUPPORTED": "1"}
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "vloopback: skipped. Docker here does not accept --storage-opt" in proc.stdout
+    assert "Docker here cannot limit a container's disk" in proc.stdout and "lium gpu-splitting setup" in proc.stdout
+    assert _plugin_changes(tmp_path) == []
+    assert not [call for call in _docker_calls(tmp_path) if call.startswith("volume ")]
+
+
+@pytest.mark.parametrize("probe", ["hangs", "errors"])
+def test_a_storage_opt_probe_that_fails_for_another_reason_still_repairs_and_tests(tmp_path, probe):
+    # only Docker's refusal of --storage-opt means no disk limit; a slow or broken start is not that
+    proc = run_script(tmp_path, env={"STUB_VLOOPBACK": "relative", "STUB_STORAGE_OPT_PROBE": probe})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "vloopback: skipped" not in proc.stdout
+    assert "vloopback: set the vloopback plugin's DATA_DIR from 'loopback' to " in proc.stdout
+    assert "vloopback: a size-limited volume mounts" in proc.stdout
+
+
+@pytest.mark.parametrize("probe", ["hangs", "errors"])
+def test_check_vloopback_runs_the_mount_test_when_the_probe_fails_for_another_reason(tmp_path, probe):
+    rc, out, fix = run_check(tmp_path, "check_vloopback", env={"STUB_STORAGE_OPT_PROBE": probe})
+    assert rc == 0 and fix == 0, out
+    assert "PASS vloopback plugin" in out or "vloopback plugin (DATA_DIR=" in out
+
+
+def test_install_mode_on_a_fixed_host_still_says_nothing_to_do(tmp_path):
+    proc = run_script(tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "vloopback: a size-limited volume mounts" in proc.stdout
+    assert "Sysbox is already working. Nothing to do." in proc.stdout
+    assert _plugin_changes(tmp_path) == []
+
+
+def test_install_mode_runs_the_vloopback_fix_on_a_working_sysbox_host(tmp_path):
+    # the ticket-0331 host: sysbox and the GPU probe work, the plugin's DATA_DIR is relative
+    proc = run_script(tmp_path, env={"STUB_VLOOPBACK": "relative"})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "vloopback: set the vloopback plugin's DATA_DIR from 'loopback' to " in proc.stdout
+    assert "Sysbox is already working.\n" in proc.stdout and "Nothing to do." not in proc.stdout
+
+
+def test_install_mode_exits_one_with_one_message_when_the_host_cannot_mount_a_volume(tmp_path):
+    proc = run_script(tmp_path, env={"STUB_VLOOPBACK_MOUNT_FAILS": "1"})
+    assert proc.returncode == 1
+    assert proc.stdout.count("Size-limited volumes (vloopback) do not work on this host:") == 1
+    assert "README.md#volume-plugin-vloopback" in proc.stdout
+    assert "Sysbox is already working" not in proc.stdout
+
+
+def test_install_mode_does_not_change_the_plugin_under_a_rental(tmp_path):
+    proc = run_script(tmp_path, env={"STUB_VLOOPBACK": "relative", "STUB_PODS": "pod_4f1c"})
+    assert proc.returncode == 1
+    assert "do not work on this host: rentals found (pod_4f1c)" in proc.stdout
+    assert _plugin_changes(tmp_path) == []
+
 # ── fuse3 ───────────────────────────────────────────────────────────────────
 
 
@@ -614,7 +1039,7 @@ def test_check_mode_reports_a_missing_fusermount3(tmp_path):
     proc = run_script(tmp_path, "--check", without=("fusermount3",))
     assert proc.returncode == 1
     assert "FIX  fusermount3 is missing" in proc.stdout
-    assert "Preflight: 12 PASS, 1 FIX, 0 SKIP." in proc.stdout
+    assert "Preflight: 14 PASS, 1 FIX, 0 SKIP." in proc.stdout
 
 
 def test_fuse3_is_installed_before_the_sysbox_deb():
@@ -638,7 +1063,7 @@ def test_check_mode_on_a_good_host_exits_zero_with_a_summary(tmp_path):
     proc = run_script(tmp_path, "--check")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "FIX  " not in proc.stdout
-    assert "Preflight: 13 PASS, 0 FIX, 0 SKIP." in proc.stdout
+    assert "Preflight: 15 PASS, 0 FIX, 0 SKIP." in proc.stdout
 
 
 def test_check_mode_without_a_gpu_reports_the_nvidia_fixes_and_exits_one(tmp_path):
@@ -649,7 +1074,7 @@ def test_check_mode_without_a_gpu_reports_the_nvidia_fixes_and_exits_one(tmp_pat
     assert "FIX  NVIDIA container toolkit is not installed" in proc.stdout
     assert "SKIP Disk >= 1.5x VRAM" in proc.stdout
     assert "PASS Kernel 6.8.0-45-generic" in proc.stdout
-    assert "Preflight: 10 PASS, 2 FIX, 1 SKIP." in proc.stdout
+    assert "Preflight: 12 PASS, 2 FIX, 1 SKIP." in proc.stdout
     assert f"Fix the lines above, then re-run: sudo bash {tmp_path / 'executor' / 'nvidia_docker_sysbox_setup.sh'} --check" in proc.stdout
 
 
@@ -675,7 +1100,7 @@ def test_install_mode_on_a_good_host_reaches_the_install_steps(tmp_path):
     # (the stubbed Docker already knows sysbox-runc and runs the GPU probe, so the script ends at "Nothing to do.")
     proc = run_script(tmp_path)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "Preflight: 9 PASS, 0 FIX, 0 SKIP." in proc.stdout
+    assert "Preflight: 10 PASS, 0 FIX, 0 SKIP." in proc.stdout
     assert "Nothing was installed." not in proc.stdout
     assert "Sysbox is already working. Nothing to do." in proc.stdout
     assert "FIX line(s) at the top" not in proc.stdout
@@ -699,6 +1124,22 @@ def test_install_mode_stops_on_a_stopped_rental(tmp_path):
     assert "docker ps -a --filter name=pod_" in proc.stdout
     assert "pod_abc123" in proc.stdout
     assert "Removing stopped containers" not in proc.stdout
+
+
+@pytest.mark.parametrize(
+    ("running", "message", "absent"),
+    [
+        ("lium_storage_check_90000_311_a1b2c3", "Validator check in progress", "Unknown containers found"),
+        ("container_4f1c", "Validator check in progress", "Unknown containers found"),
+        ("my_app", "Unknown containers found", "Validator check in progress"),
+    ],
+)
+def test_install_mode_waits_for_a_validators_vloopback_test_container(tmp_path, running, message, absent):
+    # a validator's scrape runs its vloopback test in a lium_storage_check_* container for up to a minute
+    proc = run_script(tmp_path, env={"STUB_SYSBOX_VERSION": "0.6.6", "STUB_RUNNING": running})
+    assert proc.returncode == 1
+    assert message in proc.stdout
+    assert absent not in proc.stdout
 
 
 def test_install_mode_keeps_a_newer_sysbox(tmp_path):
@@ -732,7 +1173,7 @@ def test_install_mode_goes_on_after_an_advisory_fix(tmp_path, env, without, fix_
 
 def test_install_mode_goes_on_without_the_iptables_modules(tmp_path):
     # the ticket-0309 cause: the FIX names the modprobe, and the install no longer waits for it
-    proc = run_script(tmp_path, files={"proc/modules": "nf_tables 311296 0\n"})
+    proc = run_script(tmp_path, env={"STUB_MODPROBE_FAILS": "1"}, files={"proc/modules": "nf_tables 311296 0\n"})
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "FIX  Kernel modules ip_tables iptable_nat iptable_filter are not loaded" in proc.stdout
     assert "sudo modprobe -a ip_tables iptable_nat iptable_filter" in proc.stdout
@@ -740,12 +1181,21 @@ def test_install_mode_goes_on_without_the_iptables_modules(tmp_path):
     assert "The preflight printed 1 FIX line(s) at the top." in proc.stdout
 
 
+def test_install_mode_loads_the_iptables_modules_itself(tmp_path):
+    proc = run_script(tmp_path, files={"proc/modules": "nf_tables 311296 0\n"})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Loaded the iptables modules (ip_tables iptable_nat iptable_filter) and made them load at boot." in proc.stdout
+    assert "The preflight printed" not in proc.stdout
+    conf = tmp_path / "root" / "etc" / "modules-load.d" / "lium-iptables.conf"
+    assert conf.read_text() == "ip_tables\niptable_nat\niptable_filter\n"
+
+
 def test_check_mode_still_exits_one_on_an_advisory_fix(tmp_path):
     # --check reports; the advisory / blocking split is install mode's
     proc = run_script(tmp_path, "--check", env={"STUB_NV_DRIVER": "575.57.08"})
     assert proc.returncode == 1
     assert "FIX  NVIDIA driver 575.57.08 is below 580.65.06" in proc.stdout
-    assert "Preflight: 12 PASS, 1 FIX, 0 SKIP." in proc.stdout
+    assert "Preflight: 14 PASS, 1 FIX, 0 SKIP." in proc.stdout
     assert "do not stop the install" not in proc.stdout
     # the installer never installs a driver: pointing at it is the reinstall loop of ticket-0309
     script = tmp_path / "executor" / "nvidia_docker_sysbox_setup.sh"

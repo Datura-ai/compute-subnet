@@ -160,3 +160,24 @@ async def test_create_container_still_completes_with_one_ssh_connection_step(mon
     assert isinstance(result, ContainerCreated)
     ssh_steps = [p for p in result.profilers if p.name == ProfilerStepName.SSH_CONNECTION_ESTABLISHED]
     assert len(ssh_steps) == 1
+
+
+@pytest.mark.asyncio
+async def test_each_leg_logs_its_own_connect_time_even_when_one_fails(monkeypatch):
+    # DAH-4677: the step costs the slower leg, so DAH-4210 needs each leg's time, failures included
+    import services.docker_service as docker_service
+
+    info = Mock()
+    monkeypatch.setattr(docker_service.logger, "info", info)
+    rec = _Recorder()
+
+    with pytest.raises(ConnectionError):
+        async with AsyncExitStack() as stack:
+            await DockerService._connect_ssh_and_docker(
+                stack, _ssh_context(rec), _docker_context(rec, fail=True), log_extra={"executor_id": "e1"}
+            )
+
+    (line,) = [c.args[0] for c in info.call_args_list if str(c.args[0]) == "Create SSH legs timed"]
+    assert line.extra["executor_id"] == "e1"
+    assert line.extra["ssh_connect_ms"] >= 0 and line.extra["docker_connect_ms"] >= 0
+    assert (line.extra["ssh_connected"], line.extra["docker_connected"]) == (True, False)

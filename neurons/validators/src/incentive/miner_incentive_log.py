@@ -7,7 +7,9 @@ WHERE A NODE EARNS (two "pools" of subnet emission; the rest is burned):
                     were rented, based on its rental market value (rental-share).
 
 HOW A NODE PICKS A POOL:
-  rented?                                              -> mining pool (always earns)
+  rented?                                              -> mining pool (earns unless its
+                                                          mining score is zeroed, e.g. Sysbox
+                                                          not confirmed; reason below)
   idle AND model in program AND price ok AND disk >= 1.5x VRAM
        AND (not flagship-8x OR NCU/split/attested-CVM offered) AND power cap appliable
                                AND capacity?            -> unrented pool (earns)
@@ -19,7 +21,9 @@ WHAT THIS CATALOG HOLDS — every `MinerLogLine` the miner-facing log block
 1. ZERO-INCENTIVE REASONS — each records the fact "this executor gets NO payout
    because <reason>" (`MinerLogLine.no_payout_because_*` constructors):
    Group A — earns nothing in EITHER pool (built by `_reasons_excluded_from_both_pools`):
-     spot tier, Discord not connected, paused for new rentals, running own default job
+     spot tier, provider e-mail not confirmed, Discord not connected, paused for new
+     rentals, running own default job, hotkey excluded from scoring by the validator's
+     SCORING_EXCLUDED_HOTKEYS setting
    Group B — idle but does not qualify for the unrented pool:
      GPU model not in the unrented program (earns only when rented),
      price above the market soft limit (lower the price to earn),
@@ -35,6 +39,8 @@ WHAT THIS CATALOG HOLDS — every `MinerLogLine` the miner-facing log block
      Lium fillers and its GPU configuration has an average filler revenue:
      spot node without a Lium filler, no filler revenue average for the GPU configuration,
      no room left in the incentive pool because the rental share is at the burn cap
+   Rented — in the mining pool but scored 0: Sysbox could not be confirmed on a rented
+     node this cycle (the Sysbox portion zeroes its mining score)
    Group C — a check failed this cycle: the failing check's reason code
      (`validation_failed`, context.reason_code), so a zero from a failed check is never
      reported without a reason. A run that passed every check and still scored 0 (the
@@ -95,6 +101,7 @@ class ZeroIncentiveReason(StrEnum):
     PROVIDER_DISCORD_NOT_CONNECTED = "provider_discord_not_connected"
     NEW_RENTALS_PAUSED = "new_rentals_paused"
     MINER_DEFAULT_JOB = "miner_default_job"
+    HOTKEY_EXCLUDED_FROM_SCORING = "hotkey_excluded_from_scoring"
     # Group B: idle but not qualified for the unrented pool
     GPU_MODEL_NOT_ELIGIBLE_FOR_UNRENTED_INCENTIVE = "gpu_model_not_eligible_for_unrented_incentive"
     PRICE_ABOVE_MARKET_P90_SOFT_LIMIT = "price_above_market_p90_soft_limit"
@@ -112,6 +119,10 @@ class ZeroIncentiveReason(StrEnum):
     SPOT_NO_HEADROOM_AT_BURN_CAP = "spot_no_headroom_at_burn_cap"
     # Group C: the validation run itself did not pass; context.reason_code names the check
     VALIDATION_FAILED = "validation_failed"
+    # Group A (appended): the backend keeps the node unlisted until the provider confirms an e-mail
+    PROVIDER_EMAIL_NOT_CONFIRMED = "provider_email_not_confirmed"
+    # Rented: in the mining pool, but the Sysbox portion zeroed the mining score
+    RENTED_SYSBOX_NOT_CONFIRMED = "rented_sysbox_not_confirmed"
 
 
 # The reason code a failed run carries when no check produced one (an exception in the pipeline).
@@ -249,6 +260,20 @@ class MinerLogLine(BaseModel):
         )
 
     @staticmethod
+    def no_payout_because_email_not_confirmed(result: JobResult) -> MinerLogLine:
+        return MinerLogLine._no_payout(
+            result,
+            reason=ZeroIncentiveReason.PROVIDER_EMAIL_NOT_CONFIRMED,
+            message=(
+                "No subnet incentive: this executor is not listed until the provider account "
+                "confirms an e-mail address. Confirm your e-mail under Profile Settings in the "
+                "provider portal to remove this hold. Other listing and incentive requirements "
+                "still apply."
+            ),
+            internal_message="Executor excluded from both pools - provider e-mail not confirmed, node not listed",
+        )
+
+    @staticmethod
     def no_payout_because_paused_for_new_rentals(result: JobResult) -> MinerLogLine:
         return MinerLogLine._no_payout(
             result,
@@ -287,6 +312,18 @@ class MinerLogLine(BaseModel):
                 "expected_ref": expected_ref,
             },
             internal_message="Executor excluded from both pools because a required image is outdated",
+        )
+
+    @staticmethod
+    def no_payout_because_hotkey_excluded_from_scoring(result: JobResult) -> MinerLogLine:
+        return MinerLogLine._no_payout(
+            result,
+            reason=ZeroIncentiveReason.HOTKEY_EXCLUDED_FROM_SCORING,
+            message=(
+                "No subnet incentive: this validator's configuration excludes this hotkey from "
+                "scoring. The executor is still validated and rentable as usual."
+            ),
+            internal_message="Executor excluded from both pools - hotkey excluded from scoring",
         )
 
     # ── Group B: idle but not qualified for the unrented pool ─────────────────
@@ -509,6 +546,24 @@ class MinerLogLine(BaseModel):
             },
         )
 
+    # ── Rented: in the mining pool but scored 0 ──────────────────────────────
+
+    @staticmethod
+    def no_payout_because_rented_sysbox_not_confirmed(result: JobResult) -> MinerLogLine:
+        return MinerLogLine._no_payout(
+            result,
+            reason=ZeroIncentiveReason.RENTED_SYSBOX_NOT_CONFIRMED,
+            message=(
+                "Rented node: Sysbox could not be confirmed on this check, so the rented GPUs earn "
+                "no incentive this cycle. Make sure the sysbox runtime is installed and running on "
+                "this executor."
+            ),
+            extra_fields={
+                "sysbox_runtime": result.sysbox_runtime,
+                "sysbox_multiplier": result.sysbox_multiplier,
+            },
+        )
+
     # ── Group C: the validation run did not pass ─────────────────────────────
 
     @staticmethod
@@ -544,12 +599,20 @@ class MinerLogLine(BaseModel):
     # ── Calculation reports: the per-cycle lines every scored node gets ───────
 
     @staticmethod
-    def mining_score_calculated(result: JobResult, is_rented_after_cutoff: bool) -> MinerLogLine:
+    def mining_score_calculated(
+        result: JobResult, is_rented_after_cutoff: bool, spot_rental_factor: float = 1.0
+    ) -> MinerLogLine:
+        formula: str = (
+            "score * gpu_portion * gpu_count / total_gpu_count * sysbox_multiplier * uptime_multiplier "
+            "* driver_multiplier"
+        )
+        spot_fields: dict[str, Any] = {}
+        if spot_rental_factor != 1.0:
+            # Only a rented spot node carries the factor, so every other line reads as before.
+            formula += " * spot_rental_factor"
+            spot_fields = {"spot_rental_factor": spot_rental_factor}
         return MinerLogLine(
-            message=(
-                "Mining score is calculated successfully. Formula: score * gpu_portion * gpu_count "
-                "/ total_gpu_count * sysbox_multiplier * uptime_multiplier * driver_multiplier"
-            ),
+            message=f"Mining score is calculated successfully. Formula: {formula}",
             fields={
                 "executor_id": str(result.executor_info.uuid),
                 "gpu_model": result.gpu_model,
@@ -563,6 +626,7 @@ class MinerLogLine(BaseModel):
                 "total_gpu_count": result.total_gpu_count,
                 "rental_created": result.rental_created_at,
                 "is_rented_after_cutoff": is_rented_after_cutoff,
+                **spot_fields,
             },
         )
 

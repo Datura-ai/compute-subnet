@@ -30,7 +30,12 @@ TAR_RECORD_SIZE_BYTES = 20 * 512
 TAR_CHECKPOINT_RECORDS = 1024
 MEBIBYTE = 1024 * 1024
 RESTIC_TMPFS_BYTES = 512 * MEBIBYTE
-ENCRYPTED_BACKUP_SCRIPT = 'cd "$1"; shift; exec "$@"'
+# Without `|| exit`, a failed cd leaves sh in the helper's own directory and restic backs that up instead.
+# sh's own cd error is dropped: StorageEventReporter keeps the first diagnostic, which must be ours.
+# Runs the backup inside a helper (docker volume or encrypted namespace). A missing or empty path exits 66 before
+# restic starts, so nothing is uploaded (DAH-2002); a path that is not a directory fails.
+BACKUP_SOURCE_SCRIPT = '[ -e "$1" ] || exit 66; cd "$1" 2>/dev/null || exit 1; [ -n "$(ls -A)" ] || exit 66; shift; exec "$@"'
+BACKUP_SOURCE_MISSING_EXIT = 66
 
 class ResticOperationError(RuntimeError):
     def __init__(self, message: str, *, error_code: str | None = None) -> None:
@@ -347,10 +352,21 @@ class ResticStorageRunner:
             f"lium-pod-{self._operation.pod_id}",
             "--tag",
             f"lium-operation:{self._operation.operation_id}",
+            *(f"--exclude={pattern}" for pattern in self._operation.workspace.exclude_patterns),
             ".",
         ]
+        # DAH-2002: a missing or empty path is a no-op, not a failed run
+        nothing = ResticResult("COMPLETED", OperationResultQuality.EMPTY, None, 0)
+        if isinstance(self._workspace, LocalWorkspace):
+            path = self._workspace.path
+            if path.exists() and not path.is_dir():
+                raise ResticOperationError("the backup path is not a directory")
+            if not path.exists() or not any(path.iterdir()):
+                return nothing
         exit_code, summary = self._stream(command, working_directory=True)
         snapshot_id = _snapshot_id(summary)
+        if exit_code == BACKUP_SOURCE_MISSING_EXIT and not snapshot_id:
+            return nothing
         if exit_code == 0 and snapshot_id:
             return ResticResult("COMPLETED", OperationResultQuality.FULL, snapshot_id, exit_code)
         if exit_code == 3 and snapshot_id:
@@ -527,7 +543,7 @@ class ResticStorageRunner:
                 namespace_command = [
                     "/bin/sh",
                     "-c",
-                    ENCRYPTED_BACKUP_SCRIPT,
+                    BACKUP_SOURCE_SCRIPT,
                     "sh",
                     str(self._workspace.path),
                     *restic_command,
@@ -545,7 +561,20 @@ class ResticStorageRunner:
             f"{self._workspace.volume_name}:/workspace:{volume_mode}",
         ]
         if working_directory:
-            command.extend(["--workdir", str(self._workspace.path)])
+            command.extend(
+                [
+                    "--entrypoint",
+                    "/bin/sh",
+                    self._workspace.image,
+                    "-c",
+                    BACKUP_SOURCE_SCRIPT,
+                    "sh",
+                    str(self._workspace.path),
+                    self._restic_binary,
+                    *restic_command[1:],
+                ]
+            )
+            return command, None
         command.extend(
             [
                 "--entrypoint",

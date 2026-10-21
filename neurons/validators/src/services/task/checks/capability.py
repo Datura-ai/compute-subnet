@@ -5,16 +5,24 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 from core.config import settings
+from core.utils import _m, get_extra_info
 from services.matrix_validation_service import UUID_MISMATCH_ERROR_PREFIX
 
 from ..messages import CapabilityMessages as Msg, MessageTemplate, render_message
 from ..pipeline import CheckResult, Context
+from .matmul_speed_log import log_matmul_speed
 
 if TYPE_CHECKING:
     from protocol.vc_protocol.compute_requests import RentedExecutorsResponse
     from services.matrix_validation_service import ValidationResult
 
 logger = logging.getLogger(__name__)
+
+# Cycles since the last matmul sample on a filler-only node, per (miner hotkey, executor uuid).
+# Per process: a validator restart starts the count again.
+_filler_cycles_since_sample: dict[tuple[str, str], int] = {}
+# Samples taken so far, per node: picks the next card in rotation.
+_filler_samples_taken: dict[tuple[str, str], int] = {}
 
 
 class CapabilityCheck:
@@ -38,13 +46,16 @@ class CapabilityCheck:
             )
             return CheckResult(passed=False, event=event)
 
-        filler_container = _get_filler_only_container(ctx)
+        filler_container = get_filler_only_container(ctx)
         if filler_container:
+            what_filler: dict = {"filler_container": filler_container}
+            if _filler_matmul_sample_due(ctx):
+                what_filler["matmul_sample"] = await _filler_matmul_sample(ctx, specs)
             event = render_message(
                 Msg.FILLER_SKIPPED,
                 ctx=ctx,
                 check_id=self.check_id,
-                what={"filler_container": filler_container},
+                what=what_filler,
             )
             return CheckResult(passed=True, event=event)
 
@@ -76,6 +87,9 @@ class CapabilityCheck:
                 )
             except Exception as exc:
                 failure_reason = str(exc)
+
+        # Shadow line: the speed this run measured next to the reported model. Log only.
+        log_matmul_speed(specs, result, transport=transport, default_extra=ctx.default_extra)
 
         if result and result.success:
             what: dict = {"metrics": result.metrics, "transport": transport}
@@ -281,7 +295,79 @@ def _failure_template(result: ValidationResult | None) -> MessageTemplate:
     return Msg.VERIFY_FAILED
 
 
-def _get_filler_only_container(ctx: Context) -> str | None:
+def _filler_matmul_sample_due(ctx: Context) -> bool:
+    """Every FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES-th filler-only cycle of this node; never when 0."""
+    every = settings.FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES
+    if every <= 0:
+        return False
+    key = (ctx.miner_hotkey, ctx.executor.uuid)
+    cycles = _filler_cycles_since_sample.get(key, 0) + 1
+    if cycles < every:
+        _filler_cycles_since_sample[key] = cycles
+        return False
+    _filler_cycles_since_sample[key] = 0
+    return True
+
+
+async def _filler_matmul_sample(ctx: Context, specs: dict) -> dict:
+    """A filler-only node skips the matmul for as long as the filler runs, so a card that left the
+    node after the filler started is never challenged. This runs the same challenge on a small VRAM
+    budget beside the filler and records the answer. A record only: the filler holds the cards, so
+    a failed sample proves nothing by itself and the check result never depends on it.
+
+    Each sample is pinned to one claimed card, the next one in rotation, so every card is sampled
+    within the budget. One card per sample costs what an unpinned sample did; every card in one
+    sample could run past the job timeout on a wedged node."""
+    sample: dict = {"vram_budget_mb": settings.FILLER_MATMUL_SAMPLE_VRAM_MB}
+    details = (specs.get("gpu") or {}).get("details") or []
+    gpu_uuid = None
+    if details:
+        key = (ctx.miner_hotkey, ctx.executor.uuid)
+        taken = _filler_samples_taken.get(key, 0)
+        _filler_samples_taken[key] = taken + 1
+        card_index = taken % len(details)
+        gpu_uuid = details[card_index].get("uuid") or ""
+        sample.update(card_index=card_index, card_count=len(details), gpu_uuid=gpu_uuid)
+    try:
+        result = await ctx.services.validation.validate_gpu_model_and_process_job(
+            ssh_client=ctx.ssh,
+            executor_info=ctx.executor,
+            default_extra=ctx.default_extra,
+            machine_spec=specs,
+            vram_budget_mb=settings.FILLER_MATMUL_SAMPLE_VRAM_MB,
+            probe_all_cards=False,
+            gpu_uuid=gpu_uuid,
+        )
+        sample.update(
+            passed=bool(result.success),
+            timed_out=bool(result.timed_out),
+            error=result.error_message or None,
+        )
+        if not result.success:
+            sample["error_kind"] = _sample_error_kind(result)
+    except Exception as exc:
+        sample.update(passed=False, timed_out=False, error=str(exc), error_kind="validator_error")
+    logger.warning(_m("FILLER_MATMUL_SAMPLE", extra=get_extra_info({**ctx.default_extra, **sample})))
+    return sample
+
+
+def _sample_error_kind(result: ValidationResult) -> str:
+    """no_memory: the probe could not allocate VRAM (the filler holds the card), not a wrong
+    answer. Same classification as the scored capability failure. An SSH or cipher failure on our
+    side is validator_error, so it never reads like a spoof."""
+    if result.validator_error:
+        return "validator_error"
+    template = _failure_template(result)
+    if template is Msg.VERIFY_FAILED_VRAM_UNAVAILABLE:
+        return "no_memory"
+    if template is Msg.VERIFY_TIMEOUT:
+        return "timeout"
+    if template is Msg.VERIFY_FAILED:
+        return "wrong_answer"
+    return "no_answer"  # no CUDA device / CUDA not ready
+
+
+def get_filler_only_container(ctx: Context) -> str | None:
     rented_data = ctx.state.rented_data
     if not rented_data:
         return None

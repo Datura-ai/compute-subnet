@@ -402,3 +402,57 @@ async def test_an_excluded_node_with_a_model_the_validator_does_not_know_scores_
     assert _codes(result) == ["spot_tier"]
     assert result.mining_score == 0
     assert result.eligible_for_rental_share is False
+
+
+# ── a rented node whose mining score is zeroed by the Sysbox portion ─────────
+
+
+def _rented(**overrides) -> JobResult:
+    return _idle_flagship(
+        gpu_count=4, spec=None, is_rented=True, rental_created_at=datetime(2030, 1, 1), **overrides
+    )
+
+
+async def _score_one_cycle(result: JobResult) -> JobResult:
+    redis = AsyncMock(get_portion_per_gpu_type=AsyncMock(return_value=0.3))
+    incentive = RentalPriceIncentive(IncentiveConfig(), redis, {"hk": [result]}, {H200: 4})
+    incentive.price_provider = AsyncMock(
+        get_tao_price=AsyncMock(return_value=300.0), get_alpha_rate=AsyncMock(return_value=0.001)
+    )
+    await incentive.calculate_mining_scores()
+    return result
+
+
+@pytest.mark.asyncio
+async def test_a_rented_node_without_confirmed_sysbox_names_the_reason(monkeypatch):
+    monkeypatch.setattr(settings, "PORTION_FOR_SYSBOX_RENTED", 1)
+    rented = _rented(sysbox_runtime=False)
+
+    result = await _score_one_cycle(rented)
+
+    assert _codes(result) == [ZeroIncentiveReason.RENTED_SYSBOX_NOT_CONFIRMED]
+    assert result.sysbox_multiplier == 0
+    assert result.incentive == 0
+    assert result.zero_incentive_reasons[0].message_for_miner.startswith("Rented node")
+
+
+@pytest.mark.asyncio
+async def test_a_rented_node_with_confirmed_sysbox_has_no_reason(monkeypatch):
+    monkeypatch.setattr(settings, "PORTION_FOR_SYSBOX_RENTED", 1)
+    rented = _rented(sysbox_runtime=True)
+
+    result = await _score_one_cycle(rented)
+
+    assert _codes(result) == []
+    assert result.mining_score > 0
+
+
+@pytest.mark.asyncio
+async def test_an_idle_node_without_sysbox_keeps_only_the_idle_reason(monkeypatch):
+    monkeypatch.setattr(settings, "PORTION_FOR_SYSBOX_UNRENTED", 1)
+    idle = _idle_flagship(gpu_count=4, spec=None, sysbox_runtime=False)
+
+    result = await _score_one_cycle(idle)
+
+    # unchanged: the idle reasons only, never the rented one
+    assert _codes(result) == ["no_unrented_capacity_for_gpu_count", "sysbox_not_enabled"]

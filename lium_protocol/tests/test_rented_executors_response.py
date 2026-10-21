@@ -33,3 +33,14 @@ def test_unknown_keys_are_ignored_so_an_older_reader_takes_a_newer_reply() -> No
     assert "a_later_field" not in reply.model_dump()
     assert reply.provider_spot_executor_ids == NEW_FIELDS["provider_spot_executor_ids"]
     assert reply.filler_revenue_by_gpu_config[0].usd_per_gpu_hour == 2.5
+
+
+def test_executor_owner_hotkey_arrived_in_1_6_and_is_empty_from_an_older_backend() -> None:
+    major, minor, _patch = (int(part) for part in PROTOCOL_VERSION.split("."))
+    assert (major, minor) >= (1, 6)
+    assert RentedExecutorsResponse.model_validate(OLDER_BACKEND_REPLY).executor_owner_hotkeys == {}
+    owners = {"6f1d2c3b-4a5e-4f60-9b7c-8d9e0f1a2b3c": "5Owner"}
+    reply = RentedExecutorsResponse.model_validate(
+        {**OLDER_BACKEND_REPLY, "executor_owner_hotkeys": owners}
+    )
+    assert reply.executor_owner_hotkeys == owners
