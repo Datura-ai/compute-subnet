@@ -702,14 +702,21 @@ class Settings(BaseSettings):
     )
 
     # Spot-node pay. True: an unrented spot node on the backend's spot pay list (provider_spot_executor_ids:
-    # set to Spot by its provider, or demoted for penalties) that a secure node in its place would be
-    # paid for (DAH-4299: whether or not a Lium filler runs on it) earns
+    # set to Spot by its provider, or demoted for penalties) and that runs Lium fillers earns
     # min(1.0 x its GPU configuration's average filler revenue, its secure idle rate before
-    # bucket-cap dilution), with no bucket cap (1.0 = FILLER_REVENUE_PAY_FACTOR); one whose configuration
-    # has no usable average earns 0, and a banned, pinned or no-incentive-rental one
+    # bucket-cap dilution), with no bucket cap (1.0 = FILLER_REVENUE_PAY_FACTOR); a spot node without a filler, or whose configuration
+    # has no usable average, earns 0, and a banned, pinned or no-incentive-rental one
     # earns 0 as before. Pays nobody until the backend sends provider_spot_executor_ids.
     # False: every spot node earns 0, as before.
     ENABLE_SPOT_NODE_PAY: bool = Field(env="ENABLE_SPOT_NODE_PAY", default=False)
+    # DAH-4299: whether an idle provider-chosen spot node is paid is decided as for a secure node
+    # (its GPU model is in the unrented program and every idle-pool gate passes), not by whether a
+    # Lium filler runs on it: a filler Lium did not start is Lium's doing (Fish). Provider-caused
+    # cases stay excluded by the shared rules. The amount is unchanged. On by default (Fish 20 Oct);
+    # kept as a money kill switch: False pays an idle spot node only while a Lium filler runs on it.
+    SPOT_IDLE_PAY_SECURE_DECISION_ENABLED: bool = Field(
+        env="SPOT_IDLE_PAY_SECURE_DECISION_ENABLED", default=True
+    )
     # Spot rental incentive, independent of the flag above. True: a rented spot node the backend
     # lists in provider_spot_executor_ids earns rental incentive at 0.5 x what the same node would
     # earn rented as secure (0.5 = SPOT_RENTAL_INCENTIVE_FACTOR); a node that is spot as a
