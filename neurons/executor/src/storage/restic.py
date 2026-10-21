@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import IO
 
 from storage.models import (
@@ -45,6 +45,14 @@ class ResticOperationError(RuntimeError):
 
 class StorageOperationCancelled(RuntimeError):
     pass
+
+
+class CredentialsExpired(ResticOperationError):
+    pass
+
+
+# DAH-4945: the backend renews scoped credentials up to 4 sessions' worth after the backup started.
+CREDENTIAL_RENEWALS = 3
 
 
 @dataclass(frozen=True)
@@ -107,6 +115,10 @@ class JsonEventWriter:
     @property
     def heartbeat_interval_seconds(self) -> float:
         return self._heartbeat_interval_seconds
+
+    @property
+    def reporter(self) -> StorageEventReporter | None:
+        return self._reporter
 
     @property
     def cancellation_requested(self) -> bool:
@@ -363,7 +375,17 @@ class ResticStorageRunner:
                 raise ResticOperationError("the backup path is not a directory")
             if not path.exists() or not any(path.iterdir()):
                 return nothing
-        exit_code, summary = self._stream(command, working_directory=True)
+        renewals = 0
+        while True:
+            try:
+                exit_code, summary = self._stream(command, working_directory=True)
+                break
+            except CredentialsExpired:
+                if renewals >= CREDENTIAL_RENEWALS:
+                    raise
+                renewals += 1
+                # restic resumes from the blobs its repository already indexed
+                self._renew_credentials()
         snapshot_id = _snapshot_id(summary)
         if exit_code == BACKUP_SOURCE_MISSING_EXIT and not snapshot_id:
             return nothing
@@ -375,6 +397,23 @@ class ResticStorageRunner:
             f"restic backup failed with exit {exit_code}"
             + (" without a snapshot ID" if not snapshot_id else "")
         )
+
+    def _renew_credentials(self) -> None:
+        reporter = self._events.reporter
+        credentials = reporter.renew_credentials() if reporter else None
+        if not credentials:
+            raise ResticOperationError("storage credentials expired and could not be renewed")
+        self._operation = replace(
+            self._operation, repository=replace(self._operation.repository, **credentials)
+        )
+        self._environment = self._build_environment()
+        # the stopped helper's --rm removal can lag; the rerun reuses its name
+        subprocess.run(
+            [self._docker_binary, "rm", "-f", self._helper_container_name()],
+            capture_output=True,
+            text=True,
+        )
+        self._events.diagnostic("storage credentials expired; renewed them, restarting the backup")
 
     def _restore(self) -> ResticResult:
         if self._operation.engine is StorageEngine.TAR_AWS_CLI:
@@ -472,6 +511,9 @@ class ResticStorageRunner:
                 line = raw_line.strip()
                 if not line:
                     continue
+                # restic 0.19 retries an expired session for 15 minutes before failing; stop it now
+                if self._operation.repository.session_token and _credentials_expired(line):
+                    raise CredentialsExpired("storage credentials expired")
                 checkpoint = _restore_checkpoint(line)
                 if checkpoint is not None and restore_stats is not None:
                     self._events.restic_event(
@@ -736,6 +778,11 @@ def _is_retryable_repository_failure(failure_detail: str) -> bool:
     # Normalization matches both "Access Denied" and compact "AccessDenied" forms.
     normalized_detail = "".join(failure_detail.casefold().split())
     return any(marker in normalized_detail for marker in retryable_failure_markers)
+
+
+def _credentials_expired(line: str) -> bool:
+    # S3's code for an expired session token: "ExpiredToken: The provided token has expired."
+    return "expiredtoken" in "".join(line.casefold().split())
 
 
 def _snapshot_id(summary: Mapping[str, object] | None) -> str | None:
