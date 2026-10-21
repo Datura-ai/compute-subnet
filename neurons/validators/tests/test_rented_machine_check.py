@@ -413,36 +413,6 @@ async def test_tenant_enforcement_check(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("resources_passed, reasons", [(True, None), (False, ["RENTED_POD_RESOURCES_REDUCED"])])
-async def test_rented_event_names_the_reduced_cpu_gate_that_zeroed_the_score(context_factory, resources_passed, reasons):
-    ctx = context_factory(
-        services=build_services(
-            score_calculator=DummyScoreCalculator(), container_cleanup=MockContainerCleanup(),
-            backend=DummyBackendClient(active=True),
-        ),
-        config=build_context_config(),
-        state=build_state(
-            gpu_processes=[{"container_name": "tenant-123", "pid": 1234}],
-            gpu_details=[{"gpu_utilization": 50, "memory_utilization": 60}],
-            gpu_model="NVIDIA RTX 4090",
-            rented_data=build_rented_data(
-                "executor-123", {"containers": [{"name": "tenant-123", "pod_id": "pod-1"}], "owner_flag": False}
-            ),
-        ),
-        ssh=DummySSHClient(pod_running=True, ssh_keys=["ssh-rsa AAA..."]),
-        collateral_deposited=True,
-        is_rental_succeed=True,
-        contract_version="v1.0.0",
-        rented_pod_resources_passed=resources_passed,
-    )
-
-    result = await TenantEnforcementCheck().run(ctx)
-
-    assert result.event.reason_code == Msg.ALREADY_RENTED.reason
-    assert result.event.what_we_saw.get("score_zero_reasons") == reasons
-
-
-@pytest.mark.asyncio
 async def test_tenant_enforcement_skips_pod_not_running_when_backend_says_inactive(context_factory):
     executor_uuid = "executor-123"
     rented_data = build_rented_data(

@@ -25,7 +25,7 @@ from ...const import (
 )
 from core.config import settings
 
-from ..messages import PortCountMessages, RentedPodResourcesMessages, TenantEnforcementMessages as Msg
+from ..messages import PortCountMessages, TenantEnforcementMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
 from .port_count import hidden_from_renters_text, port_count_below_listing_floor, port_floor_what
@@ -373,9 +373,6 @@ class TenantEnforcementCheck:
             "actual_score": actual_score,
             "job_score": job_score,
         }
-        # the event's own reason stays RENTED, so the portal reads why the score is zero from here
-        if not ctx.rented_pod_resources_passed:
-            what["score_zero_reasons"] = [RentedPodResourcesMessages.RESOURCES_REDUCED.reason]
         event = render_message(
             Msg.ALREADY_RENTED,
             ctx=ctx,
