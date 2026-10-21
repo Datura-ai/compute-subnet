@@ -443,15 +443,14 @@ class AttestationService:
     ) -> bool | None:
         """Verify the executor's NVIDIA CC GPU evidence.
 
-        Enforcement (ENABLE_GPU_ATTESTATION_ENFORCEMENT) applies on attestation
-        events (a nonce was issued): missing/unbound/failed evidence raises
-        AttestationError. Outside events, or with enforcement off, verification
-        is observe-only: the result is logged and recorded but never raises.
+        Enforced on attestation events (a nonce was issued): missing/unbound/failed
+        evidence raises AttestationError. Outside events verification is
+        observe-only: the result is logged and recorded but never raises.
 
         Returns True (verified), False (verified-bad), or None (not performed /
         undeterminable). Never returns True unless NRAS accepted the evidence.
         """
-        enforce_event = settings.ENABLE_GPU_ATTESTATION_ENFORCEMENT and nonce is not None
+        enforce_event = nonce is not None
         payload_raw = executor.nvidia_payload
         log_extra = {"executor": f"{executor.address}:{executor.port}"}
 

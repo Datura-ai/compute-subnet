@@ -873,13 +873,6 @@ class Settings(BaseSettings):
     # (services/cvm_quote_broker.py). Kill switch only; off = pods get no quote path.
     ENABLE_CVM_POD_QUOTE_SOCKET: bool = Field(env="ENABLE_CVM_POD_QUOTE_SOCKET", default=True)
 
-    # G1 — NVIDIA GPU confidential-compute attestation (validator-side verification).
-    # Off = observe-only: nvidia_payload, when present, is verified and logged but
-    # never affects the outcome. On = a CVM executor (verified TDX quote) must supply
-    # GPU evidence bound to the issued nonce; any failure raises AttestationError.
-    ENABLE_GPU_ATTESTATION_ENFORCEMENT: bool = Field(
-        env="ENABLE_GPU_ATTESTATION_ENFORCEMENT", default=False
-    )
     # DAH-4551 - GpuAttestationIdentityCheck: each Hopper/Blackwell GPU's NVIDIA-signed identity, pinned to its
     # UUID both ways. Shadow by default: a mismatch or forged evidence is logged as a warning event and the node
     # passes. On = it fails the node (not fatal with a live rental). Unavailable evidence alone never fails it.

@@ -124,7 +124,6 @@ def service(monkeypatch):
     monkeypatch.setattr(settings, "TDX_VERIFIER_URL", "https://verifier.example/verify")
     monkeypatch.setattr(settings, "ENABLE_ATTESTATION_WHITELIST", False)
     monkeypatch.setattr(settings, "ENABLE_TCB_ENFORCEMENT", False)
-    monkeypatch.setattr(settings, "ENABLE_GPU_ATTESTATION_ENFORCEMENT", False)
     monkeypatch.setattr(settings, "ENABLE_ATTESTATION_NONCE", False)
     return AttestationService()
 
@@ -325,7 +324,6 @@ def _gpu_payload(nonce_hex: str) -> str:
 
 async def test_g1_missing_payload_rejected_when_enforced(service, monkeypatch):
     # Arrange
-    monkeypatch.setattr(settings, "ENABLE_GPU_ATTESTATION_ENFORCEMENT", True)
     nonce = AttestationNonce.issue()
     executor = _make_executor(nvidia_payload=None)
 
@@ -341,7 +339,6 @@ async def test_g1_missing_payload_none_when_not_enforced(service):
 
 async def test_g1_malformed_payload_rejected_when_enforced(service, monkeypatch):
     # Arrange
-    monkeypatch.setattr(settings, "ENABLE_GPU_ATTESTATION_ENFORCEMENT", True)
     nonce = AttestationNonce.issue()
     executor = _make_executor(nvidia_payload="not-json{")
 
@@ -352,7 +349,6 @@ async def test_g1_malformed_payload_rejected_when_enforced(service, monkeypatch)
 
 async def test_g1_unbound_nonce_rejected_when_enforced(service, monkeypatch):
     # Arrange — payload carries a self-generated nonce, not the issued challenge
-    monkeypatch.setattr(settings, "ENABLE_GPU_ATTESTATION_ENFORCEMENT", True)
     nonce = AttestationNonce.issue()
     executor = _make_executor(nvidia_payload=_gpu_payload("ab" * 32))
 
@@ -363,7 +359,6 @@ async def test_g1_unbound_nonce_rejected_when_enforced(service, monkeypatch):
 
 async def test_g1_nras_overall_failure_rejected_when_enforced(service, monkeypatch):
     # Arrange
-    monkeypatch.setattr(settings, "ENABLE_GPU_ATTESTATION_ENFORCEMENT", True)
     nonce = AttestationNonce.issue()
     executor = _make_executor(nvidia_payload=_gpu_payload(nonce.value_hex))
 
@@ -378,22 +373,21 @@ async def test_g1_nras_overall_failure_rejected_when_enforced(service, monkeypat
 
 
 async def test_g1_nras_overall_failure_observed_as_false(service, monkeypatch):
-    # Arrange — enforcement off: verified-bad is recorded, never raised
-    nonce = AttestationNonce.issue()
-    executor = _make_executor(nvidia_payload=_gpu_payload(nonce.value_hex))
+    # Arrange — outside an attestation event (no issued nonce): verified-bad is recorded, never raised
+    self_nonce = "ab" * 32
+    executor = _make_executor(nvidia_payload=_gpu_payload(self_nonce))
 
     async def fake_post(payload, executor_):
-        return _nras_response(overall=False, nonce=nonce.value_hex)
+        return _nras_response(overall=False, nonce=self_nonce)
 
     monkeypatch.setattr(service, "_post_nras", fake_post)
 
     # Act / Assert
-    assert await service._verify_gpu(executor, nonce) is False
+    assert await service._verify_gpu(executor, None) is False
 
 
 async def test_g1_eat_nonce_mismatch_rejected(service, monkeypatch):
     # Arrange — NRAS echoes a different nonce than the payload claimed
-    monkeypatch.setattr(settings, "ENABLE_GPU_ATTESTATION_ENFORCEMENT", True)
     nonce = AttestationNonce.issue()
     executor = _make_executor(nvidia_payload=_gpu_payload(nonce.value_hex))
 
@@ -409,7 +403,6 @@ async def test_g1_eat_nonce_mismatch_rejected(service, monkeypatch):
 
 async def test_g1_per_gpu_claims_checked(service, monkeypatch):
     # Arrange — one GPU reports measres failure
-    monkeypatch.setattr(settings, "ENABLE_GPU_ATTESTATION_ENFORCEMENT", True)
     nonce = AttestationNonce.issue()
     executor = _make_executor(nvidia_payload=_gpu_payload(nonce.value_hex))
 
@@ -430,7 +423,6 @@ async def test_g1_per_gpu_claims_checked(service, monkeypatch):
 
 async def test_g1_nras_pass_returns_true(service, monkeypatch):
     # Arrange
-    monkeypatch.setattr(settings, "ENABLE_GPU_ATTESTATION_ENFORCEMENT", True)
     nonce = AttestationNonce.issue()
     executor = _make_executor(nvidia_payload=_gpu_payload(nonce.value_hex))
 
@@ -450,7 +442,6 @@ async def test_g1_nras_pass_returns_true(service, monkeypatch):
 
 async def test_g1_nras_unreachable_fail_closed_when_enforced(service, monkeypatch):
     # Arrange
-    monkeypatch.setattr(settings, "ENABLE_GPU_ATTESTATION_ENFORCEMENT", True)
     nonce = AttestationNonce.issue()
     executor = _make_executor(nvidia_payload=_gpu_payload(nonce.value_hex))
 
@@ -463,11 +454,8 @@ async def test_g1_nras_unreachable_fail_closed_when_enforced(service, monkeypatc
     with pytest.raises(AttestationError, match="NRAS unreachable"):
         await service._verify_gpu(executor, nonce)
 
-    # Arrange — observe-only: undeterminable, not verified-bad
-    monkeypatch.setattr(settings, "ENABLE_GPU_ATTESTATION_ENFORCEMENT", False)
-
-    # Act / Assert
-    assert await service._verify_gpu(executor, nonce) is None
+    # Act / Assert — outside an attestation event (no nonce): observe-only, undeterminable
+    assert await service._verify_gpu(executor, None) is None
 
 
 def test_g1_attestation_passed_invariant():
