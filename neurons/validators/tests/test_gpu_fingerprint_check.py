@@ -1,13 +1,10 @@
 """GpuFingerprintCheck: the anchored GPU UUID set of a listed node (DAH-3457).
 
-Legacy mode (GPU_ANCHOR_HARD_ENABLED off) keeps today's verdict and adds the hard rule's would-be decision to
-the event; hard mode splits a changed set into GPU_MISSING (subset) and a broken anchor (any card outside it),
-and a broken anchor stays broken under the same executor id.
+A changed set splits into GPU_MISSING (subset) and a broken anchor (any card outside it), and a broken
+anchor stays broken under the same executor id.
 """
 
 import logging
-from unittest.mock import patch
-
 import pytest
 
 from neurons.validators.src.services.task.checks.gpu_fingerprint import GpuFingerprintCheck
@@ -16,9 +13,6 @@ from neurons.validators.src.services.task.messages import GpuFingerprintMessages
 from neurons.validators.src.services.task.pipeline_factory import PipelineFactory
 
 from tests.helpers import build_context_config, build_services, build_state
-
-SETTINGS = "neurons.validators.src.services.task.checks.gpu_fingerprint.settings"
-
 
 def _ctx(context_factory, *, prev_uuids: str, current_uuids: str, anchor_broken: bool = False):
     verified = {"uuids": prev_uuids} if prev_uuids else {}
@@ -32,10 +26,8 @@ def _ctx(context_factory, *, prev_uuids: str, current_uuids: str, anchor_broken:
     )
 
 
-async def _run(context_factory, *, hard: bool, **kwargs):
-    with patch(SETTINGS) as s:
-        s.GPU_ANCHOR_HARD_ENABLED = hard
-        return await GpuFingerprintCheck().run(_ctx(context_factory, **kwargs))
+async def _run(context_factory, **kwargs):
+    return await GpuFingerprintCheck().run(_ctx(context_factory, **kwargs))
 
 
 @pytest.mark.parametrize(
@@ -46,17 +38,16 @@ async def _run(context_factory, *, hard: bool, **kwargs):
         ("gpu-001", "", True, Msg.UUID_OK.reason, False),
         ("gpu-001,gpu-002", "gpu-001,gpu-002", True, Msg.UUID_OK.reason, False),
         ("gpu-002,gpu-001", "gpu-001,gpu-002", True, Msg.UUID_OK.reason, False),  # sorted comparison
-        ("gpu-001,gpu-002", "gpu-001,gpu-003", False, Msg.UUID_CHANGED.reason, True),
-        ("gpu-001", "gpu-001,gpu-002", False, Msg.UUID_CHANGED.reason, True),
+        ("gpu-001,gpu-002", "gpu-001,gpu-003", False, Msg.ANCHOR_BROKEN.reason, True),
+        ("gpu-001", "gpu-001,gpu-002", False, Msg.ANCHOR_BROKEN.reason, True),
     ],
 )
-@pytest.mark.parametrize("hard", [False, True])
 @pytest.mark.asyncio
-async def test_same_set_passes_and_a_different_set_fails_in_both_modes(
-    prev_uuids, current_uuids, expected_pass, expected_reason, expect_clear, hard, context_factory
+async def test_same_set_passes_and_a_different_set_fails(
+    prev_uuids, current_uuids, expected_pass, expected_reason, expect_clear, context_factory
 ):
-    """Regression: a changed set no longer fails, or a first verification (no anchor yet) fails, in either mode."""
-    result = await _run(context_factory, hard=hard, prev_uuids=prev_uuids, current_uuids=current_uuids)
+    """Regression: a changed set no longer fails, or a first verification (no anchor yet) fails."""
+    result = await _run(context_factory, prev_uuids=prev_uuids, current_uuids=current_uuids)
 
     assert result.passed is expected_pass
     assert result.event.reason_code == expected_reason
@@ -66,37 +57,11 @@ async def test_same_set_passes_and_a_different_set_fails_in_both_modes(
         assert "clear_verified_job_info" not in result.updates
 
 
-@pytest.mark.parametrize(
-    "prev_uuids,current_uuids,would_be,missing,unexpected",
-    [
-        ("gpu-001,gpu-002", "gpu-001", "GPU_MISSING", ["gpu-002"], []),
-        ("gpu-001,gpu-002", "gpu-001,gpu-003", "ANCHOR_BROKEN", ["gpu-002"], ["gpu-003"]),
-        ("gpu-001", "gpu-001,gpu-002", "ANCHOR_BROKEN", [], ["gpu-002"]),
-    ],
-)
-@pytest.mark.asyncio
-async def test_legacy_mode_records_the_hard_decision_without_taking_it(
-    prev_uuids, current_uuids, would_be, missing, unexpected, context_factory
-):
-    """Regression: the flag is off and the stored row no longer says what the hard rule would have done,
-    so the week of warn-mode data the flip is decided on is blank; or the flag is off and the node is
-    marked broken anyway."""
-    result = await _run(context_factory, hard=False, prev_uuids=prev_uuids, current_uuids=current_uuids)
-
-    assert result.passed is False
-    assert result.event.reason_code == Msg.UUID_CHANGED.reason
-    assert result.event.event == Msg.UUID_CHANGED.event
-    assert result.event.what_we_saw["anchor_hard_would_be"] == would_be
-    assert result.event.what_we_saw["missing"] == missing
-    assert result.event.what_we_saw["unexpected"] == unexpected
-    assert result.updates == {"clear_verified_job_info": True}
-
-
 @pytest.mark.asyncio
 async def test_hard_mode_subset_is_gpu_missing_and_does_not_break_the_anchor(context_factory):
     """Regression: a card that dropped off the bus is treated as a swap, and the node never scores again
     once the card is back."""
-    result = await _run(context_factory, hard=True, prev_uuids="gpu-001,gpu-002", current_uuids="gpu-002")
+    result = await _run(context_factory, prev_uuids="gpu-001,gpu-002", current_uuids="gpu-002")
 
     assert result.passed is False
     assert result.event.reason_code == Msg.GPU_MISSING.reason
@@ -117,7 +82,7 @@ async def test_hard_mode_subset_is_gpu_missing_and_does_not_break_the_anchor(con
 async def test_hard_mode_any_uuid_outside_the_anchor_breaks_it(current_uuids, context_factory):
     """Regression: an added or replaced card is read as GPU_MISSING (transient) or passes, so a node
     re-anchors on a different set under the same executor id."""
-    result = await _run(context_factory, hard=True, prev_uuids="gpu-001,gpu-002", current_uuids=current_uuids)
+    result = await _run(context_factory, prev_uuids="gpu-001,gpu-002", current_uuids=current_uuids)
 
     assert result.passed is False
     assert result.event.reason_code == Msg.ANCHOR_BROKEN.reason == "GPU_UUID_CHANGED"
@@ -127,14 +92,13 @@ async def test_hard_mode_any_uuid_outside_the_anchor_breaks_it(current_uuids, co
     assert result.updates == {"clear_verified_job_info": True, "gpu_anchor_broken": True}
 
 
-@pytest.mark.parametrize("hard", [False, True])
 @pytest.mark.asyncio
-async def test_a_scrape_that_lists_an_anchored_card_twice_matches_the_anchor(hard, context_factory, caplog):
+async def test_a_scrape_that_lists_an_anchored_card_twice_matches_the_anchor(context_factory, caplog):
     """Regression (#1363 review): the sorted lists differ with `missing` and `unexpected` both empty. One
     duplicated scrape is then filed as a broken anchor and the node never scores again under this executor id."""
     with caplog.at_level(logging.WARNING):
         result = await _run(
-            context_factory, hard=hard, prev_uuids="gpu-001,gpu-002", current_uuids="gpu-001,gpu-001,gpu-002"
+            context_factory, prev_uuids="gpu-001,gpu-002", current_uuids="gpu-001,gpu-001,gpu-002"
         )
 
     assert result.passed is True
@@ -148,7 +112,7 @@ async def test_a_scrape_that_lists_an_anchored_card_twice_matches_the_anchor(har
 async def test_hard_mode_a_duplicated_scrape_missing_a_card_is_gpu_missing_not_broken(context_factory):
     """Regression: the duplicate is counted as the second card, so `gpu-001,gpu-001` passes for the anchor
     `gpu-001,gpu-002`; or the event stops recording `duplicate_uuid` on a failing cycle."""
-    result = await _run(context_factory, hard=True, prev_uuids="gpu-001,gpu-002", current_uuids="gpu-001,gpu-001")
+    result = await _run(context_factory, prev_uuids="gpu-001,gpu-002", current_uuids="gpu-001,gpu-001")
 
     assert result.passed is False
     assert result.event.reason_code == Msg.GPU_MISSING.reason
@@ -157,12 +121,11 @@ async def test_hard_mode_a_duplicated_scrape_missing_a_card_is_gpu_missing_not_b
     assert result.updates == {"clear_verified_job_info": True}
 
 
-@pytest.mark.parametrize("hard", [False, True])
 @pytest.mark.asyncio
-async def test_a_scrape_with_zero_cards_leaves_the_anchor_alone(hard, context_factory):
+async def test_a_scrape_with_zero_cards_leaves_the_anchor_alone(context_factory):
     """Regression: an empty scrape is compared as a strict subset (GPU_MISSING) or as a changed set and
     resets or breaks the anchor, when the GPU count check is the one that owns an empty scrape."""
-    result = await _run(context_factory, hard=hard, prev_uuids="gpu-001,gpu-002", current_uuids="")
+    result = await _run(context_factory, prev_uuids="gpu-001,gpu-002", current_uuids="")
 
     assert result.passed is True
     assert result.event.reason_code == Msg.UUID_OK.reason
@@ -177,7 +140,6 @@ async def test_hard_mode_a_broken_record_fails_before_the_sets_are_compared(curr
     nothing) is re-verified under the same executor id."""
     result = await _run(
         context_factory,
-        hard=True,
         prev_uuids="gpu-001,gpu-002",
         current_uuids=current_uuids,
         anchor_broken=True,
@@ -197,19 +159,3 @@ def test_fingerprint_runs_before_spec_change_in_both_pipelines():
         fingerprint_index = next(i for i, check in enumerate(checks) if isinstance(check, GpuFingerprintCheck))
         spec_index = next(i for i, check in enumerate(checks) if isinstance(check, SpecChangeCheck))
         assert fingerprint_index < spec_index
-
-
-@pytest.mark.asyncio
-async def test_legacy_mode_ignores_a_broken_mark_left_by_hard_mode(context_factory):
-    """Regression: switching the flag off does not restore the legacy behaviour for nodes marked while it
-    was on."""
-    result = await _run(
-        context_factory,
-        hard=False,
-        prev_uuids="gpu-001,gpu-002",
-        current_uuids="gpu-001,gpu-002",
-        anchor_broken=True,
-    )
-
-    assert result.passed is True
-    assert result.event.reason_code == Msg.UUID_OK.reason

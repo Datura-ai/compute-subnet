@@ -686,17 +686,7 @@ class SpecChangeMessages:
 
 
 class GpuFingerprintMessages:
-    # Warn mode (GPU_ANCHOR_HARD_ENABLED off): the legacy verdict. Its what_we_saw carries `anchor_hard_would_be`
-    # (GPU_MISSING or ANCHOR_BROKEN) so the hard rule can be read from a week of rows before it is switched on.
-    UUID_CHANGED = MessageTemplate(
-        event="GPU fingerprints changed",
-        reason="GPU_UUID_CHANGED",
-        severity="warning",
-        category="env",
-        impact="Verification reset; score set to 0",
-        remediation="Ensure the same physical GPUs remain attached and stable.",
-    )
-    # Hard mode: the scrape lists a strict subset of the anchored set. Transient by definition: the node
+    # The scrape lists a strict subset of the anchored set. Transient by definition: the node
     # scores again on the first cycle that shows the full set.
     GPU_MISSING = MessageTemplate(
         event="GPU missing from the listed set",
@@ -709,7 +699,7 @@ class GpuFingerprintMessages:
             "The node scores again when the full set is back."
         ),
     )
-    # Hard mode: the scrape shows a GPU that is not in the anchored set (swap, added card, or a set
+    # The scrape shows a GPU that is not in the anchored set (swap, added card, or a set
     # replaced by a different one). Permanent for this executor id; re-registering the node is the only way out.
     ANCHOR_BROKEN = MessageTemplate(
         event="GPU set differs from the listed set",

@@ -5,7 +5,7 @@ Through the real RedisService methods on a fakeredis server, in the order the Re
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 from fakeredis import FakeServer
@@ -20,7 +20,6 @@ from services.redis_service import GPU_ANCHOR_BROKEN_KEY, VERIFIED_JOB_COUNT_KEY
 from tests.helpers import build_state
 
 EXECUTOR = "11111111-1111-1111-1111-111111111111"
-SETTINGS = "neurons.validators.src.services.task.checks.gpu_fingerprint.settings"
 
 
 class _Sink:
@@ -118,16 +117,14 @@ async def test_result_handler_passes_the_broken_mark_to_the_reset(context_factor
     assert published["executor_uuid"] == EXECUTOR
 
 
-async def _cycle(service, handler, context_factory, *, uuids: str, hard: bool):
+async def _cycle(service, handler, context_factory, *, uuids: str):
     """One validation cycle as the service runs it: record from Redis, the two GPU-set checks through the real
     Pipeline, the outcome persisted by the ResultHandler."""
     verified = await service.get_verified_job_info("hk", EXECUTOR)
     ctx = context_factory(
         state=build_state(gpu_uuids=uuids, gpu_model_count=f"A100:{len(uuids.split(','))}"), verified=verified
     )
-    with patch(SETTINGS) as s:
-        s.GPU_ANCHOR_HARD_ENABLED = hard
-        ok, events, ctx = await Pipeline([GpuFingerprintCheck(), SpecChangeCheck()], _Sink()).run(ctx)
+    ok, events, ctx = await Pipeline([GpuFingerprintCheck(), SpecChangeCheck()], _Sink()).run(ctx)
     await handler._persist_verification_data(
         miner_hotkey="hk", executor_id=EXECUTOR, verified_job_info=verified, context=ctx, success=ok
     )
@@ -143,15 +140,15 @@ async def test_a_swap_breaks_the_anchor_through_pipeline_context_and_handler(con
     service.publish = AsyncMock()
     handler = ResultHandler(redis_service=service, dry_run=False)
 
-    ok, _, record = await _cycle(service, handler, context_factory, uuids="gpu-001", hard=True)
+    ok, _, record = await _cycle(service, handler, context_factory, uuids="gpu-001")
     assert ok is True and record["uuids"] == "gpu-001" and GPU_ANCHOR_BROKEN_KEY not in record
 
-    ok, event, record = await _cycle(service, handler, context_factory, uuids="gpu-002", hard=True)
+    ok, event, record = await _cycle(service, handler, context_factory, uuids="gpu-002")
     assert ok is False and event.reason_code == "GPU_UUID_CHANGED"
     assert record["uuids"] == "gpu-001" and record[GPU_ANCHOR_BROKEN_KEY] is True
     assert service.publish.await_count == 1
 
-    ok, event, record = await _cycle(service, handler, context_factory, uuids="gpu-001", hard=True)
+    ok, event, record = await _cycle(service, handler, context_factory, uuids="gpu-001")
     assert ok is False and event.what_we_saw["anchor_broken"] is True
     assert record[GPU_ANCHOR_BROKEN_KEY] is True and record["failed"] == 1
     # no second reset for a node already reset on the cycle that broke it
@@ -166,12 +163,12 @@ async def test_a_missing_card_is_gpu_missing_and_the_node_passes_when_it_is_back
     service.publish = AsyncMock()
     handler = ResultHandler(redis_service=service, dry_run=False)
 
-    ok, _, _ = await _cycle(service, handler, context_factory, uuids="gpu-001,gpu-002", hard=True)
+    ok, _, _ = await _cycle(service, handler, context_factory, uuids="gpu-001,gpu-002")
     assert ok is True
 
-    ok, event, record = await _cycle(service, handler, context_factory, uuids="gpu-001", hard=True)
+    ok, event, record = await _cycle(service, handler, context_factory, uuids="gpu-001")
     assert ok is False and event.reason_code == "GPU_MISSING" and event.check_id == "gpu.validate.fingerprint"
     assert record["uuids"] == "gpu-001,gpu-002" and GPU_ANCHOR_BROKEN_KEY not in record
 
-    ok, _, record = await _cycle(service, handler, context_factory, uuids="gpu-001,gpu-002", hard=True)
+    ok, _, record = await _cycle(service, handler, context_factory, uuids="gpu-001,gpu-002")
     assert ok is True and record["count"] == 1
