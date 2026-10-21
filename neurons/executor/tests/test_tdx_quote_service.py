@@ -17,7 +17,7 @@ from core.config import settings  # noqa: E402
 from neurons.executor.src.services.tdx_service import TDXQuoteService  # noqa: E402
 
 
-async def _run_quote_flow(monkeypatch):
+async def _run_quote_flow(monkeypatch, tmp_path):
     quote_payload = {"quote": "00", "event_log": "[]", "report_data": "", "vm_config": ""}
     captured: dict[str, object] = {"count": 0}
 
@@ -37,9 +37,10 @@ async def _run_quote_flow(monkeypatch):
     original_endpoint = os.environ.get("DSTACK_SIMULATOR_ENDPOINT")
     monkeypatch.setenv("DSTACK_SIMULATOR_ENDPOINT", f"http://127.0.0.1:{port}")
 
-    original_enabled = settings.ENABLE_TDX_ATTESTATION
+    socket = tmp_path / "dstack.sock"
+    socket.touch()
+    monkeypatch.setattr(settings, "DSTACK_SOCKET_PATH", str(socket))
     original_timeout = settings.TDX_QUOTE_TIMEOUT
-    settings.ENABLE_TDX_ATTESTATION = True
     settings.TDX_QUOTE_TIMEOUT = 2
 
     try:
@@ -63,7 +64,6 @@ async def _run_quote_flow(monkeypatch):
         # Missing host key should skip the request
         assert await service.get_quote(None) is None
     finally:
-        settings.ENABLE_TDX_ATTESTATION = original_enabled
         settings.TDX_QUOTE_TIMEOUT = original_timeout
         if original_endpoint is None:
             monkeypatch.delenv("DSTACK_SIMULATOR_ENDPOINT", raising=False)
@@ -72,16 +72,13 @@ async def _run_quote_flow(monkeypatch):
         await runner.cleanup()
 
 
-def test_tdx_quote_service_fetches_and_caches_quotes(monkeypatch):
-    asyncio.run(_run_quote_flow(monkeypatch))
+def test_tdx_quote_service_fetches_and_caches_quotes(monkeypatch, tmp_path):
+    asyncio.run(_run_quote_flow(monkeypatch, tmp_path))
 
 
-def test_tdx_quote_service_disabled(monkeypatch):
-    original_enabled = settings.ENABLE_TDX_ATTESTATION
-    settings.ENABLE_TDX_ATTESTATION = False
-    try:
-        service = TDXQuoteService()
-        result = asyncio.run(service.get_quote("ssh-ed25519 AAAAC3NzaTest executor"))
-        assert result is None
-    finally:
-        settings.ENABLE_TDX_ATTESTATION = original_enabled
+def test_tdx_quote_service_off_outside_a_cvm(monkeypatch, tmp_path):
+    # bare metal: no dstack guest socket, so no quote is asked for
+    monkeypatch.setattr(settings, "DSTACK_SOCKET_PATH", str(tmp_path / "missing.sock"))
+    service = TDXQuoteService()
+    result = asyncio.run(service.get_quote("ssh-ed25519 AAAAC3NzaTest executor"))
+    assert result is None

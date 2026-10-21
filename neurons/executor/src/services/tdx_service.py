@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+import os
 from typing import Optional, Tuple
 
 from dstack_sdk import AsyncDstackClient
@@ -16,7 +17,8 @@ class TDXQuoteService:
     def __init__(self) -> None:
         from core.config import settings
 
-        self.enabled: bool = bool(settings.ENABLE_TDX_ATTESTATION)
+        # a quote exists only inside a dstack CVM (its guest socket); bare metal has none to give
+        self.enabled: bool = os.path.exists(settings.DSTACK_SOCKET_PATH)
         self.timeout: int = settings.TDX_QUOTE_TIMEOUT
         self._cached_report_data: Optional[str] = None
         self._cached_quote: Optional[str] = None
