@@ -69,6 +69,7 @@ from .checks import (
     ScoreCheck,
     SpecChangeCheck,
     SshdAuthLogCheck,
+    StorageLimitCheck,
     StaleContainerCleanupCheck,
     StartGPUMonitorCheck,
     SshdBootstrapCheck,
@@ -178,8 +179,7 @@ class PipelineFactory:
             encrypted_files: Encrypted validation files
             tdx_attestation_passed: Whether TDX attestation passed
             gpu_attestation_passed: NVIDIA CC GPU attestation outcome (None = not performed)
-            first_pass: the executor's first, unscored verification (DAH-3011); takes effect
-                only with settings.FIRST_PASS_FAST_PATH_ENABLED
+            first_pass: the executor's first, unscored verification (DAH-3011)
 
         Returns:
             Configured Context ready for pipeline execution
@@ -246,11 +246,7 @@ class PipelineFactory:
                 # DAH-2794: an executor that can run the source needs no upload at all. The
                 # binary stays built because the miner picks the executor image, and one that
                 # predates a dependency the scrape imports has to keep the self-contained path.
-                machine_scrape_source=(
-                    encrypted_files.machine_scrape_source
-                    if settings.ENABLE_SCRAPE_SOURCE_DELIVERY
-                    else None
-                ),
+                machine_scrape_source=encrypted_files.machine_scrape_source,
                 machine_scrape_timeout=JOB_LENGTH,
                 obfuscation_keys=encrypted_files.all_keys,
                 default_docker_image_digests=default_docker_image_digests,
@@ -267,7 +263,7 @@ class PipelineFactory:
                 port_private_key=private_key,
                 port_public_key=public_key,
                 job_batch_id=miner_info.job_batch_id,
-                first_pass=first_pass and settings.FIRST_PASS_FAST_PATH_ENABLED,
+                first_pass=first_pass,
                 express_first_pass=first_pass,
             ),
             state=ContextState(
@@ -311,6 +307,8 @@ class PipelineFactory:
                 # warning; below half its clock with a slowdown bit it fails an unrented node (score 0) until
                 # fixed. Before the rented short-circuit, so rented nodes get the warning too.
                 GpuThermalThrottleCheck(),
+                # a renter filling a node with no per-container disk limit fills the host (18 Oct): pure data, before the rented halt
+                StorageLimitCheck(),
                 # DAH-3484: a regex over specs.cpu.model, no SSH, never fatal. It has to run before
                 # TenantEnforcementCheck halts the pipeline for a rented executor: after that halt
                 # the published specs had no tdx_host_supported key and the backend stored false,
@@ -349,9 +347,9 @@ class PipelineFactory:
                 HardwareIdentityCheck(),
                 BannedGpuCheck(),
                 # Reported GPU count and UUIDs against the kernel's list, which BannedProviderCheck
-                # read above. Logs a verdict every cycle; fails the validation only under
-                # GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED. Before the rented short-circuit, so rented
-                # and idle nodes are judged alike.
+                # read above. Logs a verdict every cycle and fails the validation on a short
+                # kernel list. Before the rented short-circuit, so rented and idle nodes are
+                # judged alike.
                 GpuKernelCountCheck(),
                 DuplicateExecutorCheck(),
                 CollateralStatusCheck(),
@@ -476,6 +474,8 @@ class PipelineFactory:
                 RentedGpuDropCheck(),
                 GpuLossHoldCheck(),
                 GpuThermalThrottleCheck(),
+                # a renter filling a node with no per-container disk limit fills the host (18 Oct): pure data, before the rented halt
+                StorageLimitCheck(),
                 TdxHostCheck(),
                 GpuCountCheck(),
                 GpuModelValidCheck(),
@@ -557,6 +557,8 @@ class PipelineFactory:
                 GpuLossHoldCheck(),
                 # ticket-0492: pure data, same place as in build_checks().
                 GpuThermalThrottleCheck(),
+                # a renter filling a node with no per-container disk limit fills the host (18 Oct): pure data, before the rented halt
+                StorageLimitCheck(),
                 # DAH-3484: before the rented halt, same as build_checks().
                 TdxHostCheck(),
                 GpuCountCheck(),

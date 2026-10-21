@@ -423,14 +423,47 @@ class GpuThermalThrottleMessages:
     )
 
 
+class StorageLimitMessages:
+    MISSING = MessageTemplate(
+        event="Docker cannot limit a container's disk",
+        reason="STORAGE_LIMIT_MISSING",
+        severity="warning",
+        category="env",
+        impact="Proceed; score not changed while the requirement is not enforced (see enforced). A renter who "
+        "fills their disk fills the host's Docker storage and takes the host and every pod on it down",
+        remediation="Set up Docker storage that enforces a per-container limit (overlay2 on xfs mounted with "
+        "pquota): https://docs.lium.io/providers/nodes/docker-storage . Check with `sudo docker run --rm "
+        "--storage-opt size=1g --gpus all daturaai/compute-subnet-executor:latest nvidia-smi`.",
+    )
+    REQUIRED = MessageTemplate(
+        event="Node rejected: Docker cannot limit a container's disk",
+        reason="STORAGE_LIMIT_REQUIRED",
+        severity="error",
+        category="env",
+        impact="Job skipped; score set to 0 until the host enforces a per-container storage limit",
+        remediation="Set up Docker storage that enforces a per-container limit (overlay2 on xfs mounted with "
+        "pquota): https://docs.lium.io/providers/nodes/docker-storage . The node passes again on the next "
+        "validation once `sudo docker run --rm --storage-opt size=1g --gpus all "
+        "daturaai/compute-subnet-executor:latest nvidia-smi` works.",
+    )
+    OK = MessageTemplate(
+        event="Docker limits a container's disk",
+        reason="STORAGE_LIMIT_OK",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+
+
 class RentedGpuDropMessages:
     DROP = MessageTemplate(
         event="Rented node lost a GPU",
         reason="RENTED_GPU_DROP",
         severity="error",
         category="env",
-        impact="Proceed; score not changed here. Reported to the backend unless held for a second cycle or a dry "
-        "run (see pods[].posted, held and delivery); provider, support and renter are told once per incident",
+        impact="Proceed; score not changed here. Reported to the backend unless held for a second cycle, a dry "
+        "run or the check off (see pods[].posted, held and delivery); provider, support and renter are told once "
+        "per incident",
         remediation="A card fell out of NVML on a rented node (see faults, missing_uuids, nvml_error_code). Check "
         "`nvidia-smi` and `dmesg` for Xid 79 / 'fallen off the bus', then reset or reboot the host; the renter's "
         "workload on the missing card is already broken.",
@@ -453,13 +486,6 @@ class RentedGpuDropMessages:
     NOT_RENTED = MessageTemplate(
         event="Rented GPU drop check skipped: no running rental",
         reason="RENTED_GPU_DROP_NOT_RENTED",
-        severity="info",
-        category="env",
-        impact="Proceed",
-    )
-    DISABLED = MessageTemplate(
-        event="Rented GPU drop check disabled",
-        reason="RENTED_GPU_DROP_DISABLED",
         severity="info",
         category="env",
         impact="Proceed",
@@ -882,6 +908,14 @@ class DuplicateExecutorMessages:
         impact="Score set to 0 for this cycle; the other miner keeps it",
         remediation="One machine earns under one miner per cycle. Register it under one miner only.",
     )
+    GPU_ALIAS = MessageTemplate(
+        event="GPU also reported by another executor of this miner this cycle",
+        reason="EXECUTOR_GPU_ALIAS",
+        severity="warning",
+        category="policy",
+        impact="Score set to 0 for this cycle; the other executor keeps it",
+        remediation="Each physical GPU earns under one executor. Register every machine once.",
+    )
 
 class CollateralStatusMessages:
     DEPOSITED = MessageTemplate(
@@ -1215,29 +1249,6 @@ class GpuUsageMessages:
         "node uses it: {rental_status}. Do not stop or remove it: contact Lium support with the "
         "container name."
     )
-    ORPHANED_CONTAINER_OF_A_CHANGING_RENTAL_REMEDIATION = (
-        "{orphaned_container} is a Lium pod container{pod} of a rental on this node that is ending "
-        "or starting: {rental_status}. Lium stops or starts it itself, so do not stop or remove it; "
-        "the next cycle checks the node again."
-    )
-    TEARDOWN_IN_PROGRESS = MessageTemplate(
-        event="Rental teardown in progress",
-        reason="TEARDOWN_IN_PROGRESS",
-        severity="info",
-        category="runtime",
-        impact="GPU usage re-checked next cycle",
-        remediation=(
-            "A rental on this node has just ended and Lium is stopping its container; do not stop it yourself."
-        ),
-    )
-    RENTAL_STARTED_DURING_RUN = MessageTemplate(
-        event="Rental started during validation",
-        reason="RENTAL_STARTED_DURING_RUN",
-        severity="info",
-        category="runtime",
-        impact="GPU usage re-checked next cycle",
-        remediation="The GPU is held by a rental that started while this run was in progress.",
-    )
     FOREIGN_PROCESS = MessageTemplate(
         event="Foreign GPU process on idle executor",
         reason="GPU_FOREIGN_PROCESS",
@@ -1446,13 +1457,13 @@ class ContainerDownloadSpeedMessages:
         impact="Score set to 0",
         remediation=CONTAINER_DOWNLOAD_SLOW_REMEDIATION,
     )
-    # the same finding while CONTAINER_DOWNLOAD_SPEED_ENFORCEMENT_ENABLED is off: logged, score unchanged
+    # the same finding when a failing reading in the streak was not on the rentals network: logged, score unchanged
     SLOW_OBSERVED = MessageTemplate(
         event="Downloads from inside a container on this node are too slow (not enforced)",
         reason="CONTAINER_DOWNLOAD_SLOW_OBSERVED",
         severity="warning",
         category="runtime",
-        impact="None: CONTAINER_DOWNLOAD_SPEED_ENFORCEMENT_ENABLED is off",
+        impact="None: a failing reading was not taken on the rentals network",
         remediation=CONTAINER_DOWNLOAD_SLOW_REMEDIATION,
     )
     SLOW_ONCE = MessageTemplate(
@@ -1809,8 +1820,7 @@ class GpuFaultProbeMessages:
 
 
 class PinnedMemoryProbeMessages:
-    """F-1599 — the pinned-host-memory H2D/D2H round trip on every GPU. On by default in shadow mode:
-    PROBE_FAILED is a logged warning with passed=True; with PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED it fails
+    """F-1599 — the pinned-host-memory H2D/D2H round trip on every GPU. On by default: PROBE_FAILED fails
     the fatal check and keeps the node unrentable."""
 
     DISABLED = MessageTemplate(
@@ -1849,6 +1859,23 @@ class PinnedMemoryProbeMessages:
         severity="info",
         category="env",
         impact="Proceed without penalty",
+    )
+    FILLER_SKIPPED = MessageTemplate(
+        event="Pinned-memory copy probe skipped for active filler",
+        reason="PINNED_MEMORY_PROBE_SKIPPED_ACTIVE_FILLER",
+        severity="info",
+        category="policy",
+        impact="Active filler runtime preserved; the probe would compete with it for the GPUs.",
+    )
+    WORKLOAD_SKIPPED = MessageTemplate(
+        event="Pinned-memory copy probe not scored: a Lium workload took the cards during this cycle",
+        reason="PINNED_MEMORY_PROBE_SKIPPED_RENTED",
+        severity="info",
+        category="policy",
+        impact=(
+            "Score unchanged; a copy hung beside a Lium pod or default job that started after this "
+            "cycle's rental snapshot. The next cycle probes again."
+        ),
     )
 
 
@@ -2055,7 +2082,7 @@ class RentalProbeMessages:
 
 class CpuTruthMessages:
     """DAH-2671 item 2a — corroborate advertised CPU(s) against sources the lscpu wrapper does not
-    author. Shadow (CPU_TRUTH_CHECK_ENABLED without enforcement) emits CPU_MISMATCH as a warning and
+    author. Shadow (without enforcement) emits CPU_MISMATCH as a warning and
     keeps passed=True; only CPU_TRUTH_ENFORCEMENT_ENABLED renders it error/score-zeroing."""
 
     CPU_OK = MessageTemplate(
@@ -2083,20 +2110,11 @@ class CpuTruthMessages:
         category="env",
         impact="Proceed without penalty",
     )
-    SKIPPED = MessageTemplate(
-        event="CPU truth check disabled",
-        reason="CPU_TRUTH_DISABLED",
-        severity="info",
-        category="env",
-        impact="Proceed",
-    )
 
 
 class GpuKernelCountMessages:
-    """Reported GPU list against the kernel's list (/proc/driver/nvidia/gpus). Shadow
-    (GPU_KERNEL_COUNT_CHECK_ENABLED without enforcement) renders COUNT_MISMATCH as a warning and
-    keeps passed=True; only GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED makes it fail the validation.
-    UUID_MISMATCH is logged only, under either flag."""
+    """Reported GPU list against the kernel's list (/proc/driver/nvidia/gpus). COUNT_MISMATCH
+    fails the validation; UUID_MISMATCH is logged only."""
 
     COUNT_OK = MessageTemplate(
         event="Reported GPUs match the kernel's GPU list",
@@ -2142,7 +2160,7 @@ class GpuKernelCountMessages:
 class ProviderSideLoadMessages:
     """DAH-2734 — the CPU/disk twin of the foreign-GPU gate: a provider who runs another
     subnet's miner on a listed machine sells capacity he already uses himself. Shadow
-    (PROVIDER_SIDE_LOAD_CHECK_ENABLED without enforcement) renders LOAD_ABOVE_LIMIT as a
+    (without enforcement) renders LOAD_ABOVE_LIMIT as a
     warning and keeps passed=True; only PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED zeroes the
     score, and only for the CPU half — a disk figure above the limit is reported, never
     scored, because it is read once and carries every docker category nobody enumerated."""
@@ -2172,13 +2190,6 @@ class ProviderSideLoadMessages:
         severity="info",
         category="policy",
         impact="Proceed without penalty",
-    )
-    SKIPPED = MessageTemplate(
-        event="Provider-side load check disabled",
-        reason="PROVIDER_SIDE_LOAD_DISABLED",
-        severity="info",
-        category="policy",
-        impact="Proceed",
     )
 
 
@@ -2365,7 +2376,7 @@ class RentedPodResourcesMessages:
 
 
 class GpuAttestationIdentityMessages:
-    # DAH-4551: warning in shadow; fails the node under GPU_ATTESTATION_IDENTITY_ENFORCEMENT_ENABLED.
+    # DAH-4551: fails the node.
     MISMATCH = MessageTemplate(
         event="GPU identity does not match the NVIDIA-signed card identity",
         reason="GPU_IDENTITY_MISMATCH",
