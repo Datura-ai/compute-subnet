@@ -39,7 +39,7 @@ def _pod_name(payload) -> str:
     return DockerService.get_container_name(payload)
 
 
-def _ssh_recording(*, container_present: bool = True, stop_exit: int = 0, rename_back_exit: int = 0, listed_with_ids: bool = True):
+def _ssh_recording(*, container_present: bool = True, stop_exit: int = 0, rename_back_exit: int = 0, listed_with_ids: bool = True, kill_stops: bool = False):
     """An ssh mock that answers docker like a host with (or without) the pod's container, recording every command."""
     client = AsyncMock()
     client.image_exists_result = True
@@ -56,6 +56,8 @@ def _ssh_recording(*, container_present: bool = True, stop_exit: int = 0, rename
             return _ssh_result(stdout="".join(f"{n} id-{n}\n" if listed_with_ids else f"{n}\n" for n in present))
         if "docker stop" in cmd:
             return _ssh_result(exit_status=stop_exit, stderr="tried to kill container, but did not receive an exit event")
+        if "docker inspect -f '{{.State.Running}}'" in cmd:
+            return _ssh_result(stdout="false\n" if kill_stops else "true\n")
         if "docker rename" in cmd and cmd.split()[-2].endswith(EDIT_PARKED_SUFFIX):  # parked -> original name
             return _ssh_result(exit_status=rename_back_exit, stderr="rename back failed")
         return _ssh_result(exit_status=0)
@@ -292,6 +294,22 @@ async def test_an_unstoppable_container_fails_the_edit_before_anything_is_destro
     assert destructive == []
     svc._run_rental_docker_create_with_port_retry.assert_not_awaited()
     svc.clean_existing_containers.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_stop_that_docker_kill_ends_still_parks_and_edits(svc, monkeypatch):
+    # DinD pods: the first `docker stop` misses its exit event, a kill seconds later works
+    monkeypatch.setattr("services.docker_service._PARK_KILL_SETTLE_SECONDS", 0)
+    payload = _edit_payload()
+    ssh = _ssh_recording(stop_exit=1, kill_stops=True)
+    _patch_happy(svc, monkeypatch, ssh)
+    parked = _pod_name(payload) + EDIT_PARKED_SUFFIX
+
+    result = await _run(svc, payload)
+
+    assert isinstance(result, ContainerCreated)
+    assert _docker(ssh.commands, "kill") == [f"/usr/bin/docker kill {parked}"]
+    assert _docker(ssh.commands, "rename") == [f"/usr/bin/docker rename {_pod_name(payload)} {parked}"]
 
 
 @pytest.mark.asyncio
