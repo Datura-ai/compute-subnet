@@ -7,7 +7,7 @@ from services.const import MAX_DISK_UTILIZATION_PERCENT, MIN_FREE_DISK_GB
 from ..messages import DiskSpaceMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
-from .banned_provider import has_live_rental
+from .rented_machine import _rental_of_validated_miner
 
 KB_PER_GB = 1024 * 1024
 
@@ -45,18 +45,25 @@ class DiskSpaceCheck:
             template = Msg.NOT_REPORTED
         else:
             utilization = _as_float(hard_disk.get("utilization"))
-            free_gb = round(_as_float(hard_disk.get("free")) / KB_PER_GB, 1)
-            what.update(utilization_percent=utilization, free_gb=free_gb)
+            free_kb = _as_float(hard_disk.get("free"))
+            # compare unrounded KB like the listing did; round only the displayed figure
+            what.update(utilization_percent=utilization, free_gb=round(free_kb / KB_PER_GB, 1))
             if utilization > MAX_DISK_UTILIZATION_PERCENT:
                 template = Msg.TOO_FULL
-            elif free_gb < MIN_FREE_DISK_GB:
+            elif free_kb < MIN_FREE_DISK_GB * KB_PER_GB:
                 template = Msg.FREE_TOO_LOW
             else:
                 return CheckResult(
                     passed=True,
                     event=render_message(Msg.OK, ctx=ctx, check_id=self.check_id, what=what),
                 )
-        if has_live_rental(ctx):
+        rented_data = ctx.state.rented_data
+        # same ownership rule as TenantEnforcementCheck: another miner's rental on a different
+        # endpoint does not exempt this node
+        rental = _rental_of_validated_miner(
+            ctx, rented_data.executors.get(ctx.executor.uuid) if rented_data else None
+        )
+        if rental and rental.pods:
             event = render_message(
                 template,
                 ctx=ctx,
