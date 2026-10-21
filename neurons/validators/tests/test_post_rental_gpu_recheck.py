@@ -68,7 +68,6 @@ def recheck_on():
     with (
         patch.object(module.settings, "POST_RENTAL_GPU_RECHECK_ENABLED", True),
         patch.object(module.settings, "GPU_FAULT_PROBE_CHECK_ENABLED", False),
-        patch.object(module.settings, "GPU_FAULT_PROBE_ENFORCEMENT_ENABLED", False),
     ):
         yield
 

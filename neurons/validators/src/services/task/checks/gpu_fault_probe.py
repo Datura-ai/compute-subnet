@@ -59,8 +59,7 @@ class GpuFaultProbeCheck:
     round-trips pinned memory through the copy engines, verifies every result on the device, and reads
     uncorrected ECC / remapped rows / recovery action from NVML before and after.
 
-    Shadow-first like every score-zeroing gate: GPU_FAULT_PROBE_CHECK_ENABLED runs it and emits the verdict,
-    GPU_FAULT_PROBE_ENFORCEMENT_ENABLED lets a fault fail the (fatal) check. A probe that could not run
+    GPU_FAULT_PROBE_CHECK_ENABLED runs it; a fault always fails the (fatal) check. A probe that could not run
     (no libcuda, cuInit, JIT) passes with GPU_FAULT_PROBE_UNKNOWN: inability to measure is not a fault.
     """
 
@@ -68,7 +67,7 @@ class GpuFaultProbeCheck:
     fatal = True
 
     def __init__(self, enforce: bool = False):
-        # enforce: run and judge a fault as a failure whatever the GPU_FAULT_PROBE_* flags say
+        # enforce: run whatever GPU_FAULT_PROBE_CHECK_ENABLED says
         # (the post-rental recheck, DAH-4482)
         self.enforce = enforce
 
@@ -76,15 +75,6 @@ class GpuFaultProbeCheck:
         if not (self.enforce or settings.GPU_FAULT_PROBE_CHECK_ENABLED):
             return CheckResult(
                 passed=True, event=render_message(Msg.DISABLED, ctx=ctx, check_id=self.check_id)
-            )
-
-        if ctx.config.first_pass and not (
-            self.enforce or settings.GPU_FAULT_PROBE_ENFORCEMENT_ENABLED
-        ):
-            # a shadow verdict cannot fail the node, so it does not delay a new node's first verification
-            return CheckResult(
-                passed=True,
-                event=render_message(Msg.FIRST_PASS_SKIPPED, ctx=ctx, check_id=self.check_id),
             )
 
         filler_container = get_filler_only_container(ctx)
@@ -182,7 +172,6 @@ class GpuFaultProbeCheck:
     def _fault_verdict(
         self, ctx: Context, what: dict[str, Any], *, error: str, report: dict[str, Any] | None
     ) -> CheckResult:
-        enforce = self.enforce or settings.GPU_FAULT_PROBE_ENFORCEMENT_ENABLED
         what["error"] = error[: MAX_FAULT_LINES * MAX_FAULT_CHARS]
         if report is not None:
             what["xid"] = _capped_xid(report.get("xid"))
@@ -190,11 +179,9 @@ class GpuFaultProbeCheck:
             Msg.PROBE_FAILED,
             ctx=ctx,
             check_id=self.check_id,
-            severity=None if enforce else "warning",
-            impact=None if enforce else "Shadow observation only: score was NOT changed",
             what=what,
         )
-        return CheckResult(passed=not enforce, event=event)
+        return CheckResult(passed=False, event=event)
 
 
 def _parse_report(stdout: str) -> dict[str, Any] | None:
