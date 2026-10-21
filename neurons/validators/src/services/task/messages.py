@@ -2025,13 +2025,6 @@ class RentalProbeMessages:
     """DAH-3436: the synthetic rental probe. A failed step zeroes the score and clears the verified job
     (RENTAL_PROBE_FAILED) until a probe passes; an idle node with the image pulled is probed again next cycle."""
 
-    DISABLED = MessageTemplate(
-        event="Rental probe disabled",
-        reason="RENTAL_PROBE_DISABLED",
-        severity="info",
-        category="env",
-        impact="Proceed",
-    )
     SKIPPED = MessageTemplate(
         event="Rental probe skipped",
         reason="RENTAL_PROBE_SKIPPED",
@@ -2052,14 +2045,6 @@ class RentalProbeMessages:
         severity="error",
         category="runtime",
         impact="Score set to 0 and the verified job cleared until a probe passes; the node is probed again next cycle while it stays idle",
-    )
-    # the same verdict while RENTAL_PROBE_ENFORCEMENT_ENABLED is off: logged, score unchanged
-    PROBE_FAILED_OBSERVED = MessageTemplate(
-        event="Rental probe failed: a renter could not use this node (not enforced)",
-        reason="RENTAL_PROBE_FAILED_OBSERVED",
-        severity="warning",
-        category="runtime",
-        impact="None: RENTAL_PROBE_ENFORCEMENT_ENABLED is off; the node is probed again after the interval",
     )
     INCONCLUSIVE = MessageTemplate(
         event="Rental probe could not reach a verdict",

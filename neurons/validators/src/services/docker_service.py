@@ -9217,20 +9217,15 @@ class DockerService:
         """Stamp a host-fault create failure as the node's standing rental probe failure.
 
         The node then scores 0 every cycle until a rental probe passes on it; the probe's interval stamp
-        is dropped so that probe runs on the next idle cycle. Without the probe there is nothing to
-        clear the stamp, so nothing is stamped while RENTAL_PROBE_ENABLED is off. In shadow
-        (RENTAL_PROBE_ENFORCEMENT_ENABLED off) only the interval stamp is dropped: a standing failure
-        written then is never cleared on a node a filler keeps busy, and would zero it once
-        enforcement is turned on.
+        is dropped so that probe runs on the next idle cycle.
         """
-        if not settings.RENTAL_PROBE_ENABLED or not is_host_fault_create_failure(current_step):
+        if not is_host_fault_create_failure(current_step):
             return
         try:
-            if settings.RENTAL_PROBE_ENFORCEMENT_ENABLED:
-                await self.redis_service.set(
-                    f"{RENTAL_PROBE_FAILED_PREFIX}:{executor_uuid}",
-                    f"{_RENTAL_PROBE_CONTAINER_START_STEP}:{current_step}",
-                )
+            await self.redis_service.set(
+                f"{RENTAL_PROBE_FAILED_PREFIX}:{executor_uuid}",
+                f"{_RENTAL_PROBE_CONTAINER_START_STEP}:{current_step}",
+            )
             await self.redis_service.delete(f"{RENTAL_PROBE_OK_PREFIX}:{executor_uuid}")
         except Exception:  # noqa: BLE001 — the create's own failure reply still goes out
             logger.warning(
