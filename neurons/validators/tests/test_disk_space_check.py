@@ -44,16 +44,17 @@ async def test_idle_node_fails_the_listing_disk_floor(context_factory, specs, re
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "owner, address, port, exempt",
+    "owner, address, port, live, exempt",
     [
-        ("miner-hotkey", "127.0.0.1", "8080", True),  # this miner's rental
-        ("other-hotkey", "127.0.0.1", "22", True),  # another miner, same endpoint: the pod is here
-        ("other-hotkey", "10.0.0.1", "22", False),  # another miner elsewhere
-        (None, None, None, False),  # no rental
+        ("miner-hotkey", "127.0.0.1", "8080", True, True),  # this miner's rental
+        ("other-hotkey", "127.0.0.1", "22", True, True),  # another miner, same endpoint: the pod is here
+        ("other-hotkey", "10.0.0.1", "22", True, False),  # another miner elsewhere
+        ("miner-hotkey", "127.0.0.1", "8080", False, False),  # rental ended since the cycle started
+        (None, None, None, False, False),  # no rental
     ],
 )
 async def test_live_rental_is_not_failed_for_its_disk(
-    context_factory, owner, address, port, exempt
+    context_factory, owner, address, port, live, exempt
 ):
     """Tenant enforcement and disk enforcement agree whether the rental belongs on this node."""
     executors = {}
@@ -65,7 +66,9 @@ async def test_live_rental_is_not_failed_for_its_disk(
             pods=[RentedPod(pod_id="pod-1", container_name="container_test", rented_ports=[])],
         )
     rented_data = RentedExecutorsResponse(executors=executors)
-    ctx = context_factory(state=build_state(specs=_disk(95, 500), rented_data=rented_data))
+    ctx = context_factory(
+        state=build_state(specs=_disk(95, 500), rented_data=rented_data), rented=live
+    )
 
     result = await DiskSpaceCheck().run(ctx)
 

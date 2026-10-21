@@ -63,7 +63,8 @@ class DiskSpaceCheck:
         rental = _rental_of_validated_miner(
             ctx, rented_data.executors.get(ctx.executor.uuid) if rented_data else None
         )
-        if rental and rental.pods:
+        # ctx.rented is TenantEnforcementCheck's verdict: False once the listed rental ended
+        if rental and rental.pods and ctx.rented:
             event = render_message(
                 template,
                 ctx=ctx,
