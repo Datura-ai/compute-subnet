@@ -36,9 +36,7 @@ from unittest.mock import AsyncMock, Mock
 
 import asyncssh
 import pytest
-from core.config import settings
 from payload_models.payloads import WorkloadKind
-from services import nvidia_devices as nd
 from services.docker_service import (
     DOCKER_FILLER_VOLUME_LS_NAME_DRIVER_CMD,
     DockerService,
@@ -57,6 +55,7 @@ from services.prerun_host_probe import (
     DOCKER_PS_ALL_NAMES_IDS_CMD,
     DOCKER_VOLUME_LS_NAME_DRIVER_CMD,
     PrerunHostProbe,
+    PrerunHostProbeParseError,
     ProbedVolume,
     parse_prerun_host_probe,
     port_check_containers_command,
@@ -154,6 +153,20 @@ def _cmds(client) -> list[str]:
 # ------------------------------------------------------------------
 # the command
 # ------------------------------------------------------------------
+
+
+def test_probe_without_the_image_label_keeps_the_image_out_of_the_host_command():
+    cmd = prerun_host_probe_command(
+        docker_image=_IMAGE, image_label=None, miner_hotkey=_HOTKEY, with_power=True
+    )
+    assert "t LABEL " not in cmd
+    assert _IMAGE not in cmd
+    out = _stdout().replace("LABEL\t1\nLABEL_RC\t0\n", "")
+    assert "LABEL" not in out
+    assert parse_prerun_host_probe(out, with_power=True, with_label=False).image_label_value is None
+    # a probe that expects the label still refuses an output without it
+    with pytest.raises(PrerunHostProbeParseError):
+        parse_prerun_host_probe(out, with_power=True)
 
 
 def test_shared_device_nodes_command_whole_host_only_is_the_tail_of_the_whole_host_command():
@@ -260,8 +273,7 @@ def test_probe_through_sh_multiline_label_cannot_forge_another_section(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_gpu_config_with_probe_matches_live_partial_rental(monkeypatch):
-    monkeypatch.setattr(nd.settings, "KERNEL_GPU_VERDICT_CHECK_ENABLED", False)
+async def test_gpu_config_with_probe_matches_live_partial_rental():
     proc = "GPU-1, 0\nGPU-2, 1\n"
     live = _ssh(_ssh_result(stdout=proc), _ssh_result(stdout="/dev/nvidiactl\n/dev/nvidia-uvm\n"))
     from_live = await build_gpu_docker_config_for_executor(live, ["GPU-2"])
@@ -282,8 +294,7 @@ async def test_gpu_config_with_probe_matches_live_partial_rental(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_gpu_config_with_probe_whole_host_gets_the_whole_host_nodes(monkeypatch):
-    monkeypatch.setattr(nd.settings, "KERNEL_GPU_VERDICT_CHECK_ENABLED", False)
+async def test_gpu_config_with_probe_whole_host_gets_the_whole_host_nodes():
     probe = _probe(
         gpu_minor_map_stdout="GPU-1, 0\nGPU-2, 1\n",
         gpu_device_nodes=("/dev/nvidia0", "/dev/nvidia1"),
@@ -306,8 +317,7 @@ async def test_gpu_config_with_probe_whole_host_gets_the_whole_host_nodes(monkey
 
 
 @pytest.mark.asyncio
-async def test_gpu_config_with_probe_missing_uuid_still_consults_xml_live(monkeypatch):
-    monkeypatch.setattr(nd.settings, "KERNEL_GPU_VERDICT_CHECK_ENABLED", False)
+async def test_gpu_config_with_probe_missing_uuid_still_consults_xml_live():
     probe = _probe(gpu_minor_map_stdout="GPU-1, 0\n", shared_nodes=("/dev/nvidiactl",))
     ssh = _ssh(_ssh_result(exit_status=1, stderr="no nvidia-smi"))
     config = await build_gpu_docker_config_for_executor(ssh, ["GPU-9"], host_probe=probe)
@@ -317,8 +327,7 @@ async def test_gpu_config_with_probe_missing_uuid_still_consults_xml_live(monkey
 
 
 @pytest.mark.asyncio
-async def test_gpu_config_failed_proc_section_queries_live(monkeypatch):
-    monkeypatch.setattr(nd.settings, "KERNEL_GPU_VERDICT_CHECK_ENABLED", False)
+async def test_gpu_config_failed_proc_section_queries_live():
     probe = _probe(gpu_minor_map_stdout=None, shared_nodes=("/dev/nvidiactl",))
     ssh = _ssh(_ssh_result(stdout="GPU-1, 0\n"))
     config = await build_gpu_docker_config_for_executor(ssh, ["GPU-1"], host_probe=probe)
@@ -331,10 +340,19 @@ async def test_gpu_config_failed_proc_section_queries_live(monkeypatch):
 # ------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+async def test_create_container_without_an_encrypted_volume_probes_without_the_label(svc_fixture, monkeypatch):
+    svc = svc_fixture
+    _wire(svc, monkeypatch, _deploy_ssh_client(), probe_result=_probe())
+    result = await _run_create_container(svc, _deploy_payload())
+    assert type(result).__name__ == "ContainerCreated", getattr(result, "msg", "")
+    svc.probe_prerun_host.assert_awaited_once()
+    assert svc.probe_prerun_host.await_args.kwargs["with_label"] is False
+    svc._image_has_encrypted_volume_label.assert_not_awaited()
+
+
 def _wire(svc, monkeypatch, ssh_client, *, probe_result):
     _patch_happy(svc, monkeypatch, ssh_client)
-    # so a payload with is_sysbox + enable_volume_encryption reaches the label check
-    monkeypatch.setattr(settings, "ENABLE_VOLUME_ENCRYPTION", True)
     monkeypatch.setattr(svc, "probe_prerun_host", AsyncMock(return_value=probe_result))
     monkeypatch.setattr(svc, "clean_existing_containers", AsyncMock(return_value=[]))
     monkeypatch.setattr(svc, "clean_stale_vloopback_volumes", AsyncMock(return_value=[]))
@@ -363,9 +381,42 @@ def _probe_kwarg(mock) -> object:
 
 
 @pytest.mark.asyncio
+async def test_create_container_probes_once_and_hands_it_to_every_consumer(
+    svc_fixture, monkeypatch
+):
+    svc = svc_fixture
+    ssh_client = _deploy_ssh_client()
+    probe = _probe(port_check_container_names=("health_check_1",))
+    _wire(svc, monkeypatch, ssh_client, probe_result=probe)
+    payload = _deploy_payload(enable_volume_encryption=True, is_sysbox=True)
+    result = await _run_create_container(svc, payload)
+    assert type(result).__name__ == "ContainerCreated", getattr(result, "msg", "")
+    svc.probe_prerun_host.assert_awaited_once()
+    assert svc.probe_prerun_host.await_args.kwargs["docker_image"] == payload.docker_image
+    assert svc.probe_prerun_host.await_args.kwargs["with_power"] is True
+    assert svc.probe_prerun_host.await_args.kwargs["with_label"] is True
+    for m in (
+        svc.clean_existing_containers,
+        svc.clean_stale_vloopback_volumes,
+        svc.sweep_stale_cache_volumes,
+        svc.select_affordable_cache_volumes,
+        svc.reclaim_dphn_cache_for_rental,
+        svc._image_has_encrypted_volume_label,
+    ):
+        assert _probe_kwarg(m) is probe, m
+    from services import docker_service as ds
+
+    assert _probe_kwarg(ds.build_gpu_docker_config_for_executor) is probe
+    assert _probe_kwarg(ds.restore_tracked_gpu_power_limits) is probe
+    port_check = svc.wait_for_port_check_containers.await_args.kwargs
+    assert port_check["probed_container_names"] is probe.port_check_container_names
+    # the last-resort raise runs minutes after the probe and never takes it
+    assert "host_probe" not in ds.raise_low_power_limits_to_default.await_args.kwargs
+
+
+@pytest.mark.asyncio
 async def test_a_filler_cap_after_the_early_gpu_power_restore_is_restored_before_docker_run(svc_fixture, monkeypatch):
     svc = svc_fixture
-    monkeypatch.setattr(settings, "RENTAL_PRERUN_HOST_PROBE_ENABLED", True)
     _wire(svc, monkeypatch, _deploy_ssh_client(), probe_result=_probe())
     events: list[str] = []
     early_restore_done = asyncio.Event()
@@ -394,7 +445,6 @@ async def test_a_power_limit_lowered_without_a_record_after_the_early_raise_is_r
     svc_fixture, monkeypatch
 ):
     svc = svc_fixture
-    monkeypatch.setattr(settings, "RENTAL_PRERUN_HOST_PROBE_ENABLED", True)
     _wire(svc, monkeypatch, _deploy_ssh_client(), probe_result=_probe())
     events: list[str] = []
     early_raise_done = asyncio.Event()
@@ -420,8 +470,6 @@ async def test_a_power_limit_lowered_without_a_record_after_the_early_raise_is_r
 
 def _wire_early_probes(svc, monkeypatch, *, image_present: bool) -> list[int]:
     """Both probes on; returns how many host probes had started when the image inspect answered."""
-    monkeypatch.setattr(settings, "RENTAL_PRERUN_HOST_PROBE_ENABLED", True)
-    monkeypatch.setattr(settings, "RENTAL_VOLUME_FAST_PATH_ENABLED", True)
     _wire(svc, monkeypatch, _deploy_ssh_client(inspect_exit=0 if image_present else 1), probe_result=_probe())
     monkeypatch.setattr(svc, "probe_volume_host", AsyncMock(return_value=None))
     monkeypatch.setattr(svc, "reclaim_dphn_cache_for_rental", AsyncMock(return_value=False))
@@ -455,8 +503,6 @@ def _wire_customer_create_over_the_host(
     """Both early probes on; the cleanup, the sweeps and the port-check wait are the real
     ones over a stub SSH client, so every listing they run is a command on it. The host lists the
     probe's containers until the first rm, then ``ps_after_rm``."""
-    monkeypatch.setattr(settings, "RENTAL_PRERUN_HOST_PROBE_ENABLED", True)
-    monkeypatch.setattr(settings, "RENTAL_VOLUME_FAST_PATH_ENABLED", True)
     ssh_client = _deploy_ssh_client()
     answer_as_the_deploy_host = ssh_client.run.side_effect
     names_on_host = list(probe.container_names or () if containers_on_host is None else containers_on_host)

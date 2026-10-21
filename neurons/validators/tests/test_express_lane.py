@@ -13,7 +13,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import uuid4
 
 import bittensor
@@ -28,9 +28,9 @@ from core.express_lane import (
 from fakeredis.aioredis import FakeRedis
 from fixtures.rest_miner_fixtures import VALIDATOR_HOTKEY
 from fixtures.rest_miner_fixtures import executor_info as _executor_info
-from payload_models.payloads import MinerJobEnryptedFiles
+from payload_models.payloads import MinerJobEnryptedFiles, MinerJobRequestPayload
 from protocol.vc_protocol.compute_requests import RentedExecutorsResponse
-from services.miner_service import MinerService
+from services.miner_service import CYCLE_DONE, MinerService
 from services.redis_service import RedisService
 from services.task.models import JobResult
 
@@ -123,7 +123,45 @@ def _redis_service() -> RedisService:
     return service
 
 
+@pytest.fixture
+def miner_task_result():
+    return _job_result
+
+
+def _payload() -> MinerJobRequestPayload:
+    return MinerJobRequestPayload(
+        job_batch_id="2026-09-06 16:40:00",
+        miner_hotkey="miner-a",
+        miner_coldkey="miner-coldkey",
+        miner_address="192.0.2.10",
+        miner_port=8091,
+    )
+
+
+async def _request(service: MinerService, **kwargs):
+    return await service.request_job_to_miner(
+        payload=_payload(),
+        encrypted_files=_cycle_inputs().encrypted_files,
+        rented_data=RentedExecutorsResponse(executors={}),
+        default_docker_image_digests={},
+        **kwargs,
+    )
+
+
 # --- MinerService: what the miner is asked for, and who holds an executor -----------------
+
+
+@pytest.mark.asyncio
+async def test_the_cycle_asks_for_every_executor(rest_miner_service):
+    first, second = str(uuid4()), str(uuid4())
+    rest_miner_service.miner_returns(first, second)
+
+    job = await _request(rest_miner_service)
+
+    submit = dict(rest_miner_service.rest_calls)["ssh-pubkey-submit"]
+    assert submit["executor_id"] is None
+    assert {r.executor_info.uuid for r in job["results"]} == {first, second}
+    assert rest_miner_service.in_flight == {first: CYCLE_DONE, second: CYCLE_DONE}
 
 
 # --- ExpressLane: discovery, caps, publish, retries -----------------------------------------
@@ -139,7 +177,6 @@ class _Harness:
     ):
         from core.config import settings
 
-        monkeypatch.setattr(settings, "EXPRESS_LANE_ENABLED", True)
         self.settings = settings
         self.redis_service = _redis_service()
         if miner_service is None:
@@ -229,6 +266,39 @@ async def test_a_never_validated_executor_is_verified_alone_and_published_spec_o
 
 
 # --- job_batch_id: the prod_executors row's time ---------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_every_miner_is_asked_under_the_cycles_block_time_id(
+    validator_with_mocks, create_neuron_info
+):
+    """Every miner is asked under the id the cycle derives from the job block. The last line
+    guards the wiring the lane reads: the inputs carry that same id."""
+    validator = validator_with_mocks
+    validator.subtensor_client.get_miners = AsyncMock(
+        return_value=[create_neuron_info(1, "miner-a"), create_neuron_info(2, "miner-b")]
+    )
+    validator.subtensor_client.get_time_from_block = AsyncMock(return_value=CYCLE_BATCH_ID)
+
+    async def no_results(payload, **_):
+        return {"miner_hotkey": payload.miner_hotkey, "miner_coldkey": "c", "results": []}
+
+    validator.miner_service.request_job_to_miner = AsyncMock(side_effect=no_results)
+    with (
+        patch("core.validator.fetch_default_image_digests", new=AsyncMock(return_value={})),
+        patch("core.validator.fetch_executor_image_digest", new=AsyncMock(return_value=None)),
+    ):
+        await validator.sync()
+
+    asked = {
+        c.kwargs["payload"].miner_hotkey: c.kwargs["payload"].job_batch_id
+        for c in validator.miner_service.request_job_to_miner.await_args_list
+    }
+    assert asked == {"miner-a": CYCLE_BATCH_ID, "miner-b": CYCLE_BATCH_ID}
+    assert validator.cycle_inputs.job_batch_id == CYCLE_BATCH_ID
+    validator.miner_service.start_awaiting_wave_lists.assert_called_once_with(
+        CYCLE_BATCH_ID, ["miner-a", "miner-b"]
+    )
 
 
 @pytest.mark.asyncio

@@ -22,12 +22,6 @@ from services.task.models import JobResult
 pytest_plugins = ["fixtures.rest_miner_fixtures"]
 
 B300 = "NVIDIA B300 SXM6 AC"
-LISTED_TWICE = "Executor listed twice by miner; scored once"
-EXPRESS_LANE_ON_AND_OFF = pytest.mark.parametrize(
-    "express_lane", [False, True], ids=["lane-off", "lane-on"]
-)
-
-
 def _idle_b300_1x(executor_id: str) -> JobResult:
     return JobResult(
         executor_info=_executor_info(executor_id),
@@ -74,21 +68,13 @@ async def _request(service: MinerService, **kwargs) -> dict:
     )
 
 
-def _verified(service: MinerService) -> list[str]:
-    return [c.kwargs["executor_info"].uuid for c in service.task_service.create_task.call_args_list]
-
-
 async def _score(job_results: dict[str, list[JobResult]]) -> RentalPriceIncentive:
     redis = AsyncMock()
     redis.get_portion_per_gpu_type = AsyncMock(return_value=0.3)
     redis.get_executor_uptime = AsyncMock(return_value=9999)
     incentive = RentalPriceIncentive(
-        IncentiveConfig(),
-        redis,
-        job_results,
-        total_gpu_model_count_map={
-            B300: sum(j.gpu_count for jobs in job_results.values() for j in jobs)
-        },
+        IncentiveConfig(), redis, job_results,
+        total_gpu_model_count_map={B300: sum(j.gpu_count for jobs in job_results.values() for j in jobs)},
     )
     price_provider = AsyncMock()
     price_provider.get_tao_price.return_value = 500.0
@@ -98,16 +84,10 @@ async def _score(job_results: dict[str, list[JobResult]]) -> RentalPriceIncentiv
     return incentive
 
 
-@EXPRESS_LANE_ON_AND_OFF
 @pytest.mark.asyncio
-async def test_an_executor_listed_twice_is_one_gpu_in_its_idle_tier(
-    rest_miner_service, monkeypatch, express_lane
-):
+async def test_an_executor_listed_twice_is_one_gpu_in_its_idle_tier(rest_miner_service):
     """End to end: the 23-25 Sep shape (a repeated 1x B300 beside three distinct ones, cap 4)
     fills the tier with 4 GPUs, not 5, so every node is paid in full."""
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "EXPRESS_LANE_ENABLED", express_lane)
     rest_miner_service.miner_returns("exec-twin", "exec-twin", "exec-b", "exec-c", "exec-d")
 
     job = await _request(rest_miner_service)
@@ -115,3 +95,9 @@ async def test_an_executor_listed_twice_is_one_gpu_in_its_idle_tier(
 
     assert incentive.unrented_count_by_bucket[("B300", 1)] == 4
     assert incentive.cap_multiplier_by_bucket[("B300", 1)] == pytest.approx(1.0)
+
+
+def test_a_list_without_repeats_is_handed_on_unchanged(rest_miner_service):
+    listed = [_executor_info("exec-a"), _executor_info("exec-b")]
+
+    assert rest_miner_service._claim_for_cycle(_payload(), listed, {}) == listed

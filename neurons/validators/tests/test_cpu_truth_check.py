@@ -44,7 +44,6 @@ def _state(advertised):
 async def test_mismatch_fails_under_enforcement(context_factory):
     ctx = context_factory(state=_state(176), ssh=_fake_ssh(present="0-43"))
     with patch("neurons.validators.src.services.task.checks.cpu_truth.settings") as s:
-        s.CPU_TRUTH_CHECK_ENABLED = True
         s.CPU_TRUTH_ENFORCEMENT_ENABLED = True
         result = await CpuTruthCheck().run(ctx)
 
@@ -61,7 +60,6 @@ async def test_offlined_cores_not_a_spoof(context_factory):
     # honest host with cores offlined: present (== lscpu CPU(s)) equals advertised.
     ctx = context_factory(state=_state(128), ssh=_fake_ssh(present="0-127"))
     with patch("neurons.validators.src.services.task.checks.cpu_truth.settings") as s:
-        s.CPU_TRUTH_CHECK_ENABLED = True
         s.CPU_TRUTH_ENFORCEMENT_ENABLED = True
         result = await CpuTruthCheck().run(ctx)
 

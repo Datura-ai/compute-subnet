@@ -18,6 +18,11 @@ from services.rental_docker_sdk import (
 
 
 # ---------------------------------------------------------------------------
+# 1 + 2 — create_container: delete during create, workload container restarting
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
 # 2 — the SDK names the container state first, then Docker's 409 text
 # ---------------------------------------------------------------------------
 
@@ -68,3 +73,35 @@ async def test_exec_on_restarting_container_names_exit_code_and_never_the_worklo
     assert "Container abc is restarting" in text
     assert api.exec_create_calls == 2  # the retry budget was spent before the cause was read
     assert isinstance(raised.value.__cause__, _RestartConflict)
+
+
+# ---------------------------------------------------------------------------
+# 8 — a remove that finds nothing is INFO; a run that fails is still ERROR
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# 3 — an offline miner is one WARNING per miner per cycle
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# 4 — provider-state verdicts log at INFO; other verdicts keep their severity
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# 5 — port verification: attempts and tiers are DEBUG, the exception path is still ERROR
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# 6 — DinD: the node's refusal is one WARNING; our own exception is still ERROR
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# 7 — inspector: the node's verdict is a WARNING; an unclassified exception is still ERROR
+# ---------------------------------------------------------------------------
+
+

@@ -43,8 +43,7 @@ def _fake_ssh(*responses):
 
 @pytest.fixture(autouse=True)
 def _shadow_flags(monkeypatch):
-    # default posture for every test: master on, enforcement off; tests flip enforcement explicitly.
-    monkeypatch.setattr(nd.settings, "KERNEL_GPU_VERDICT_CHECK_ENABLED", True, raising=False)
+    # default posture for every test: enforcement off; tests flip it explicitly.
     monkeypatch.setattr(nd.settings, "KERNEL_GPU_VERDICT_ENFORCEMENT_ENABLED", False, raising=False)
 
 

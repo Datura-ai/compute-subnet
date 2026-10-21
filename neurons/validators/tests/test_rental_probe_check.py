@@ -1531,13 +1531,11 @@ async def test_a_shadow_failure_is_not_the_runs_failure_reason():
 
 
 @pytest.mark.asyncio
-async def test_the_real_redis_service_accepts_the_stamps_lifetime(monkeypatch):
+async def test_the_real_redis_service_accepts_the_stamps_lifetime():
     """Regression (self-review): FakeRedis.set took an `ex` the real `RedisService.set` did not, so both
     stamps raised TypeError in production, swallowed by their `except Exception`: no interval stamp (a
     container per idle node per cycle) and no standing failure."""
     from services.redis_service import RedisService
-
-    from core.config import settings as validator_settings
 
     class RecordingRedis:
         calls: list[tuple] = []
@@ -1545,7 +1543,6 @@ async def test_the_real_redis_service_accepts_the_stamps_lifetime(monkeypatch):
         async def set(self, key, value, ex=None):
             self.calls.append((key, value, ex))
 
-    monkeypatch.setattr(validator_settings, "REDIS_COMMAND_LOCK_ENABLED", False)
     service = RedisService()  # builds pools from settings; nothing connects until a command runs
     service.redis = RecordingRedis()
     await service.set("rental_probe_ok:x", "1.0", ex=module._REDIS_STAMP_TTL_SECONDS)
