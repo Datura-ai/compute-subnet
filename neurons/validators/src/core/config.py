@@ -85,10 +85,6 @@ class VerifyXSettings(BaseSettings):
         default="https://raw.githubusercontent.com/Datura-ai/lium-io/main/neurons/executor/libverifyx.so",
         description="Raw GitHub URL the executor curls when library refresh is on and the hash does not match",
     )
-    ENABLE_XET_CHALLENGE: bool = Field(
-        default=True,
-        description="Include HuggingFace Xet download challenge in VerifyX",
-    )
 
 
 class DebugSettings(BaseSettings):
