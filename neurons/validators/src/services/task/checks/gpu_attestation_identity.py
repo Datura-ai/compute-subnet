@@ -17,7 +17,6 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 
-from core.config import settings
 from services.redis_service import RedisWrites
 
 from ..messages import GpuAttestationIdentityMessages as Msg, render_message
@@ -208,8 +207,7 @@ class GpuAttestationIdentityCheck:
     not change UUID (on any executor or hotkey), and two UUIDs of one node may not present the same card.
 
     With Confidential Computing off NVML refuses to attest, so on most bare-metal hosts this logs
-    GPU_ATTESTATION_UNAVAILABLE and passes. Shadow by default: findings are warning events and the node
-    passes. Under GPU_ATTESTATION_IDENTITY_ENFORCEMENT_ENABLED a mismatch or forged evidence fails the node
+    GPU_ATTESTATION_UNAVAILABLE and passes. A mismatch or forged evidence fails the node
     (not fatal with a live rental, as HardwareIdentityCheck). Unavailable evidence never fails it, except a
     UUID that attested before and now does not (a downgrade), which counts as a mismatch.
 
@@ -342,7 +340,6 @@ class GpuAttestationIdentityCheck:
         except Exception:
             logger.warning("gpu identity record unavailable", exc_info=True, extra=ctx.default_extra)
 
-        enforce = settings.GPU_ATTESTATION_IDENTITY_ENFORCEMENT_ENABLED
         findings = list(dict.fromkeys(findings))
         what = {
             "verified": verified,
@@ -352,7 +349,6 @@ class GpuAttestationIdentityCheck:
             "hardware_changed": changed,
             "hardware": hw_by_uuid,
             "findings": findings,
-            "enforced": enforce,
         }
         if findings:
             if SWAP_FINDINGS & set(findings):
@@ -361,16 +357,12 @@ class GpuAttestationIdentityCheck:
                 template = Msg.MISMATCH
             else:
                 template = Msg.INCONSISTENT
-            event = render_message(
-                template,
-                ctx=ctx,
-                check_id=self.check_id,
-                impact=None if enforce else "Shadow observation only: score was NOT changed",
-                what=what,
-            )
-            updates = {"gpu_attestation_identity_passed": False} if enforce else {}
+            event = render_message(template, ctx=ctx, check_id=self.check_id, what=what)
             return CheckResult(
-                passed=not enforce, event=event, fatal=not has_live_rental(ctx), updates=updates
+                passed=False,
+                event=event,
+                fatal=not has_live_rental(ctx),
+                updates={"gpu_attestation_identity_passed": False},
             )
         template = Msg.OK if verified and not unavailable else Msg.UNAVAILABLE
         return CheckResult(passed=True, event=render_message(template, ctx=ctx, check_id=self.check_id, what=what))

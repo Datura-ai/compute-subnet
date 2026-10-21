@@ -2379,7 +2379,7 @@ class RentedPodResourcesMessages:
 
 
 class GpuAttestationIdentityMessages:
-    # DAH-4551: warning in shadow; fails the node under GPU_ATTESTATION_IDENTITY_ENFORCEMENT_ENABLED.
+    # DAH-4551: fails the node.
     MISMATCH = MessageTemplate(
         event="GPU identity does not match the NVIDIA-signed card identity",
         reason="GPU_IDENTITY_MISMATCH",
