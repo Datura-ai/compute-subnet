@@ -2065,7 +2065,7 @@ class RentalProbeMessages:
 
 class CpuTruthMessages:
     """DAH-2671 item 2a — corroborate advertised CPU(s) against sources the lscpu wrapper does not
-    author. Shadow (CPU_TRUTH_CHECK_ENABLED without enforcement) emits CPU_MISMATCH as a warning and
+    author. Shadow (without enforcement) emits CPU_MISMATCH as a warning and
     keeps passed=True; only CPU_TRUTH_ENFORCEMENT_ENABLED renders it error/score-zeroing."""
 
     CPU_OK = MessageTemplate(
@@ -2092,13 +2092,6 @@ class CpuTruthMessages:
         severity="info",
         category="env",
         impact="Proceed without penalty",
-    )
-    SKIPPED = MessageTemplate(
-        event="CPU truth check disabled",
-        reason="CPU_TRUTH_DISABLED",
-        severity="info",
-        category="env",
-        impact="Proceed",
     )
 
 
