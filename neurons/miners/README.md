@@ -5,8 +5,7 @@ central miner the *self-hosted provider* ([setup guide](https://docs.lium.io/pro
 and an executor a *node*. Most providers do not run this service: the
 [Lium.io Central Provider Server](https://docs.lium.io/providers/provider-configuration) runs it for them and is
 ON by default in the [Provider Portal](https://provider.lium.io); nodes are set up with `lium mine`
-([Node Quickstart](https://docs.lium.io/providers/nodes/quickstart)). Already running this service? The same page
-shows how to move to the central server without losing nodes or rentals.
+([Node Quickstart](https://docs.lium.io/providers/nodes/quickstart)).
 
 ## Overview
 
