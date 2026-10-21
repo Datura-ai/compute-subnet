@@ -2144,10 +2144,7 @@ class DockerService:
         self.attestation_service = attestation_service
         self.rental_docker_client_factory = (
             rental_docker_client_factory
-            or RentalDockerSdkClientFactory(
-                pull_timeout_seconds=_DOCKER_PULL_TIMEOUT_SECONDS,
-                transport_retry_enabled=lambda: settings.DOCKER_TRANSPORT_RETRY_ENABLED,
-            )
+            or RentalDockerSdkClientFactory(pull_timeout_seconds=_DOCKER_PULL_TIMEOUT_SECONDS)
         )
         self.lock = asyncio.Lock()
         self.logs_queue: list[dict] = []
