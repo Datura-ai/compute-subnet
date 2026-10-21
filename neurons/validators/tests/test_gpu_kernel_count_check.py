@@ -151,6 +151,7 @@ async def test_mismatch_on_a_rented_node_fails_but_does_not_stop_the_run(
 
     assert result.passed is False
     assert result.fatal is False
+    assert result.updates == {"gpu_kernel_count_passed": False}
     assert result.event.reason_code == Msg.COUNT_MISMATCH.reason
     assert ok is True
 
