@@ -4708,7 +4708,7 @@ class DockerService:
         with_power: bool,
         miner_hotkey: str,
         log_extra: dict,
-        with_label: bool = True,
+        with_label: bool,
     ) -> PrerunHostProbe | None:
         """DAH-3257: the pre-run host listings in one SSH command; None on any failure.
 
