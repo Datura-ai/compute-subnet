@@ -2,8 +2,7 @@
 
 RED→GREEN: before the check existed, nothing compared the advertised CPU(s) count against the
 kernel-present population, so a host advertising 176 cores over 44 real ones passed unnoticed. The
-mismatch test fails closed only under CPU_TRUTH_ENFORCEMENT_ENABLED; shadow observes and passes; an
-inability to measure never fails.
+mismatch test fails closed; an inability to measure never fails.
 """
 from __future__ import annotations
 
@@ -69,7 +68,6 @@ async def test_the_sysfs_read_is_bounded(context_factory):
     ctx = context_factory(state=_state(128), ssh=SimpleNamespace(run=run))
     with patch("neurons.validators.src.services.task.checks.cpu_truth.settings") as s:
         s.CPU_TRUTH_CHECK_ENABLED = True
-        s.CPU_TRUTH_ENFORCEMENT_ENABLED = False
         await CpuTruthCheck().run(ctx)
 
     assert seen.get("timeout") == CPU_TRUTH_READ_TIMEOUT_SECONDS
@@ -80,7 +78,6 @@ async def test_match_passes(context_factory):
     ctx = context_factory(state=_state(128), ssh=_fake_ssh(present="0-127"))
     with patch("neurons.validators.src.services.task.checks.cpu_truth.settings") as s:
         s.CPU_TRUTH_CHECK_ENABLED = True
-        s.CPU_TRUTH_ENFORCEMENT_ENABLED = False
         result = await CpuTruthCheck().run(ctx)
 
     assert result.passed is True
@@ -90,31 +87,17 @@ async def test_match_passes(context_factory):
 
 
 @pytest.mark.asyncio
-async def test_mismatch_emits_under_shadow_and_still_passes(context_factory):
+async def test_mismatch_fails(context_factory):
     # advertised 176 over a 44-core present population — the spoof signature.
     ctx = context_factory(state=_state(176), ssh=_fake_ssh(present="0-43"))
     with patch("neurons.validators.src.services.task.checks.cpu_truth.settings") as s:
         s.CPU_TRUTH_CHECK_ENABLED = True
-        s.CPU_TRUTH_ENFORCEMENT_ENABLED = False
-        result = await CpuTruthCheck().run(ctx)
-
-    assert result.passed is True  # shadow: never changes score
-    assert result.updates == {}
-    assert result.event.reason_code == Msg.CPU_MISMATCH.reason
-    assert result.event.what_we_saw["advertised"] == 176
-    assert result.event.what_we_saw["present"] == 44
-
-
-@pytest.mark.asyncio
-async def test_mismatch_fails_under_enforcement(context_factory):
-    ctx = context_factory(state=_state(176), ssh=_fake_ssh(present="0-43"))
-    with patch("neurons.validators.src.services.task.checks.cpu_truth.settings") as s:
-        s.CPU_TRUTH_CHECK_ENABLED = True
-        s.CPU_TRUTH_ENFORCEMENT_ENABLED = True
         result = await CpuTruthCheck().run(ctx)
 
     assert result.passed is False
     assert result.event.reason_code == Msg.CPU_MISMATCH.reason
+    assert result.event.what_we_saw["advertised"] == 176
+    assert result.event.what_we_saw["present"] == 44
     # The check is non-fatal and ScoreCheck runs after it, so the verdict travels as a context
     # flag calculate_scores gates on — see test_mismatch_zeroes_the_final_score.
     assert result.updates["cpu_truth_passed"] is False
@@ -122,8 +105,7 @@ async def test_mismatch_fails_under_enforcement(context_factory):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("enforce, expected_score", [(True, 0.0), (False, 1.0)])
-async def test_mismatch_zeroes_the_final_score(context_factory, enforce, expected_score):
+async def test_mismatch_zeroes_the_final_score(context_factory):
     # End-to-end through the pipeline: CpuTruthCheck is non-fatal and ScoreCheck recomputes the
     # score from scratch afterwards, so only a context flag calculate_scores reads survives.
     from neurons.validators.src.services.task.checks.score import ScoreCheck
@@ -151,13 +133,12 @@ async def test_mismatch_zeroes_the_final_score(context_factory, enforce, expecte
         patch("neurons.validators.src.services.task.score_calculator.settings") as score_s,
     ):
         s.CPU_TRUTH_CHECK_ENABLED = True
-        s.CPU_TRUTH_ENFORCEMENT_ENABLED = enforce
         score_s.ENABLE_TDX_ATTESTATION = False
         pipeline = Pipeline([CpuTruthCheck(), ScoreCheck()], _NullSink())
         _, _, final_ctx = await pipeline.run(ctx)
 
-    assert final_ctx.score == expected_score
-    assert final_ctx.job_score == expected_score
+    assert final_ctx.score == 0.0
+    assert final_ctx.job_score == 0.0
 
 
 @pytest.mark.asyncio
@@ -165,7 +146,6 @@ async def test_ssh_error_passes_with_unknown_reason(context_factory):
     ctx = context_factory(state=_state(176), ssh=_fake_ssh(raise_exc=OSError("ssh down")))
     with patch("neurons.validators.src.services.task.checks.cpu_truth.settings") as s:
         s.CPU_TRUTH_CHECK_ENABLED = True
-        s.CPU_TRUTH_ENFORCEMENT_ENABLED = True  # even under enforcement, cannot-measure never fails
         result = await CpuTruthCheck().run(ctx)
 
     assert result.passed is True
@@ -178,7 +158,6 @@ async def test_offlined_cores_not_a_spoof(context_factory):
     ctx = context_factory(state=_state(128), ssh=_fake_ssh(present="0-127"))
     with patch("neurons.validators.src.services.task.checks.cpu_truth.settings") as s:
         s.CPU_TRUTH_CHECK_ENABLED = True
-        s.CPU_TRUTH_ENFORCEMENT_ENABLED = True
         result = await CpuTruthCheck().run(ctx)
 
     assert result.passed is True
@@ -192,7 +171,6 @@ async def test_missing_advertised_count_is_unknown(context_factory):
     ctx = context_factory(state=build_state(specs={"cpu": {}}), ssh=_fake_ssh())
     with patch("neurons.validators.src.services.task.checks.cpu_truth.settings") as s:
         s.CPU_TRUTH_CHECK_ENABLED = True
-        s.CPU_TRUTH_ENFORCEMENT_ENABLED = True
         result = await CpuTruthCheck().run(ctx)
 
     assert result.passed is True
@@ -204,7 +182,6 @@ async def test_disabled_master_switch_skips(context_factory):
     ctx = context_factory(state=_state(176), ssh=_fake_ssh(present="0-43"))
     with patch("neurons.validators.src.services.task.checks.cpu_truth.settings") as s:
         s.CPU_TRUTH_CHECK_ENABLED = False
-        s.CPU_TRUTH_ENFORCEMENT_ENABLED = True
         result = await CpuTruthCheck().run(ctx)
 
     assert result.passed is True

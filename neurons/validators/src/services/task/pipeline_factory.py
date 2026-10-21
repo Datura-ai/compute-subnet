@@ -334,10 +334,10 @@ class PipelineFactory:
                 # the node like a GPU ban (not fatal under a live pod), so it sits before the rented
                 # short-circuit
                 GpuMemoryHealthCheck(),
-                # DAH-2671 item 2a: non-fatal, observe-only CPU-count corroboration. Placed right
+                # DAH-2671 item 2a: non-fatal CPU-count corroboration. Placed right
                 # after the GPU spec-check group (and before the rented short-circuit) so it reads
                 # advertised specs already populated by the scrape; it only reads over SSH, mutates
-                # no executor state, and never zeroes score outside CPU_TRUTH_ENFORCEMENT_ENABLED.
+                # no executor state; a mismatch zeroes the score via cpu_truth_passed.
                 CpuTruthCheck(),
                 GpuPowerLimitCheck(),
                 NvmlDigestCheck(),

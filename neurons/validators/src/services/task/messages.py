@@ -2072,8 +2072,7 @@ class RentalProbeMessages:
 
 class CpuTruthMessages:
     """DAH-2671 item 2a — corroborate advertised CPU(s) against sources the lscpu wrapper does not
-    author. Shadow (CPU_TRUTH_CHECK_ENABLED without enforcement) emits CPU_MISMATCH as a warning and
-    keeps passed=True; only CPU_TRUTH_ENFORCEMENT_ENABLED renders it error/score-zeroing."""
+    author. CPU_MISMATCH is an error that zeroes the score (when CPU_TRUTH_CHECK_ENABLED is on)."""
 
     CPU_OK = MessageTemplate(
         event="CPU core count corroborated",
