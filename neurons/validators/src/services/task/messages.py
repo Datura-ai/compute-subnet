@@ -423,6 +423,38 @@ class GpuThermalThrottleMessages:
     )
 
 
+class StorageLimitMessages:
+    MISSING = MessageTemplate(
+        event="Docker cannot limit a container's disk",
+        reason="STORAGE_LIMIT_MISSING",
+        severity="warning",
+        category="env",
+        impact="Proceed; score not changed while the requirement is not enforced (see enforced). A renter who "
+        "fills their disk fills the host's Docker storage and takes the host and every pod on it down",
+        remediation="Set up Docker storage that enforces a per-container limit (overlay2 on xfs mounted with "
+        "pquota): https://docs.lium.io/providers/nodes/docker-storage . Check with `sudo docker run --rm "
+        "--storage-opt size=1g --gpus all daturaai/compute-subnet-executor:latest nvidia-smi`.",
+    )
+    REQUIRED = MessageTemplate(
+        event="Node rejected: Docker cannot limit a container's disk",
+        reason="STORAGE_LIMIT_REQUIRED",
+        severity="error",
+        category="env",
+        impact="Job skipped; score set to 0 until the host enforces a per-container storage limit",
+        remediation="Set up Docker storage that enforces a per-container limit (overlay2 on xfs mounted with "
+        "pquota): https://docs.lium.io/providers/nodes/docker-storage . The node passes again on the next "
+        "validation once `sudo docker run --rm --storage-opt size=1g --gpus all "
+        "daturaai/compute-subnet-executor:latest nvidia-smi` works.",
+    )
+    OK = MessageTemplate(
+        event="Docker limits a container's disk",
+        reason="STORAGE_LIMIT_OK",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+
+
 class RentedGpuDropMessages:
     DROP = MessageTemplate(
         event="Rented node lost a GPU",
@@ -882,6 +914,14 @@ class DuplicateExecutorMessages:
         impact="Score set to 0 for this cycle; the other miner keeps it",
         remediation="One machine earns under one miner per cycle. Register it under one miner only.",
     )
+    GPU_ALIAS = MessageTemplate(
+        event="GPU also reported by another executor of this miner this cycle",
+        reason="EXECUTOR_GPU_ALIAS",
+        severity="warning",
+        category="policy",
+        impact="Score set to 0 for this cycle; the other executor keeps it",
+        remediation="Each physical GPU earns under one executor. Register every machine once.",
+    )
 
 class CollateralStatusMessages:
     DEPOSITED = MessageTemplate(
@@ -1214,29 +1254,6 @@ class GpuUsageMessages:
         "{orphaned_container} is named like a Lium pod container{pod}, and no live rental on this "
         "node uses it: {rental_status}. Do not stop or remove it: contact Lium support with the "
         "container name."
-    )
-    ORPHANED_CONTAINER_OF_A_CHANGING_RENTAL_REMEDIATION = (
-        "{orphaned_container} is a Lium pod container{pod} of a rental on this node that is ending "
-        "or starting: {rental_status}. Lium stops or starts it itself, so do not stop or remove it; "
-        "the next cycle checks the node again."
-    )
-    TEARDOWN_IN_PROGRESS = MessageTemplate(
-        event="Rental teardown in progress",
-        reason="TEARDOWN_IN_PROGRESS",
-        severity="info",
-        category="runtime",
-        impact="GPU usage re-checked next cycle",
-        remediation=(
-            "A rental on this node has just ended and Lium is stopping its container; do not stop it yourself."
-        ),
-    )
-    RENTAL_STARTED_DURING_RUN = MessageTemplate(
-        event="Rental started during validation",
-        reason="RENTAL_STARTED_DURING_RUN",
-        severity="info",
-        category="runtime",
-        impact="GPU usage re-checked next cycle",
-        remediation="The GPU is held by a rental that started while this run was in progress.",
     )
     FOREIGN_PROCESS = MessageTemplate(
         event="Foreign GPU process on idle executor",
