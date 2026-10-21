@@ -147,6 +147,9 @@ class Settings(BaseSettings):
     # of the median idle pipeline. Off: commands go straight to the bounded BlockingConnectionPool
     # (DAH-2475), which is what serialises them when it must. On = today's behaviour.
     REDIS_COMMAND_LOCK_ENABLED: bool = Field(env="REDIS_COMMAND_LOCK_ENABLED", default=True)
+    BACKEND_COMMAND_CLAIM_TTL_SECONDS: int = Field(default=60, gt=0)
+    BACKEND_COMMAND_HEARTBEAT_SECONDS: float = Field(default=20, gt=0)
+    BACKEND_COMMAND_ANSWER_TTL_SECONDS: int = Field(default=900, gt=0)
     COMPUTE_APP_URI: str = Field(env="COMPUTE_APP_URI", default="wss://lium.io/api")
     COMPUTE_REST_API_URL: str | None = Field(
         env="COMPUTE_REST_API_URL", default="https://lium.io/api"

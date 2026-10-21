@@ -29,6 +29,7 @@ PENDING_PODS_PREFIX = "pending_pods_prefix"
 # DAH-4698: creates the backend sent that are running in this connector right now, by pod id; what is left when a
 # connector starts was cut off by the restart (a redeploy recreates the connector mid-create)
 INFLIGHT_BACKEND_CREATES_KEY = "inflight_backend_creates"
+BACKEND_COMMAND_PREFIX = "backend_command:"
 DUPLICATED_MACHINE_SET = "duplicated_machines"
 RENTAL_SUCCEED_MACHINE_SET = "rental_succeed_machines"
 AVAILABLE_PORT_MAPS_PREFIX = "available_port_maps"
@@ -579,7 +580,46 @@ class RedisService:
             await self.hset(PENDING_PODS_PREFIX, f"{miner_hotkey}:{executor_id}", json.dumps(pending_pods))
         else:
             await self.hdel(PENDING_PODS_PREFIX, f"{miner_hotkey}:{executor_id}")
-    
+
+    async def claim_backend_command(self, command_id: str, claim: str) -> dict | None:
+        key = f"{BACKEND_COMMAND_PREFIX}{command_id}"
+        while True:
+            if await self.redis.set(
+                key, claim, nx=True, ex=settings.BACKEND_COMMAND_CLAIM_TTL_SECONDS
+            ):
+                return None
+            existing = await self.redis.get(key)
+            if existing is not None:
+                existing = json.loads(existing)
+                # Redis may retry SET NX after storing our claim but losing the reply.
+                return None if existing == json.loads(claim) else existing
+
+    async def update_backend_command(
+        self, command_id: str, claim: str, value: str, ttl: int
+    ) -> None:
+        # Compare ownership atomically: a stale job must not touch a retry's claim.
+        await self.redis.eval(
+            """
+            if redis.call('GET', KEYS[1]) == ARGV[1] then
+                if ARGV[2] == '' then
+                    return redis.call('DEL', KEYS[1])
+                end
+                return redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+            end
+            """,
+            1,
+            f"{BACKEND_COMMAND_PREFIX}{command_id}",
+            claim,
+            value,
+            ttl,
+        )
+
+    async def clear_running_backend_commands(self) -> None:
+        async for key in self.redis.scan_iter(match=f"{BACKEND_COMMAND_PREFIX}*", count=100):
+            value = await self.redis.get(key)
+            if value is not None and json.loads(value)["state"] == "running":
+                await self.redis.delete(key)
+
     async def add_inflight_backend_create(
         self, pod_id: str, miner_hotkey: str, executor_id: str, workload_kind: WorkloadKind
     ) -> None:
