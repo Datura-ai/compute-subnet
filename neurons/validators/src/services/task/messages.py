@@ -457,13 +457,6 @@ class RentedGpuDropMessages:
         category="env",
         impact="Proceed",
     )
-    DISABLED = MessageTemplate(
-        event="Rented GPU drop check disabled",
-        reason="RENTED_GPU_DROP_DISABLED",
-        severity="info",
-        category="env",
-        impact="Proceed",
-    )
 
 
 class GpuLossHoldMessages:
