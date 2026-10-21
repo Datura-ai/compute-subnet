@@ -2093,10 +2093,8 @@ class CpuTruthMessages:
 
 
 class GpuKernelCountMessages:
-    """Reported GPU list against the kernel's list (/proc/driver/nvidia/gpus). Shadow
-    (GPU_KERNEL_COUNT_CHECK_ENABLED without enforcement) renders COUNT_MISMATCH as a warning and
-    keeps passed=True; only GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED makes it fail the validation.
-    UUID_MISMATCH is logged only, under either flag."""
+    """Reported GPU list against the kernel's list (/proc/driver/nvidia/gpus). COUNT_MISMATCH
+    fails the validation; UUID_MISMATCH is logged only."""
 
     COUNT_OK = MessageTemplate(
         event="Reported GPUs match the kernel's GPU list",

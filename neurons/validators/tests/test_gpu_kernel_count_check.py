@@ -2,7 +2,7 @@
 
 The reported count and UUIDs come from the scrape. /proc/driver/nvidia/gpus is the kernel's own
 inventory. A kernel list that is present and shorter than the reported GPU count is a mismatch:
-logged every cycle, and failing the validation under GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED (off by default).
+logged every cycle and failing the validation.
 A missing kernel list is never a failure.
 """
 
@@ -103,74 +103,12 @@ def _ctx(
 
 
 @pytest.fixture
-def shadow(monkeypatch):
-    monkeypatch.setattr(settings, "GPU_KERNEL_COUNT_CHECK_ENABLED", True)
-    monkeypatch.setattr(settings, "GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED", False)
-
-
-@pytest.fixture
 def enforcing(monkeypatch):
     monkeypatch.setattr(settings, "GPU_KERNEL_COUNT_CHECK_ENABLED", True)
-    monkeypatch.setattr(settings, "GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED", True)
 
 
-def test_defaults_are_check_on_enforcement_off():
-    fields = type(settings).model_fields
-    assert fields["GPU_KERNEL_COUNT_CHECK_ENABLED"].default is True
-    assert fields["GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED"].default is False
-
-
-@pytest.mark.asyncio
-async def test_kernel_one_reported_eight_is_logged_but_passes_under_the_default_flags(
-    context_factory, monkeypatch
-):
-    fields = type(settings).model_fields
-    for name in ("GPU_KERNEL_COUNT_CHECK_ENABLED", "GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED"):
-        monkeypatch.setattr(settings, name, fields[name].default)
-    ctx = _ctx(context_factory, reported=[REAL[0], *OTHER_CARDS], kernel=[REAL[0]])
-
-    ok, events, _ = await Pipeline([GpuKernelCountCheck()], _Sink()).run(ctx)
-
-    assert ok is True
-    mismatch = [e for e in events if e.reason_code == Msg.COUNT_MISMATCH.reason]
-    assert mismatch and mismatch[0].severity == "warning"
-    assert mismatch[0].what_we_saw["would_fail"] is True and mismatch[0].what_we_saw["enforced"] is False
-
-
-# ---------------------------- kernel 1 vs reported 8 ----------------------------
-
-
-@pytest.mark.asyncio
-async def test_kernel_one_reported_eight_is_logged_and_passes_in_shadow(context_factory, shadow):
-    ctx = _ctx(context_factory, reported=[REAL[0], *OTHER_CARDS], kernel=[REAL[0]])
-
-    result = await GpuKernelCountCheck().run(ctx)
-
-    assert result.passed is True
-    assert result.updates == {}
-    assert result.event.reason_code == Msg.COUNT_MISMATCH.reason
-    assert result.event.severity == "warning"
-    what = result.event.what_we_saw
-    assert what["kernel_verdict"] == "count_lower"
-    assert what["reported_gpu_count"] == 8
-    assert what["kernel_gpu_count"] == 1
-    assert what["would_fail"] is True
-    assert what["enforced"] is False
-    assert what["reported_uuids_not_in_kernel"] == [u.lower() for u in OTHER_CARDS]
-
-
-@pytest.mark.asyncio
-async def test_kernel_one_reported_eight_leaves_the_pipeline_result_unchanged_in_shadow(
-    context_factory, shadow
-):
-    ctx = _ctx(context_factory, reported=[REAL[0], *OTHER_CARDS], kernel=[REAL[0]])
-
-    ok, events, after = await Pipeline([GpuKernelCountCheck()], _Sink()).run(ctx)
-
-    assert ok is True
-    assert events[-1].reason_code == Msg.COUNT_MISMATCH.reason
-    assert after.state == ctx.state
-    assert after.score == ctx.score
+def test_the_check_is_on_by_default():
+    assert type(settings).model_fields["GPU_KERNEL_COUNT_CHECK_ENABLED"].default is True
 
 
 @pytest.mark.asyncio
@@ -185,7 +123,7 @@ async def test_kernel_one_reported_eight_fails_the_validation_under_enforcement(
     assert result.passed is False
     assert result.event.reason_code == Msg.COUNT_MISMATCH.reason
     assert result.event.severity == "error"
-    assert result.event.what_we_saw["enforced"] is True
+    assert result.event.what_we_saw["would_fail"] is True
     assert ok is False
     assert events[-1].what_we_saw["steps_failed"] == GpuKernelCountCheck.check_id
 
@@ -228,30 +166,8 @@ async def test_mismatch_on_an_idle_node_is_fatal_under_enforcement(context_facto
 
 
 @pytest.mark.asyncio
-async def test_mismatch_on_a_rented_node_still_passes_in_shadow(context_factory, shadow):
-    ctx = _ctx(context_factory, reported=[REAL[0], *OTHER_CARDS], kernel=[REAL[0]])
-    rented = RentedExecutorsResponse(
-        executors={
-            ctx.executor.uuid: RentedExecutor(
-                miner_hotkey="miner-hotkey",
-                executor_ip_address=ctx.executor.address,
-                executor_ip_port=str(ctx.executor.port),
-                pods=[RentedPod(pod_id="pod-1", container_name="pod_p1")],
-            )
-        }
-    )
-    ctx = ctx.model_copy(update={"state": replace(ctx.state, rented_data=rented)})
-
-    result = await GpuKernelCountCheck().run(ctx)
-
-    assert result.passed is True
-    assert result.event.reason_code == Msg.COUNT_MISMATCH.reason
-    assert result.event.severity == "warning"
-
-
-@pytest.mark.asyncio
 async def test_reported_count_above_the_listed_cards_is_judged_on_the_count(
-    context_factory, shadow
+    context_factory, enforcing
 ):
     # the node claims 8 and lists one card: the claim is what is compared
     ctx = _ctx(context_factory, reported=[REAL[0]], kernel=[REAL[0]], count=8)
@@ -280,12 +196,9 @@ def test_container_read_is_the_same_command_and_the_host_read_goes_through_pid_1
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("enforcement", [False, True])
 async def test_container_one_host_four_reported_four_matches_on_the_host_view(
-    context_factory, monkeypatch, enforcement
+    context_factory, enforcing
 ):
-    monkeypatch.setattr(settings, "GPU_KERNEL_COUNT_CHECK_ENABLED", True)
-    monkeypatch.setattr(settings, "GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED", enforcement)
     ctx = _ctx(context_factory, reported=REAL[:4], kernel=[REAL[0]], host=_host_stdout(REAL[:4]))
 
     result = await GpuKernelCountCheck().run(ctx)
@@ -513,10 +426,7 @@ async def test_host_view_is_not_read_when_the_container_list_is_missing(context_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("enforcement", [False, True])
-async def test_kernel_eight_reported_eight_passes(context_factory, monkeypatch, enforcement):
-    monkeypatch.setattr(settings, "GPU_KERNEL_COUNT_CHECK_ENABLED", True)
-    monkeypatch.setattr(settings, "GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED", enforcement)
+async def test_kernel_eight_reported_eight_passes(context_factory, enforcing):
     # the kernel prints the same UUIDs; letter case is not a difference
     ctx = _ctx(context_factory, reported=REAL, kernel=[u.upper() for u in reversed(REAL)])
 
@@ -608,7 +518,6 @@ async def test_malformed_specs_never_fail_the_check(context_factory, enforcing):
 @pytest.mark.asyncio
 async def test_disabled_check_reads_nothing(context_factory, monkeypatch):
     monkeypatch.setattr(settings, "GPU_KERNEL_COUNT_CHECK_ENABLED", False)
-    monkeypatch.setattr(settings, "GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED", True)
     ctx = _ctx(context_factory, reported=[REAL[0], *OTHER_CARDS], kernel=[REAL[0]])
 
     result = await GpuKernelCountCheck().run(ctx)

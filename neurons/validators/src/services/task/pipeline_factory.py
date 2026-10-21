@@ -349,9 +349,9 @@ class PipelineFactory:
                 HardwareIdentityCheck(),
                 BannedGpuCheck(),
                 # Reported GPU count and UUIDs against the kernel's list, which BannedProviderCheck
-                # read above. Logs a verdict every cycle; fails the validation only under
-                # GPU_KERNEL_COUNT_ENFORCEMENT_ENABLED. Before the rented short-circuit, so rented
-                # and idle nodes are judged alike.
+                # read above. Logs a verdict every cycle and fails the validation on a short
+                # kernel list. Before the rented short-circuit, so rented and idle nodes are
+                # judged alike.
                 GpuKernelCountCheck(),
                 DuplicateExecutorCheck(),
                 CollateralStatusCheck(),
