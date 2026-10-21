@@ -649,13 +649,10 @@ class Settings(BaseSettings):
     # NAT and runtime and can get 1000x less (297-588 Mbps on the host, under 1 Mbps from PyPI in a container). CHECK
     # reads up to 16 MiB of a pinned PyPI wheel and a pinned Hugging Face file from a throwaway container on idle
     # nodes once per INTERVAL_HOURS and logs CONTAINER_DOWNLOAD_SPEED; two failing readings in a row (30 min apart)
-    # are the finding. ENFORCEMENT fails the node (CONTAINER_DOWNLOAD_SLOW, score 0); off until the shadow logs are
-    # reviewed. MIN_MBPS is a fifth of NETWORK_MIN_PACKAGE_DOWNLOAD_SPEED_MBPS (50): one cold single-stream CDN object
+    # are the finding and fail the node (CONTAINER_DOWNLOAD_SLOW, score 0) when both were read on the rentals network.
+    # MIN_MBPS is a fifth of NETWORK_MIN_PACKAGE_DOWNLOAD_SPEED_MBPS (50): one cold single-stream CDN object
     # read 32-88 Mbps on healthy nodes (DAH-2959), so 50 would flag them; the defect is two orders of magnitude lower.
     CONTAINER_DOWNLOAD_SPEED_CHECK_ENABLED: bool = Field(env="CONTAINER_DOWNLOAD_SPEED_CHECK_ENABLED", default=True)
-    CONTAINER_DOWNLOAD_SPEED_ENFORCEMENT_ENABLED: bool = Field(
-        env="CONTAINER_DOWNLOAD_SPEED_ENFORCEMENT_ENABLED", default=False
-    )
     CONTAINER_DOWNLOAD_SPEED_MIN_MBPS: float = Field(env="CONTAINER_DOWNLOAD_SPEED_MIN_MBPS", default=10.0, gt=0)
     CONTAINER_DOWNLOAD_SPEED_INTERVAL_HOURS: float = Field(
         env="CONTAINER_DOWNLOAD_SPEED_INTERVAL_HOURS", default=6.0, gt=0
