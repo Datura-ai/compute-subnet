@@ -693,7 +693,6 @@ class Settings(BaseSettings):
     UNREACHABLE_EXECUTOR_REPORT_ENABLED: bool = Field(
         env="UNREACHABLE_EXECUTOR_REPORT_ENABLED", default=False
     )
-    SKIP_COLLATERAL_PENALTY: bool = Field(env="SKIP_COLLATERAL_PENALTY", default=True)
     DRY_RUN: bool = Field(env="DRY_RUN", default=False, description="Run validation without publishing scores/weights")
     # DAH-4001 — delayed idle settlement. off: today's behaviour, nothing reported. shadow: post every cycle's
     # vector and per-node rows to the backend and read its settled vector every tempo for comparison only; live
