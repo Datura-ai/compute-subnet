@@ -1,8 +1,7 @@
 """/upload_ssh_key checks the validator issued the key for this executor's own miner hotkey.
 
-Log-only by default (`ssh_key_miner_binding` warning, upload accepted);
-REQUIRE_MINER_BOUND_SSH_KEY refuses instead. Uploads without the miner-bound
-signature (older validators or miners) are logged as legacy.
+A key not bound to it is logged (`ssh_key_miner_binding`) and refused with 403,
+including uploads without the miner-bound signature (older validators or miners: legacy).
 """
 
 import logging
@@ -43,13 +42,13 @@ def other_miner_kp():
 def client(validator_kp, miner_kp, monkeypatch):
     monkeypatch.setattr(settings, "MINER_HOTKEY_SS58_ADDRESS", miner_kp.ss58_address)
     monkeypatch.setattr(settings, "DEFAULT_MINER_HOTKEY", miner_kp.ss58_address)
-    monkeypatch.setattr(settings, "REQUIRE_MINER_BOUND_SSH_KEY", False)
     monkeypatch.setattr("dependencies.auth.VALIDATOR_HOTKEYS_SS58", {"current": validator_kp.ss58_address})
     app = FastAPI()
     app.add_middleware(MinerMiddleware)
     app.include_router(apis_router)
     service = MagicMock()
     service.upload_ssh_key = AsyncMock(return_value={"ssh_username": "u", "ssh_port": 2200})
+    service.remove_ssh_key = AsyncMock(return_value=None)
     app.dependency_overrides[MinerService] = lambda: service
     return TestClient(app)
 
@@ -87,41 +86,32 @@ def test_matching_hotkey_accepted_without_log(client, miner_kp, validator_kp, ca
     assert _binding_logs(caplog) == []
 
 
-def test_mismatched_hotkey_logged_and_accepted(client, miner_kp, validator_kp, other_miner_kp, caplog):
+def test_mismatched_hotkey_logged_and_refused(client, miner_kp, validator_kp, other_miner_kp, caplog):
     caplog.set_level(logging.INFO)
     resp = client.post("/upload_ssh_key", json=_payload(miner_kp, validator_kp, other_miner_kp.ss58_address))
-    assert resp.status_code == 200
+    assert resp.status_code == 403
     [rec] = _binding_logs(caplog)
     assert "mismatch" in rec.getMessage() and other_miner_kp.ss58_address in rec.getMessage()
 
 
-def test_mismatched_hotkey_refused_when_enforced(client, miner_kp, validator_kp, other_miner_kp, monkeypatch):
-    monkeypatch.setattr(settings, "REQUIRE_MINER_BOUND_SSH_KEY", True)
-    resp = client.post("/upload_ssh_key", json=_payload(miner_kp, validator_kp, other_miner_kp.ss58_address))
-    assert resp.status_code == 403
-
-
-def test_hotkey_not_signed_by_validator_is_bad_signature(client, miner_kp, validator_kp, other_miner_kp, caplog, monkeypatch):
+def test_hotkey_not_signed_by_validator_is_bad_signature(client, miner_kp, validator_kp, other_miner_kp, caplog):
     # the miner-bound signature is not the validator's: the claimed hotkey proves nothing
     caplog.set_level(logging.INFO)
     body = _payload(miner_kp, validator_kp, miner_kp.ss58_address, signer=other_miner_kp)
-    assert client.post("/upload_ssh_key", json=body).status_code == 200
+    assert client.post("/upload_ssh_key", json=body).status_code == 403
     [rec] = _binding_logs(caplog)
     assert "bad_signature" in rec.getMessage()
-    monkeypatch.setattr(settings, "REQUIRE_MINER_BOUND_SSH_KEY", True)
-    assert client.post("/upload_ssh_key", json=body).status_code == 403
 
 
-def test_legacy_payload_accepted_and_logged(client, miner_kp, validator_kp, caplog):
+def test_legacy_payload_logged_and_refused(client, miner_kp, validator_kp, caplog):
     caplog.set_level(logging.INFO)
-    assert client.post("/upload_ssh_key", json=_payload(miner_kp, validator_kp)).status_code == 200
+    assert client.post("/upload_ssh_key", json=_payload(miner_kp, validator_kp)).status_code == 403
     [rec] = _binding_logs(caplog)
     assert "legacy" in rec.getMessage()
 
 
-def test_legacy_payload_refused_when_enforced(client, miner_kp, validator_kp, monkeypatch):
-    monkeypatch.setattr(settings, "REQUIRE_MINER_BOUND_SSH_KEY", True)
-    assert client.post("/upload_ssh_key", json=_payload(miner_kp, validator_kp)).status_code == 403
+def test_remove_ssh_key_needs_no_miner_binding(client, miner_kp, validator_kp):
+    assert client.post("/remove_ssh_key", json=_payload(miner_kp, validator_kp)).status_code == 200
 
 
 def test_signing_blob_without_hotkey_unchanged():

@@ -85,6 +85,9 @@ def _build_payload(miner_kp, validator_kp, nonce=None, signed_nonce="__same__") 
         "data_to_sign": _SSH_KEY,
         "signature": miner_sig,
         "validator_signature": validator_sig,
+        "miner_hotkey": miner_kp.ss58_address,
+        "validator_miner_signature": "0x"
+        + validator_kp.sign(ssh_pubkey_signing_blob(_SSH_KEY, nonce, miner_kp.ss58_address)).hex(),
     }
     if nonce is not None:
         payload["nonce"] = nonce

@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import bittensor
 import pytest
+from datura.requests.validator_requests import ssh_pubkey_signing_blob
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from middlewares.miner import MinerMiddleware
@@ -67,6 +68,9 @@ def _upload_payload(miner_kp, validator_kp) -> dict:
         "data_to_sign": _SSH_KEY,
         "signature": "0x" + miner_kp.sign(_SSH_KEY).hex(),
         "validator_signature": "0x" + validator_kp.sign(_SSH_KEY).hex(),
+        "miner_hotkey": miner_kp.ss58_address,
+        "validator_miner_signature": "0x"
+        + validator_kp.sign(ssh_pubkey_signing_blob(_SSH_KEY, None, miner_kp.ss58_address)).hex(),
     }
 
 

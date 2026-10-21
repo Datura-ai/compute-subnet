@@ -172,10 +172,6 @@ class Settings(BaseSettings):
     # I-78: a dated upload nonce (datura fresh_upload_nonce) older or newer than this is refused, so a
     # captured upload signature is worth at most this window. Symmetric for host clock drift.
     UPLOAD_NONCE_MAX_AGE_SECONDS: int = Field(env="UPLOAD_NONCE_MAX_AGE_SECONDS", default=600)
-    # Refuse an SSH-key upload unless the validator signed it for this executor's
-    # MINER_HOTKEY_SS58_ADDRESS. Off: a missing or different miner hotkey is only logged
-    # ("ssh_key_miner_binding"). Turn on once the validator, miner and executor fleet send it.
-    REQUIRE_MINER_BOUND_SSH_KEY: bool = Field(env="REQUIRE_MINER_BOUND_SSH_KEY", default=False)
     # DAH-3200: the backend signs `timestamp = int(time.time())` into every /containers/{name}
     # request (utilization and logs). A signed request older or newer than this many seconds is
     # refused, so a captured one cannot be replayed for the life of the container. Symmetric so a

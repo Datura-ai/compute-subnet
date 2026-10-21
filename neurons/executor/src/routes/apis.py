@@ -270,7 +270,7 @@ def _check_miner_binding(payload: UploadSShKeyPayload) -> None:
     """Check the validator issued this key for this executor's own miner hotkey.
 
     Logs `ssh_key_miner_binding` with miner_binding = legacy (no miner-bound signature),
-    bad_signature or mismatch, and refuses the upload only with REQUIRE_MINER_BOUND_SSH_KEY.
+    bad_signature or mismatch, and refuses the upload.
     """
     own_hotkey = settings.MINER_HOTKEY_SS58_ADDRESS
     if not payload.miner_hotkey or not payload.validator_miner_signature:
@@ -287,7 +287,6 @@ def _check_miner_binding(payload: UploadSShKeyPayload) -> None:
             miner_binding = "mismatch"
         else:
             return
-    enforced = settings.REQUIRE_MINER_BOUND_SSH_KEY
     logger.warning(
         _m(
             "ssh_key_miner_binding",
@@ -295,12 +294,11 @@ def _check_miner_binding(payload: UploadSShKeyPayload) -> None:
                 "miner_binding": miner_binding,
                 "signed_miner_hotkey": payload.miner_hotkey,
                 "executor_miner_hotkey": own_hotkey,
-                "enforced": enforced,
+                "enforced": True,
             },
         )
     )
-    if enforced:
-        raise HTTPException(status_code=403, detail="SSH key was not issued for this miner")
+    raise HTTPException(status_code=403, detail="SSH key was not issued for this miner")
 
 
 @apis_router.post("/upload_ssh_key")
