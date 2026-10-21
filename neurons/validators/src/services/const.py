@@ -244,6 +244,8 @@ NETWORK_MIN_DOWNLOAD_SPEED_MBPS = 50.0
 PREFERRED_POD_PORTS = [20000, 20001, 20002, 20003, 20004, 20005, 20006, 20007, 20008, 20009]
 
 POD_CONTAINER_PREFIX = "pod_"
+# DAH-4564: the --cpus a rental container was created with; `docker update` cannot change a label.
+RENTAL_CPU_COUNT_LABEL = "io.lium.cpu_count"
 FILLER_CONTAINER_PREFIX = "filler_"
 # DAH-2740: the name a pod's current container is parked under while an edit builds its replacement.
 # Still a pod_* name, so both sweepers protect it while the pod is rented (they add this suffix to
@@ -272,8 +274,8 @@ FILLER_CONTAINER_GRACE_MINUTES = 15
 # let a provider reuse the name of their own broken pod for a foreign workload.
 BROKEN_POD_CONTAINER_GRACE_MINUTES = 2 * FILLER_CONTAINER_GRACE_MINUTES
 # How long after a rental closes its pod container still counts as the unrent flow's teardown rather
-# than an orphan: with RENTAL_TEARDOWN_DEFERRAL_ENABLED on, the GPU usage check defers instead of
-# scoring 0 until this long after the close, which covers one run and occasionally two. A run is
+# than an orphan: the GPU usage check counts it as the renter's load, not ORPHANED_RENTAL_CONTAINER,
+# until this long after the close, which covers one run and occasionally two. A run is
 # shorter than this, so a rental that ends while the run is inside it always lands here. It must stay
 # short for the same reason as the grace above: the pod's name must not shield a workload for long.
 RENTAL_TEARDOWN_GRACE_MINUTES = 15
@@ -369,8 +371,11 @@ TDX_WHITELIST = {
             # DAH-2834, three settings added to init_script.sh; executor-v1.128 to v1.130 and main).
             # Missing here from 2026-09-14 to this entry, so every CVM created from those releases
             # would score zero with the whitelist on. Version 5; DAH-2780's pre_launch_script.sh
-            # rewrite (lium-io#1266) takes 6.
+            # rewrite (lium-io#1266) takes the next free version.
             "87d3430000bb7046a19eeaa6efe074fd8b5f7856bbfe2906addab238174c542d": 5,
+            # DAH-4631 — the same runner digest with EXECUTOR_SSH_SOURCE_PIN added to init_script.sh
+            # (lium-io#1677). Version 6.
+            "ae7ff74c04eb0626f7cd16822693298f2202650eba9e59b9daebe77a4e018c52": 6,
             # Version 3 (ab4d1433…, July runner sha256:f85b948b…) is gone and its number burned:
             # that runner bakes the STAGING validator hotkey via config_override.py and answers every
             # prod validator with 401. Removed, not demoted: TDX_MINIMUM_COMPOSE_VERSION defaults to 0.

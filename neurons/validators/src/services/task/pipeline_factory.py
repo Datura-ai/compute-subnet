@@ -32,6 +32,7 @@ from .checks import (
     CachedTemplateVerificationCheck,
     CapabilityCheck,
     CollateralStatusCheck,
+    ContainerDownloadSpeedCheck,
     CpuTruthCheck,
     CustomBuildOrphanSweepCheck,
     DiskHealthCheck,
@@ -58,14 +59,17 @@ from .checks import (
     PinnedMemoryProbeCheck,
     PortConnectivityCheck,
     PortCountCheck,
+    PostRentalGpuRecheckCheck,
     ProviderSideLoadCheck,
     RegistryPullCheck,
     RentalProbeCheck,
     RentalVerificationCheck,
     RentedGpuDropCheck,
+    RentedPodResourcesCheck,
     ScoreCheck,
     SpecChangeCheck,
     SshdAuthLogCheck,
+    StorageLimitCheck,
     StaleContainerCleanupCheck,
     StartGPUMonitorCheck,
     SshdBootstrapCheck,
@@ -308,6 +312,8 @@ class PipelineFactory:
                 # warning; below half its clock with a slowdown bit it fails an unrented node (score 0) until
                 # fixed. Before the rented short-circuit, so rented nodes get the warning too.
                 GpuThermalThrottleCheck(),
+                # a renter filling a node with no per-container disk limit fills the host (18 Oct): pure data, before the rented halt
+                StorageLimitCheck(),
                 # DAH-3484: a regex over specs.cpu.model, no SSH, never fatal. It has to run before
                 # TenantEnforcementCheck halts the pipeline for a rented executor: after that halt
                 # the published specs had no tdx_host_supported key and the backend stored false,
@@ -377,12 +383,16 @@ class PipelineFactory:
                 # Before the rented short-circuit; it leaves a rented node alone itself (no pull beside a
                 # renter's pod).
                 RegistryPullCheck(),
+                # DAH-3420: download speed from inside a container, as a renter gets it. Leaves rented and
+                # filler nodes alone itself; after PortConnectivityCheck, which settles sysbox_runtime.
+                ContainerDownloadSpeedCheck(),
                 # DAH-2313: require sysbox before an unrented executor is allowed on the network.
                 # Runs after PortConnectivityCheck, which overwrites ctx.state.sysbox_runtime with
                 # the authoritative probe result used for scoring (not the earlier scrape hint).
                 SysboxRequiredCheck(),
                 ExecutorImageCheck(),
                 InspectorRentedCheck(),
+                RentedPodResourcesCheck(),
                 TenantEnforcementCheck(),
                 GpuUsageCheck(),
                 # liumd phase 1 (DAH-2834): one signed `POST /verify` runs the VerifyX and matmul
@@ -397,6 +407,9 @@ class PipelineFactory:
                 # F-1599: a pinned-host-memory H2D/D2H round trip on every GPU (a TDX guest without GPU CC
                 # passes the matmul but cannot DMA pinned memory). On by default, shadow (logged only) until enforcement is enabled.
                 PinnedMemoryProbeCheck(),
+                # DAH-4482: a node the rented health read flagged proves every card before it re-lists.
+                # Rented nodes halted above, so this only runs unrented. Off by default: logs only.
+                PostRentalGpuRecheckCheck(),
                 # DAH-2265 Plan 2: advisory, non-fatal — observes whether the executor has
                 # the recommended default image pre-pulled (DOCKER_PULL no-op). Runs here,
                 # after specs/gpu_model/driver are populated and the GPU is validated, on the
@@ -466,6 +479,8 @@ class PipelineFactory:
                 RentedGpuDropCheck(),
                 GpuLossHoldCheck(),
                 GpuThermalThrottleCheck(),
+                # a renter filling a node with no per-container disk limit fills the host (18 Oct): pure data, before the rented halt
+                StorageLimitCheck(),
                 TdxHostCheck(),
                 GpuCountCheck(),
                 GpuModelValidCheck(),
@@ -492,6 +507,7 @@ class PipelineFactory:
                 _CUSTOM_BUILD_ORPHAN_SWEEP_SINGLETON,
                 ExecutorImageCheck(),
                 InspectorRentedCheck(),
+                RentedPodResourcesCheck(),
                 TenantEnforcementCheck(),
                 GpuUsageCheck(),
                 LocalVerifyCheck(),
@@ -502,6 +518,7 @@ class PipelineFactory:
                             PortConnectivityCheck(),
                             PortCountCheck(),
                             RegistryPullCheck(),
+                            ContainerDownloadSpeedCheck(),
                             SysboxRequiredCheck(),
                             RentalVerificationCheck(),
                         ],
@@ -509,6 +526,7 @@ class PipelineFactory:
                             CapabilityCheck(),
                             GpuFaultProbeCheck(),
                             PinnedMemoryProbeCheck(),
+                            PostRentalGpuRecheckCheck(),
                             CachedTemplateVerificationCheck(),
                         ],
                     ]
@@ -544,6 +562,8 @@ class PipelineFactory:
                 GpuLossHoldCheck(),
                 # ticket-0492: pure data, same place as in build_checks().
                 GpuThermalThrottleCheck(),
+                # a renter filling a node with no per-container disk limit fills the host (18 Oct): pure data, before the rented halt
+                StorageLimitCheck(),
                 # DAH-3484: before the rented halt, same as build_checks().
                 TdxHostCheck(),
                 GpuCountCheck(),
@@ -557,6 +577,8 @@ class PipelineFactory:
                 CpuTruthCheck(),
                 # DAH-2734: specs arithmetic plus a read-only SSH reading — safe in dry run.
                 ProviderSideLoadCheck(),
+                # DAH-4564: read-only docker inspect + /proc read — safe in dry run.
+                RentedPodResourcesCheck(),
                 # restore_stale_caps=False: dry run must not run nvidia-smi -pl on the executor or
                 # consume the shared gpu_power_restore:* records the production pipeline relies on.
                 GpuPowerLimitCheck(restore_stale_caps=False),
@@ -579,6 +601,7 @@ class PipelineFactory:
                 PortConnectivityCheck(),
                 PortCountCheck(),
                 # RegistryPullCheck left out: it removes and pulls an image on the executor.
+                # ContainerDownloadSpeedCheck left out: it starts a container on the executor.
                 # DAH-2313: require sysbox before an unrented executor is allowed on the network.
                 # Runs after PortConnectivityCheck, which overwrites ctx.state.sysbox_runtime with
                 # the authoritative probe result used for scoring (not the earlier scrape hint).
@@ -594,6 +617,7 @@ class PipelineFactory:
                 CapabilityCheck(),
                 GpuFaultProbeCheck(),
                 PinnedMemoryProbeCheck(),
+                PostRentalGpuRecheckCheck(),
                 RentalVerificationCheck(),
                 # RentalProbeCheck(),  # SKIP: creates and removes a container on the executor
                 ScoreCheck(),

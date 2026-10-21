@@ -128,10 +128,9 @@ def _missing_executor_failure(
 
     DAH-3338: the miner now says which executors it KNOWS (known_executor_ids) apart from which
     ACCEPTED the key (executors). An id the miner lists but did not return is a node it could not
-    reach, ExecutorUnreachable; an id the miner does not list is InvalidExecutorId, worded by
-    `_ssh_key_not_accepted_text` (DAH-3508: "no executor accepted the SSH key" / "the miner
-    returned a different executor id", never the old "Invalid executor id"). A miner that predates
-    known_executor_ids sends None, and every miss stays InvalidExecutorId as before.
+    reach, ExecutorUnreachable; an id the miner does not list is InvalidExecutorId, worded "the
+    miner no longer lists this executor" (DAH-4481). A miner that predates known_executor_ids sends
+    None: it is still InvalidExecutorId, worded by `_ssh_key_not_accepted_text` (DAH-3508).
     Both twins of the container flow (websocket and REST) call this, so they cannot drift apart.
     """
     if msg.known_executor_ids is not None and executor_id in msg.known_executor_ids:
@@ -141,6 +140,23 @@ def _missing_executor_failure(
                 extra=get_extra_info({**default_extra, "executors_returned": len(msg.executors)}),
             ),
             FailedContainerErrorCodes.ExecutorUnreachable,
+        )
+    if msg.known_executor_ids is not None:
+        # DAH-4481: the miner lists its executors and this id is not among them (e.g. the machine was
+        # re-registered under a new id). Saying "no executor accepted the SSH key" sent readers after a
+        # host SSH fault. The code stays InvalidExecutorId, the backend's existing name for this case.
+        return (
+            _m(
+                "Error: the miner no longer lists this executor",
+                extra=get_extra_info(
+                    {
+                        **default_extra,
+                        "reason_code": "EXECUTOR_NOT_LISTED_BY_MINER",
+                        "known_executors": len(msg.known_executor_ids),
+                    }
+                ),
+            ),
+            FailedContainerErrorCodes.InvalidExecutorId,
         )
     return _ssh_key_not_accepted_text(msg.executors, default_extra), FailedContainerErrorCodes.InvalidExecutorId
 
@@ -279,6 +295,9 @@ class MinerService:
         # wave's list of the node's miner, or the wave could verify and publish the node again
         # under the same id once the lane let go of it. Stays empty with the flag off.
         self.miners_awaiting_wave_list: dict[str, str] = {}
+        # per miner hotkey, the rented executor uuids it left out of its previous answer (RENTED_NOT_LISTED_ONE_CYCLE_GRACE).
+        # shortcut: in memory, so a restart costs one extra cycle before a real outage is reported.
+        self.rented_missed_last_cycle: dict[str, set[str]] = {}
 
     def start_awaiting_wave_lists(self, job_batch_id: str, miner_hotkeys: list[str]) -> None:
         """Validator.sync(), in the same step that publishes the cycle's inputs to the lane."""
@@ -985,7 +1004,7 @@ class MinerService:
 
         return results
 
-    def _iter_not_listed_rented(
+    def _missing_rented(
         self,
         payload: MinerJobRequestPayload,
         rented_data: RentedExecutorsResponse | None,
@@ -1020,6 +1039,24 @@ class MinerService:
                 continue
             yield executor_uuid, rented_executor
 
+    def _not_listed_rented_to_report(
+        self,
+        payload: MinerJobRequestPayload,
+        rented_data: RentedExecutorsResponse | None,
+        miner_returned_executors: list[ExecutorSSHInfo],
+        executor_id: str | None,
+    ) -> Iterator[tuple[str, RentedExecutor]]:
+        """The missing rented executors that get a row: with RENTED_NOT_LISTED_ONE_CYCLE_GRACE only those the
+        miner also left out of its previous answer."""
+        for executor_uuid, rented_executor in self._missing_rented(
+            payload, rented_data, miner_returned_executors, executor_id
+        ):
+            if settings.RENTED_NOT_LISTED_ONE_CYCLE_GRACE and executor_uuid not in self.rented_missed_last_cycle.get(
+                payload.miner_hotkey, ()
+            ):
+                continue
+            yield executor_uuid, rented_executor
+
     def _has_not_listed_rented_executors(
         self,
         payload: MinerJobRequestPayload,
@@ -1032,8 +1069,9 @@ class MinerService:
         A miner whose only executors are rented and down answers with zero executors; that used to
         end as one miner-level failure row and nothing about the nodes.
         """
+        # the raw list, not the graced one: a first miss must still reach the build, which records it
         return any(
-            self._iter_not_listed_rented(
+            self._missing_rented(
                 payload, rented_data, miner_returned_executors, executor_id
             )
         )
@@ -1065,10 +1103,18 @@ class MinerService:
         """
         results = [
             self._not_listed_rented_job_result(payload, executor_uuid, rented_executor)
-            for executor_uuid, rented_executor in self._iter_not_listed_rented(
+            for executor_uuid, rented_executor in self._not_listed_rented_to_report(
                 payload, rented_data, miner_returned_executors, executor_id
             )
         ]
+        if settings.RENTED_NOT_LISTED_ONE_CYCLE_GRACE and rented_data and executor_id is None:
+            # this miner's misses replace its previous ones: a node it returned, or whose rental ended, drops out
+            self.rented_missed_last_cycle[payload.miner_hotkey] = {
+                executor_uuid
+                for executor_uuid, _ in self._missing_rented(
+                    payload, rented_data, miner_returned_executors, executor_id
+                )
+            }
         if results:
             logger.info(
                 _m(
@@ -1155,6 +1201,11 @@ class MinerService:
         reach (DAH-3338). Rented ones are left to ``_build_not_listed_rented_results``; only the
         cycle's whole-miner request reports, as there. A miner that predates the field sends None
         and gets nothing. Flag off: [].
+
+        A miner that reached none of its nodes is down itself (its own network, a restart), not its
+        nodes: that wave writes none of these rows, so one miner-side blip does not mark every node
+        down (Pixel, 19 Oct). Manual rentals are left out, as the miner cannot reach them anyway. The
+        zero-executor wave then fails as before.
         """
         if (
             not settings.UNREACHABLE_EXECUTOR_REPORT_ENABLED
@@ -1162,12 +1213,28 @@ class MinerService:
             or executor_id is not None
         ):
             return []
-        skip = {str(executor.uuid).lower() for executor in msg.executors}
+        known = list(dict.fromkeys(str(uuid).lower() for uuid in msg.known_executor_ids))
+        reached = {str(executor.uuid).lower() for executor in msg.executors}
+        manual = {str(uuid).lower() for uuid in ((rented_data and rented_data.manual_rental_executors) or {})}
+        reachable = set(known) - manual
+        if reachable and not reached & reachable:
+            if log:
+                logger.warning(
+                    _m(
+                        "Miner reached none of its known executors; no unreachable rows this wave",
+                        extra=get_extra_info({
+                            "job_batch_id": payload.job_batch_id,
+                            "miner_hotkey": payload.miner_hotkey,
+                            "known": len(reachable),
+                        }),
+                    )
+                )
+            return []
+        skip = reached | manual
         if rented_data:
             skip |= {str(uuid).lower() for uuid in rented_data.executors}
-            skip |= {str(uuid).lower() for uuid in (rented_data.manual_rental_executors or {})}
         results = []
-        for executor_uuid in dict.fromkeys(str(uuid).lower() for uuid in msg.known_executor_ids):
+        for executor_uuid in known:
             if executor_uuid in skip:
                 continue
             event = build_executor_unreachable_by_miner_event(

@@ -11,10 +11,11 @@ per such node (EXECUTOR_UNREACHABLE_BY_MINER). Flag off: nothing is added.
 """
 
 from unittest.mock import patch
+from uuid import uuid4
 
 import pytest
 from datura.requests.miner_requests import AcceptSSHKeyRequest
-from protocol.vc_protocol.compute_requests import RentedExecutorsResponse
+from protocol.vc_protocol.compute_requests import ManualRentalInfo, RentedExecutorsResponse
 from services.task.availability import AvailabilityErrorCode, ReachSource, ReachTarget
 from tests.test_rented_executor_not_listed import (
     LISTED,
@@ -85,7 +86,7 @@ def test_miner_without_known_executor_ids_adds_nothing(flag_on):
 
 
 def test_rented_executors_are_left_to_the_not_listed_row(flag_on):
-    msg = accepted([], [MISSING])
+    msg = accepted([LISTED], [LISTED, MISSING])
 
     results = build(msg, RentedExecutorsResponse(executors={MISSING.upper(): rented()}))
 
@@ -108,8 +109,37 @@ def test_uuid_case_does_not_split_a_returned_executor_from_its_known_id(flag_on)
     assert results == []
 
 
+def test_a_miner_that_reached_none_of_its_nodes_adds_nothing(flag_on):
+    ids = [str(uuid4()) for _ in range(3)]
+    msg = accepted([], ids)
+
+    results = build(msg, RentedExecutorsResponse(executors={}))
+
+    assert results == []
+
+
+def test_a_miner_that_reached_one_node_reports_the_rest(flag_on):
+    ids = [str(uuid4()) for _ in range(25)]
+    msg = accepted(ids[:1], ids)
+
+    results = build(msg, RentedExecutorsResponse(executors={}))
+
+    assert [r.executor_info.uuid for r in results] == ids[1:]
+
+
+def test_manual_rentals_do_not_hide_an_idle_node_the_miner_could_not_reach(flag_on):
+    manual = [str(uuid4()) for _ in range(10)]
+    msg = accepted([LISTED], [*manual, LISTED, UNREACHABLE])
+
+    manual_info = {uuid: ManualRentalInfo(gpu_model="NVIDIA H200", gpu_count=8) for uuid in manual}
+
+    results = build(msg, RentedExecutorsResponse(executors={}, manual_rental_executors=manual_info))
+
+    assert [r.executor_info.uuid for r in results] == [UNREACHABLE]
+
+
 @pytest.mark.asyncio
-async def test_rest_zero_executors_falls_through_to_the_unreachable_node_row(rest_service, flag_on):  # noqa: F811
+async def test_rest_zero_executors_writes_no_unreachable_row(rest_service, flag_on):  # noqa: F811
     async def _make_rest_request(method, url, json_data, headers, timeout, log_extra, operation_name):
         if url.endswith("ssh-pubkey-submit"):
             return 200, accepted([], [UNREACHABLE]).model_dump(mode="json")
@@ -119,8 +149,7 @@ async def test_rest_zero_executors_falls_through_to_the_unreachable_node_row(res
 
     out = await request(rest_service, RentedExecutorsResponse(executors={}))
 
-    assert [r.executor_info.uuid for r in out["results"]] == [UNREACHABLE]
-    assert out["results"][0].failure_reason_code == "EXECUTOR_UNREACHABLE_BY_MINER"
+    assert [r.log_text for r in out["results"]] == ["Miner returned zero executors in AcceptSSHKeyRequest"]
 
 
 @pytest.mark.asyncio

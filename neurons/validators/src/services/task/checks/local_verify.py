@@ -57,7 +57,7 @@ from core.utils import _m, get_extra_info
 from ..messages import LocalVerifyMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
-from .capability import _get_filler_only_container
+from .capability import get_filler_only_container
 from .verifyx import _first_pass_challenge_config
 
 logger = logging.getLogger(__name__)
@@ -89,7 +89,7 @@ def _over_time(name: str, answer: LocalVerifyAnswer) -> bool:
 def _matmul_ssh_reason(ctx: Context) -> str | None:
     """Why the matmul is not asked for in the one call, or None when it is.
 
-    `allcards_ssh` (DAH-2671 item 3): the all-cards work-proof (`_probe_all_claimed_cards`, one
+    `allcards_ssh` (DAH-2671 item 3): the all-cards work-proof (`probe_all_claimed_cards`, one
     pinned run per card) lives inside the SSH matmul path only. While that check is on, the matmul
     stays on SSH so a consumed local pass can never skip the probe or its enforcement; phase 2
     carries `devices` in the intent and judges the per-card output here.
@@ -148,7 +148,7 @@ class LocalVerifyCheck:
         specs = ctx.state.specs
         if not specs:
             return self._skipped(ctx, "no specs")
-        if _get_filler_only_container(ctx):
+        if get_filler_only_container(ctx):
             # Both consuming checks skip on an idle filler; there is nothing to run locally.
             return self._skipped(ctx, "filler only")
         if ctx.config.validator_keypair is None:

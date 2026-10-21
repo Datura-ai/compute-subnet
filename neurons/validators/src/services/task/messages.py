@@ -423,6 +423,38 @@ class GpuThermalThrottleMessages:
     )
 
 
+class StorageLimitMessages:
+    MISSING = MessageTemplate(
+        event="Docker cannot limit a container's disk",
+        reason="STORAGE_LIMIT_MISSING",
+        severity="warning",
+        category="env",
+        impact="Proceed; score not changed while the requirement is not enforced (see enforced). A renter who "
+        "fills their disk fills the host's Docker storage and takes the host and every pod on it down",
+        remediation="Set up Docker storage that enforces a per-container limit (overlay2 on xfs mounted with "
+        "pquota): https://docs.lium.io/providers/nodes/docker-storage . Check with `sudo docker run --rm "
+        "--storage-opt size=1g --gpus all daturaai/compute-subnet-executor:latest nvidia-smi`.",
+    )
+    REQUIRED = MessageTemplate(
+        event="Node rejected: Docker cannot limit a container's disk",
+        reason="STORAGE_LIMIT_REQUIRED",
+        severity="error",
+        category="env",
+        impact="Job skipped; score set to 0 until the host enforces a per-container storage limit",
+        remediation="Set up Docker storage that enforces a per-container limit (overlay2 on xfs mounted with "
+        "pquota): https://docs.lium.io/providers/nodes/docker-storage . The node passes again on the next "
+        "validation once `sudo docker run --rm --storage-opt size=1g --gpus all "
+        "daturaai/compute-subnet-executor:latest nvidia-smi` works.",
+    )
+    OK = MessageTemplate(
+        event="Docker limits a container's disk",
+        reason="STORAGE_LIMIT_OK",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+
+
 class RentedGpuDropMessages:
     DROP = MessageTemplate(
         event="Rented node lost a GPU",
@@ -493,6 +525,60 @@ class GpuLossHoldMessages:
         severity="info",
         category="env",
         impact="Proceed",
+    )
+
+
+class PostRentalGpuRecheckMessages:
+    """DAH-4482 — the recheck a node owes after the rented GPU health read flagged it. Shadow while
+    POST_RENTAL_GPU_RECHECK_ENABLED is off: WOULD_REQUIRE is logged and the cycle goes on."""
+
+    NO_MARKER = MessageTemplate(
+        event="Post-rental GPU recheck not needed",
+        reason="POST_RENTAL_GPU_RECHECK_NOT_NEEDED",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+    WOULD_REQUIRE = MessageTemplate(
+        event="Post-rental GPU recheck would be required (shadow)",
+        reason="POST_RENTAL_GPU_RECHECK_WOULD_REQUIRE",
+        severity="warning",
+        category="env",
+        impact="Shadow observation only: score was NOT changed",
+    )
+    FILLER_SKIPPED = MessageTemplate(
+        event="Post-rental GPU recheck waits: active filler",
+        reason="POST_RENTAL_GPU_RECHECK_SKIPPED_ACTIVE_FILLER",
+        severity="info",
+        category="policy",
+        impact="Proceed; the recheck runs on a cycle without a filler, or after a few filler cycles anyway.",
+    )
+    INCONCLUSIVE = MessageTemplate(
+        event="Post-rental GPU recheck gave no verdict",
+        reason="POST_RENTAL_GPU_RECHECK_INCONCLUSIVE",
+        severity="info",
+        category="env",
+        impact="Proceed; the recheck runs again next cycle.",
+    )
+    PASSED = MessageTemplate(
+        event="Post-rental GPU recheck passed",
+        reason="POST_RENTAL_GPU_RECHECK_PASSED",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+    FAILED = MessageTemplate(
+        event="Post-rental GPU recheck failed",
+        reason="POST_RENTAL_GPU_RECHECK_FAILED",
+        severity="error",
+        category="env",
+        impact="Score set to 0",
+        remediation=(
+            "A GPU showed a fault during the last rental, and after it at least one card failed the "
+            "all-cards matmul or the kernel-fault probe. Check `nvidia-smi -q` and the host `dmesg` for NVRM "
+            "Xid lines; reset the card (`nvidia-smi -r`) or reboot the host, replace a card that still fails, "
+            "and wait one cycle."
+        ),
     )
 
 
@@ -828,6 +914,14 @@ class DuplicateExecutorMessages:
         impact="Score set to 0 for this cycle; the other miner keeps it",
         remediation="One machine earns under one miner per cycle. Register it under one miner only.",
     )
+    GPU_ALIAS = MessageTemplate(
+        event="GPU also reported by another executor of this miner this cycle",
+        reason="EXECUTOR_GPU_ALIAS",
+        severity="warning",
+        category="policy",
+        impact="Score set to 0 for this cycle; the other executor keeps it",
+        remediation="Each physical GPU earns under one executor. Register every machine once.",
+    )
 
 class CollateralStatusMessages:
     DEPOSITED = MessageTemplate(
@@ -1161,29 +1255,6 @@ class GpuUsageMessages:
         "node uses it: {rental_status}. Do not stop or remove it: contact Lium support with the "
         "container name."
     )
-    ORPHANED_CONTAINER_OF_A_CHANGING_RENTAL_REMEDIATION = (
-        "{orphaned_container} is a Lium pod container{pod} of a rental on this node that is ending "
-        "or starting: {rental_status}. Lium stops or starts it itself, so do not stop or remove it; "
-        "the next cycle checks the node again."
-    )
-    TEARDOWN_IN_PROGRESS = MessageTemplate(
-        event="Rental teardown in progress",
-        reason="TEARDOWN_IN_PROGRESS",
-        severity="info",
-        category="runtime",
-        impact="GPU usage re-checked next cycle",
-        remediation=(
-            "A rental on this node has just ended and Lium is stopping its container; do not stop it yourself."
-        ),
-    )
-    RENTAL_STARTED_DURING_RUN = MessageTemplate(
-        event="Rental started during validation",
-        reason="RENTAL_STARTED_DURING_RUN",
-        severity="info",
-        category="runtime",
-        impact="GPU usage re-checked next cycle",
-        remediation="The GPU is held by a rental that started while this run was in progress.",
-    )
     FOREIGN_PROCESS = MessageTemplate(
         event="Foreign GPU process on idle executor",
         reason="GPU_FOREIGN_PROCESS",
@@ -1367,6 +1438,66 @@ class RegistryPullMessages:
     SKIPPED = MessageTemplate(
         event="Registry pull check skipped",
         reason="REGISTRY_PULL_SKIPPED",
+        severity="info",
+        category="runtime",
+        impact="Proceed",
+    )
+
+
+CONTAINER_DOWNLOAD_SLOW_REMEDIATION = (
+    "a container on this node downloads from PyPI or Hugging Face far slower than the host does, so a renter's "
+    "`pip install` or model download crawls; check the docker bridge MTU against the uplink (`ip link`; set "
+    '"mtu" in /etc/docker/daemon.json to the uplink\'s and restart docker), NAT/firewall rules and any traffic '
+    "shaping on docker traffic, then `docker run --rm alpine:3.19 wget -O /dev/null "
+    "https://files.pythonhosted.org/packages/9b/b4/e3c7e6fab0f77fff6194afa173d1f2342073d91b1d3b4b30b17c3fb4407a/"
+    "numpy-2.1.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl` on the host must finish in seconds"
+)
+
+
+class ContainerDownloadSpeedMessages:
+    SLOW = MessageTemplate(
+        event="Downloads from inside a container on this node are too slow",
+        reason="CONTAINER_DOWNLOAD_SLOW",
+        severity="warning",
+        category="runtime",
+        impact="Score set to 0",
+        remediation=CONTAINER_DOWNLOAD_SLOW_REMEDIATION,
+    )
+    # the same finding while CONTAINER_DOWNLOAD_SPEED_ENFORCEMENT_ENABLED is off: logged, score unchanged
+    SLOW_OBSERVED = MessageTemplate(
+        event="Downloads from inside a container on this node are too slow (not enforced)",
+        reason="CONTAINER_DOWNLOAD_SLOW_OBSERVED",
+        severity="warning",
+        category="runtime",
+        impact="None: CONTAINER_DOWNLOAD_SPEED_ENFORCEMENT_ENABLED is off",
+        remediation=CONTAINER_DOWNLOAD_SLOW_REMEDIATION,
+    )
+    SLOW_ONCE = MessageTemplate(
+        event="A container download was slow once; the next reading decides",
+        reason="CONTAINER_DOWNLOAD_SLOW_ONCE",
+        severity="info",
+        category="runtime",
+        impact="Proceed",
+        remediation=CONTAINER_DOWNLOAD_SLOW_REMEDIATION,
+    )
+    OK = MessageTemplate(
+        event="Container download speed verified",
+        reason="CONTAINER_DOWNLOAD_SPEED_OK",
+        severity="info",
+        category="runtime",
+        impact="Proceed",
+    )
+    # an endpoint the validator cannot reach either, an HTTP error, or a container that did not run
+    UNMEASURED = MessageTemplate(
+        event="Container download speed reached no verdict",
+        reason="CONTAINER_DOWNLOAD_SPEED_UNMEASURED",
+        severity="info",
+        category="runtime",
+        impact="Proceed",
+    )
+    SKIPPED = MessageTemplate(
+        event="Container download speed check skipped",
+        reason="CONTAINER_DOWNLOAD_SPEED_SKIPPED",
         severity="info",
         category="runtime",
         impact="Proceed",
@@ -1589,8 +1720,10 @@ class GpuMemoryHealthMessages:
         event="GPU memory reported broken by NVML",
         reason="GPU_MEMORY_HEALTH_FAILED",
         severity="error",
-        category="gpu",
-        impact="Node not rentable until the card is reset or replaced (a running rental is kept)",
+        # an availability error: the backend hides the node and refuses new rentals, a rental on it runs on
+        category=AVAILABILITY_CATEGORY,
+        impact="Node hidden and not rentable until the card is reset or replaced (a running rental "
+        "is kept)",
         remediation="NVML reports uncorrected ECC errors, a pending or failed row remap, or a "
         "required recovery action on the card(s) in flags; a rented card in this state faults the "
         "renter's jobs. Check `nvidia-smi -q -d ECC,ROW_REMAPPER`: a pending remap or a "
@@ -1617,6 +1750,17 @@ class GpuMemoryHealthMessages:
         severity="info",
         category="gpu",
         impact="Proceed",
+    )
+    RESET_ADVISED = MessageTemplate(
+        event="GPU memory needs a reset",
+        reason="GPU_MEMORY_HEALTH_RESET_ADVISED",
+        severity="warning",
+        category="gpu",
+        impact="Proceed; score not changed",
+        remediation="NVML reports a pending row remap or a recovery action from correctable errors "
+        "on the card(s) in warnings. The card still works, but the remap takes effect only after "
+        "a reset: drain the card and reset it (`nvidia-smi -r` with no process on it, or a host "
+        "reboot) when it is free.",
     )
     OK = MessageTemplate(
         event="GPU memory health ok",
@@ -2185,6 +2329,55 @@ class LocalVerifyMessages:
         severity="info",
         category="transport",
         impact="The matmul and VerifyX verdicts below come from the executor's local run, judged by the validator",
+    )
+
+
+class RentedPodResourcesMessages:
+    """DAH-4564 — a host script `docker update --cpuset-cpus`-pins a rented pod, or cuts its CPU quota,
+    below 95% of the cores rented. Shadow (RENTED_POD_RESOURCES_CHECK_ENABLED without enforcement)
+    renders RESOURCES_REDUCED as a warning and keeps passed=True; only
+    RENTED_POD_RESOURCES_ENFORCEMENT_ENABLED zeroes the score. A raised oom_score_adj is recorded
+    in the event and never scored: a renter running as root can raise it himself."""
+
+    RESOURCES_OK = MessageTemplate(
+        event="Rented pod CPU resources match the deployment",
+        reason="RENTED_POD_RESOURCES_OK",
+        severity="info",
+        category="policy",
+        impact="Proceed",
+    )
+    RESOURCES_REDUCED = MessageTemplate(
+        event="Host pinned or throttled a rented pod below 95% of its advertised CPUs",
+        reason="RENTED_POD_RESOURCES_REDUCED",
+        severity="error",
+        category="policy",
+        impact="Score set to 0",
+        remediation=(
+            "A host-side script changed the renter's container with `docker update` "
+            "(--cpuset-cpus, --cpus or --cpu-quota). A rental must keep at least 95% of its advertised "
+            "cores in both its cpuset and its CPU quota; remove the script or loosen it to that."
+        ),
+    )
+    RESOURCES_UNKNOWN = MessageTemplate(
+        event="Rented pod CPU resources could not be read",
+        reason="RENTED_POD_RESOURCES_UNKNOWN",
+        severity="info",
+        category="policy",
+        impact="Proceed without penalty",
+    )
+    NOT_RENTED = MessageTemplate(
+        event="Rented pod resources check skipped: no running rental",
+        reason="RENTED_POD_RESOURCES_NOT_RENTED",
+        severity="info",
+        category="policy",
+        impact="Proceed",
+    )
+    SKIPPED = MessageTemplate(
+        event="Rented pod resources check disabled",
+        reason="RENTED_POD_RESOURCES_DISABLED",
+        severity="info",
+        category="policy",
+        impact="Proceed",
     )
 
 

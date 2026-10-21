@@ -17,6 +17,7 @@ from typing import TypeVar
 
 from core.utils import _m, get_extra_info
 from datura.requests.miner_requests import ExecutorSSHInfo
+from services.const import RENTAL_CPU_COUNT_LABEL
 from services.node_host import NodeHostError, dial_validated, resolve_node_host
 
 
@@ -675,6 +676,16 @@ class RentalDockerSdkClient:
                 _wrap_error_message("Docker SDK inspect container failed", exc)
             ) from exc
 
+    async def container_image_id(self, *, container: str) -> str:
+        """The image ID (`sha256:…`) the container was created from; a later tag move does not change it."""
+        try:
+            info = await _in_docker_thread(self._api_client.inspect_container, container)
+        except Exception as exc:
+            raise RentalDockerOperationError(
+                _wrap_error_message("Docker SDK inspect container failed", exc)
+            ) from exc
+        return str(info.get("Image") or "")
+
     async def container_status(self, *, container_name: str) -> str | None:
         """Return the container's ``State.Status`` (``running``, ``exited``, ``removing``, …), or
         None when dockerd no longer knows the name (404)."""
@@ -1017,6 +1028,7 @@ class RentalDockerSdkClient:
                 name=spec.name,
                 entrypoint=spec.entrypoint or None,
                 host_config=host_config,
+                labels={RENTAL_CPU_COUNT_LABEL: str(spec.cpu_count)} if spec.cpu_count else None,
             )
         if spec.before_start is not None:
             spec.before_start(
@@ -1364,6 +1376,8 @@ _INTERACTIVE_SHELLS = frozenset(
     {"sh", "bash", "zsh", "/bin/sh", "/bin/bash", "/bin/zsh", "/usr/bin/bash", "/usr/bin/zsh"}
 )
 KEEP_ALIVE_COMMAND: tuple[str, ...] = ("sleep", "infinity")
+# entrypoints that end in `exec "$@"`: with no Cmd they exit at start (the backend's image_startup_check lists the same)
+_PASS_THROUGH_ENTRYPOINTS = frozenset({"nvidia_entrypoint.sh"})
 
 
 def keep_alive_command_for(entrypoint: tuple[str, ...], cmd: tuple[str, ...]) -> tuple[str, ...]:
@@ -1375,6 +1389,12 @@ def keep_alive_command_for(entrypoint: tuple[str, ...], cmd: tuple[str, ...]) ->
     if len(cmd) == 1 and cmd[0] in _INTERACTIVE_SHELLS:
         return KEEP_ALIVE_COMMAND
     if not cmd and not entrypoint:
+        return KEEP_ALIVE_COMMAND
+    if (
+        not cmd
+        and len(entrypoint) == 1
+        and entrypoint[0].rsplit("/", 1)[-1] in _PASS_THROUGH_ENTRYPOINTS
+    ):
         return KEEP_ALIVE_COMMAND
     return ()
 

@@ -16,6 +16,7 @@ from neurons.validators.src.services.task.checks.rented_gpu_drop import (
     FAULT_ANCHORED_MISSING,
     FAULT_BELOW_RENTED,
     FAULT_DETAILS_SHORT,
+    FAULT_ECC_UNCORRECTED,
     FAULT_NVML_ERROR,
     judge_rented_gpus,
     nvml_error_code,
@@ -38,6 +39,8 @@ from tests.helpers import (
     build_state,
     default_executor,
 )
+from tests.test_gpu_fault_probe_check import FakeRunner
+from tests.test_gpu_memory_health_check import _report
 from tests.test_machine_spec_scrape_check import DummySSHCommandRunner, make_command_result
 
 MODEL = "NVIDIA GeForce RTX 5090"
@@ -371,6 +374,139 @@ async def test_an_nvml_error_with_every_card_listed_is_reported(context_factory)
     assert result.event.reason_code == Msg.DROP.reason
     assert result.event.what_we_saw["faults"] == [FAULT_NVML_ERROR]
     services.backend.report_rented_gpu_drop.assert_awaited_once()
+
+
+async def _run_with_memory_read(context_factory, services, stdout: str):
+    ctx = _ctx(context_factory, services, listed=UUIDS).model_copy(
+        update={"runner": FakeRunner(stdout)}
+    )
+    return await RentedGpuDropCheck().run(ctx), ctx
+
+
+@pytest.mark.asyncio
+async def test_a_listed_card_with_uncorrected_ecc_is_reported_as_lost(context_factory):
+    services = _services()
+    flags = [f"gpu 3 ({UUIDS[3]}): 1 uncorrected ECC error(s) since the driver loaded"]
+
+    result, ctx = await _run_with_memory_read(
+        context_factory, services, _report("flagged", flags=flags)
+    )
+
+    assert result.event.reason_code == Msg.DROP.reason
+    assert result.event.what_we_saw["faults"] == [FAULT_ECC_UNCORRECTED]
+    call = services.backend.report_rented_gpu_drop.await_args
+    assert call.kwargs["faults"] == [FAULT_ECC_UNCORRECTED]
+    assert call.kwargs["missing_uuids"] == [UUIDS[3]]
+    assert call.kwargs["expected_gpu_count"] == call.kwargs["visible_gpu_count"] == 8
+    # GpuMemoryHealthCheck reuses this read instead of a second SSH run
+    assert result.updates["state"].memory_health.report["flags"] == flags
+    assert len(ctx.runner.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_memory_read_does_not_recover_an_uncorrected_ecc_incident(context_factory):
+    services = _services()
+    flags = [f"gpu 3 ({UUIDS[3]}): 1 uncorrected ECC error(s) since the driver loaded"]
+    await _run_with_memory_read(context_factory, services, _report("flagged", flags=flags))
+
+    unread, _ = await _run_with_memory_read(
+        context_factory, services, _report("error", flags=[], nvml={"available": False})
+    )
+    assert unread.event.reason_code == Msg.OK.reason
+    assert _states(services) == ["fault"]
+
+    healthy = {"available": True, "gpus": [{"index": 3, "uuid": UUIDS[3], "ecc_uncorrected": 0}]}
+    healed, _ = await _run_with_memory_read(
+        context_factory, services, _report("ok", flags=[], nvml=healthy)
+    )
+    assert healed.event.reason_code == Msg.RECOVERED.reason
+    assert _states(services) == ["fault", "recovered"]
+
+
+ECC_FLAGS = [f"gpu 3 ({UUIDS[3]}): 1 uncorrected ECC error(s) since the driver loaded"]
+
+
+@pytest.mark.asyncio
+async def test_a_broken_card_on_a_partly_rented_node_is_not_named(context_factory):
+    # the rental does not say which cards the pod holds: the broken card may be one no pod rents
+    services = _services()
+    ctx = _ctx(context_factory, services, listed=UUIDS, gpu_count=1).model_copy(
+        update={"runner": FakeRunner(_report("flagged", flags=ECC_FLAGS))}
+    )
+
+    result = await RentedGpuDropCheck().run(ctx)
+
+    assert result.event.what_we_saw["faults"] == [FAULT_ECC_UNCORRECTED]
+    call = services.backend.report_rented_gpu_drop.await_args
+    assert call.kwargs["faults"] == [FAULT_ECC_UNCORRECTED]
+    assert call.kwargs["missing_uuids"] == []
+
+
+def test_a_card_off_the_bus_does_not_make_a_part_rental_look_like_the_whole_node():
+    # 8 anchored cards, one fell off the bus so NVML and the scrape list 7, and the rental holds 7
+    drop = judge_rented_gpus(
+        rented_gpu_count=7,
+        anchor_uuids=UUIDS,
+        nvml_count=7,
+        listed_uuids=UUIDS[:7],
+        listed_count=7,
+        scrape_error=None,
+        broken_uuids=[UUIDS[3]],
+    )
+
+    assert (
+        len(drop.missing_uuids) == 1
+    )  # the card off the bus; the broken card may be one no pod rents
+
+
+UNREAD_MEMORY = [
+    pytest.param(
+        _report("flagged", flags=["gpu 3: no uuid in this flag"]), id="flag-names-no-card"
+    ),
+    pytest.param(
+        _report(
+            "ok",
+            flags=[],
+            nvml={
+                "available": True,
+                "gpus": [{"index": 3, "uuid": UUIDS[3], "ecc_uncorrected": None}],
+            },
+        ),
+        id="ecc-read-failed-on-a-card",
+    ),
+    pytest.param(
+        _report("ok", flags=[], nvml={"available": True, "gpus": []}), id="nvml-lists-no-card"
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unread_stdout", UNREAD_MEMORY)
+async def test_a_memory_read_that_proves_nothing_keeps_an_ecc_incident_open(
+    context_factory, unread_stdout
+):
+    redis = FakeRedis()
+    services = _services(redis=redis)
+    key = f"rented_gpu_drop:{POD_ID}"
+    await _run_with_memory_read(context_factory, services, _report("flagged", flags=ECC_FLAGS))
+    redis.ttl.pop(key)
+
+    unread, _ = await _run_with_memory_read(context_factory, services, unread_stdout)
+
+    assert unread.event.reason_code == Msg.OK.reason
+    assert _states(services) == ["fault"]
+    # the held mark is written again, so its TTL does not run out while NVML stays unread
+    assert redis.ttl[key] == rented_gpu_drop.settings.RENTED_GPU_DROP_STATE_TTL_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_memory_read_reports_nothing(context_factory):
+    services = _services()
+
+    result, _ = await _run_with_memory_read(context_factory, services, _report("ok"))
+
+    assert result.event.reason_code == Msg.OK.reason
+    services.backend.report_rented_gpu_drop.assert_not_awaited()
 
 
 @pytest.mark.asyncio
