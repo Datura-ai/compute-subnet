@@ -4,8 +4,7 @@ Executor-side tests for the CVM attestation gap remediation (DAH-2338, G1/G3).
 Covers:
 - G3 signature surface: validator_signature must cover public_key ‖ nonce when a
   nonce rides the request — swapping or stripping the nonce invalidates it; the
-  legacy (no-nonce) format keeps working; REQUIRE_ATTESTATION_NONCE gates the
-  enforcement phase on the upload route only.
+  an upload without a dated nonce is refused; removals keep the legacy (no-nonce) format.
 - G3 quote binding: TDX report_data becomes sha256 half ‖ nonce half, nonce-bound
   quotes bypass the cache, malformed nonces are rejected.
 - G1 topology guard: GPU evidence is emitted only in-CVM with the feature flag on;
@@ -98,7 +97,7 @@ def _build_payload(miner_kp, validator_kp, nonce=None, signed_nonce="__same__") 
 
 def test_nonce_covered_signature_accepted(client, miner_keypair, validator_keypair):
     # Arrange — signature over public_key ‖ nonce, nonce shipped in payload
-    payload = _build_payload(miner_keypair, validator_keypair, nonce=_NONCE)
+    payload = _build_payload(miner_keypair, validator_keypair, nonce=fresh_upload_nonce())
 
     # Act
     response = client.post("/upload_ssh_key", json=payload)
@@ -107,12 +106,13 @@ def test_nonce_covered_signature_accepted(client, miner_keypair, validator_keypa
     assert response.status_code == 200
 
 
-def test_legacy_no_nonce_signature_still_accepted(client, miner_keypair, validator_keypair):
-    # Arrange — deployed-fleet format: bare public key signature, no nonce
+def test_legacy_no_nonce_signature_refused_on_upload_only(client, miner_keypair, validator_keypair):
+    # Arrange — pre-nonce format: bare public key signature, no nonce
     payload = _build_payload(miner_keypair, validator_keypair, nonce=None)
 
-    # Act / Assert
-    assert client.post("/upload_ssh_key", json=payload).status_code == 200
+    # Act / Assert — an upload needs the dated nonce; a removal never carries one
+    assert client.post("/upload_ssh_key", json=payload).status_code == 401
+    assert client.post("/remove_ssh_key", json=payload).status_code == 200
 
 
 def test_swapped_nonce_rejected(client, miner_keypair, validator_keypair):
@@ -148,8 +148,7 @@ def test_nonce_without_covering_signature_rejected(client, miner_keypair, valida
 def test_require_nonce_enforcement_upload_only(
     client, miner_keypair, validator_keypair, monkeypatch
 ):
-    # Arrange — enforcement phase: uploads without a nonce are rejected
-    monkeypatch.setattr(settings, "REQUIRE_ATTESTATION_NONCE", True)
+    # Arrange — uploads without a dated nonce are rejected
     no_nonce = _build_payload(miner_keypair, validator_keypair, nonce=None)
     undated = _build_payload(miner_keypair, validator_keypair, nonce=_NONCE)
     with_nonce = _build_payload(miner_keypair, validator_keypair, nonce=fresh_upload_nonce())
