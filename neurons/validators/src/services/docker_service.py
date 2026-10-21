@@ -2002,11 +2002,7 @@ def _can_remount_encrypted_volume(local_volume_path: str | None) -> bool:
     # derives a passphrase that simply will not mount. A plaintext path at or under the ciphertext
     # mount is refused as well: mounting the plaintext view inside the ciphertext it is decrypting
     # is not something recovery should attempt on customer data.
-    if not (
-        settings.RECOVER_ENCRYPTED_VOLUMES
-        and settings.VOLUME_MASTER_SECRET
-        and local_volume_path
-    ):
+    if not (settings.VOLUME_MASTER_SECRET and local_volume_path):
         return False
     if local_volume_path == _LIUM_CIPHER_MOUNT or local_volume_path.startswith(
         f"{_LIUM_CIPHER_MOUNT}/"
