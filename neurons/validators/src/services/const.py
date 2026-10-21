@@ -53,6 +53,7 @@ GPU_MODEL_RATES = {
     "NVIDIA RTX A6000": 0.009,
     "NVIDIA RTX PRO 6000 Blackwell Server Edition": 0.025, # 2.5x 6000 ada
     "NVIDIA RTX PRO 6000 Blackwell Workstation Edition": 0.027, # 2.7x 6000 ada
+    "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition": 0.024, # 2.4x 6000 ada: proposed, Workstation 0.027 scaled to Max-Q 300 W throughput (~88%); DAH-3453, Mikhail to confirm
     "NVIDIA RTX PRO 6000D Blackwell Workstation Edition": 0.0,
     "NVIDIA RTX 6000D": 0.0,
     "NVIDIA RTX A5000": 0.002,
