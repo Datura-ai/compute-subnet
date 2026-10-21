@@ -497,8 +497,7 @@ class GpuLossHoldMessages:
 
 
 class PostRentalGpuRecheckMessages:
-    """DAH-4482 — the recheck a node owes after the rented GPU health read flagged it. Shadow while
-    POST_RENTAL_GPU_RECHECK_ENABLED is off: WOULD_REQUIRE is logged and the cycle goes on."""
+    """DAH-4482 — the recheck a node owes after the rented GPU health read flagged it."""
 
     NO_MARKER = MessageTemplate(
         event="Post-rental GPU recheck not needed",
@@ -506,13 +505,6 @@ class PostRentalGpuRecheckMessages:
         severity="info",
         category="env",
         impact="Proceed",
-    )
-    WOULD_REQUIRE = MessageTemplate(
-        event="Post-rental GPU recheck would be required (shadow)",
-        reason="POST_RENTAL_GPU_RECHECK_WOULD_REQUIRE",
-        severity="warning",
-        category="env",
-        impact="Shadow observation only: score was NOT changed",
     )
     FILLER_SKIPPED = MessageTemplate(
         event="Post-rental GPU recheck waits: active filler",

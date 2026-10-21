@@ -532,11 +532,6 @@ class Settings(BaseSettings):
     # DAH-4457: a node whose GPU dropped out stays hidden (GPU_LOST availability entry, no new rentals) until its
     # cards have read clean this long after the last faulty cycle (GpuLossHoldCheck).
     GPU_LOSS_HOLD_SECONDS: int = Field(env="GPU_LOSS_HOLD_SECONDS", default=7200, gt=0)
-    # DAH-4482: a node GpuMemoryHealthCheck flagged while rented must pass the all-cards matmul and the
-    # kernel-fault probe on every card on its next unrented cycle, whatever the MATMUL_ALLCARDS_* /
-    # GPU_FAULT_PROBE_* flags say; a failure fails the node until a recheck passes. Off: that cycle only logs
-    # POST_RENTAL_GPU_RECHECK_WOULD_REQUIRE.
-    POST_RENTAL_GPU_RECHECK_ENABLED: bool = Field(env="POST_RENTAL_GPU_RECHECK_ENABLED", default=False)
     # DAH-2735 — judge an idle node's GPU by WHO holds it, not by utilization: a competitor's
     # rental idling on the card (Nodexo/SN106) passes every percentage gate. CHECK_ENABLED
     # observes and logs the verdict; ENFORCEMENT additionally zeroes the score. Enforcement

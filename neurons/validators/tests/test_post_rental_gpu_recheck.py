@@ -66,15 +66,10 @@ def _idle_ctx(context_factory, runner, validation, *, marker=MARKER, gpu_count=2
 def recheck_on():
     # the global probe flags are off: the recheck enforces regardless
     with (
-        patch.object(module.settings, "POST_RENTAL_GPU_RECHECK_ENABLED", True),
         patch.object(module.settings, "GPU_FAULT_PROBE_CHECK_ENABLED", False),
         patch.object(module.settings, "GPU_FAULT_PROBE_ENFORCEMENT_ENABLED", False),
     ):
         yield
-
-
-def test_off_by_default():
-    assert type(module.settings).model_fields["POST_RENTAL_GPU_RECHECK_ENABLED"].default is False
 
 
 # --- the marker, set on a rented cycle ----------------------------------------------------------------------
@@ -134,21 +129,6 @@ async def test_no_marker_runs_nothing(context_factory, recheck_on):
 
     assert result.passed and result.event.reason_code == Msg.NO_MARKER.reason
     assert runner.calls == [] and validation.calls == 0
-
-
-@pytest.mark.asyncio
-async def test_off_only_logs_what_it_would_require(context_factory, caplog):
-    runner, validation = FakeRunner(), FakeValidation()
-    ctx = _idle_ctx(context_factory, runner, validation)
-
-    with caplog.at_level("WARNING", logger=module.__name__):
-        result = await PostRentalGpuRecheckCheck().run(ctx)
-
-    assert result.passed and result.event.reason_code == Msg.WOULD_REQUIRE.reason
-    assert result.event.what_we_saw["marker"].items() >= MARKER.items()
-    assert runner.calls == [] and validation.calls == 0
-    assert KEY in ctx.services.redis.store
-    assert any(r.getMessage() == "POST_RENTAL_GPU_RECHECK_WOULD_REQUIRE" for r in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -403,12 +383,13 @@ def _reported_ctx(context_factory, runner, validation, *, owner="miner-hotkey"):
 
 
 @pytest.mark.asyncio
-async def test_a_geforce_node_flagged_only_by_renters_gets_the_marker(context_factory):
-    ctx = _reported_ctx(context_factory, FakeRunner(), FakeValidation())
+async def test_a_geforce_node_flagged_only_by_renters_gets_the_marker(context_factory, recheck_on):
+    runner = FakeRunner(probe_stdout("fault", faults=["gpu 0: wrong result in gather"]))
+    ctx = _reported_ctx(context_factory, runner, FakeValidation(None))
 
     result = await PostRentalGpuRecheckCheck().run(ctx)
 
-    assert result.event.reason_code == Msg.WOULD_REQUIRE.reason
+    assert result.passed is False and result.event.reason_code == Msg.FAILED.reason
     marker = json.loads(ctx.services.redis.store[KEY])
     assert (marker["source"], marker["verdict"]) == ("renter_report", "renter_reported")
     assert ctx.services.redis.ttl[KEY] == module.MARKER_TTL_SECONDS
