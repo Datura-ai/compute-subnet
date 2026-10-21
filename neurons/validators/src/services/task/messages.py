@@ -2159,7 +2159,7 @@ class GpuKernelCountMessages:
 class ProviderSideLoadMessages:
     """DAH-2734 — the CPU/disk twin of the foreign-GPU gate: a provider who runs another
     subnet's miner on a listed machine sells capacity he already uses himself. Shadow
-    (PROVIDER_SIDE_LOAD_CHECK_ENABLED without enforcement) renders LOAD_ABOVE_LIMIT as a
+    (without enforcement) renders LOAD_ABOVE_LIMIT as a
     warning and keeps passed=True; only PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED zeroes the
     score, and only for the CPU half — a disk figure above the limit is reported, never
     scored, because it is read once and carries every docker category nobody enumerated."""
@@ -2189,13 +2189,6 @@ class ProviderSideLoadMessages:
         severity="info",
         category="policy",
         impact="Proceed without penalty",
-    )
-    SKIPPED = MessageTemplate(
-        event="Provider-side load check disabled",
-        reason="PROVIDER_SIDE_LOAD_DISABLED",
-        severity="info",
-        category="policy",
-        impact="Proceed",
     )
 
 
