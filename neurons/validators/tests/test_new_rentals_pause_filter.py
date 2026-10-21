@@ -105,6 +105,8 @@ def _miner_service() -> MinerService:
     # EXPRESS_LANE_ENABLED is on (DAH-2958), so the suite also passes with the flag set
     service.in_flight = {}
     service.miners_awaiting_wave_list = {}
+    # the one-cycle not-listed grace (DAH-4829) reads this on every answer
+    service.rented_missed_last_cycle = {}
     return service
 
 
