@@ -226,7 +226,7 @@ def flags(
 
 
 def test_defaults_bounded():
-    """Regression: the pull runs every 15-minute cycle."""
+    """Regression: the check is on with no enforcement switch, pulls every 6 h and retries a failure after 30 min."""
     fields = type(module.settings).model_fields
     assert fields["REGISTRY_PULL_CHECK_ENABLED"].default is True
     assert "REGISTRY_PULL_ENFORCEMENT_ENABLED" not in fields
