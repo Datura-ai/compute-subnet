@@ -88,7 +88,7 @@ def _subtensor(monkeypatch, *, axon_versions=None, central=()):
         SimpleNamespace(hotkey=hotkey, axon_info=SimpleNamespace(version=version))
         for hotkey, version in (axon_versions or {}).items()
     ]
-    fake = SimpleNamespace(miners=neurons, central_miner_hotkeys=frozenset(central))
+    fake = SimpleNamespace(miners=neurons, hotkeys_routed_via_central_miner=frozenset(central))
     monkeypatch.setattr(SubtensorClient, "get_instance", classmethod(lambda cls: fake))
 
 

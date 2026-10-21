@@ -425,11 +425,11 @@ class MinerService:
         bittensor 10.5.0+. Older miners drop the field and the upload fails, so they get none.
         """
         subtensor = SubtensorClient.get_instance()
-        if miner_hotkey in subtensor.central_miner_hotkeys:
+        if miner_hotkey in subtensor.hotkeys_routed_via_central_miner:
             return fresh_upload_nonce()
         # in-memory metagraph snapshot only: no chain read on the upload path
         neuron = next((n for n in subtensor.miners if n.hotkey == miner_hotkey), None)
-        axon_version = neuron.axon_info.version if neuron is not None else None
+        axon_version = getattr(neuron.axon_info, "version", None) if neuron is not None else None
         if axon_version and axon_version >= MIN_DATED_NONCE_MINER_AXON_VERSION:
             return fresh_upload_nonce()
         logger.info(
