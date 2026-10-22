@@ -73,13 +73,13 @@ def upload_ssh_key_payload(miner_kp: Keypair, validator_kp: Keypair, public_key:
     """What the miner posts to the executor's /upload_ssh_key (ExecutorService.send_pubkey_to_executor), signed as the
     validator does: a dated nonce and the miner-bound signature, both of which executors require on upload."""
     return {
-        **validator_key_fields(validator_kp, public_key),
+        **validator_signed_upload_fields(validator_kp, public_key),
         "data_to_sign": public_key,
         "signature": sign(miner_kp, public_key),
     }
 
 
-def validator_key_fields(validator_kp: Keypair, public_key: str) -> dict:
+def validator_signed_upload_fields(validator_kp: Keypair, public_key: str) -> dict:
     """The validator-signed fields of an SSH-key upload (MinerService): validator_signature over the key and a fresh
     dated nonce, and validator_miner_signature binding the key to this miner's hotkey."""
     nonce = fresh_upload_nonce()
