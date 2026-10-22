@@ -252,10 +252,6 @@ class Settings(BaseSettings):
     # the EMA moves as before and the would-be hold is only logged.
     VERIFYX_EMA_HOLD_ENABLED: bool = Field(env="VERIFYX_EMA_HOLD_ENABLED", default=False)
     ENABLE_INSPECTOR: bool = True
-    INSPECTOR_ENSURE_COLLECTOR_ON_RENTED_CHECK: bool = Field(
-        env="INSPECTOR_ENSURE_COLLECTOR_ON_RENTED_CHECK",
-        default=True,
-    )
     # Rented cycles in a row in which the inspector saw nothing (error, failed canary, stopped or
     # just-started collector) are counted per node and logged as INSPECTOR_BLIND_STREAK from this
     # many on.
@@ -283,11 +279,6 @@ class Settings(BaseSettings):
         default="https://raw.githubusercontent.com/Datura-ai/lium-io/main/neurons/executor/libinspector.so",
         description="Raw GitHub URL the executor curls when the libinspector.so refresh is on and the hash does not match",
     )
-    # DAH-3257: on a rent, read the host listings the pre-run steps need (containers, volumes,
-    # mounted volumes, GPU minor map, device nodes, nvidia-smi power state, the image's
-    # encryption label) in ONE ssh command instead of ~8; every removal and write still runs its
-    # own command, and a probe that fails leaves every step on its own commands. Off: as before.
-    RENTAL_PRERUN_HOST_PROBE_ENABLED: bool = Field(env="RENTAL_PRERUN_HOST_PROBE_ENABLED", default=False)
     # A rental container with a memory limit runs with swap off (--memory-swap = --memory) and
     # RENTAL_CONTAINER_OOM_SCORE_ADJ, so a host-wide OOM picks its processes before the executor. The
     # memory limit stays the backend's memory_gb. 0 or below would protect the renter over host services, and Docker
@@ -786,8 +777,6 @@ class Settings(BaseSettings):
     # 32-byte challenge per attestation event, folds it into the signed SSH-key
     # request, and requires the executor to echo it in TDX report_data[32:64].
     ENABLE_ATTESTATION_NONCE: bool = Field(env="ENABLE_ATTESTATION_NONCE", default=False)
-    # I-78: sign every SSH-key upload over a dated nonce (datura fresh_upload_nonce); see MinerService._dated_upload_nonce_if_enabled
-    ENABLE_DATED_UPLOAD_NONCE: bool = Field(env="ENABLE_DATED_UPLOAD_NONCE", default=False)
     # A nonce-bound attestation event is required at most once per this interval per
     # miner (freshness = "bounded, provably recent", not "every wave") — GPU evidence
     # collection is too expensive to force fleet-wide every cycle.
@@ -852,9 +841,6 @@ class Settings(BaseSettings):
 
     def get_scoring_excluded_hotkeys(self) -> set[str]:
         return {s.strip() for s in self.SCORING_EXCLUDED_HOTKEYS.split(",") if s.strip()}
-
-    # Use REST API instead of WebSocket for miner communication
-    USE_REST_API: bool = Field(env="USE_REST_API", default=False)
 
     # A rented node missing from its miner's answer for ONE cycle is mostly a key upload that missed the miner's 10 s
     # window: 86 of the 347 RENTED_EXECUTOR_NOT_LISTED rows on 19 Oct were back in the next answer. On: the row is
@@ -1017,7 +1003,6 @@ class Settings(BaseSettings):
         ),
     )
     
-    ENABLE_VOLUME_ENCRYPTION: bool = Field(env="ENABLE_VOLUME_ENCRYPTION", default=True)
     VOLUME_MASTER_SECRET: str | None = Field(env="VOLUME_MASTER_SECRET", default=None)
 
     DEPLOY_ENV: Literal["PROD", "LOCAL", "STAGE"] = Field(env="DEPLOY_ENV", default="PROD")
@@ -1028,21 +1013,15 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_volume_encryption_secret(self) -> "Settings":
-        if self.ENABLE_VOLUME_ENCRYPTION:
-            secret = self.VOLUME_MASTER_SECRET
-            if secret is None or len(secret) < 32:
-                raise ValueError(
-                    "ENABLE_VOLUME_ENCRYPTION requires VOLUME_MASTER_SECRET "
-                    "of at least 32 characters"
-                )
-            # one unit of up to 8 bytes repeated holds at most 64 bits however long it is; a random secret
-            # of 32+ characters is never one (odds about 2^-96 for hex). A warning, not a refusal: the
-            # remedy, a new secret, leaves every volume encrypted under the old one unreadable
-            encoded = secret.encode()
-            if any(encoded[period:] == encoded[:-period] for period in range(1, 9)):
-                logger.warning(
-                    "VOLUME_MASTER_SECRET repeats a unit of at most 8 bytes, so it holds at most 64 bits"
-                )
+        secret = self.VOLUME_MASTER_SECRET
+        if secret is None or len(secret) < 32:
+            raise ValueError("VOLUME_MASTER_SECRET is required and must be at least 32 characters")
+        # one unit of up to 8 bytes repeated holds at most 64 bits however long it is; a random secret
+        # of 32+ characters is never one (odds about 2^-96 for hex). A warning, not a refusal: the
+        # remedy, a new secret, leaves every volume encrypted under the old one unreadable
+        encoded = secret.encode()
+        if any(encoded[period:] == encoded[:-period] for period in range(1, 9)):
+            logger.warning("VOLUME_MASTER_SECRET repeats a unit of at most 8 bytes, so it holds at most 64 bits")
         return self
 
     def get_bittensor_wallet(self) -> "Wallet":

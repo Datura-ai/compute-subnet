@@ -262,11 +262,10 @@ class InspectorValidationService:
             validator.start_session()
             process = await ssh.create_process(command)
 
-            if settings.INSPECTOR_ENSURE_COLLECTOR_ON_RENTED_CHECK:
-                try:
-                    await self._send_message(process, {"cmd": "start-collector"})
-                except Exception as exc:
-                    diagnostics["collector_ensure_error"] = str(exc)
+            try:
+                await self._send_message(process, {"cmd": "start-collector"})
+            except Exception as exc:
+                diagnostics["collector_ensure_error"] = str(exc)
 
             open_json = validator.handshake_start()
             handshake_reply = await self._send_message(
