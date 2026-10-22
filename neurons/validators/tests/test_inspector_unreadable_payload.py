@@ -28,7 +28,7 @@ from test_inspector_validation_service import (  # noqa: F401 — the autouse fi
     FakeStdout,
     FakeValidator,
     _interactive_stdout,
-    enable_collector_ensure,
+    fake_inspector_settings,
     fake_validator,
     matching_lib_checksums,
 )
