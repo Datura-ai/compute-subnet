@@ -1322,6 +1322,55 @@ def test_backup_of_a_missing_path_is_an_empty_no_op(monkeypatch: pytest.MonkeyPa
     assert (result.status, result.result_quality, result.snapshot_id) == ("COMPLETED", OperationResultQuality.EMPTY, None)
 
 
+_EMPTY_JSON = '{"message_type":"exit_error","code":1,"message":"Fatal: unable to save snapshot: snapshot is empty"}\n'
+_EMPTY_TEXT = "Fatal: unable to save snapshot: snapshot is empty\n"
+_EMPTY_IN_FILENAME = '{"message_type":"status","current_files":["/data/snapshot is empty.txt"]}\n'
+
+
+def _run_backup_with_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, lines: list[str], exclude_patterns: list[str]
+) -> object:
+    class _Popen(_FakePopen):
+        def __init__(self, command: list[str], *args: object, **kwargs: object) -> None:
+            super().__init__(command, *args, **kwargs)
+            self.stdout = iter(lines)
+
+        def wait(self) -> int:
+            return 1
+
+    (tmp_path / "file").write_text("x")
+    payload = _operation_payload()
+    payload["workspace"]["exclude_patterns"] = exclude_patterns
+    runner = ResticStorageRunner(StorageOperationSpec.from_mapping(payload), LocalWorkspace(tmp_path))
+    monkeypatch.setattr(
+        "storage.restic.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="[]", stderr=""),
+    )
+    monkeypatch.setattr("storage.restic.subprocess.Popen", _Popen)
+    return runner._backup()
+
+
+@pytest.mark.parametrize("line", [_EMPTY_JSON, _EMPTY_TEXT], ids=["json", "text"])
+def test_backup_with_every_file_excluded_is_an_empty_no_op(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, line: str
+) -> None:
+    result = _run_backup_with_output(monkeypatch, tmp_path, [line], [".cache"])
+
+    assert (result.status, result.result_quality, result.snapshot_id) == ("COMPLETED", OperationResultQuality.EMPTY, None)
+
+
+@pytest.mark.parametrize(
+    ("lines", "exclude_patterns"),
+    [([_EMPTY_JSON], []), ([_EMPTY_IN_FILENAME], [".cache"])],
+    ids=["no-excludes", "filename-contains-text"],
+)
+def test_backup_empty_snapshot_without_excludes_or_real_error_still_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, lines: list[str], exclude_patterns: list[str]
+) -> None:
+    with pytest.raises(ResticOperationError):
+        _run_backup_with_output(monkeypatch, tmp_path, lines, exclude_patterns)
+
+
 @pytest.mark.parametrize("make_dir", [False, True], ids=["missing", "empty"])
 def test_local_backup_of_a_missing_or_empty_directory_skips_restic(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_dir: bool
@@ -1445,3 +1494,134 @@ def test_encrypted_backup_preflight_lets_an_absent_path_through(
     else:
         with pytest.raises(WorkspaceResolutionError):
             validate()
+
+
+EXPIRED_LINE = "Save(<data/1234>) returned error, retrying after 1s: ExpiredToken: The provided token has expired.\n"
+
+
+class _RenewalSession:
+    """DAH-4945: the backend's progress and credentials routes"""
+
+    def __init__(self, status_code: int = 200) -> None:
+        self.status_code = status_code
+        self.posts: list[dict[str, object]] = []
+
+    def put(self, url: str, **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(status_code=200, raise_for_status=lambda: None, json=lambda: {})
+
+    def post(self, url: str, **kwargs: object) -> SimpleNamespace:
+        self.posts.append({"url": url, **kwargs})
+        n = len(self.posts)
+        body = {"access_key_id": f"key-{n}", "secret_access_key": f"secret-{n}", "session_token": f"token-{n}"}
+        return SimpleNamespace(status_code=self.status_code, raise_for_status=lambda: None, json=lambda: body)
+
+
+def _renewing_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    session: _RenewalSession,
+    expired_runs: int,
+    first_line: str | None = None,
+) -> tuple[ResticStorageRunner, list[dict[str, str]]]:
+    spec = ReporterSpec(api_url="https://api.test", auth_token="op-token", resource=ReporterResource.BACKUP)
+    reporter = StorageEventReporter(
+        OPERATION_ID, StorageAction.BACKUP, spec, session=session, sleeper=lambda _: None
+    )
+    events = JsonEventWriter(str(OPERATION_ID), 0, output=io.StringIO(), reporter=reporter)
+    (tmp_path / "file").write_text("x")
+    runner = ResticStorageRunner(
+        StorageOperationSpec.from_mapping(_operation_payload()), LocalWorkspace(tmp_path), event_writer=events
+    )
+    environments: list[dict[str, str]] = []
+
+    class _Popen(_FakePopen):
+        def __init__(self, command: list[str], *args: object, **kwargs: object) -> None:
+            super().__init__(command, *args, **kwargs)
+            environments.append(dict(kwargs["env"]))
+            if len(environments) <= expired_runs:
+                self.stdout = iter(['{"message_type":"status","percent_done":0.5}\n', EXPIRED_LINE])
+            elif first_line and len(environments) == 1:
+                summary = json.dumps({"message_type": "summary", "snapshot_id": SNAPSHOT_ID})
+                self.stdout = iter([*first_line.splitlines(keepends=True), summary + "\n"])
+
+    monkeypatch.setattr("storage.restic.subprocess.Popen", _Popen)
+    monkeypatch.setattr(runner, "_terminate_process", MagicMock())
+    monkeypatch.setattr(
+        "storage.restic.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="[]", stderr=""),
+    )
+    return runner, environments
+
+
+@pytest.mark.parametrize(
+    ("line", "renewals"),
+    [
+        (EXPIRED_LINE, 1),
+        ("client.PutObject: The provided token has expired.\n", 1),
+        ('{"message_type":"error","error":{"message":"The provided token has expired."}}\n', 1),
+        ('{"message_type":"exit_error","message":"The provided token has expired."}\n', 1),
+        ('{"message_type":"status","current_files":["/workspace/ExpiredToken.java"]}\n', 0),
+        (
+            '{"message_type":"error","error":{"message":"permission denied"},'
+            '"item":"/workspace/ExpiredToken.java"}\n',
+            0,
+        ),
+        (
+            '{"message_type":"error","error":{"message":"open /workspace/ExpiredToken.java: permission denied"},'
+            '"during":"archival","item":"/workspace/ExpiredToken.java"}\n',
+            0,
+        ),
+        # restic keeps relative source paths: removing the absolute item leaves "open ExpiredToken.java: ..."
+        (
+            json.dumps(
+                {
+                    "message_type": "error",
+                    "during": "archival",
+                    "item": "/workspace/ExpiredToken.java",
+                    "error": {"message": "/workspace/ExpiredToken.java: open ExpiredToken.java: permission denied"},
+                }
+            )
+            + "\n",
+            0,
+        ),
+        # expiry while restic removes its lock after the snapshot was saved
+        (json.dumps({"message_type": "summary", "snapshot_id": SNAPSHOT_ID}) + "\n" + EXPIRED_LINE, 0),
+    ],
+)
+def test_backup_renews_expired_credentials_and_reruns(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, line: str, renewals: int
+) -> None:
+    session = _RenewalSession()
+    runner, environments = _renewing_runner(
+        monkeypatch, tmp_path, session, expired_runs=0, first_line=line
+    )
+
+    result = runner.run()
+
+    assert (result.status, result.snapshot_id) == ("COMPLETED", SNAPSHOT_ID)
+    assert (len(environments), len(session.posts)) == (renewals + 1, renewals)
+    if renewals:
+        assert [env["AWS_SESSION_TOKEN"] for env in environments] == ["session-token", "token-1"]
+        assert environments[1]["AWS_ACCESS_KEY_ID"] == "key-1"
+        (post,) = session.posts
+        assert post["url"] == f"https://api.test/backup-logs/{OPERATION_ID}/credentials"
+        assert post["headers"] == {"Authorization": "Bearer op-token"}
+
+
+def test_backup_fails_when_the_backend_refuses_renewal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runner, environments = _renewing_runner(
+        monkeypatch, tmp_path, _RenewalSession(410), expired_runs=1
+    )
+
+    with pytest.raises(ResticOperationError, match="could not be renewed"):
+        runner.run()
+    assert len(environments) == 1
+
+
+def test_backup_renews_at_most_three_times(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    session = _RenewalSession()
+    runner, environments = _renewing_runner(monkeypatch, tmp_path, session, expired_runs=99)
+
+    with pytest.raises(ResticOperationError, match="credentials expired"):
+        runner.run()
+    assert (len(environments), len(session.posts)) == (4, 3)

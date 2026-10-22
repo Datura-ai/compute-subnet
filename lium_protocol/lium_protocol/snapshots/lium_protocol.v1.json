@@ -2,6 +2,11 @@
   "$defs": {
     "AddDebugSshKeyRequest": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "executor_id": {
           "title": "Executor Id",
           "type": "string"
@@ -53,6 +58,11 @@
     },
     "AddSshPublicKeyRequest": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "container_name": {
           "title": "Container Name",
           "type": "string"
@@ -241,6 +251,11 @@
         },
         "backup_volume_info": {
           "$ref": "#/$defs/ExternalVolumeInfo"
+        },
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
         },
         "container_name": {
           "anyOf": [
@@ -477,6 +492,11 @@
     },
     "CancelStorageOperationRequest": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "executor_id": {
           "title": "Executor Id",
           "type": "string"
@@ -684,6 +704,11 @@
             }
           ],
           "default": null
+        },
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
         },
         "cpu_count": {
           "anyOf": [
@@ -1240,6 +1265,11 @@
     },
     "ContainerDeleteRequest": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "container_name": {
           "title": "Container Name",
           "type": "string"
@@ -1391,6 +1421,11 @@
     },
     "ContainerStartRequest": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "container_name": {
           "title": "Container Name",
           "type": "string"
@@ -1540,6 +1575,11 @@
     },
     "ContainerStopRequest": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "container_name": {
           "title": "Container Name",
           "type": "string"
@@ -2139,6 +2179,11 @@
     },
     "ExecutorRentFinishedRequest": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "executor_id": {
           "title": "Executor Id",
           "type": "string"
@@ -2807,6 +2852,11 @@
           "default": null,
           "title": "Build Log Tail"
         },
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "detail": {
           "anyOf": [
             {
@@ -3168,6 +3218,11 @@
     },
     "GetPodLogsRequestFromServer": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "container_name": {
           "title": "Container Name",
           "type": "string"
@@ -3472,6 +3527,11 @@
     },
     "InstallJupyterServerRequest": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "container_name": {
           "title": "Container Name",
           "type": "string"
@@ -4464,6 +4524,11 @@
     },
     "RemoveSshPublicKeysRequest": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "container_name": {
           "title": "Container Name",
           "type": "string"
@@ -5121,6 +5186,11 @@
         "backup_volume_info": {
           "$ref": "#/$defs/ExternalVolumeInfo"
         },
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "container_name": {
           "anyOf": [
             {
@@ -5389,6 +5459,11 @@
     },
     "SshPubKeyAdded": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "executor_id": {
           "title": "Executor Id",
           "type": "string"
@@ -5790,7 +5865,7 @@
       "$ref": "#/$defs/RentedExecutorsResponse"
     }
   },
-  "protocol_version": "1.12.0",
+  "protocol_version": "1.14.0",
   "socket_replies": {
     "RentedMachineResponse": {
       "$ref": "#/$defs/RentedMachineResponse"
