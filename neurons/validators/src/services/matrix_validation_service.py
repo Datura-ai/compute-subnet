@@ -351,7 +351,12 @@ class ValidationService:
         )
         elapsed = time.perf_counter() - start
 
-        failed_cards = [outcome for outcome in per_card if not outcome["ok"]]
+        # A transport error (ssh_error) says nothing about the card: it counts as not measured.
+        failed_cards = [
+            outcome
+            for outcome in per_card
+            if not outcome["ok"] and not outcome["reason"].startswith("ssh_error")
+        ]
         over_wall_clock = elapsed > MATMUL_ALLCARDS_WALL_CLOCK_SECONDS
         passed = not failed_cards and not over_wall_clock
         if failed_cards:

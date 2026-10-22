@@ -206,8 +206,26 @@ async def test_ssh_error_sweeps_orphan_matmul(svc, monkeypatch):
         return SimpleNamespace(exit_status=0, stdout="RESULT_JSON: {}", stderr="")
 
     probe = await svc.probe_all_claimed_cards(SimpleNamespace(run=run), _executor(), {}, _spec(2))
-    assert probe is not None and probe.passed is False
+    # the transport error is not a failed card: card 0 is not measured, card 1 passed
+    assert probe is not None and probe.passed is True
+    assert probe.per_card[0]["reason"].startswith("ssh_error")
     killed.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_an_ssh_error_is_not_counted_as_a_failed_card(svc, monkeypatch):
+    # one card's dropped channel must not fail the node; a real device failure beside it still does
+    async def run(cmd, *a, **k):
+        if "CUDA_VISIBLE_DEVICES=0" in cmd:
+            raise OSError("channel closed")
+        if "CUDA_VISIBLE_DEVICES=1" in cmd:
+            return SimpleNamespace(exit_status=1, stdout="", stderr="invalid device ordinal")
+        return SimpleNamespace(exit_status=0, stdout="RESULT_JSON: {}", stderr="")
+
+    monkeypatch.setattr(svc, "_kill_remote_matmul", AsyncMock())
+    probe = await svc.probe_all_claimed_cards(SimpleNamespace(run=run), _executor(), {}, _spec(3))
+    assert probe is not None and probe.passed is False
+    assert probe.failure_reason.startswith("1/3 card(s) failed")
 
 
 @pytest.mark.asyncio
