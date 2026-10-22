@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import logging
 import re
@@ -25,6 +26,8 @@ from ...const import (
     POD_CONTAINER_NAME_GRACE_MINUTES,
 )
 from core.config import settings
+from services.docker_service import inflight_creates
+from services.redis_service import EXECUTOR_CREATE_LOCK_TIMEOUT
 
 from ..messages import PortCountMessages, TenantEnforcementMessages as Msg
 from ..messages import render_message
@@ -763,6 +766,9 @@ async def _recover_pod_after_stale_vloopback_mount(
 # A recovery runs only for a pod no operation is under: a *_PENDING pod (or a STOPPED one) is the
 # backend's to drive.
 _RECOVERY_POD_STATUSES = (None, "RUNNING", REBOOT_FAILED_POD_STATUS)
+# a recovery under the create lock finishes (cleanup included) well before the lock expires, so a
+# create can never take the lock while a recovery is still mutating the pod's containers
+_RECOVERY_DEADLINE_SEC = EXECUTOR_CREATE_LOCK_TIMEOUT - 120
 
 
 @contextlib.asynccontextmanager
@@ -772,7 +778,9 @@ async def _no_create_in_flight(ctx: Context, pod_id: str, pod_status: str | None
     A create between its park and `docker run` looks like a lone `<name>__prev`, and one between its
     `docker run` and the gocryptfs mount looks like a running pod without its volume: a recovery
     under it would race the create's own steps."""
-    if pod_status not in _RECOVERY_POD_STATUSES:
+    # this validator's own creates, reboots and edits of the pod, however long they run: the
+    # pending mark below expires at 30 min, and a create that waited out the lock goes on without it
+    if pod_status not in _RECOVERY_POD_STATUSES or inflight_creates.is_running(pod_id):
         yield False
         return
     redis = ctx.services.redis
@@ -809,16 +817,20 @@ async def _recover_parked_pod_container(
         if not clear:
             return False
         try:
-            return await ctx.services.pod_recovery.recover_parked_pod_container(
-                ssh_client=ctx.ssh,
-                executor_info=ctx.executor,
-                miner_hotkey=ctx.miner_hotkey,
-                private_key=ctx.executor_ssh_private_key,
-                container_name=container_name,
-                pod_id=pod_id,
-                local_volume_path=local_volume_path,
-                default_extra=ctx.default_extra,
-            )
+            async with asyncio.timeout(_RECOVERY_DEADLINE_SEC):
+                return await ctx.services.pod_recovery.recover_parked_pod_container(
+                    ssh_client=ctx.ssh,
+                    executor_info=ctx.executor,
+                    miner_hotkey=ctx.miner_hotkey,
+                    private_key=ctx.executor_ssh_private_key,
+                    container_name=container_name,
+                    pod_id=pod_id,
+                    local_volume_path=local_volume_path,
+                    default_extra=ctx.default_extra,
+                )
+        except TimeoutError as exc:  # before OSError: a missed deadline is not a dead transport
+            _log_recovery_failed("POD_PARKED_CONTAINER_RECOVERY_FAILED", ctx, container_name, pod_id, exc)
+            return False
         except (asyncssh.Error, OSError):
             raise
         except Exception as exc:
@@ -834,6 +846,20 @@ async def _recover_parked_pod_container(
                 )
             )
             return False
+
+
+def _log_recovery_failed(event: str, ctx: Context, container_name: str, pod_id: str, exc: Exception) -> None:
+    logger.warning(
+        _m(
+            event,
+            extra=get_extra_info({
+                **ctx.default_extra,
+                "container_name": container_name,
+                "pod_id": pod_id,
+                "error": f"{type(exc).__name__}: {exc}",
+            }),
+        )
+    )
 
 
 async def _restore_missing_volume_mount(
@@ -852,7 +878,9 @@ async def _restore_missing_volume_mount(
         local_volume_path = rental_active.local_volume_path if rental_active else None
         if not local_volume_path:
             return  # never remount at a guessed path
-        async with _no_create_in_flight(ctx, pod_id, pod_status) as clear:
+        async with _no_create_in_flight(ctx, pod_id, pod_status) as clear, asyncio.timeout(
+            _RECOVERY_DEADLINE_SEC
+        ):
             if clear:
                 await recovery.restore_volume_mount_of_running_container(
                     ssh_client=ctx.ssh,
@@ -863,6 +891,8 @@ async def _restore_missing_volume_mount(
                     local_volume_path=local_volume_path,
                     default_extra=ctx.default_extra,
                 )
+    except TimeoutError as exc:  # before OSError: a missed deadline is not a dead transport
+        _log_recovery_failed("POD_VOLUME_MOUNT_RESTORE_FAILED", ctx, container_name, pod_id, exc)
     except (asyncssh.Error, OSError):
         raise
     except Exception as exc:

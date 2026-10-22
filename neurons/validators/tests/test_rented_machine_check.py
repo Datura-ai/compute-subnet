@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, Mock
@@ -5,6 +6,7 @@ from unittest.mock import AsyncMock, Mock
 import asyncssh
 import pytest
 from helpers import build_context_config, build_services, build_state
+import neurons.validators.src.services.task.checks.rented_machine as rented_machine_module
 from neurons.validators.src.core.docker_utils import _collect_host_context
 from neurons.validators.src.services.task.checks.rented_machine import (
     TenantEnforcementCheck,
@@ -1102,6 +1104,60 @@ async def test_tenant_enforcement_renames_back_a_stranded_parked_container(
         kwargs = docker.recover_parked_pod_container.await_args.kwargs
         assert (kwargs["container_name"], kwargs["local_volume_path"]) == ("pod_pod-1", "/workspace")
         lock.release.assert_awaited_once()
+
+
+def _parked_recovery_ctx(context_factory, docker):
+    ssh = MissingPodSSHClient(pod_running=False, ssh_keys=["ssh-rsa recovered"])
+    docker.recover_pod_after_stale_vloopback_mount.return_value = False
+    lock = Mock(acquire=AsyncMock(return_value=True), release=AsyncMock())
+    redis = Mock(renting_in_progress=AsyncMock(return_value=False), executor_create_lock=Mock(return_value=lock))
+    ctx = build_recovery_context(
+        context_factory,
+        ssh,
+        docker,
+        backend=DummyBackendClient(active=True, local_volume_path="/workspace"),
+        redis=redis,
+    )
+    return ctx, lock
+
+
+@pytest.mark.asyncio
+async def test_tenant_enforcement_never_recovers_under_this_validators_running_create(
+    context_factory, monkeypatch
+):
+    # the pending mark expires at 30 min; a reboot still running then is seen in the registry
+    docker = AsyncMock()
+    ctx, lock = _parked_recovery_ctx(context_factory, docker)
+    monkeypatch.setattr(rented_machine_module.inflight_creates, "is_running", lambda pod_id: True)
+
+    result = await TenantEnforcementCheck().run(ctx)
+
+    assert result.event.reason_code == Msg.POD_NOT_RUNNING.reason
+    docker.recover_parked_pod_container.assert_not_awaited()
+    lock.acquire.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_tenant_enforcement_a_recovery_past_its_deadline_fails_inside_the_lock(
+    context_factory, monkeypatch
+):
+    # bounded well inside the create lock's TTL, and a missed deadline is a failed recovery, not a
+    # dead SSH transport
+    docker = AsyncMock()
+
+    async def stall(**kwargs):
+        await asyncio.sleep(10)
+
+    docker.recover_parked_pod_container.side_effect = stall
+    ctx, lock = _parked_recovery_ctx(context_factory, docker)
+    # the real deadline plus its cleanup (a 30 s stop and a 30 s rename) ends before the lock's TTL
+    assert rented_machine_module._RECOVERY_DEADLINE_SEC + 60 < rented_machine_module.EXECUTOR_CREATE_LOCK_TIMEOUT
+    monkeypatch.setattr(rented_machine_module, "_RECOVERY_DEADLINE_SEC", 0.01)
+
+    result = await TenantEnforcementCheck().run(ctx)
+
+    assert result.event.reason_code == Msg.POD_NOT_RUNNING.reason
+    lock.release.assert_awaited_once()
 
 
 @pytest.mark.parametrize(

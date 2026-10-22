@@ -9870,19 +9870,52 @@ class DockerService:
         A reboot or edit whose undo never ran (cancelled, SSH lost, validator restarted) leaves the
         pod's only container parked and stopped with no ``<name>``; only the pod's next create used
         to rename it back (``_EditSwap.park``), so the renter stayed down until then. The caller has
-        made sure no create for the pod is in flight. A failed start raises: the container keeps its
-        name, and the stale-mount recovery picks up a "file exists" start next cycle.
+        made sure no create for the pod is in flight and bounds the call well inside the create lock.
+        A start that fails leaves the container stopped and parked again, so the next cycle retries;
+        only a stale-mount start error keeps the name, for the stale-mount recovery to take it.
         """
         parked = f"{container_name}{EDIT_PARKED_SUFFIX}"
         q_name, q_parked = shlex.quote(container_name), shlex.quote(parked)
-        listed = await ssh_client.run(
-            f'/usr/bin/docker ps -a --format "{{{{.Names}}}}" '
-            f"--filter name=^{q_name}$ --filter name=^{q_parked}$"
-        )
-        if listed.exit_status != 0 or set((listed.stdout or "").split()) != {parked}:
-            return False
         log_extra = {**default_extra, "container_name": container_name, "parked": parked}
-        renamed = await ssh_client.run(f"/usr/bin/docker rename {q_parked} {q_name}")
+        try:
+            listed = await ssh_client.run(
+                f'/usr/bin/docker ps -a --format "{{{{.ID}}}} {{{{.Names}}}}" '
+                f"--filter name=^{q_name}$ --filter name=^{q_parked}$",
+                timeout=_VLOOPBACK_REPAIR_COMMAND_TIMEOUT_SEC,
+            )
+            rows = [line.split() for line in (listed.stdout or "").splitlines() if line.strip()]
+            if listed.exit_status != 0 or [row[1:] for row in rows] != [[parked]]:
+                return False
+            container_id = rows[0][0]
+            encryption_state = await self._local_volume_encryption_state(ssh_client, parked)
+            if encryption_state is _VolumeEncryptionState.UNKNOWN or (
+                encryption_state is _VolumeEncryptionState.ENCRYPTED
+                and not _can_remount_encrypted_volume(local_volume_path)
+            ):
+                logger.warning(
+                    _m(
+                        "POD_PARKED_CONTAINER_RECOVERY_SKIPPED_ENCRYPTED_VOLUME",
+                        extra=get_extra_info(
+                            {**log_extra, "volume_encryption_state": encryption_state.value}
+                        ),
+                    )
+                )
+                return False
+            # before the rename: a failure here must leave the container parked, where this
+            # recovery finds it again next cycle
+            known_hosts_policy = await self._prepare_known_hosts_policy(
+                executor_info, miner_hotkey, log_extra
+            )
+            require_rental_docker_ssh_host_key(executor_info)
+            if inflight_creates.is_running(pod_id):
+                return False
+            renamed = await ssh_client.run(
+                f"/usr/bin/docker rename {shlex.quote(container_id)} {q_name}",
+                timeout=_VLOOPBACK_REPAIR_COMMAND_TIMEOUT_SEC,
+            )
+        except TimeoutError:
+            logger.warning(_m("POD_PARKED_CONTAINER_RECOVERY_TIMED_OUT", extra=get_extra_info(log_extra)))
+            return False
         if renamed.exit_status != 0:
             logger.warning(
                 _m(
@@ -9892,24 +9925,61 @@ class DockerService:
             )
             return False
         logger.warning(_m("POD_PARKED_CONTAINER_RENAMED_BACK", extra=get_extra_info(log_extra)))
-        # the unclean stop left the volume's mountpoint dir behind; without this the first start
-        # fails with "file exists" and waits a cycle for the stale-mount recovery (ticket-0729)
-        await self._repair_stale_mountpoint_of_container_volume(ssh_client, container_name, log_extra)
-        known_hosts_policy = await self._prepare_known_hosts_policy(
-            executor_info, miner_hotkey, log_extra
-        )
-        require_rental_docker_ssh_host_key(executor_info)
-        with node_owner(miner_hotkey):
-            await self.start_existing_container(
-                executor_info=executor_info,
-                private_key=private_key,
-                known_hosts_policy=known_hosts_policy,
-                container_name=container_name,
-                local_volume_path=local_volume_path,
-                pod_id=pod_id,
-                default_extra=log_extra,
+        try:
+            # the unclean stop left the volume's mountpoint dir behind; without this the first start
+            # fails with "file exists" and waits a cycle for the stale-mount recovery (ticket-0729)
+            await self._repair_stale_mountpoint_of_container_volume(ssh_client, container_name, log_extra)
+            with node_owner(miner_hotkey):
+                await self.start_existing_container(
+                    executor_info=executor_info,
+                    private_key=private_key,
+                    known_hosts_policy=known_hosts_policy,
+                    container_name=container_name,
+                    local_volume_path=local_volume_path,
+                    pod_id=pod_id,
+                    default_extra=log_extra,
+                )
+        except asyncio.CancelledError:
+            # as in the stale-mount recovery: a cancellation between `docker start` and the remount
+            # would leave the pod up with its plaintext path unmounted
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(
+                    self._put_back_parked_container(ssh_client, container_id, container_name, parked, None)
+                )
+            raise
+        except Exception as exc:
+            parked_again = await self._put_back_parked_container(
+                ssh_client, container_id, container_name, parked, str(exc)
             )
+            logger.error(
+                _m(
+                    "POD_PARKED_CONTAINER_START_FAILED",
+                    extra=get_extra_info({**log_extra, "error": str(exc), "parked_again": parked_again}),
+                )
+            )
+            return False
         return True
+
+    async def _put_back_parked_container(
+        self,
+        ssh_client: asyncssh.SSHClientConnection,
+        container_id: str,
+        container_name: str,
+        parked: str,
+        start_error: str | None,
+    ) -> bool:
+        # stop a half-started container, then park it again by its own id so the next cycle's
+        # recovery retries; a stale-mount start error keeps the name for the stale-mount recovery
+        stopped = await self._stop_half_recovered_container(ssh_client, container_name)
+        if not stopped or (start_error and _is_stale_vloopback_mountpoint_error(start_error)):
+            return False
+        with contextlib.suppress(Exception):
+            result = await ssh_client.run(
+                f"/usr/bin/docker rename {shlex.quote(container_id)} {shlex.quote(parked)}",
+                timeout=_VLOOPBACK_REPAIR_COMMAND_TIMEOUT_SEC,
+            )
+            return getattr(result, "exit_status", 1) == 0
+        return False
 
     async def encrypted_volume_mount_missing(
         self, ssh_client: asyncssh.SSHClientConnection, container_name: str
