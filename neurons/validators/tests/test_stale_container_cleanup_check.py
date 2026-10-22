@@ -26,6 +26,7 @@ from neurons.validators.src.services.task.checks.stale_container_cleanup import 
 from neurons.validators.src.services.task.pipeline_factory import PipelineFactory
 
 from protocol.vc_protocol.compute_requests import (
+    PodRentalActiveResponse,
     RentedExecutor,
     RentedExecutorsResponse,
     RentedPod,
@@ -64,6 +65,10 @@ class RecordingContainerCleanup:
     async def sweep_abandoned_download_temporaries(self, ssh_client, executor_uuid):
         self.sweep_calls.append({"ssh_client": ssh_client, "executor_uuid": executor_uuid})
         return self._swept
+
+    async def remove_ended_rental_volumes_when_disk_is_tight(self, ssh_client, rented_data, executor_uuid, is_ended_rental):
+        self.is_ended_rental = is_ended_rental
+        return 0
 
 
 def _listed_rented_data(executor_uuid: str = default_executor().uuid) -> RentedExecutorsResponse:
@@ -704,3 +709,25 @@ async def test_a_valid_rented_list_keeps_the_cleaned_event():
     assert len(cleanup.calls) == 1
     assert result.event.reason_code == "STALE_CLEANUP_DONE"
     assert result.event.what_we_saw["rented_list_unknown"] is None
+
+
+# A closed rental's volume goes only once the backend reports it closed, an hour on.
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "answer, ended",
+    [
+        (None, False),
+        (PodRentalActiveResponse(active=True), False),
+        (PodRentalActiveResponse(active=False), False),  # no closed rental: a filler id or unknown
+        (PodRentalActiveResponse(active=False, rental_closed_at=datetime.now(UTC) - timedelta(minutes=10)), False),
+        (PodRentalActiveResponse(active=False, rental_closed_at=datetime.now(UTC) - timedelta(hours=2)), True),
+        # the backend's naive UTC timestamp
+        (PodRentalActiveResponse(active=False, rental_closed_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=2)), True),
+    ],
+)
+async def test_a_volume_counts_as_an_ended_rental_only_when_the_backend_closed_it_over_an_hour_ago(answer, ended):
+    cleanup = RecordingContainerCleanup()
+    ctx = _make_ctx(cleanup)
+    ctx.services.backend.get_pod_rental_active.return_value = answer
+    await StaleContainerCleanupCheck().run(ctx)
+    assert await cleanup.is_ended_rental("11111111-2222-3333-4444-555555555555") is ended

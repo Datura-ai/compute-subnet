@@ -7,6 +7,7 @@ reclaims, and it decides on real free space: below the rental listing floor the 
 """
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -170,3 +171,77 @@ async def test_a_stopped_filler_does_not_block_the_reclaim(cleanup):
     assert await cleanup.reclaim_dphn_cache_when_disk_is_tight(ssh_client, "exec-1") == 1
     assert _removed(ssh_client) == ["dphn_cache_hf_x"]
     assert not any("ps -a" in c for c in ssh_client.commands), "guard must not use `docker ps -a`"
+
+
+# A closed rental's leftover volume, removed once the node is hidden for lack of disk.
+POD = "11111111-2222-3333-4444-555555555555"
+LIVE = "66666666-7777-8888-9999-000000000000"
+
+
+class DanglingAwareSsh(FakeSshClient):
+    def __init__(self, dangling: list[str], used_gb: float = 1, **kwargs):
+        super().__init__(**kwargs)
+        self._dangling = dangling
+        self._used = str(int(used_gb * GB))
+
+    async def run(self, command: str, *args, **kwargs):
+        if "dangling=true" in command:
+            self.commands.append(command)
+            return SimpleNamespace(exit_status=0, stdout="\n".join(self._dangling), stderr="")
+        if "df -P -B1" in command:
+            self.commands.append(command)
+            line = f"/dev/sda1 1 {self._used} {self._free_bytes} 1% /hostfs"
+            return SimpleNamespace(exit_status=0, stdout=f"Filesystem 1B-blocks Used Available Capacity\n{line}", stderr="")
+        return await super().run(command, *args, **kwargs)
+
+
+def _snapshot(pod_ids: list[str]):
+    from protocol.vc_protocol.compute_requests import RentedExecutor, RentedExecutorsResponse, RentedPod
+
+    pods = [RentedPod(pod_id=pod_id, container_name=f"pod_{pod_id}") for pod_id in pod_ids]
+    executor = RentedExecutor(miner_hotkey="m", executor_ip_address="1.2.3.4", executor_ip_port="1", pods=pods)
+    return RentedExecutorsResponse(executors={"exec-1": executor})
+
+
+async def _ended(pod_id: str) -> bool:
+    return pod_id == POD
+
+
+@pytest.mark.asyncio
+async def test_removes_only_an_unlisted_dangling_ended_rental_volume_when_disk_is_low(cleanup):
+    volumes = [f"volume_{POD}", f"volume_{LIVE}", "volume_custom", "dphn_cache_x"]
+    ssh_client = DanglingAwareSsh(dangling=volumes, containers=[], volumes=volumes, free_gb=40)
+    assert await cleanup.remove_ended_rental_volumes_when_disk_is_tight(ssh_client, _snapshot([LIVE]), "exec-1", _ended) == 1
+    assert _removed(ssh_client) == [f"volume_{POD}"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "dangling, listed, free_gb, used_gb, is_ended",
+    [
+        ([], [], 40, 1, _ended),  # mounted by a container, even a stopped one
+        ([f"volume_{POD}"], [POD], 40, 1, _ended),  # the snapshot still lists the pod
+        ([f"volume_{POD}"], [], 500, 1, _ended),  # the node is over the listing floor
+        ([f"volume_{POD}"], [], 40, 1, AsyncMock(return_value=False)),  # backend: not closed
+    ],
+)
+async def test_keeps_every_volume_that_is_not_a_long_ended_unmounted_rental(cleanup, dangling, listed, free_gb, used_gb, is_ended):
+    volumes = [f"volume_{POD}"]
+    ssh_client = DanglingAwareSsh(dangling=dangling, used_gb=used_gb, containers=[], volumes=volumes, free_gb=free_gb)
+    assert await cleanup.remove_ended_rental_volumes_when_disk_is_tight(ssh_client, _snapshot([LIVE, *listed]), "exec-1", is_ended) == 0
+    assert _removed(ssh_client) == []
+
+
+@pytest.mark.asyncio
+async def test_an_empty_snapshot_removes_no_volume(cleanup):
+    ssh_client = DanglingAwareSsh(dangling=[f"volume_{POD}"], containers=[], volumes=[f"volume_{POD}"], free_gb=40)
+    assert await cleanup.remove_ended_rental_volumes_when_disk_is_tight(ssh_client, None, "exec-1", _ended) == 0
+    assert _removed(ssh_client) == []
+
+
+@pytest.mark.asyncio
+async def test_a_disk_over_ninety_percent_full_counts_as_low_even_with_the_free_floor_met(cleanup):
+    ssh_client = DanglingAwareSsh(
+        dangling=[f"volume_{POD}"], used_gb=1900, containers=[], volumes=[f"volume_{POD}"], free_gb=150
+    )
+    assert await cleanup.remove_ended_rental_volumes_when_disk_is_tight(ssh_client, _snapshot([LIVE]), "exec-1", _ended) == 1

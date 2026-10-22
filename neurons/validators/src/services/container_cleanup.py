@@ -6,7 +6,7 @@ from typing import Awaitable, Callable, Optional
 import asyncssh
 
 from protocol.vc_protocol.compute_requests import RentedExecutorsResponse
-from core.docker_utils import ALPINE_HELPER_IMAGE, DockerCommand, df_available_bytes
+from core.docker_utils import ALPINE_HELPER_IMAGE, DockerCommand, df_available_bytes, df_command
 from core.utils import _m
 from services.const import (
     DPHN_CACHE_LISTING_FLOOR_GB,
@@ -34,6 +34,14 @@ DPHN_CACHE_RECLAIM_FREE_FLOOR_GB = DPHN_CACHE_LISTING_FLOOR_GB
 # Remove at most this many per pass; GC runs each cycle, so a backlog drains
 # over a few passes without a huge `docker volume rm` command.
 VOLUME_RM_MAX_PER_PASS = 200
+
+# A rental's own volume is created as volume_<pod uuid>; nothing else on the host is named so.
+POD_VOLUME_NAME_PATTERN = re.compile(r"^volume_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
+# The backend hides a node from the rental listing below DPHN_CACHE_LISTING_FLOOR_GB free OR above
+# this utilization, so the ended-rental volume sweep fires on either.
+LISTING_MAX_DISK_USED_PERCENT = 90
+# One backend lookup per candidate volume; a backlog drains over a few cycles.
+ENDED_RENTAL_VOLUME_LOOKUPS_PER_PASS = 50
 
 
 # DAH-2805: how long an abandoned download temporary may sit before the sweep removes it. The window
@@ -338,6 +346,100 @@ class ContainerCleanup:
             logger.warning(_m("DPHN cache reclaim failed", extra=extra | {"error": str(e)}))
             return 0
 
+    async def remove_ended_rental_volumes_when_disk_is_tight(
+        self,
+        ssh_client: asyncssh.SSHClientConnection,
+        rented_data: Optional[RentedExecutorsResponse],
+        executor_uuid: str,
+        is_ended_rental: Callable[[str], Awaitable[bool]],
+    ) -> int:
+        """Remove the volumes of rentals that have ended, once the node is hidden for lack of disk.
+
+        A delete removes its pod's volume, but best-effort: a volume dockerd still held, or a
+        delete that never reached the host, stays behind for good and fills the disk. A candidate
+        must be all of: a `volume_<pod uuid>` no container (running or stopped) mounts, a pod the
+        fleet snapshot does not list (the snapshot carries every pod status but BROKEN and
+        DELETING, so a stopped or failed-reboot pod keeps its volume), and a rental the backend
+        itself reports closed (``is_ended_rental``). Anything the backend does not know as a
+        closed rental, a filler's volume included, is kept. Returns how many volumes were removed.
+        """
+        extra = {"executor_uuid": executor_uuid}
+        try:
+            if rented_list_unknown_reason(rented_data) is not None:
+                return 0
+            dangling: Optional[list[str]] = await self._get_dangling_volumes(ssh_client)
+            listed_names: set[str] = listed_container_names(rented_data)
+            listed_pod_ids: set[str] = {
+                pod.pod_id for executor in rented_data.executors.values() for pod in executor.pods
+            }
+            candidates: list[str] = [
+                name
+                for name in dangling or []
+                if (match := POD_VOLUME_NAME_PATTERN.match(name))
+                and match[1] not in listed_pod_ids
+                and f"{POD_CONTAINER_PREFIX}{match[1]}" not in listed_names
+                and f"{FILLER_CONTAINER_PREFIX}{match[1]}" not in listed_names
+            ]
+            # cheapest guard first: most nodes hold no such volume, and measuring disk starts a container
+            if not candidates or not await self._is_disk_below_listing_floor(ssh_client):
+                return 0
+
+            ended: list[str] = []
+            for name in candidates[:ENDED_RENTAL_VOLUME_LOOKUPS_PER_PASS]:
+                if await is_ended_rental(name.removeprefix("volume_")):
+                    ended.append(name)
+            if not ended:
+                return 0
+            if self.dry_run:
+                logger.info(
+                    _m(
+                        f"[DRY RUN] Would remove {len(ended)} ended-rental volume(s)",
+                        extra=extra | {"volumes": ended, "dry_run": True},
+                    )
+                )
+                return 0
+
+            await ssh_client.run(DockerCommand.volume_remove(*ended))
+            # `volume_remove` ends in `|| true`: re-list to report only what is really gone
+            surviving: set[str] = set(await self._get_cache_volumes(ssh_client, ("volume_",)))
+            removed: list[str] = [name for name in ended if name not in surviving]
+            if removed:
+                logger.info(
+                    _m(
+                        f"Removed {len(removed)} ended-rental volume(s) to get the node back over "
+                        "the rental listing floor",
+                        extra=extra | {"volumes": removed},
+                    )
+                )
+            return len(removed)
+        except Exception as e:
+            logger.warning(_m("Ended-rental volume removal failed", extra=extra | {"error": str(e)}))
+            return 0
+
+    async def _is_disk_below_listing_floor(self, ssh_client: asyncssh.SSHClientConnection) -> bool:
+        # Same measure as _get_free_disk_gb, plus utilization; an unreadable disk counts as fine.
+        info = await ssh_client.run("/usr/bin/docker info --format '{{.DockerRootDir}}'")
+        if getattr(info, "exit_status", 0) != 0:
+            return False
+        docker_root: str = (info.stdout or "").strip() or "/var/lib/docker"
+        result = await ssh_client.run(df_command(shlex.quote(docker_root)))
+        if getattr(result, "exit_status", 0) != 0:
+            return False
+        try:
+            used, available = (int(column) for column in result.stdout.strip().splitlines()[1].split()[2:4])
+        except (IndexError, ValueError, AttributeError):
+            return False
+        if available < DPHN_CACHE_LISTING_FLOOR_GB * 1024**3:
+            return True
+        return used + available > 0 and used * 100 / (used + available) > LISTING_MAX_DISK_USED_PERCENT
+
+    async def _get_dangling_volumes(self, ssh_client) -> Optional[list[str]]:
+        # every volume no container (in any state) references; None if listing failed
+        result = await ssh_client.run(DockerCommand.volume_ls_dangling())
+        if result.exit_status != 0:
+            return None
+        return [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+
     async def _has_running_filler_container(self, ssh_client: asyncssh.SSHClientConnection) -> bool:
         # A cache a live filler still mounts is in use; docker refuses to remove it anyway.
         result = await ssh_client.run(
@@ -463,10 +565,9 @@ class ContainerCleanup:
 
     async def get_dangling_anonymous_volumes(self, ssh_client) -> Optional[list[str]]:
         # anonymous (64-hex) volumes referenced by no container; None if listing failed
-        result = await ssh_client.run(DockerCommand.volume_ls_dangling())
-        if result.exit_status != 0:
+        names = await self._get_dangling_volumes(ssh_client)
+        if names is None:
             return None
-        names = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
         return [name for name in names if ANON_VOLUME_NAME_PATTERN.match(name)]
 
     async def force_remove_health_checks(

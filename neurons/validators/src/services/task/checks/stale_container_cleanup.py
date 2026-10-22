@@ -4,7 +4,7 @@ import json
 import logging
 import time
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from core.config import settings
@@ -40,6 +40,8 @@ DOWNLOAD_TEMPORARY_SWEEP_INTERVAL_SECONDS = 60 * 60
 # claim on those slots, the queued ids take turns for the rest (least recently sent first) and never
 # fewer than REAPED_POD_STATES_FLOOR of them, so a node with 256 rented pods still moves its queue.
 REAPED_POD_STATE_RETENTION_SECONDS = 24 * 60 * 60
+# How long after its rental closed a volume is still the delete's to remove, not the low-disk sweep's.
+ENDED_RENTAL_VOLUME_GRACE = timedelta(hours=1)
 REAPED_POD_STATES_KEY_PREFIX = "reaped_pod_states:"
 REAPED_POD_STATES_FLOOR = 32
 
@@ -121,6 +123,15 @@ class StaleContainerCleanupCheck:
             )
             self._last_sweep_at[ctx.executor.uuid] = now
 
+        # A closed rental's volume a failed delete left behind: the renter's leftovers go before
+        # our own filler cache below, which measures free disk again after this.
+        removed_ended_rental_volumes = await ctx.services.container_cleanup.remove_ended_rental_volumes_when_disk_is_tight(
+            ssh_client=ctx.ssh,
+            rented_data=ctx.state.rented_data,
+            executor_uuid=ctx.executor.uuid,
+            is_ended_rental=lambda pod_id: _is_ended_rental(ctx, pod_id),
+        )
+
         # DAH-2475: give the DPHN filler cache back when the node can no longer afford it. This is
         # the ONLY caller — the create-time sweep deliberately never reclaims (it would raise free
         # disk, the backend would grant the cache again next cycle, and the node would re-download
@@ -142,6 +153,7 @@ class StaleContainerCleanupCheck:
                 "first_sight_grace": first_sight,
                 "rented_list_unknown": rented_list_unknown,
                 "reclaimed_cache_volumes": reclaimed_cache_volumes,
+                "removed_ended_rental_volumes": removed_ended_rental_volumes,
                 "swept_download_temporaries": swept_download_temporaries,
             },
         )
@@ -205,6 +217,22 @@ class StaleContainerCleanupCheck:
                 )
             )
             return True
+
+
+async def _is_ended_rental(ctx: Context, pod_id: str) -> bool:
+    """True only when the backend reports this pod's rental closed over ENDED_RENTAL_VOLUME_GRACE ago.
+
+    Any doubt keeps the volume: no answer, a live rental, or a pod the backend has no closed rental
+    for (a filler's run id, a foreign name). The grace leaves the delete's own volume removal to run.
+    """
+    answer = await ctx.services.backend.get_pod_rental_active(pod_id)
+    if answer is None or answer.active or answer.rental_closed_at is None:
+        return False
+    closed_at: datetime = answer.rental_closed_at
+    if closed_at.tzinfo is None:
+        # the backend writes a naive UTC timestamp
+        closed_at = closed_at.replace(tzinfo=UTC)
+    return datetime.now(UTC) - closed_at >= ENDED_RENTAL_VOLUME_GRACE
 
 
 def pod_id_of_container(name: str) -> str | None:

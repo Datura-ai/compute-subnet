@@ -130,3 +130,54 @@ def test_no_backend_digest_unreadable_remote_keeps_local():
 
     # Assert
     client.api.pull.assert_not_called()
+
+
+# Low-disk prune: every image no container uses goes, except the templates this loop keeps warm.
+def _image(image_id: str, tags: list[str]) -> MagicMock:
+    image = MagicMock()
+    image.id, image.tags = image_id, tags
+    return image
+
+
+def _prune_client(images: list[MagicMock], container_image_ids: list[str]) -> MagicMock:
+    client = MagicMock()
+    client.images.list.return_value = images
+    client.containers.list.return_value = [
+        MagicMock(attrs={"Image": image_id}, status="running") for image_id in container_image_ids
+    ]
+    return client
+
+
+def _disk(monkeypatch, free_gb: float, percent: float) -> None:
+    usage = MagicMock(free=int(free_gb * 1024**3), percent=percent)
+    monkeypatch.setattr(cache_template_service.psutil, "disk_usage", lambda path: usage)
+    monkeypatch.setattr(cache_template_service, "rental_activity", lambda client: None)
+
+
+def test_low_disk_removes_unused_images_and_keeps_used_and_template_ones(monkeypatch):
+    _disk(monkeypatch, free_gb=30, percent=97.8)
+    images = [
+        _image("sha256:own", ["daturaai/compute-subnet-executor:latest"]),
+        _image("sha256:tpl", [f"{REPO}:{TAG}"]),
+        _image("sha256:old", ["someone/old:1", "someone/old:latest"]),
+        _image("sha256:dangling", []),
+    ]
+    client = _prune_client(images, ["sha256:own"])
+    assert cache_template_service._prune_unused_images_when_disk_low(client, {f"{REPO}:{TAG}"}) == 2
+    removed = [call.args[0] for call in client.images.remove.call_args_list]
+    assert removed == ["someone/old:1", "someone/old:latest", "sha256:dangling"]
+
+
+def test_a_disk_over_the_listing_floor_removes_nothing(monkeypatch):
+    _disk(monkeypatch, free_gb=500, percent=50)
+    client = _prune_client([_image("sha256:old", ["someone/old:1"])], [])
+    assert cache_template_service._prune_unused_images_when_disk_low(client, set()) == 0
+    client.images.remove.assert_not_called()
+
+
+def test_a_busy_node_keeps_its_images(monkeypatch):
+    _disk(monkeypatch, free_gb=30, percent=97.8)
+    monkeypatch.setattr(cache_template_service, "rental_activity", lambda client: "docker-over-ssh session")
+    client = _prune_client([_image("sha256:old", ["someone/old:1"])], [])
+    assert cache_template_service._prune_unused_images_when_disk_low(client, set()) == 0
+    client.images.remove.assert_not_called()
