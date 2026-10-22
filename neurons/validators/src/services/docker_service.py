@@ -499,6 +499,14 @@ _PRERUN_HOST_PROBE_TIMEOUT_SECONDS = NVIDIA_SMI_TIMEOUT_SECONDS
 # DAH-3980: a forced rm of a few containers takes about a second; a hung dockerd must fail the
 # customer's create at the cleanup step instead of hanging it
 _CUSTOMER_CONTAINER_REMOVAL_TIMEOUT_SECONDS = 60
+# DAH-5012: after that rm times out on fillers only, one host command kills their processes directly and
+# reads whether each is exiting; bounded on its own, since the rm's deadline is spent by then
+_STUCK_FILLER_PROBE_TIMEOUT_SECONDS = 15
+# failure_step of a customer create whose filler (our own container) is still alive after the kill:
+# not `container_cleanup`, which the backend counts against the provider's node
+FILLER_REMOVAL_STUCK_STEP = "filler_removal_stuck"
+# Linux task flag set by do_exit(): the process was killed and is tearing down (/proc/<pid>/stat field 9)
+_PF_EXITING = 0x4
 
 
 def _missing_rental_docker_host_key_log_text(
@@ -1040,6 +1048,11 @@ class _CreateCancelledByDelete(Exception):
 
 class _FillerRefusedForCustomerCreate(ContainerCreateRefused):
     """Raised at a filler's `docker run` while a customer create runs on the same executor."""
+
+
+class _FillerRemovalStuck(Exception):
+    """DAH-5012: a customer create's `docker rm -fv` of the node's fillers timed out and a filler process is
+    still alive, not exiting, after the validator's direct SIGKILL (or the host could not show it)."""
 
 
 class _FillerBesideCustomerContainer(Exception):
@@ -1745,6 +1758,53 @@ class _OwnSweepRegistry:
 
 
 own_sweep_removals = _OwnSweepRegistry()
+# DAH-5012: filler IDs whose rm timed out in a customer create while every process of theirs was killed and
+# exiting; dockerd finishes that removal, so the running check after `docker run` does not rm them again.
+# shortcut: a plain set, only rare stuck removals are added; prune it if that ever stops being rare
+fillers_exiting_after_kill: set[str] = set()
+
+
+def _kill_and_read_filler_processes_command(container_ids: list[str]) -> str:
+    """DAH-5012: SIGKILL every host process whose cgroup names one of ``container_ids``, wait a second,
+    then print `PROC<TAB>id<TAB>pid<TAB>state<TAB>flags<TAB>wchan` per process still there. `HOSTPID` first
+    when dockerd is visible: without the host's pid namespace no process line proves anything."""
+    ids = " ".join(shlex.quote(container_id) for container_id in container_ids)
+    return (
+        "pgrep -x dockerd >/dev/null 2>&1 && echo HOSTPID; "
+        f"pairs=$(for id in {ids}; do grep -l -- \"$id\" /proc/[0-9]*/cgroup 2>/dev/null | "
+        "while read -r f; do p=${f#/proc/}; echo \"$id ${p%/cgroup}\"; done; done); "
+        "echo \"$pairs\" | while read -r id p; do [ -n \"$p\" ] && kill -KILL \"$p\" 2>/dev/null; done; "
+        "sleep 1; "
+        "echo \"$pairs\" | while read -r id p; do [ -n \"$p\" ] || continue; "
+        "s=$(sed 's/^.*) //' /proc/$p/stat 2>/dev/null); [ -n \"$s\" ] || continue; set -- $s; "
+        "printf 'PROC\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \"$id\" \"$p\" \"$1\" \"$7\" \"$(cat /proc/$p/wchan 2>/dev/null)\"; done"
+    )
+
+
+class StuckFillerProcess(NamedTuple):
+    container_id: str
+    pid: str
+    state: str
+    flags: int
+    wchan: str
+
+    @property
+    def exiting(self) -> bool:
+        return self.state in ("Z", "X", "x") or bool(self.flags & _PF_EXITING)
+
+
+def _parse_stuck_filler_processes(stdout: str) -> tuple[bool, list[StuckFillerProcess]]:
+    """(dockerd visible, the processes still there) from _kill_and_read_filler_processes_command."""
+    host_pid_view = False
+    processes = []
+    for line in stdout.splitlines():
+        if line == "HOSTPID":
+            host_pid_view = True
+            continue
+        fields = line.split("\t")
+        if len(fields) == 6 and fields[0] == "PROC" and fields[4].isdigit():
+            processes.append(StuckFillerProcess(fields[1], fields[2], fields[3], int(fields[4]), fields[5]))
+    return host_pid_view, processes
 
 
 class _MarkOwnRemovalsOnSubmit:
@@ -3487,31 +3547,15 @@ class DockerService:
             await asyncio.sleep(1)
         return False
 
-    async def _remove_fillers_beside_customer_container(
+    async def _remove_live_fillers_beside_customer_container(
         self,
         ssh_client: asyncssh.SSHClientConnection,
         default_extra: dict,
         pod_name: str,
-        listing: ContainerListing | None,
+        fillers: list[str],
+        ids: dict[str, str],
+        exiting: set[str],
     ) -> None:
-        # the `filler_*` on a listing taken while the customer's container runs
-        if listing is None:
-            # read once more, the channel open unbounded as the running check's (_list_all_containers bounds it)
-            try:
-                result = await ssh_client.run(
-                    _RUNNING_CHECK_LISTING_CMD, timeout=_PRERUN_HOST_PROBE_TIMEOUT_SECONDS
-                )
-            except Exception as exc:
-                raise _FillerBesideCustomerContainer(
-                    f"the host listing failed: {exc.__class__.__name__}"
-                ) from exc
-            _, listing = _parse_running_check_with_listing(result.stdout or "")
-            if listing is None:
-                raise _FillerBesideCustomerContainer("the host could not be listed to confirm no filler runs")
-        names, ids = listing
-        fillers = [name for name in names if name.startswith(FILLER_CONTAINER_PREFIX)]
-        if not fillers:
-            return
         logger.warning(
             _m(
                 "Filler found beside a customer's running container; removing it",
@@ -3542,10 +3586,59 @@ class DockerService:
             removed_fillers=fillers,
             listing_after=listing_after,
         )
+        if survivors:
+            survivors = {name: survivors[name] for name in survivors if name not in exiting}
         if survivors is None:
             raise _FillerBesideCustomerContainer(f"the removal of {fillers} could not be confirmed")
         if survivors:
             raise _FillerBesideCustomerContainer(f"{sorted(survivors)} still on the host after docker rm -fv")
+
+    async def _remove_fillers_beside_customer_container(
+        self,
+        ssh_client: asyncssh.SSHClientConnection,
+        default_extra: dict,
+        pod_name: str,
+        listing: ContainerListing | None,
+    ) -> None:
+        # the `filler_*` on a listing taken while the customer's container runs
+        if listing is None:
+            # read once more, the channel open unbounded as the running check's (_list_all_containers bounds it)
+            try:
+                result = await ssh_client.run(
+                    _RUNNING_CHECK_LISTING_CMD, timeout=_PRERUN_HOST_PROBE_TIMEOUT_SECONDS
+                )
+            except Exception as exc:
+                raise _FillerBesideCustomerContainer(
+                    f"the host listing failed: {exc.__class__.__name__}"
+                ) from exc
+            _, listing = _parse_running_check_with_listing(result.stdout or "")
+            if listing is None:
+                raise _FillerBesideCustomerContainer("the host could not be listed to confirm no filler runs")
+        names, ids = listing
+        fillers = [name for name in names if name.startswith(FILLER_CONTAINER_PREFIX)]
+        if not fillers:
+            return
+        # DAH-5012: a filler killed and exiting before `docker run` is still being removed by dockerd; another
+        # rm would only wait on that removal, so it is logged and left to it
+        exiting = [name for name in fillers if ids.get(name) in fillers_exiting_after_kill]
+        if exiting:
+            logger.warning(
+                _m(
+                    "Killed filler still being removed beside a customer's running container",
+                    extra=get_extra_info({
+                        **default_extra,
+                        "event": FILLER_STILL_RUNNING_EVENT,
+                        "reason": "killed_removal_in_progress",
+                        "pod_name": pod_name,
+                        "container_names": exiting,
+                    }),
+                )
+            )
+        to_remove = [name for name in fillers if name not in exiting]
+        if to_remove:
+            await self._remove_live_fillers_beside_customer_container(
+                ssh_client, default_extra, pod_name, to_remove, ids, set(exiting)
+            )
         # DAH-2356: a PEARL filler caps its GPUs before its `docker run`, possibly after this create's
         # last power restore; lifted only now that it is confirmed gone
         for name in fillers:
@@ -4081,6 +4174,10 @@ class DockerService:
             )
         )
         if timeout_error is not None:
+            if stale_containers and all(name.startswith(FILLER_CONTAINER_PREFIX) for name in stale_containers):
+                return await self._settle_stuck_filler_removal(
+                    ssh_client, default_extra, stale_containers, targets, timeout_error
+                )
             raise Exception(
                 f"[clean_existing_containers] docker rm -fv did not finish in {_CUSTOMER_CONTAINER_REMOVAL_TIMEOUT_SECONDS} s"
             ) from timeout_error
@@ -4122,6 +4219,69 @@ class DockerService:
                 f"{_CUSTOMER_CONTAINER_REMOVAL_TIMEOUT_SECONDS} s"
             ) from exc
         return CustomerContainerRemoval(False, listing_after)
+
+    async def _settle_stuck_filler_removal(
+        self,
+        ssh_client: asyncssh.SSHClientConnection,
+        default_extra: dict,
+        fillers: list[str],
+        targets: list[str],
+        timeout_error: TimeoutError,
+    ) -> CustomerContainerRemoval:
+        """DAH-5012: a customer create's `docker rm -fv` of our fillers did not finish in time. In prod (22 Oct,
+        ENGY_TEE fillers on 8x B300) dockerd kept removing them: one went 62 s after the rm was sent, the
+        other's removal was still "in progress" at 66 s. Waiting longer only makes the customer wait (#1809).
+
+        So the filler processes are killed directly and read once (bounded): when dockerd is visible and every
+        process left is exiting (PF_EXITING, or a zombie) the filler can run nothing more, dockerd finishes
+        the removal, and the create goes on. Otherwise the create fails at its own step,
+        FILLER_REMOVAL_STUCK_STEP, not at `container_cleanup`: the stuck container is ours."""
+        error = (
+            f"[clean_existing_containers] docker rm -fv of filler {fillers} did not finish in "
+            f"{_CUSTOMER_CONTAINER_REMOVAL_TIMEOUT_SECONDS} s"
+        )
+        try:
+            # asyncssh's timeout= bounds only the command, not its channel open
+            async with asyncio.timeout(_STUCK_FILLER_PROBE_TIMEOUT_SECONDS):
+                result = await ssh_client.run(
+                    _kill_and_read_filler_processes_command(targets),
+                    check=False,
+                    timeout=_STUCK_FILLER_PROBE_TIMEOUT_SECONDS,
+                )
+        except Exception as exc:
+            logger.warning(
+                _m(
+                    "Stuck filler removal: the filler processes could not be read",
+                    extra=get_extra_info({
+                        **default_extra,
+                        "container_names": fillers,
+                        "error_type": exc.__class__.__name__,
+                    }),
+                )
+            )
+            raise _FillerRemovalStuck(f"{error}; its processes could not be read") from timeout_error
+        host_pid_view, processes = _parse_stuck_filler_processes(result.stdout or "")
+        # a filler listed without an ID cannot be found by its cgroup
+        all_found_by_id = not set(targets) & set(fillers)
+        exiting = host_pid_view and all_found_by_id and all(process.exiting for process in processes)
+        logger.warning(
+            _m(
+                "Filler removal timed out on a customer create",
+                extra=get_extra_info({
+                    **default_extra,
+                    "event": FILLER_STILL_RUNNING_EVENT,
+                    "reason": "rm_timed_out",
+                    "container_names": fillers,
+                    "host_pid_view": host_pid_view,
+                    "processes": [process._asdict() for process in processes[:20]],
+                    "exiting": exiting,
+                }),
+            )
+        )
+        if not exiting:
+            raise _FillerRemovalStuck(f"{error}; a filler process is not exiting after SIGKILL") from timeout_error
+        fillers_exiting_after_kill.update(targets)
+        return CustomerContainerRemoval(False, await self._list_all_containers(ssh_client))
 
     @staticmethod
     async def _rm_containers(
@@ -9083,6 +9243,8 @@ class DockerService:
                 current_step = "cancelled_by_delete"
             elif isinstance(e, _FillerRefusedForCustomerCreate):
                 current_step = "customer_create_in_flight"
+            elif isinstance(e, _FillerRemovalStuck):
+                current_step = FILLER_REMOVAL_STUCK_STEP
             # `error_class` (e.g. `port_collision`: dockerd could not bind the pod's host port)
             # rides in the event's detail next to the stage so the backend can count the class
             error_class = rental_docker_error_class(e) or port_collision_error_class(e)

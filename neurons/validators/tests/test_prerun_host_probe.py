@@ -1381,10 +1381,11 @@ async def test_customer_create_relists_after_any_other_removal(
 
 
 @pytest.mark.asyncio
-async def test_customer_create_whose_filler_removal_times_out_fails_at_the_cleanup_step(
+async def test_customer_create_whose_filler_removal_times_out_fails_at_its_own_step(
     svc_fixture, monkeypatch
 ):
-    """A hung dockerd fails the create where a failed cleanup does, never hangs it."""
+    """A filler rm that times out, its processes not shown exiting, fails the create, never hangs it; at
+    filler_removal_stuck (DAH-5012), not container_cleanup, which the backend counts against the node."""
     svc = svc_fixture
     ssh_client = _wire_customer_create_over_the_host(
         svc,
@@ -1396,7 +1397,7 @@ async def test_customer_create_whose_filler_removal_times_out_fails_at_the_clean
     result = await _run_create_container(svc, _deploy_payload(active_volume_names=["volume_x"]))
 
     assert type(result).__name__ == "FailedContainerRequest"
-    assert result.failure_step == "container_cleanup"
+    assert result.failure_step == "filler_removal_stuck"
     [removal] = [call for call in ssh_client.run.await_args_list if call.args[0].startswith("/usr/bin/docker rm -fv")]
     assert removal.kwargs["timeout"] == ds_module._CUSTOMER_CONTAINER_REMOVAL_TIMEOUT_SECONDS
 
