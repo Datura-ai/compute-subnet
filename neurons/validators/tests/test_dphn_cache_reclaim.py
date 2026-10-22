@@ -173,25 +173,27 @@ async def test_a_stopped_filler_does_not_block_the_reclaim(cleanup):
     assert not any("ps -a" in c for c in ssh_client.commands), "guard must not use `docker ps -a`"
 
 
-# A closed rental's leftover volume, removed once the node is hidden for lack of disk.
+
+# Orphan named volumes: volume_<uuid> whose container is gone, judged by the backend (is_orphan).
 POD = "11111111-2222-3333-4444-555555555555"
 LIVE = "66666666-7777-8888-9999-000000000000"
+NOW = 1_800_000_000
 
 
-class DanglingAwareSsh(FakeSshClient):
-    def __init__(self, dangling: list[str], used_gb: float = 1, **kwargs):
-        super().__init__(**kwargs)
+class VolumeHostSsh(FakeSshClient):
+    def __init__(self, dangling: list[str], created: dict[str, str], **kwargs):
+        super().__init__(containers=[], free_gb=500, **kwargs)
         self._dangling = dangling
-        self._used = str(int(used_gb * GB))
+        self._created = created
 
     async def run(self, command: str, *args, **kwargs):
         if "dangling=true" in command:
             self.commands.append(command)
             return SimpleNamespace(exit_status=0, stdout="\n".join(self._dangling), stderr="")
-        if "df -P -B1" in command:
+        if "volume inspect" in command:
             self.commands.append(command)
-            line = f"/dev/sda1 1 {self._used} {self._free_bytes} 1% /hostfs"
-            return SimpleNamespace(exit_status=0, stdout=f"Filesystem 1B-blocks Used Available Capacity\n{line}", stderr="")
+            lines = [str(NOW)] + [f"{name} {at}" for name, at in self._created.items() if name in command]
+            return SimpleNamespace(exit_status=0, stdout="\n".join(lines), stderr="")
         return await super().run(command, *args, **kwargs)
 
 
@@ -203,45 +205,36 @@ def _snapshot(pod_ids: list[str]):
     return RentedExecutorsResponse(executors={"exec-1": executor})
 
 
-async def _ended(pod_id: str) -> bool:
-    return pod_id == POD
-
-
 @pytest.mark.asyncio
-async def test_removes_only_an_unlisted_dangling_ended_rental_volume_when_disk_is_low(cleanup):
+async def test_removes_only_unlisted_unmounted_volume_uuids_the_backend_calls_orphans(cleanup):
     volumes = [f"volume_{POD}", f"volume_{LIVE}", "volume_custom", "dphn_cache_x"]
-    ssh_client = DanglingAwareSsh(dangling=volumes, containers=[], volumes=volumes, free_gb=40)
-    assert await cleanup.remove_ended_rental_volumes_when_disk_is_tight(ssh_client, _snapshot([LIVE]), "exec-1", _ended) == 1
+    created = {name: "2026-09-10T08:00:00Z" for name in volumes}
+    ssh_client = VolumeHostSsh(dangling=volumes, created=created, volumes=volumes)
+    seen = []
+
+    async def is_orphan(volume_id, age):
+        seen.append((volume_id, age.days))
+        return True
+
+    assert await cleanup.remove_orphan_rental_volumes(ssh_client, _snapshot([LIVE]), "exec-1", is_orphan) == 1
     assert _removed(ssh_client) == [f"volume_{POD}"]
+    assert [volume_id for volume_id, _ in seen] == [POD] and seen[0][1] > 7  # age from CreatedAt
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "dangling, listed, free_gb, used_gb, is_ended",
-    [
-        ([], [], 40, 1, _ended),  # mounted by a container, even a stopped one
-        ([f"volume_{POD}"], [POD], 40, 1, _ended),  # the snapshot still lists the pod
-        ([f"volume_{POD}"], [], 500, 1, _ended),  # the node is over the listing floor
-        ([f"volume_{POD}"], [], 40, 1, AsyncMock(return_value=False)),  # backend: not closed
-    ],
-)
-async def test_keeps_every_volume_that_is_not_a_long_ended_unmounted_rental(cleanup, dangling, listed, free_gb, used_gb, is_ended):
-    volumes = [f"volume_{POD}"]
-    ssh_client = DanglingAwareSsh(dangling=dangling, used_gb=used_gb, containers=[], volumes=volumes, free_gb=free_gb)
-    assert await cleanup.remove_ended_rental_volumes_when_disk_is_tight(ssh_client, _snapshot([LIVE, *listed]), "exec-1", is_ended) == 0
+@pytest.mark.parametrize("dangling, listed", [([], []), ([f"volume_{POD}"], [POD])])
+async def test_a_mounted_volume_or_a_listed_pod_is_never_a_candidate(cleanup, dangling, listed):
+    ssh_client = VolumeHostSsh(dangling=dangling, created={f"volume_{POD}": "2026-09-10T08:00:00Z"}, volumes=[f"volume_{POD}"])
+    is_orphan = AsyncMock(return_value=True)
+    assert await cleanup.remove_orphan_rental_volumes(ssh_client, _snapshot([LIVE, *listed]), "exec-1", is_orphan) == 0
+    is_orphan.assert_not_called()
     assert _removed(ssh_client) == []
 
 
 @pytest.mark.asyncio
-async def test_an_empty_snapshot_removes_no_volume(cleanup):
-    ssh_client = DanglingAwareSsh(dangling=[f"volume_{POD}"], containers=[], volumes=[f"volume_{POD}"], free_gb=40)
-    assert await cleanup.remove_ended_rental_volumes_when_disk_is_tight(ssh_client, None, "exec-1", _ended) == 0
+async def test_an_empty_snapshot_or_a_kept_verdict_removes_no_volume(cleanup):
+    created = {f"volume_{POD}": "2026-09-10T08:00:00Z"}
+    ssh_client = VolumeHostSsh(dangling=[f"volume_{POD}"], created=created, volumes=[f"volume_{POD}"])
+    assert await cleanup.remove_orphan_rental_volumes(ssh_client, None, "exec-1", AsyncMock(return_value=True)) == 0
+    assert await cleanup.remove_orphan_rental_volumes(ssh_client, _snapshot([LIVE]), "exec-1", AsyncMock(return_value=False)) == 0
     assert _removed(ssh_client) == []
-
-
-@pytest.mark.asyncio
-async def test_a_disk_over_ninety_percent_full_counts_as_low_even_with_the_free_floor_met(cleanup):
-    ssh_client = DanglingAwareSsh(
-        dangling=[f"volume_{POD}"], used_gb=1900, containers=[], volumes=[f"volume_{POD}"], free_gb=150
-    )
-    assert await cleanup.remove_ended_rental_volumes_when_disk_is_tight(ssh_client, _snapshot([LIVE]), "exec-1", _ended) == 1

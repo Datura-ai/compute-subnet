@@ -26,6 +26,7 @@ from neurons.validators.src.services.task.checks.stale_container_cleanup import 
 from neurons.validators.src.services.task.pipeline_factory import PipelineFactory
 
 from protocol.vc_protocol.compute_requests import (
+    FillerRunActiveResponse,
     PodRentalActiveResponse,
     RentedExecutor,
     RentedExecutorsResponse,
@@ -66,8 +67,8 @@ class RecordingContainerCleanup:
         self.sweep_calls.append({"ssh_client": ssh_client, "executor_uuid": executor_uuid})
         return self._swept
 
-    async def remove_ended_rental_volumes_when_disk_is_tight(self, ssh_client, rented_data, executor_uuid, is_ended_rental):
-        self.is_ended_rental = is_ended_rental
+    async def remove_orphan_rental_volumes(self, ssh_client, rented_data, executor_uuid, is_orphan):
+        self.is_orphan = is_orphan
         return 0
 
 
@@ -711,23 +712,38 @@ async def test_a_valid_rented_list_keeps_the_cleaned_event():
     assert result.event.what_we_saw["rented_list_unknown"] is None
 
 
-# A closed rental's volume goes only once the backend reports it closed, an hour on.
+
+# An orphan volume_<uuid>: a rental closed over an hour ago, a filler run that ended, or a uuid
+# nothing knows on a volume at least 7 days old. Example shapes: a filler run stopped weeks ago
+# (volume_1d61a61b...) and a uuid matching nothing (volume_3f8deb9e...).
+_CLOSED = datetime.now(UTC) - timedelta(hours=2)
+_POD_UNKNOWN = PodRentalActiveResponse(active=False)
+_FILLER_UNKNOWN = FillerRunActiveResponse(active=False)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "answer, ended",
+    "pod, filler, age, orphan",
     [
-        (None, False),
-        (PodRentalActiveResponse(active=True), False),
-        (PodRentalActiveResponse(active=False), False),  # no closed rental: a filler id or unknown
-        (PodRentalActiveResponse(active=False, rental_closed_at=datetime.now(UTC) - timedelta(minutes=10)), False),
-        (PodRentalActiveResponse(active=False, rental_closed_at=datetime.now(UTC) - timedelta(hours=2)), True),
-        # the backend's naive UTC timestamp
-        (PodRentalActiveResponse(active=False, rental_closed_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=2)), True),
+        (None, _FILLER_UNKNOWN, timedelta(days=30), False),  # backend unreachable
+        (PodRentalActiveResponse(active=True, status="RUNNING"), None, timedelta(days=30), False),
+        (PodRentalActiveResponse(active=False, status="STOPPED"), None, timedelta(days=30), False),  # no closed rental
+        (PodRentalActiveResponse(active=False, status="BROKEN", rental_closed_at=datetime.now(UTC) - timedelta(minutes=10)), None, timedelta(days=30), False),
+        (PodRentalActiveResponse(active=False, status="BROKEN", rental_closed_at=_CLOSED), None, timedelta(days=1), True),
+        (PodRentalActiveResponse(active=False, rental_closed_at=_CLOSED.replace(tzinfo=None)), None, timedelta(days=1), True),  # naive UTC
+        (_POD_UNKNOWN, FillerRunActiveResponse(active=False, status="STOPPED"), timedelta(days=1), True),  # ended filler run
+        (_POD_UNKNOWN, FillerRunActiveResponse(active=False, status="STARTING"), timedelta(days=30), False),
+        (_POD_UNKNOWN, FillerRunActiveResponse(active=True, status="RUNNING"), timedelta(days=30), False),
+        (_POD_UNKNOWN, None, timedelta(days=30), False),  # filler lookup failed
+        (_POD_UNKNOWN, _FILLER_UNKNOWN, timedelta(days=6), False),  # unknown uuid, too young
+        (_POD_UNKNOWN, _FILLER_UNKNOWN, timedelta(days=8), True),  # unknown uuid, old enough
     ],
 )
-async def test_a_volume_counts_as_an_ended_rental_only_when_the_backend_closed_it_over_an_hour_ago(answer, ended):
+async def test_which_volume_uuids_count_as_orphans(pod, filler, age, orphan):
     cleanup = RecordingContainerCleanup()
     ctx = _make_ctx(cleanup)
-    ctx.services.backend.get_pod_rental_active.return_value = answer
-    await StaleContainerCleanupCheck().run(ctx)
-    assert await cleanup.is_ended_rental("11111111-2222-3333-4444-555555555555") is ended
+    ctx.services.backend.get_pod_rental_active.return_value = pod
+    ctx.services.backend.get_filler_run_active.return_value = filler
+    result = await StaleContainerCleanupCheck().run(ctx)
+    assert result.event.what_we_saw["removed_orphan_volumes"] == 0
+    assert await cleanup.is_orphan("1d61a61b-2222-3333-4444-555555555555", age) is orphan

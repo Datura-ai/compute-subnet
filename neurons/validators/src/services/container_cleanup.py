@@ -1,12 +1,13 @@
 import logging
 import re
+from datetime import UTC, datetime, timedelta
 import shlex
 from typing import Awaitable, Callable, Optional
 
 import asyncssh
 
 from protocol.vc_protocol.compute_requests import RentedExecutorsResponse
-from core.docker_utils import ALPINE_HELPER_IMAGE, DockerCommand, df_available_bytes, df_command
+from core.docker_utils import ALPINE_HELPER_IMAGE, DockerCommand, df_available_bytes
 from core.utils import _m
 from services.const import (
     DPHN_CACHE_LISTING_FLOOR_GB,
@@ -37,11 +38,8 @@ VOLUME_RM_MAX_PER_PASS = 200
 
 # A rental's own volume is created as volume_<pod uuid>; nothing else on the host is named so.
 POD_VOLUME_NAME_PATTERN = re.compile(r"^volume_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
-# The backend hides a node from the rental listing below DPHN_CACHE_LISTING_FLOOR_GB free OR above
-# this utilization, so the ended-rental volume sweep fires on either.
-LISTING_MAX_DISK_USED_PERCENT = 90
-# One backend lookup per candidate volume; a backlog drains over a few cycles.
-ENDED_RENTAL_VOLUME_LOOKUPS_PER_PASS = 50
+# Backend lookups go per candidate volume; a backlog drains over a few passes.
+ORPHAN_VOLUME_LOOKUPS_PER_PASS = 50
 
 
 # DAH-2805: how long an abandoned download temporary may sit before the sweep removes it. The window
@@ -346,22 +344,23 @@ class ContainerCleanup:
             logger.warning(_m("DPHN cache reclaim failed", extra=extra | {"error": str(e)}))
             return 0
 
-    async def remove_ended_rental_volumes_when_disk_is_tight(
+    async def remove_orphan_rental_volumes(
         self,
         ssh_client: asyncssh.SSHClientConnection,
         rented_data: Optional[RentedExecutorsResponse],
         executor_uuid: str,
-        is_ended_rental: Callable[[str], Awaitable[bool]],
+        is_orphan: Callable[[str, timedelta], Awaitable[bool]],
     ) -> int:
-        """Remove the volumes of rentals that have ended, once the node is hidden for lack of disk.
+        """Remove `volume_<uuid>` volumes whose pod or filler run is over and whose container is gone.
 
-        A delete removes its pod's volume, but best-effort: a volume dockerd still held, or a
-        delete that never reached the host, stays behind for good and fills the disk. A candidate
-        must be all of: a `volume_<pod uuid>` no container (running or stopped) mounts, a pod the
-        fleet snapshot does not list (the snapshot carries every pod status but BROKEN and
-        DELETING, so a stopped or failed-reboot pod keeps its volume), and a rental the backend
-        itself reports closed (``is_ended_rental``). Anything the backend does not know as a
-        closed rental, a filler's volume included, is kept. Returns how many volumes were removed.
+        The orphan reaper removes a `volume_<id>` only together with its container, and the dangling
+        prune only matches anonymous (64-hex) names, so a named volume whose container was already
+        gone (a delete whose volume removal failed, a filler stopped without it) stayed for good.
+        A candidate must be a `volume_<uuid>` no container (running or stopped) mounts, and not a pod
+        or filler the fleet snapshot lists: the snapshot carries every pod status but BROKEN and
+        DELETING, so a stopped or failed-reboot pod keeps its volume. ``is_orphan(uuid, age)`` then
+        decides from the backend, ``age`` being the time since the volume was created. Returns how
+        many volumes were removed.
         """
         extra = {"executor_uuid": executor_uuid}
         try:
@@ -379,59 +378,58 @@ class ContainerCleanup:
                 and match[1] not in listed_pod_ids
                 and f"{POD_CONTAINER_PREFIX}{match[1]}" not in listed_names
                 and f"{FILLER_CONTAINER_PREFIX}{match[1]}" not in listed_names
-            ]
-            # cheapest guard first: most nodes hold no such volume, and measuring disk starts a container
-            if not candidates or not await self._is_disk_below_listing_floor(ssh_client):
+            ][:ORPHAN_VOLUME_LOOKUPS_PER_PASS]
+            if not candidates:
                 return 0
 
-            ended: list[str] = []
-            for name in candidates[:ENDED_RENTAL_VOLUME_LOOKUPS_PER_PASS]:
-                if await is_ended_rental(name.removeprefix("volume_")):
-                    ended.append(name)
-            if not ended:
+            ages: dict[str, timedelta] = await self._volume_ages(ssh_client, candidates)
+            orphans: list[str] = [
+                name
+                for name in candidates
+                if name in ages and await is_orphan(name.removeprefix("volume_"), ages[name])
+            ]
+            if not orphans:
                 return 0
             if self.dry_run:
                 logger.info(
                     _m(
-                        f"[DRY RUN] Would remove {len(ended)} ended-rental volume(s)",
-                        extra=extra | {"volumes": ended, "dry_run": True},
+                        f"[DRY RUN] Would remove {len(orphans)} orphan rental volume(s)",
+                        extra=extra | {"volumes": orphans, "dry_run": True},
                     )
                 )
                 return 0
 
-            await ssh_client.run(DockerCommand.volume_remove(*ended))
+            await ssh_client.run(DockerCommand.volume_remove(*orphans))
             # `volume_remove` ends in `|| true`: re-list to report only what is really gone
             surviving: set[str] = set(await self._get_cache_volumes(ssh_client, ("volume_",)))
-            removed: list[str] = [name for name in ended if name not in surviving]
+            removed: list[str] = [name for name in orphans if name not in surviving]
             if removed:
                 logger.info(
-                    _m(
-                        f"Removed {len(removed)} ended-rental volume(s) to get the node back over "
-                        "the rental listing floor",
-                        extra=extra | {"volumes": removed},
-                    )
+                    _m(f"Removed {len(removed)} orphan rental volume(s)", extra=extra | {"volumes": removed})
                 )
             return len(removed)
         except Exception as e:
-            logger.warning(_m("Ended-rental volume removal failed", extra=extra | {"error": str(e)}))
+            logger.warning(_m("Orphan rental volume removal failed", extra=extra | {"error": str(e)}))
             return 0
 
-    async def _is_disk_below_listing_floor(self, ssh_client: asyncssh.SSHClientConnection) -> bool:
-        # Same measure as _get_free_disk_gb, plus utilization; an unreadable disk counts as fine.
-        info = await ssh_client.run("/usr/bin/docker info --format '{{.DockerRootDir}}'")
-        if getattr(info, "exit_status", 0) != 0:
-            return False
-        docker_root: str = (info.stdout or "").strip() or "/var/lib/docker"
-        result = await ssh_client.run(df_command(shlex.quote(docker_root)))
-        if getattr(result, "exit_status", 0) != 0:
-            return False
-        try:
-            used, available = (int(column) for column in result.stdout.strip().splitlines()[1].split()[2:4])
-        except (IndexError, ValueError, AttributeError):
-            return False
-        if available < DPHN_CACHE_LISTING_FLOOR_GB * 1024**3:
-            return True
-        return used + available > 0 and used * 100 / (used + available) > LISTING_MAX_DISK_USED_PERCENT
+    async def _volume_ages(self, ssh_client: asyncssh.SSHClientConnection, names: list[str]) -> dict[str, timedelta]:
+        # time since each volume was created, by the host's clock; a volume it cannot date is left out
+        quoted = " ".join(shlex.quote(name) for name in names)
+        result = await ssh_client.run(
+            f"date +%s; /usr/bin/docker volume inspect --format '{{{{.Name}}}} {{{{.CreatedAt}}}}' {quoted}"
+        )
+        lines = (result.stdout or "").splitlines()
+        if not lines or not lines[0].strip().isdigit():
+            return {}
+        now = datetime.fromtimestamp(int(lines[0].strip()), UTC)
+        ages: dict[str, timedelta] = {}
+        for line in lines[1:]:
+            name, _, created = line.strip().partition(" ")
+            try:
+                ages[name] = now - datetime.fromisoformat(created.strip())
+            except ValueError:
+                continue
+        return ages
 
     async def _get_dangling_volumes(self, ssh_client) -> Optional[list[str]]:
         # every volume no container (in any state) references; None if listing failed
