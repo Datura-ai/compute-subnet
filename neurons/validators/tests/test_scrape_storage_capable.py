@@ -1,7 +1,8 @@
 """DAH-1997 (Fish 21 Oct): the storage limit is required only of hosts that can build it.
 
 storage_limit_capable() in machine_scrape.py: docker's data root already on xfs (only `pquota` missing), or a
-disk or partition of 100 GB+ that nothing uses (not mounted, not swap, no holders, not partitioned, writable).
+disk or partition of 100 GiB+ that nothing uses and `lium gpu-splitting setup` accepts (not mounted, not swap, no
+holders, not partitioned, writable, not removable or non-local, no signature).
 A host with one disk, all of it in use, is not capable and keeps the STORAGE_LIMIT_MISSING warning only.
 """
 
@@ -27,6 +28,9 @@ HELPERS = {
     "SYSFS_SECTOR_BYTES",
     "PROC_SWAPS_PATH",
     "NOT_A_SPARE_DISK_PREFIXES",
+    "NON_LOCAL_SYSFS_PARTS",
+    "SIGNATURE_SPAN_BYTES",
+    "carries_signature",
     "MountLine",
     "covering_mount",
     "kernel_name_of_device_node",
@@ -34,7 +38,7 @@ HELPERS = {
     "spare_block_device",
     "storage_limit_capable",
 }
-SECTORS_200_GB = 200 * 1000**3 // 512
+SECTORS_200_GB = 200 * 1024**3 // 512
 ROOT_ON_SDA1 = "/dev/sda1 / ext4 rw,relatime 0 0\n"
 
 
@@ -61,6 +65,11 @@ def device(scrape: dict[str, Any], name: str, sectors: int = SECTORS_200_GB, **f
     (path / "holders").mkdir()
     for file_name, text in files.items():
         (path / file_name).write_text(text)
+    # the device node: a sparse all-zero file (a blank disk) of the same size
+    node = Path(scrape["HOST_ROOT_PREFIX"]) / "dev" / name
+    node.parent.mkdir(parents=True, exist_ok=True)
+    with open(node, "wb") as node_file:
+        node_file.truncate(sectors * 512)
     return path
 
 
@@ -89,15 +98,29 @@ def test_an_unused_second_disk_is_capable(scrape: dict[str, Any]) -> None:
     assert scrape["spare_block_device"](ROOT_ON_SDA1) == "nvme1n1"
 
 
-@pytest.mark.parametrize("case", ["mounted", "swap", "lvm_member", "small", "read_only", "loop"])
+@pytest.mark.parametrize(
+    "case",
+    ["mounted", "swap", "lvm_member", "small", "read_only", "loop", "removable", "ext4", "end_signature", "no_node"],
+)
 def test_a_disk_in_use_or_unfit_is_not_spare(scrape: dict[str, Any], case: str) -> None:
     name = "loop0" if case == "loop" else "sdb"
     path = device(
         scrape,
         name,
         sectors=50 * 1000**3 // 512 if case == "small" else SECTORS_200_GB,
-        **({"ro": "1\n"} if case == "read_only" else {}),
+        **({"ro": "1\n"} if case == "read_only" else {"removable": "1\n"} if case == "removable" else {}),
     )
+    node = Path(scrape["HOST_ROOT_PREFIX"]) / "dev" / name
+    if case == "ext4":  # an unmounted ext4 partition: the superblock magic at byte 1080
+        with open(node, "r+b") as node_file:
+            node_file.seek(1080)
+            node_file.write(b"\x53\xef")
+    if case == "end_signature":  # a backup GPT header at the end of the disk
+        with open(node, "r+b") as node_file:
+            node_file.seek(SECTORS_200_GB * 512 - 512)
+            node_file.write(b"EFI PART")
+    if case == "no_node":
+        node.unlink()
     if case == "lvm_member":
         (path / "holders" / "dm-0").mkdir()
     if case == "swap":
@@ -107,3 +130,12 @@ def test_a_disk_in_use_or_unfit_is_not_spare(scrape: dict[str, Any], case: str) 
     mounts = ROOT_ON_SDA1 + ("/dev/sdb /data ext4 rw 0 0\n" if case == "mounted" else "")
 
     assert scrape["spare_block_device"](mounts) is None
+
+
+def test_a_usb_disk_is_not_spare(scrape: dict[str, Any], tmp_path: Path) -> None:
+    usb = tmp_path / "devices" / "pci0000:00" / "usb2" / "2-1" / "block" / "sdc"
+    usb.parent.mkdir(parents=True)
+    device(scrape, "sdc").rename(usb)
+    (Path(scrape["SYS_CLASS_BLOCK_PATH"]) / "sdc").symlink_to(usb)
+
+    assert scrape["spare_block_device"](ROOT_ON_SDA1) is None

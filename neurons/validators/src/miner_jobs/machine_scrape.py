@@ -1958,16 +1958,35 @@ def get_docker_root_disk_type() -> str:
 # DAH-1997 (Fish 21 Oct): the storage limit is required only of hosts that can build it - docker's data
 # root already on xfs (only `pquota` missing), or a spare disk or partition big enough for it. A host
 # with one disk, all of it in use, cannot, and keeps the warning only.
-STORAGE_CAPABLE_MIN_BYTES = 100 * 1000 ** 3
+STORAGE_CAPABLE_MIN_BYTES = 100 * 1024 ** 3
 SYSFS_SECTOR_BYTES = 512
 PROC_SWAPS_PATH = "/proc/swaps"
 NOT_A_SPARE_DISK_PREFIXES = ("loop", "ram", "zram", "sr", "fd", "nbd", "dm-", "md")
+# sysfs path parts of the transports `lium gpu-splitting setup` refuses (usb, mmc, iscsi, fc)
+NON_LOCAL_SYSFS_PARTS = ("/usb", "/mmc_host/", "/session", "/rport-")
+# every signature wipefs finds (filesystem, partition table, LVM, RAID, swap, ZFS) sits in a disk's first
+# or last MiB
+SIGNATURE_SPAN_BYTES = 1024 * 1024
+
+
+def carries_signature(node_path: str, size_bytes: int) -> bool:
+    """True unless the first and last SIGNATURE_SPAN_BYTES of the device are all zero - the CLI refuses a
+    target that carries any signature, so an unreadable device counts as carrying one."""
+    try:
+        with open(node_path, "rb") as device_file:
+            head = device_file.read(SIGNATURE_SPAN_BYTES)
+            device_file.seek(max(size_bytes - SIGNATURE_SPAN_BYTES, 0))
+            tail = device_file.read(SIGNATURE_SPAN_BYTES)
+    except OSError:
+        return True
+    return not head or head.count(0) != len(head) or tail.count(0) != len(tail)
 
 
 def spare_block_device(mounts_text: str) -> str | None:
-    """The kernel name of a disk or partition of STORAGE_CAPABLE_MIN_BYTES or more that nothing uses:
-    not mounted, not swap, not under LVM / RAID / dm-crypt (no holders), not read-only, and for a whole
-    disk, not partitioned. None when there is none. Free space inside an LVM volume group or after the
+    """The kernel name of a disk or partition of STORAGE_CAPABLE_MIN_BYTES or more that nothing uses and
+    `lium gpu-splitting setup` accepts: not mounted, not swap, not under LVM / RAID / dm-crypt (no
+    holders), not read-only, not removable or attached over usb / mmc / iscsi / fc, no signature (no
+    filesystem), and for a whole disk, not partitioned. None when there is none. Free space inside an LVM volume group or after the
     last partition is not seen."""
     in_use = set()
     for line in mounts_text.splitlines():
@@ -1998,6 +2017,14 @@ def spare_block_device(mounts_text: str) -> str | None:
         if size_bytes < STORAGE_CAPABLE_MIN_BYTES or holders or partitioned:
             continue
         if read_sysfs_text(f"{device_path}/ro") == "1":
+            continue
+        # a partition's removable flag is on its parent disk, the sysfs directory above it
+        real_path = os.path.realpath(device_path)
+        if "1" in (read_sysfs_text(f"{real_path}/removable"), read_sysfs_text(f"{os.path.dirname(real_path)}/removable")):
+            continue
+        if any(part in real_path for part in NON_LOCAL_SYSFS_PARTS):
+            continue
+        if carries_signature(f"{HOST_ROOT_PREFIX}/dev/{name}", size_bytes):
             continue
         return name
     return None
