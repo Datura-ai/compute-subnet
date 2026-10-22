@@ -6,6 +6,7 @@ again next cycle and the node would re-download ~37 GB forever. This backstop is
 reclaims, and it decides on real free space: below the rental listing floor the node earns nothing.
 """
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -256,3 +257,28 @@ async def test_kept_candidates_never_starve_the_volumes_behind_the_per_pass_cap(
     assert passes == [0, 1]
     assert seen[:50] == ids[:50] and ids[-1] in seen[50:]
     assert _removed(ssh_client) == [names[-1]]
+
+
+@pytest.mark.asyncio
+async def test_a_slow_backend_ends_the_pass_on_budget_and_later_passes_resume(cleanup, monkeypatch):
+    monkeypatch.setattr("services.container_cleanup.ORPHAN_VOLUME_LOOKUP_BUDGET_SECONDS", 0.05)
+    ids = [str(UUID(int=i)) for i in range(1, 4)]
+    names = [f"volume_{uid}" for uid in ids]
+    ssh_client = VolumeHostSsh(dangling=names, created={name: "2026-09-10T08:00:00Z" for name in names}, volumes=names)
+    slow = {ids[1]}
+    seen = []
+
+    async def is_orphan(volume_id, age):
+        seen.append(volume_id)
+        if volume_id in slow:
+            await asyncio.sleep(1)  # far past the budget: the pass must return, not hang
+        return True
+
+    assert await cleanup.remove_orphan_rental_volumes(ssh_client, _snapshot([LIVE]), "exec-1", is_orphan) == 1
+    assert _removed(ssh_client) == [names[0]]
+    slow.clear()  # the backend recovers: the next pass picks up after the volume it stopped on
+    ssh_client._dangling = names[1:]
+    ssh_client.commands.clear()
+    seen.clear()
+    assert await cleanup.remove_orphan_rental_volumes(ssh_client, _snapshot([LIVE]), "exec-1", is_orphan) == 2
+    assert seen == [ids[2], ids[1]] and _removed(ssh_client) == names[1:]

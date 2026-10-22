@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from datetime import UTC, datetime, timedelta
@@ -40,6 +41,8 @@ VOLUME_RM_MAX_PER_PASS = 200
 POD_VOLUME_NAME_PATTERN = re.compile(r"^volume_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
 # Backend lookups go per candidate volume; a backlog drains over a few passes.
 ORPHAN_VOLUME_LOOKUPS_PER_PASS = 50
+# Wall-clock budget for those lookups, well inside the executor task timeout; the rest wait a pass.
+ORPHAN_VOLUME_LOOKUP_BUDGET_SECONDS = 30
 
 
 # DAH-2805: how long an abandoned download temporary may sit before the sweep removes it. The window
@@ -392,11 +395,18 @@ class ContainerCleanup:
             self._orphan_volume_cursor[executor_uuid] = candidates[-1]
 
             ages: dict[str, timedelta] = await self._volume_ages(ssh_client, candidates)
-            orphans: list[str] = [
-                name
-                for name in candidates
-                if name in ages and await is_orphan(name.removeprefix("volume_"), ages[name])
-            ]
+            orphans: list[str] = []
+            try:
+                async with asyncio.timeout(ORPHAN_VOLUME_LOOKUP_BUDGET_SECONDS):
+                    for name in candidates:
+                        # the cursor counts the in-flight candidate too, so one slow lookup cannot pin it
+                        self._orphan_volume_cursor[executor_uuid] = name
+                        if name in ages and await is_orphan(name.removeprefix("volume_"), ages[name]):
+                            orphans.append(name)
+            except TimeoutError:
+                logger.info(
+                    _m("Orphan volume lookups hit the pass budget; resuming next pass", extra=extra)
+                )
             if not orphans:
                 return 0
             if self.dry_run:
