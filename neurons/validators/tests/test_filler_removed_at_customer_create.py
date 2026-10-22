@@ -408,6 +408,28 @@ async def test_a_filler_that_stays_past_the_wait_fails_the_create(docker_service
 
 
 @pytest.mark.asyncio
+async def test_a_stale_pod_that_stays_fails_the_create_at_the_short_budget(docker_service, retry_ssh_mock, monkeypatch):
+    # only a filler's GPU teardown earns the long wait; a stuck pod_* still fails at the first budget
+    monkeypatch.setattr(ds_module, "_SLOW_REMOVAL_WAIT_SECONDS", 10)
+    monkeypatch.setattr(ds_module, "_SLOW_REMOVAL_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(ds_module, "_CUSTOMER_CONTAINER_REMOVAL_TIMEOUT_SECONDS", 0.05)
+    replies = [_listing("pod_target\npod_stuck\n"), _removal("pod_stuck", rm_exit=1)]
+
+    async def run(cmd, *args, **kwargs):
+        if replies:
+            return replies.pop(0)
+        if cmd == ds_module.DOCKER_PS_ALL_NAMES_IDS_CMD:
+            return _listing("pod_stuck\n")
+        return _listing("", exit_status=1, stderr="busy")
+
+    ssh_client = AsyncMock()
+    ssh_client.run = AsyncMock(side_effect=run)
+
+    with pytest.raises(Exception, match="after a failed docker rm -fv did not finish in 0.05 s"):
+        await asyncio.wait_for(_clean_for_customer(docker_service, ssh_client), 2)
+
+
+@pytest.mark.asyncio
 async def test_a_filler_that_goes_after_more_than_the_first_budget_does_not_fail_the_create(
     docker_service, retry_ssh_mock, monkeypatch, caplog
 ):
@@ -675,6 +697,32 @@ async def test_a_replacement_fillers_volume_is_removed_once_the_replacement_is_g
 
     assert ssh_client.containers == {}
     assert ssh_client.volumes == set()
+
+
+@pytest.mark.asyncio
+async def test_a_replacement_filler_after_a_slow_first_removal_gets_a_fresh_deadline(docker_service, monkeypatch):
+    # the slow filler wait outlasted the cleanup's first deadline; the replacement's removal must not fail at once
+    monkeypatch.setattr(ds_module, "_CUSTOMER_CONTAINER_REMOVAL_TIMEOUT_SECONDS", 0.05)
+    ssh_client = _host_where_a_same_name_container_replaces_the_listed_one("filler_x", [])
+    answer_like_the_host = ssh_client.run.side_effect
+
+    async def run(cmd, *args, **kwargs):
+        await asyncio.sleep(0)  # a real SSH round trip yields, so a deadline already passed fires
+        return await answer_like_the_host(cmd, *args, **kwargs)
+
+    ssh_client.run = AsyncMock(side_effect=run)
+    first_removal = docker_service._remove_stale_containers_tolerantly
+
+    async def slow_first_removal(*args, **kwargs):
+        _, listing_after = await first_removal(*args, **kwargs)
+        await asyncio.sleep(0.1)
+        return ds_module.CustomerContainerRemoval(False, listing_after)
+
+    monkeypatch.setattr(docker_service, "_remove_stale_containers_tolerantly", slow_first_removal)
+
+    await asyncio.wait_for(_clean_for_customer(docker_service, ssh_client), 2)
+
+    assert ssh_client.containers == {}
 
 
 @pytest.mark.asyncio

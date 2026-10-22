@@ -3907,6 +3907,11 @@ class DockerService:
             ssh_client, default_extra, stale_containers, targets, volumes_to_remove, cleanup_deadline,
             own_ids=list(listed_ids.values()),
         )
+        if not removed_at_once:
+            # a slow filler wait may have used up the cleanup's deadline; the steps after it get a fresh one
+            cleanup_deadline = max(
+                cleanup_deadline, asyncio.get_running_loop().time() + _CUSTOMER_CONTAINER_REMOVAL_TIMEOUT_SECONDS
+            )
         removed_fillers = [name for name in stale_containers if name.startswith(FILLER_CONTAINER_PREFIX)]
         if not removed_fillers:
             return False
@@ -4052,7 +4057,7 @@ class DockerService:
         for nothing. So on an rm error the listing decides: names already gone are not an error; names
         still there are removed again until a listing shows them gone (a GPU filler can take minutes to go
         after its rm exited 1), and the volume rm runs again after them. Those steps, the listings among
-        them, share a deadline _SLOW_REMOVAL_WAIT_SECONDS away; a timeout fails the create too. A listing that cannot be read even on its own re-raises the rm error. A
+        them, share the cleanup's deadline, moved to _SLOW_REMOVAL_WAIT_SECONDS away when only fillers are left; a timeout fails the create too. A listing that cannot be read even on its own re-raises the rm error. A
         listed ID is looked for by that ID: a same-name container created since is not a stale one.
         ``own_ids`` are marked as ours when a command carrying their `rm` is sent.
         """
@@ -4099,15 +4104,23 @@ class DockerService:
         if rm_exit_status == 0:
             return CustomerContainerRemoval(True, listing_after)
 
-        # a slow filler teardown gets its own, longer budget; the first rm above keeps the short one
-        wait_deadline = max(cleanup_deadline, asyncio.get_running_loop().time() + _SLOW_REMOVAL_WAIT_SECONDS)
+        budget_seconds = _CUSTOMER_CONTAINER_REMOVAL_TIMEOUT_SECONDS
         try:
-            async with asyncio.timeout_at(wait_deadline):
+            async with asyncio.timeout_at(cleanup_deadline) as cleanup_timeout:
                 if listing_after is None:
                     listing_after = await self._list_all_containers(ssh_client)
                     if listing_after is None:
                         raise rm_error
                 still_present = _still_on_host(targets, listing_after)
+                names_by_target = dict(zip(targets, stale_containers))
+                # a slow GPU filler teardown gets the longer budget; any other container keeps the short one
+                if still_present and all(
+                    names_by_target.get(target, target).startswith(FILLER_CONTAINER_PREFIX) for target in still_present
+                ):
+                    budget_seconds = _SLOW_REMOVAL_WAIT_SECONDS
+                    cleanup_timeout.reschedule(
+                        max(cleanup_deadline, asyncio.get_running_loop().time() + _SLOW_REMOVAL_WAIT_SECONDS)
+                    )
                 if not still_present:
                     logger.info(
                         _m(
@@ -4130,7 +4143,7 @@ class DockerService:
         except TimeoutError as exc:
             raise Exception(
                 "[clean_existing_containers] the steps after a failed docker rm -fv did not finish in "
-                f"{_SLOW_REMOVAL_WAIT_SECONDS} s"
+                f"{budget_seconds} s"
             ) from exc
         return CustomerContainerRemoval(False, listing_after)
 
