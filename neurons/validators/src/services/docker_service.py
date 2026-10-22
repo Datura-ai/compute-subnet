@@ -4218,6 +4218,11 @@ class DockerService:
                 if volumes_to_remove:
                     await self._remove_volumes(ssh_client, volumes_to_remove)
         except TimeoutError as exc:
+            # DAH-5012 (22 Oct 22:32Z, 8x aad247c2): the rm of our filler can also exit 1 and then its retry hang
+            if stale_containers and all(name.startswith(FILLER_CONTAINER_PREFIX) for name in stale_containers):
+                return await self._settle_stuck_filler_removal(
+                    ssh_client, default_extra, stale_containers, targets, exc
+                )
             raise Exception(
                 "[clean_existing_containers] the steps after a failed docker rm -fv did not finish in "
                 f"{_CUSTOMER_CONTAINER_REMOVAL_TIMEOUT_SECONDS} s"

@@ -1062,6 +1062,39 @@ async def test_a_killed_filler_still_exiting_does_not_fail_the_customer_create(
     assert stuck_log.extra["dirty_writeback"] == ["Dirty:          812345678 kB", "Writeback:          1024 kB"]
 
 
+@pytest.mark.parametrize("exiting", [True, False])
+@pytest.mark.asyncio
+async def test_a_filler_whose_rm_failed_and_retry_hung_is_settled_the_same_way(
+    docker_service, retry_ssh_mock, _short_removal_bound, exiting
+):
+    """DAH-5012 (22 Oct 22:32Z): the rm of our filler exited 1 after 12 s, its retry hung, and the create
+    failed at container_cleanup ("the steps after a failed docker rm -fv did not finish")."""
+    state = "D\t4194564\tnv_teardown" if exiting else "S\t4194304\tep_poll"
+    ssh_client = _stuck_filler_host(f"HOSTPID\nPROC\t{_STUCK_ID}\t4242\t{state}\n")
+    hang = ssh_client.run.side_effect
+
+    async def run(cmd, *args, **kwargs):
+        if "docker rm -fv" in cmd:
+            return _listing(f"RM\t1\nNAME\tfiller_stuck {_STUCK_ID}\nPS\t0\n")
+        return await hang(cmd, *args, **kwargs)
+
+    async def retry_hangs(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    ssh_client.run.side_effect = run
+    retry_ssh_mock.side_effect = retry_hangs
+
+    if exiting:
+        await docker_service.remove_fillers_at_ssh_connect(ssh_client, {"executor_uuid": "exec-1"}, "pod_target", [])
+        assert _STUCK_ID in ds_module.fillers_exiting_after_kill
+    else:
+        with pytest.raises(ds_module._FillerRemovalStuck, match="did not finish"):
+            await docker_service.remove_fillers_at_ssh_connect(
+                ssh_client, {"executor_uuid": "exec-1"}, "pod_target", []
+            )
+    assert retry_ssh_mock.await_count == 1
+
+
 @pytest.mark.parametrize(
     "probe_stdout",
     [
