@@ -137,6 +137,9 @@ class Settings(BaseSettings):
     REDIS_PORT: int = Field(env="REDIS_PORT", default=6379)
     REDIS_USERNAME: str | None = Field(env="REDIS_USERNAME", default=None)
     REDIS_PASSWORD: str | None = Field(env="REDIS_PASSWORD", default=None)
+    BACKEND_COMMAND_CLAIM_TTL_SECONDS: int = Field(default=60, gt=0)
+    BACKEND_COMMAND_HEARTBEAT_SECONDS: float = Field(default=20, gt=0)
+    BACKEND_COMMAND_ANSWER_TTL_SECONDS: int = Field(default=900, gt=0)
     COMPUTE_APP_URI: str = Field(env="COMPUTE_APP_URI", default="wss://lium.io/api")
     COMPUTE_REST_API_URL: str | None = Field(
         env="COMPUTE_REST_API_URL", default="https://lium.io/api"
