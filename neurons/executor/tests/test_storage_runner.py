@@ -735,26 +735,34 @@ def test_exit_code_three_with_snapshot_is_completed_partial(
     assert '"result_quality":"PARTIAL"' in output.getvalue()
 
 
-class _OomKilledPopen(_FakePopen):
+class _KilledPopen(_FakePopen):
     def wait(self) -> int:
         return 137
 
 
-def test_backup_killed_by_oom_reports_out_of_memory(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("oom_killed", "message"),
+    [("true", "^backup ran out of memory$"), ("false", r"^backup helper was killed \(often out of memory\)$")],
+)
+def test_killed_helper_reports_oom_only_when_docker_says_so(
+    monkeypatch: pytest.MonkeyPatch, oom_killed: str, message: str
 ) -> None:
     operation = StorageOperationSpec.from_mapping(_operation_payload())
-    (tmp_path / "file").write_text("x")
-    runner = ResticStorageRunner(operation, LocalWorkspace(tmp_path))
-    monkeypatch.setattr(
-        "storage.restic.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="[]", stderr=""),
-    )
-    monkeypatch.setattr("storage.restic.subprocess.Popen", _OomKilledPopen)
+    workspace = WorkspaceResolver(environ={"LIUM_STORAGE_HELPER_IMAGE": "executor:test"}).resolve(operation)
+    runner = ResticStorageRunner(operation, workspace)
+    calls: list[list[str]] = []
 
-    with pytest.raises(ResticOperationError, match="^backup ran out of memory$"):
+    def fake_run(command: list[str], *args: object, **kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        stdout = f"{oom_killed}\n" if "inspect" in command else "[]"
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr("storage.restic.subprocess.run", fake_run)
+    monkeypatch.setattr("storage.restic.subprocess.Popen", _KilledPopen)
+
+    with pytest.raises(ResticOperationError, match=message):
         runner.run()
+    assert calls[-1][1:3] == ["rm", "--force"]
 
 
 def test_docker_restore_uses_native_json_restore_to_requested_directory() -> None:

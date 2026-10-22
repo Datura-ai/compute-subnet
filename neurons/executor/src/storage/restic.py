@@ -30,12 +30,13 @@ TAR_RECORD_SIZE_BYTES = 20 * 512
 TAR_CHECKPOINT_RECORDS = 1024
 MEBIBYTE = 1024 * 1024
 RESTIC_TMPFS_BYTES = 512 * MEBIBYTE
-# DAH-2002: bound the helper so a large backup cannot OOM the rental; restic stays well under this with GOGC=50.
+# DAH-2002: bound the helper so a backup cannot OOM the rental. Measured restic 0.19.1 peak RSS: 0.41 GiB at
+# 2M files, ~125 B per extra file; bytes barely matter (20 GiB file: 0.17 GiB). 4g covers ~30M files.
 RESTIC_HELPER_MEMORY = "4g"
 # Highest OOM score: the kernel kills the helper before the rental.
 RESTIC_HELPER_OOM_SCORE_ADJ = "1000"
 RESTIC_HELPER_GOGC = "50"
-OUT_OF_MEMORY_EXIT = 137
+SIGKILL_EXIT = 137
 # Without `|| exit`, a failed cd leaves sh in the helper's own directory and restic backs that up instead.
 # sh's own cd error is dropped: StorageEventReporter keeps the first diagnostic, which must be ours.
 # Runs the backup inside a helper (docker volume or encrypted namespace). A missing or empty path exits 66 before
@@ -174,6 +175,7 @@ class ResticStorageRunner:
         )
         self._environment = self._build_environment()
         self._snapshot_empty = False
+        self._helper_oom_killed = False
 
     def run(self) -> ResticResult:
         if self._operation.engine is StorageEngine.RESTIC:
@@ -383,8 +385,12 @@ class ResticStorageRunner:
             return ResticResult("COMPLETED", OperationResultQuality.FULL, snapshot_id, exit_code)
         if exit_code == 3 and snapshot_id:
             return ResticResult("COMPLETED", OperationResultQuality.PARTIAL, snapshot_id, exit_code)
-        if exit_code == OUT_OF_MEMORY_EXIT:
-            raise ResticOperationError("backup ran out of memory")
+        if exit_code == SIGKILL_EXIT:
+            raise ResticOperationError(
+                "backup ran out of memory"
+                if self._helper_oom_killed
+                else "backup helper was killed (often out of memory)"
+            )
         raise ResticOperationError(
             f"restic backup failed with exit {exit_code}"
             + (" without a snapshot ID" if not snapshot_id else "")
@@ -444,6 +450,10 @@ class ResticStorageRunner:
         restore_stats: RestoreStats | None = None,
     ) -> tuple[int, Mapping[str, object] | None]:
         started_at = time.monotonic()
+        # The helper runs without --rm so its OOMKilled state can be read after exit, then it is removed.
+        helper = not isinstance(self._workspace, LocalWorkspace)
+        if helper:
+            self._remove_helper_container()
         process = subprocess.Popen(
             command,
             cwd=cwd,
@@ -521,6 +531,8 @@ class ResticStorageRunner:
             raise
         finally:
             output_reader.join(timeout=1)
+            if helper:
+                self._helper_oom_killed = self._remove_helper_container()
 
     def _cancel_if_requested(self, process: subprocess.Popen[str]) -> None:
         if not self._events.cancellation_requested:
@@ -538,6 +550,17 @@ class ResticStorageRunner:
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=5)
+
+    def _remove_helper_container(self) -> bool:
+        """Remove the helper container; return whether docker recorded it as OOM-killed."""
+        name = self._helper_container_name()
+        inspection = subprocess.run(
+            [self._docker_binary, "inspect", "--format", "{{.State.OOMKilled}}", name],
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run([self._docker_binary, "rm", "--force", name], capture_output=True, text=True)
+        return inspection.returncode == 0 and inspection.stdout.strip() == "true"
 
     def _stop_helper_container(self) -> None:
         subprocess.run(
@@ -679,7 +702,6 @@ class ResticStorageRunner:
         return [
             self._docker_binary,
             "run",
-            "--rm",
             "--name",
             self._helper_container_name(),
             "--log-driver",
