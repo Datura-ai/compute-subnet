@@ -1956,7 +1956,7 @@ def get_docker_root_disk_type() -> str:
 
 
 # DAH-1997 (Fish 21 Oct): the storage limit is required only of hosts that can build it - docker's data
-# root already on xfs (only `pquota` missing), or a spare disk or partition big enough for it. A host
+# root already on xfs (only `pquota` missing), or a blank whole disk `lium gpu-splitting setup` takes. A host
 # with one disk, all of it in use, cannot, and keeps the warning only.
 STORAGE_CAPABLE_MIN_BYTES = 100 * 1024 ** 3
 SYSFS_SECTOR_BYTES = 512
@@ -1983,11 +1983,12 @@ def carries_signature(node_path: str, size_bytes: int) -> bool:
 
 
 def spare_block_device(mounts_text: str) -> str | None:
-    """The kernel name of a disk or partition of STORAGE_CAPABLE_MIN_BYTES or more that nothing uses and
-    `lium gpu-splitting setup` accepts: not mounted, not swap, not under LVM / RAID / dm-crypt (no
-    holders), not read-only, not removable or attached over usb / mmc / iscsi / fc, no signature (no
-    filesystem), and for a whole disk, not partitioned. None when there is none. Free space inside an LVM volume group or after the
-    last partition is not seen."""
+    """The kernel name of a blank whole disk that `lium gpu-splitting setup` takes (its blank_whole_disk):
+    STORAGE_CAPABLE_MIN_BYTES or more, not partitioned, not mounted, not swap, no holders (LVM / RAID /
+    dm-crypt), not read-only, not removable or attached over usb / mmc / iscsi / fc, and no signature.
+    None when there is none. Partitions and free space after the last partition are not counted: setup
+    decides those with parted and a read-only mount, which the validator does not run on a host, so a
+    host whose only option is one of them is exempt rather than required to do what setup may refuse."""
     in_use = set()
     for line in mounts_text.splitlines():
         fields = line.split()
@@ -2006,7 +2007,7 @@ def spare_block_device(mounts_text: str) -> str | None:
         return None
     for name in names:
         device_path = f"{SYS_CLASS_BLOCK_PATH}/{name}"
-        if name.startswith(NOT_A_SPARE_DISK_PREFIXES) or name in in_use:
+        if name.startswith(NOT_A_SPARE_DISK_PREFIXES) or name in in_use or os.path.exists(f"{device_path}/partition"):
             continue
         try:
             size_bytes = int(read_sysfs_text(f"{device_path}/size") or 0) * SYSFS_SECTOR_BYTES
@@ -2018,9 +2019,8 @@ def spare_block_device(mounts_text: str) -> str | None:
             continue
         if read_sysfs_text(f"{device_path}/ro") == "1":
             continue
-        # a partition's removable flag is on its parent disk, the sysfs directory above it
         real_path = os.path.realpath(device_path)
-        if "1" in (read_sysfs_text(f"{real_path}/removable"), read_sysfs_text(f"{os.path.dirname(real_path)}/removable")):
+        if read_sysfs_text(f"{real_path}/removable") == "1":
             continue
         if any(part in real_path for part in NON_LOCAL_SYSFS_PARTS):
             continue
