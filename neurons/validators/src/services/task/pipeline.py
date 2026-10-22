@@ -114,12 +114,12 @@ class ContextConfig:
     # DAH-2794: obfuscated scrape source, piped to the executor's interpreter over stdin.
     # None => the legacy path, where the scrape is a binary uploaded by UploadFilesCheck.
     machine_scrape_source: Optional[str] = None
-    # DAH-3011: True only for a never-validated executor's first, unscored verification AND with
-    # FIRST_PASS_FAST_PATH_ENABLED on (resolved in PipelineFactory.build_context). The capability
+    # DAH-3011: True only for a never-validated executor's first, unscored verification
+    # (set in PipelineFactory.build_context). The capability
     # matmul and VerifyX right-size their probes and the bandwidth gate is deferred to the first
     # scored cycle; every other check is the same.
     first_pass: bool = False
-    # The caller's raw first_pass (the express lane), whatever FIRST_PASS_FAST_PATH_ENABLED says.
+    # The caller's raw first_pass (the express lane); today the same value as first_pass.
     # The rental probe skips its shadow run on it (DAH-4258).
     express_first_pass: bool = False
 

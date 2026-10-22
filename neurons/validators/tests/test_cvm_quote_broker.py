@@ -307,15 +307,12 @@ def test_run_spec_default_is_no_socket(docker_service):
 
 
 @pytest.mark.parametrize(
-    ("enabled", "in_cvm", "workload_kind", "expected"),
+    ("in_cvm", "workload_kind", "expected"),
     [
-        (True, True, WorkloadKind.CUSTOMER_RENTAL, True),
-        (True, False, WorkloadKind.CUSTOMER_RENTAL, False),  # bare metal: no guest agent
-        (True, True, WorkloadKind.FILLER, False),  # DPHN/PEARL have no attestation use
-        (False, True, WorkloadKind.CUSTOMER_RENTAL, False),  # kill switch
+        (True, WorkloadKind.CUSTOMER_RENTAL, True),
+        (False, WorkloadKind.CUSTOMER_RENTAL, False),  # bare metal: no guest agent
+        (True, WorkloadKind.FILLER, False),  # DPHN/PEARL have no attestation use
     ],
 )
-def test_wants_quote_socket(monkeypatch, enabled, in_cvm, workload_kind, expected):
-    monkeypatch.setattr("services.docker_service.settings.ENABLE_CVM_POD_QUOTE_SOCKET", enabled)
-
+def test_wants_quote_socket(in_cvm, workload_kind, expected):
     assert _wants_quote_socket(_make_payload(workload_kind), in_cvm=in_cvm) is expected
