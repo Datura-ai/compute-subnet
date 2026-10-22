@@ -95,7 +95,7 @@ def _sweep(puller: PrePuller, entries: list[dict]) -> None:
     asyncio.run(puller.sweep(entries))
 
 
-# --- flag off = today's behaviour -------------------------------------------------------
+# --- the cache-template loop ---------------------------------------------------------------
 
 
 def _one_loop_iteration(
@@ -153,22 +153,7 @@ def _one_loop_iteration(
     return seen
 
 
-def test_flag_off_does_not_ask_for_or_touch_pre_pull_entries(monkeypatch):
-    monkeypatch.setattr(cache_template_service.settings, "PRE_PULL_TEMPLATES_ENABLED", False)
-    default = _entry(REPO, DEFAULT_TAG, DIGEST_DEFAULT, pre_pull=False)
-
-    monkeypatch.setattr(cache_template_service.settings, "CACHE_TEMPLATE_REFRESH_SECONDS", 900)
-
-    seen = _one_loop_iteration(monkeypatch, [default])
-
-    assert "include_pre_pull" not in seen["params"]
-    assert seen["ensured"] == [(DEFAULT_TAG, set())]
-    assert seen["pullers"] == 0 and seen["swept"] == []
-    assert seen["slept"] == 900  # the full interval after the work, as today
-
-
-def test_flag_on_asks_backend_and_routes_pre_pull_entries_to_the_puller(monkeypatch):
-    monkeypatch.setattr(cache_template_service.settings, "PRE_PULL_TEMPLATES_ENABLED", True)
+def test_loop_asks_backend_and_routes_pre_pull_entries_to_the_puller(monkeypatch):
     default = _entry(REPO, DEFAULT_TAG, DIGEST_DEFAULT, pre_pull=False)
     extra = _entry(REPO, CU128_TAG, DIGEST_CU128)
 
@@ -185,7 +170,6 @@ def test_the_sweep_gets_the_refresh_deadline_and_the_loop_sleeps_only_up_to_it(m
     # interval, so a 15-minute jitter plus a 30-minute pull postponed the default image's
     # refresh by 45 minutes while the validator checked its digest. The deadline is one
     # interval after the refresh began; the sleep is what is left of it.
-    monkeypatch.setattr(cache_template_service.settings, "PRE_PULL_TEMPLATES_ENABLED", True)
     monkeypatch.setattr(cache_template_service.settings, "CACHE_TEMPLATE_REFRESH_SECONDS", 900)
     clock = iter([1000.0, 1600.0])  # deadline computed at 1000; the mandatory pass took until 1600
     # the module name only: asyncio keeps the real clock
@@ -207,7 +191,6 @@ def test_a_sweep_that_never_returns_does_not_delay_the_next_refresh(monkeypatch,
     # the deadline) or an untimed eviction still moved the default image's refresh. The loop now
     # starts the sweep as a task and refreshes on time; a second refresh finding that task still
     # running does not start another sweep.
-    monkeypatch.setattr(cache_template_service.settings, "PRE_PULL_TEMPLATES_ENABLED", True)
     monkeypatch.setattr(cache_template_service.settings, "CACHE_TEMPLATE_REFRESH_SECONDS", 900)
     started: list[str] = []
     pullers: list = []
@@ -244,7 +227,6 @@ def test_a_sweep_that_never_returns_does_not_delay_the_next_refresh(monkeypatch,
 
 def test_cancelling_the_loop_cancels_a_running_sweep(monkeypatch):
     # the loop is cancelled at app shutdown; the sweep task it started must not outlive it
-    monkeypatch.setattr(cache_template_service.settings, "PRE_PULL_TEMPLATES_ENABLED", True)
     sweep_saw: list[str] = []
 
     class HangingPuller:
@@ -286,7 +268,6 @@ def test_a_cancel_that_lands_in_the_error_backoff_sleep_still_cancels_the_sweep(
     # while the loop sleeps out an error backoff is raised inside a sibling except clause, so
     # that handler never ran and the sweep started by the previous refresh kept running with
     # nothing left to read its outcome. The finally covers it.
-    monkeypatch.setattr(cache_template_service.settings, "PRE_PULL_TEMPLATES_ENABLED", True)
     sweep_saw: list[str] = []
     in_backoff = asyncio.Event()
     templates = [
@@ -349,7 +330,6 @@ def test_a_cancel_that_lands_in_the_error_backoff_sleep_still_cancels_the_sweep(
 def test_a_pre_pull_entry_that_is_the_default_image_never_reaches_the_puller(monkeypatch):
     # the backend's top-N is global; when it repeats this node's default image, the default must not
     # become a tracked (evictable) pre-pull
-    monkeypatch.setattr(cache_template_service.settings, "PRE_PULL_TEMPLATES_ENABLED", True)
     default = _entry(REPO, DEFAULT_TAG, DIGEST_DEFAULT, pre_pull=False)
     default_again = _entry(REPO, DEFAULT_TAG, DIGEST_DEFAULT, pre_pull=True)
     extra = _entry(REPO, CU128_TAG, DIGEST_CU128)
@@ -365,7 +345,6 @@ def test_a_pre_pull_entry_that_is_the_default_image_never_reaches_the_puller(mon
 def test_state_is_published_before_the_sweep_can_block(monkeypatch):
     # the DAH-2470 document carries the default image's outcome; a sweep may wait out the start
     # jitter and one pull, so the flush must not wait for it
-    monkeypatch.setattr(cache_template_service.settings, "PRE_PULL_TEMPLATES_ENABLED", True)
     order: list[str] = []
     real_flush = cache_template_service.CachePrefetchState.flush
 

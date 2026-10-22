@@ -4,7 +4,7 @@ Measured on 398 rentals (5 Sep 2026): a rental whose image is already on the nod
 starts in p50 23 s / p90 54 s; one that has to pull it starts in p50 61 s / p90 324 s.
 Only the node's default image is pre-pulled today (``cache_template_service``).
 
-With ``PRE_PULL_TEMPLATES_ENABLED`` the cache-template loop asks the backend for the
+The cache-template loop asks the backend for the
 top-N official templates as well (entries carrying ``pre_pull: true``) and hands them
 to :func:`PrePuller.sweep` once per refresh sweep, which pulls AT MOST ONE missing image,
 digest-pinned, and only if
