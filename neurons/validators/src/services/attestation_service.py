@@ -484,24 +484,19 @@ class AttestationService:
         # nonce — a self-generated (phase-0) nonce is replayable and rejected.
         payload_nonce = payload.get("nonce")
         if nonce is not None and payload_nonce != nonce.value_hex:
-            if enforce_event:
-                logger.warning(_m(
-                    "GPU attestation rejected: evidence nonce is not the issued challenge",
-                    extra=get_extra_info({
-                        **log_extra,
-                        "reason": "gpu_nonce_unbound",
-                        "expected_nonce": nonce.value_hex,
-                        "payload_nonce": payload_nonce,
-                    }),
-                ))
-                raise AttestationError(
-                    f"NVIDIA GPU evidence from executor {executor.address}:{executor.port} is not "
-                    "bound to the issued attestation nonce"
-                )
-            logger.info(_m(
-                "GPU evidence nonce differs from issued challenge (observe-only, likely phase-0 self-nonce)",
-                extra=get_extra_info({**log_extra, "payload_nonce": payload_nonce}),
+            logger.warning(_m(
+                "GPU attestation rejected: evidence nonce is not the issued challenge",
+                extra=get_extra_info({
+                    **log_extra,
+                    "reason": "gpu_nonce_unbound",
+                    "expected_nonce": nonce.value_hex,
+                    "payload_nonce": payload_nonce,
+                }),
             ))
+            raise AttestationError(
+                f"NVIDIA GPU evidence from executor {executor.address}:{executor.port} is not "
+                "bound to the issued attestation nonce"
+            )
 
         expected_nonce_hex = nonce.value_hex if (nonce is not None and payload_nonce == nonce.value_hex) else (
             payload_nonce if isinstance(payload_nonce, str) else None
