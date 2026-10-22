@@ -571,7 +571,7 @@ class RentalPriceIncentive(DefaultIncentive):
             exclusions.append(MinerLogLine.no_payout_because_spot_tier(job_result))
         if job_result.is_provider_email_held:
             exclusions.append(MinerLogLine.no_payout_because_email_not_confirmed(job_result))
-        # A held node has no listing row, so its Discord state is unknown, not known false.
+        # A held new node has no listing row, so its Discord state is unknown; one reason is enough.
         elif is_missing_discord_after_cutoff(job_result):
             exclusions.append(MinerLogLine.no_payout_because_discord_not_connected(job_result))
         if job_result.is_new_rentals_paused and not job_result.is_rented:

@@ -56,7 +56,8 @@ Consumers pin a tag `lium-protocol-v<PROTOCOL_VERSION>` of this repository. The 
 - `1.9.0` — `ContainerWarningCode.DockerInDockerDisabled`: the container was created with its external volume attached, but without nested Docker on this node. A reader that requires nested Docker can refuse the container instead of handing it over without it.
 - `1.11.0` — `ContainerCreateRequest.build_context_url` and `ContainerCreateRequest.build_context_sha256` (optional): a gzipped tar the validator downloads and checks against the sha256 (hex), then unpacks as the build context of `dockerfile_content`. A validator that does not take build contexts refuses such a request instead of building without the files.
 - `1.12.0` — `RentedExecutorsResponse.renter_hardware_fault_executor_ids` (optional, default empty): the nodes whose rentals drew hardware-fault reports from at least two distinct renters in the backend's report window; the validator owes each a post-rental GPU recheck.
-- `1.13.0` — `RentedExecutorsResponse.maintenance_executor_ids` (optional, default empty): the nodes inside a running provider maintenance window; the validator pays them no incentive from either pool, rented or not.
+- `1.13.0` — `command_id` (optional, default empty) on every `ServerRequest`; a validator that knows it answers a repeat from the first run instead of running it again.
+- `1.14.0` — `RentedExecutorsResponse.maintenance_executor_ids` (optional, default empty): the nodes inside a running provider maintenance window; the validator pays them no incentive from either pool, rented or not.
 - `1.0.0` — first release.
 
 ## Tests

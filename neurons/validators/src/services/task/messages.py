@@ -523,8 +523,7 @@ class GpuLossHoldMessages:
 
 
 class PostRentalGpuRecheckMessages:
-    """DAH-4482 — the recheck a node owes after the rented GPU health read flagged it. Shadow while
-    POST_RENTAL_GPU_RECHECK_ENABLED is off: WOULD_REQUIRE is logged and the cycle goes on."""
+    """DAH-4482 — the recheck a node owes after the rented GPU health read flagged it."""
 
     NO_MARKER = MessageTemplate(
         event="Post-rental GPU recheck not needed",
@@ -532,13 +531,6 @@ class PostRentalGpuRecheckMessages:
         severity="info",
         category="env",
         impact="Proceed",
-    )
-    WOULD_REQUIRE = MessageTemplate(
-        event="Post-rental GPU recheck would be required (shadow)",
-        reason="POST_RENTAL_GPU_RECHECK_WOULD_REQUIRE",
-        severity="warning",
-        category="env",
-        impact="Shadow observation only: score was NOT changed",
     )
     FILLER_SKIPPED = MessageTemplate(
         event="Post-rental GPU recheck waits: active filler",
@@ -1387,15 +1379,6 @@ class RegistryPullMessages:
         impact="Score set to 0",
         remediation=REGISTRY_PULL_REMEDIATION,
     )
-    # the same finding while REGISTRY_PULL_ENFORCEMENT_ENABLED is off: logged, score unchanged
-    REGISTRY_PULL_FAILED_OBSERVED = MessageTemplate(
-        event="Docker Hub image pull fails through this node's registry path (not enforced)",
-        reason="REGISTRY_PULL_FAILED_OBSERVED",
-        severity="warning",
-        category="runtime",
-        impact="None: REGISTRY_PULL_ENFORCEMENT_ENABLED is off",
-        remediation=REGISTRY_PULL_REMEDIATION,
-    )
     # one failed pull: a finding only once the next pull fails too
     REGISTRY_PULL_FAILED_ONCE = MessageTemplate(
         event="Docker Hub image pull failed once; the next pull decides",
@@ -1860,6 +1843,23 @@ class PinnedMemoryProbeMessages:
         category="env",
         impact="Proceed without penalty",
     )
+    FILLER_SKIPPED = MessageTemplate(
+        event="Pinned-memory copy probe skipped for active filler",
+        reason="PINNED_MEMORY_PROBE_SKIPPED_ACTIVE_FILLER",
+        severity="info",
+        category="policy",
+        impact="Active filler runtime preserved; the probe would compete with it for the GPUs.",
+    )
+    WORKLOAD_SKIPPED = MessageTemplate(
+        event="Pinned-memory copy probe not scored: a Lium workload took the cards during this cycle",
+        reason="PINNED_MEMORY_PROBE_SKIPPED_RENTED",
+        severity="info",
+        category="policy",
+        impact=(
+            "Score unchanged; a copy hung beside a Lium pod or default job that started after this "
+            "cycle's rental snapshot. The next cycle probes again."
+        ),
+    )
 
 
 class ScoreMessages:
@@ -2018,13 +2018,6 @@ class RentalProbeMessages:
     """DAH-3436: the synthetic rental probe. A failed step zeroes the score and clears the verified job
     (RENTAL_PROBE_FAILED) until a probe passes; an idle node with the image pulled is probed again next cycle."""
 
-    DISABLED = MessageTemplate(
-        event="Rental probe disabled",
-        reason="RENTAL_PROBE_DISABLED",
-        severity="info",
-        category="env",
-        impact="Proceed",
-    )
     SKIPPED = MessageTemplate(
         event="Rental probe skipped",
         reason="RENTAL_PROBE_SKIPPED",
@@ -2046,14 +2039,6 @@ class RentalProbeMessages:
         category="runtime",
         impact="Score set to 0 and the verified job cleared until a probe passes; the node is probed again next cycle while it stays idle",
     )
-    # the same verdict while RENTAL_PROBE_ENFORCEMENT_ENABLED is off: logged, score unchanged
-    PROBE_FAILED_OBSERVED = MessageTemplate(
-        event="Rental probe failed: a renter could not use this node (not enforced)",
-        reason="RENTAL_PROBE_FAILED_OBSERVED",
-        severity="warning",
-        category="runtime",
-        impact="None: RENTAL_PROBE_ENFORCEMENT_ENABLED is off; the node is probed again after the interval",
-    )
     INCONCLUSIVE = MessageTemplate(
         event="Rental probe could not reach a verdict",
         reason="RENTAL_PROBE_INCONCLUSIVE",
@@ -2065,7 +2050,7 @@ class RentalProbeMessages:
 
 class CpuTruthMessages:
     """DAH-2671 item 2a — corroborate advertised CPU(s) against sources the lscpu wrapper does not
-    author. Shadow (CPU_TRUTH_CHECK_ENABLED without enforcement) emits CPU_MISMATCH as a warning and
+    author. Shadow (without enforcement) emits CPU_MISMATCH as a warning and
     keeps passed=True; only CPU_TRUTH_ENFORCEMENT_ENABLED renders it error/score-zeroing."""
 
     CPU_OK = MessageTemplate(
@@ -2092,13 +2077,6 @@ class CpuTruthMessages:
         severity="info",
         category="env",
         impact="Proceed without penalty",
-    )
-    SKIPPED = MessageTemplate(
-        event="CPU truth check disabled",
-        reason="CPU_TRUTH_DISABLED",
-        severity="info",
-        category="env",
-        impact="Proceed",
     )
 
 
@@ -2150,7 +2128,7 @@ class GpuKernelCountMessages:
 class ProviderSideLoadMessages:
     """DAH-2734 — the CPU/disk twin of the foreign-GPU gate: a provider who runs another
     subnet's miner on a listed machine sells capacity he already uses himself. Shadow
-    (PROVIDER_SIDE_LOAD_CHECK_ENABLED without enforcement) renders LOAD_ABOVE_LIMIT as a
+    (without enforcement) renders LOAD_ABOVE_LIMIT as a
     warning and keeps passed=True; only PROVIDER_SIDE_LOAD_ENFORCEMENT_ENABLED zeroes the
     score, and only for the CPU half — a disk figure above the limit is reported, never
     scored, because it is read once and carries every docker category nobody enumerated."""
@@ -2180,13 +2158,6 @@ class ProviderSideLoadMessages:
         severity="info",
         category="policy",
         impact="Proceed without penalty",
-    )
-    SKIPPED = MessageTemplate(
-        event="Provider-side load check disabled",
-        reason="PROVIDER_SIDE_LOAD_DISABLED",
-        severity="info",
-        category="policy",
-        impact="Proceed",
     )
 
 
@@ -2373,7 +2344,7 @@ class RentedPodResourcesMessages:
 
 
 class GpuAttestationIdentityMessages:
-    # DAH-4551: fails the node.
+    # DAH-4551: warning in shadow; fails the node under GPU_ATTESTATION_IDENTITY_ENFORCEMENT_ENABLED.
     MISMATCH = MessageTemplate(
         event="GPU identity does not match the NVIDIA-signed card identity",
         reason="GPU_IDENTITY_MISMATCH",

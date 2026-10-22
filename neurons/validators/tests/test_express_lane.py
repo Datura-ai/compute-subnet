@@ -1,8 +1,8 @@
 """DAH-2958: the express lane verifies never-validated executors ahead of the 15-min cycle.
 
-Flag off: request_job_to_miner asks the miner for every executor (executor_id=None) and claims
-nothing, exactly as before. Flag on: a portal executor registered after the first cycle since
-start that this validator never published is verified alone, as a first pass, with the cycle's
+The cycle's request_job_to_miner asks the miner for every executor (executor_id=None). A portal
+executor registered after the first cycle since start that this validator never published is
+verified alone, as a first pass, with the cycle's
 own pipeline inputs and published spec-only; an executor registered before that cycle is the
 cycle's; the wave and the lane never run on one executor at the same time, and one the wave
 verified is not run again before the cycle records it; the next cycle keeps the job files a
@@ -164,10 +164,7 @@ async def _request(service: MinerService, **kwargs):
 
 
 @pytest.mark.asyncio
-async def test_flag_off_the_cycle_asks_for_every_executor_and_claims_nothing(rest_miner_service, monkeypatch):
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "EXPRESS_LANE_ENABLED", False)
+async def test_the_cycle_asks_for_every_executor(rest_miner_service):
     first, second = str(uuid4()), str(uuid4())
     rest_miner_service.miner_returns(first, second)
 
@@ -176,14 +173,11 @@ async def test_flag_off_the_cycle_asks_for_every_executor_and_claims_nothing(res
     submit = dict(rest_miner_service.rest_calls)["ssh-pubkey-submit"]
     assert submit["executor_id"] is None
     assert {r.executor_info.uuid for r in job["results"]} == {first, second}
-    assert rest_miner_service.in_flight == {}
+    assert rest_miner_service.in_flight == {first: CYCLE_DONE, second: CYCLE_DONE}
 
 
 @pytest.mark.asyncio
 async def test_the_express_lane_asks_the_miner_for_one_executor(rest_miner_service, monkeypatch):
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "EXPRESS_LANE_ENABLED", True)
     new_node = str(uuid4())
     rest_miner_service.in_flight[new_node] = EXPRESS_LANE
     rest_miner_service.miner_returns(new_node)
@@ -202,9 +196,6 @@ async def test_the_express_lane_asks_the_miner_for_one_executor(rest_miner_servi
 async def test_the_express_lane_verifies_only_the_executor_it_asked_for(rest_miner_service, monkeypatch):
     """A miner that ignores the executor filter must not get its other executors verified on the
     express path — they may be held by the wave, and their results are discarded anyway."""
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "EXPRESS_LANE_ENABLED", True)
     new_node, extra = str(uuid4()), str(uuid4())
     rest_miner_service.in_flight[new_node] = EXPRESS_LANE
     rest_miner_service.in_flight[extra] = CYCLE_LANE
@@ -223,9 +214,6 @@ async def test_the_express_lane_verifies_only_the_executor_it_asked_for(rest_min
 async def test_first_pass_reaches_the_task_only_when_the_caller_asks_for_it(rest_miner_service, monkeypatch):
     """DAH-3011: `first_pass` travels request_job_to_miner → create_task; the wave's request (no
     argument) runs today's scored pipeline."""
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "EXPRESS_LANE_ENABLED", True)
     new_node, known = str(uuid4()), str(uuid4())
     create_task = rest_miner_service.task_service.create_task
 
@@ -246,9 +234,6 @@ async def test_the_wave_skips_an_executor_the_express_lane_holds_and_marks_its_o
 ):
     """The wave's claim turns into CYCLE_DONE when its pipeline ends (pass or fail) and is dropped
     only once the cycle has recorded its published executors — the lane skips it in between."""
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "EXPRESS_LANE_ENABLED", True)
     on_express, known = str(uuid4()), str(uuid4())
     rest_miner_service.in_flight[on_express] = EXPRESS_LANE
     rest_miner_service.miner_returns(on_express, known)
@@ -289,7 +274,6 @@ class _Harness:
     ):
         from core.config import settings
 
-        monkeypatch.setattr(settings, "EXPRESS_LANE_ENABLED", True)
         self.settings = settings
         self.redis_service = _redis_service()
         if miner_service is None:
@@ -407,9 +391,6 @@ async def test_an_executor_the_wave_verified_is_not_run_again_before_the_cycle_r
     """The cycle records its published executors once, after scoring and publishing — minutes
     after a miner's wave returned. A node registered after fleet_known_since that the wave reached
     first is, in that window, neither validated nor running; the lane must still leave it alone."""
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "EXPRESS_LANE_ENABLED", True)
     new_node = str(uuid4())
     rest_miner_service.miner_returns(new_node)
 
@@ -603,15 +584,11 @@ async def test_a_verification_running_across_a_cycle_boundary_keeps_the_cycle_it
 
 
 @pytest.mark.asyncio
-async def test_flag_off_every_miner_is_asked_under_the_cycles_block_time_id(
-    validator_with_mocks, create_neuron_info, monkeypatch
+async def test_every_miner_is_asked_under_the_cycles_block_time_id(
+    validator_with_mocks, create_neuron_info
 ):
-    """Lane off: the cycle is the only writer and every miner is still asked under the id it
-    derives from the job block. The last line guards the wiring the lane reads once the flag is
-    on: the inputs carry that same id."""
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "EXPRESS_LANE_ENABLED", False)
+    """Every miner is asked under the id the cycle derives from the job block. The last line
+    guards the wiring the lane reads: the inputs carry that same id."""
     validator = validator_with_mocks
     validator.subtensor_client.get_miners = AsyncMock(
         return_value=[create_neuron_info(1, "miner-a"), create_neuron_info(2, "miner-b")]
@@ -687,9 +664,6 @@ async def test_the_wave_settles_a_miners_entry_when_its_list_arrives_or_its_requ
     """start_awaiting_wave_lists marks every miner of the cycle. The wave's claim clears a miner's
     entry before its pipeline runs; a request that ends without a list clears it too; a request
     of an older cycle leaves the current cycle's entry alone."""
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "EXPRESS_LANE_ENABLED", True)
     batch = _payload().job_batch_id
     rest_miner_service.start_awaiting_wave_lists(batch, ["miner-a", "miner-b"])
     during_pipeline = {}
