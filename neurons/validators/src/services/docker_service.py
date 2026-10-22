@@ -5327,9 +5327,7 @@ class DockerService:
             started_ms = now_ms()
             async with asyncio.timeout(60):
                 try:
-                    result = await ssh_client.run(
-                        command, input=host_key.private_openssh, check=False, timeout=60,
-                    )
+                    result = await ssh_client.run(command, input=host_key.private_openssh, check=False)
                 except asyncssh.ChannelOpenError:
                     result = None
                 logger.info(_m(
@@ -5352,7 +5350,8 @@ class DockerService:
             logger.warning(
                 _m(
                     "Failed to install pod SSH host key",
-                    extra=get_extra_info({**log_extra, "container_name": container_name, "error_type": type(exc).__name__}),
+                    extra=get_extra_info({**log_extra, "container_name": container_name, "error": str(exc),
+                                         "error_type": type(exc).__name__}),
                 ),
             )
 

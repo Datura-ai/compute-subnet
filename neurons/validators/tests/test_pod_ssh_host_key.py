@@ -179,5 +179,5 @@ async def test_install_uses_existing_ssh_and_keeps_private_key_out_of_command(mo
     assert argv[-1] == host_key.public_openssh
     assert host_key.private_openssh not in args[0]
     assert _public_of(kwargs.pop("input")) == host_key.public_openssh
-    assert kwargs == {"check": False, "timeout": 60}
+    assert kwargs == {"check": False}
     ssh.run.assert_awaited_once()
