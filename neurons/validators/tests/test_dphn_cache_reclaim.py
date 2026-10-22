@@ -64,8 +64,7 @@ def _removal_targets(command: str) -> list[str]:
 
 
 def _removed(ssh_client: FakeSshClient) -> list[str]:
-    removals = [c for c in ssh_client.commands if "volume rm" in c]
-    return sorted(_removal_targets(removals[0])) if removals else []
+    return sorted(name for c in ssh_client.commands if "volume rm" in c for name in _removal_targets(c))
 
 
 @pytest.fixture
@@ -170,3 +169,40 @@ async def test_a_stopped_filler_does_not_block_the_reclaim(cleanup):
     assert await cleanup.reclaim_dphn_cache_when_disk_is_tight(ssh_client, "exec-1") == 1
     assert _removed(ssh_client) == ["dphn_cache_hf_x"]
     assert not any("ps -a" in c for c in ssh_client.commands), "guard must not use `docker ps -a`"
+
+
+class EvictingSshClient(FakeSshClient):
+    """DAH-5014: each removed volume gives its size back, and docker reports when each was created."""
+
+    def __init__(self, volumes: dict[str, tuple[str, float]], free_gb: float):
+        super().__init__(containers=[], volumes=list(volumes), free_gb=free_gb)
+        self._sizes = volumes
+        self._free_gb = free_gb
+
+    async def run(self, command: str, *args, **kwargs):
+        if "volume inspect" in command:
+            self.commands.append(command)
+            body = "\n".join(f"{name} {created}" for name, (created, _) in self._sizes.items())
+            return SimpleNamespace(exit_status=0, stdout=body, stderr="")
+        result = await super().run(command, *args, **kwargs)
+        if "volume rm" in command:
+            for name in _removal_targets(command):
+                self._free_gb += self._sizes[name][1]
+            self._free_bytes = str(int(self._free_gb * GB))
+        return result
+
+
+@pytest.mark.asyncio
+async def test_the_engy_checkpoint_is_reclaimed_oldest_first_and_only_as_far_as_the_floor(cleanup):
+    # An old Dolphin cache goes first; that alone gets the node back over the floor, so the newer
+    # 1.5 TB Engy checkpoint stays for the next fast restart.
+    ssh_client = EvictingSshClient(
+        {
+            "engy_cache_hf_kimi-k3": ("2026-10-22T10:00:00Z", 1500),
+            "dphn_cache_hf_x": ("2026-10-01T10:00:00Z", 80),
+        },
+        free_gb=40,
+    )
+
+    assert await cleanup.reclaim_dphn_cache_when_disk_is_tight(ssh_client, "exec-1") == 1
+    assert _removed(ssh_client) == ["dphn_cache_hf_x"]

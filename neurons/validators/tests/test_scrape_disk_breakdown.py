@@ -33,6 +33,8 @@ DISK_HELPERS = {
     "get_container_log_bytes",
     "get_host_disk_usage",
     "get_docker_disk_usage",
+    "FILLER_CACHE_VOLUME_PREFIXES",
+    "release_filler_cache",
 }
 
 
@@ -75,6 +77,7 @@ def test_docker_disk_usage_splits_df_by_kind(scrape: dict) -> None:
         "hard_disk_images": (45079943748 + 2000000000) // 1024,
         "hard_disk_containers": (282628096 + 1024) // 1024,
         "hard_disk_volumes": 5454000000 // 1024,
+        "filler_cache_kb": 0,
     }
 
 
@@ -97,7 +100,12 @@ def test_docker_disk_usage_ignores_unknown_sizes(scrape: dict) -> None:
     usage = scrape["get_docker_disk_usage"]()
 
     # Assert
-    assert usage == {"hard_disk_images": 0, "hard_disk_containers": 0, "hard_disk_volumes": 0}
+    assert usage == {
+        "hard_disk_images": 0,
+        "hard_disk_containers": 0,
+        "hard_disk_volumes": 0,
+        "filler_cache_kb": 0,
+    }
 
 
 def test_vloopback_volumes_are_added_to_the_local_driver_total(scrape: dict, monkeypatch) -> None:
@@ -402,3 +410,55 @@ def test_disk_usage_survives_a_silent_docker_socket(scrape: dict, monkeypatch) -
 
     assert scrape["get_host_disk_usage"]() == _DOCKER_PARTITION
     assert asked == ["/proc/1/root/var/lib/docker"]
+
+
+def test_filler_cache_volumes_are_reported_as_free_disk(scrape: dict) -> None:
+    # Arrange — DAH-5014: an engy checkpoint and a dolphin cache next to a renter's volume
+    _stub_docker_api(
+        scrape,
+        {
+            "/system/df": {
+                "LayersSize": 0,
+                "Containers": [],
+                "Volumes": [
+                    {"Name": "engy_cache_hf_kimi-k3-0123abcd", "UsageData": {"Size": 1500 * 1024**3}},
+                    {"Name": "dphn_cache_hf_x", "UsageData": {"Size": 40 * 1024**3}},
+                    {"Name": "volume_renter", "UsageData": {"Size": 10 * 1024**3}},
+                ],
+            },
+            "/info": {"DockerRootDir": "/var/lib/docker"},
+            "/volumes": {"Volumes": []},
+        },
+    )
+    hard_disk = {
+        "hard_disk_total": 4000 * 1024**2,
+        "hard_disk_used": 1600 * 1024**2,
+        "hard_disk_free": 2400 * 1024**2,
+        "hard_disk_utilization": 40.0,
+    }
+
+    # Act
+    hard_disk.update(scrape["get_docker_disk_usage"]())
+    scrape["release_filler_cache"](hard_disk)
+
+    # Assert — the cache moved from used to free and out of the volumes breakdown
+    assert hard_disk == {
+        "hard_disk_total": 4000 * 1024**2,
+        "hard_disk_used": 60 * 1024**2,
+        "hard_disk_free": 3940 * 1024**2,
+        "hard_disk_utilization": 1.5,
+        "hard_disk_images": 0,
+        "hard_disk_containers": 0,
+        "hard_disk_volumes": 10 * 1024**2,
+    }
+
+
+def test_release_filler_cache_without_a_disk_reading_only_drops_the_key(scrape: dict) -> None:
+    # Arrange — the host half of the scrape failed, the docker half did not
+    hard_disk = {"hard_disk_volumes": 0, "filler_cache_kb": 5}
+
+    # Act
+    scrape["release_filler_cache"](hard_disk)
+
+    # Assert
+    assert hard_disk == {"hard_disk_volumes": 0}

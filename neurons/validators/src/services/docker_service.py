@@ -80,6 +80,7 @@ from services.const import (
     POD_CONTAINER_PREFIX,
     PREFERRED_POD_PORTS,
 )
+from services.container_cleanup import evict_cache_volumes_oldest_first
 from services.cvm_quote_broker import ensure_quote_broker, quote_socket_pod_mount
 from services.node_host import node_owner, public_host_sock
 from services.default_docker_image_digest_service import fetch_docker_hub_digest
@@ -4368,8 +4369,9 @@ class DockerService:
             return False
         requested_gb: int | None = payload.volume_limit_gb
         try:
+            # DAH-5014: the Engy checkpoint cache gives way to the renter too.
             cache_volumes: list[str] = await self._find_cache_volumes_to_sweep(
-                ssh_client, set(), default_extra, host_probe=host_probe
+                ssh_client, set(), default_extra, FILLER_CACHE_VOLUME_PREFIXES, host_probe=host_probe
             )
             if not cache_volumes:
                 return False
@@ -4388,7 +4390,7 @@ class DockerService:
 
             logger.info(
                 _m(
-                    "Reclaiming DPHN cache volumes for the customer rental",
+                    "Reclaiming filler cache volumes for the customer rental",
                     extra=get_extra_info({
                         **default_extra,
                         "volumes": cache_volumes,
@@ -4397,9 +4399,19 @@ class DockerService:
                     }),
                 )
             )
-            await retry_ssh_command(
-                ssh_client, DockerCommand.volume_remove(*cache_volumes), "reclaim_dphn_cache_for_rental"
-            )
+            async def remove(command: str) -> object:
+                return await retry_ssh_command(ssh_client, command, "reclaim_dphn_cache_for_rental")
+
+            if not requested_gb:
+                await remove(DockerCommand.volume_remove(*cache_volumes))
+                return True
+
+            async def rental_fits() -> bool:
+                free_now_gb = await self._get_fs_available_bytes(ssh_client, docker_root_dir) / (1024**3)
+                return free_now_gb >= requested_gb + RENTAL_DISK_HEADROOM_GB
+
+            # Oldest first, only as much as the rental needs: a kept Engy checkpoint still restarts fast.
+            await evict_cache_volumes_oldest_first(ssh_client, cache_volumes, remove, rental_fits)
             return True
         except asyncio.CancelledError:
             raise
