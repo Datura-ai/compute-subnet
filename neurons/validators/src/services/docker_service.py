@@ -3100,10 +3100,10 @@ class DockerService:
     ) -> asyncssh.SSHKnownHosts | None:
         """Single chokepoint for every rental-path SSH host-key policy.
 
-        N3 (CVM attestation gap remediation): an unexpected error here fails closed — no host-key policy means no rental
-        SSH — instead of silently falling back to unpinned SSH. Rental-path
-        freshness rides the most recent validation-cycle attestation; no nonce is
-        minted here by design.
+        N3 (CVM attestation gap remediation): an unexpected error here fails closed — no
+        host-key policy means no rental SSH — instead of silently falling back to unpinned
+        SSH. Rental-path freshness rides the most recent validation-cycle attestation; no
+        nonce is minted here by design.
         """
         try:
             host_policy = await self.attestation_service.prepare_host_policy(
