@@ -5289,8 +5289,9 @@ class DockerService:
 
     async def install_pod_ssh_host_key(
         self,
-        docker_client: RentalDockerSdkClient,
+        ssh_client: asyncssh.SSHClientConnection,
         *,
+        docker_client: RentalDockerSdkClient,
         container_name: str,
         pod_id: str,
         log_extra: dict,
@@ -5303,22 +5304,43 @@ class DockerService:
         try:
             host_key = derive_pod_ssh_host_key(settings.VOLUME_MASTER_SECRET, pod_id)
             script = self._pod_ssh_host_key_script_path().read_text()
-            await exec_logged_rental_docker_sdk_operation(
-                docker_client=docker_client,
-                operation="exec_install_pod_ssh_host_key",
-                exec_spec=ContainerExecSpec(
-                    container_name=container_name,
-                    argv=("sh", "-c", script, "pod_ssh_host_key", host_key.public_openssh),
-                    stdin=host_key.private_openssh,
-                    idempotent=True,
-                ),
-                log_extra=log_extra,
+            # The CLI talks to the local daemon: one channel on the create's pinned SSH
+            # session replaces the WAN Docker API readiness/exec round trips.
+            exec_spec = ContainerExecSpec(
+                container_name=container_name,
+                argv=("sh", "-c", script, "pod_ssh_host_key", host_key.public_openssh),
+                stdin=host_key.private_openssh,
+                idempotent=True,
             )
+            command = shlex.join(("/usr/bin/docker", "exec", "-i", "-u", "0", container_name, *exec_spec.argv))
+            started_ms = now_ms()
+            async with asyncio.timeout(60):
+                try:
+                    result = await ssh_client.run(command, input=host_key.private_openssh, check=False)
+                except asyncssh.ChannelOpenError:
+                    result = None
+                logger.info(_m(
+                    "Pod SSH host key installation finished",
+                    extra=get_extra_info({**log_extra, "duration_ms": now_ms() - started_ms,
+                                          "exit_status": result.exit_status if result else None}),
+                ))
+                if result is None or result.exit_status != 0:
+                    # Keep the SDK readiness/retry path if the cheap attempt failed.
+                    # Its output may echo stdin, so log only the status here.
+                    fallback = await docker_client.exec_in_container(exec_spec)
+                    logger.info(_m(
+                        "Pod SSH host key fallback finished",
+                        extra=get_extra_info({**log_extra, "duration_ms": now_ms() - started_ms,
+                                              "exit_status": fallback.exit_status}),
+                    ))
+                    if fallback.exit_status != 0:
+                        raise RuntimeError("pod SSH host key fallback failed")
         except Exception as exc:
             logger.warning(
                 _m(
                     "Failed to install pod SSH host key",
-                    extra=get_extra_info({**log_extra, "container_name": container_name, "error": str(exc)}),
+                    extra=get_extra_info({**log_extra, "container_name": container_name, "error": str(exc),
+                                         "error_type": type(exc).__name__}),
                 ),
             )
 
@@ -8814,7 +8836,8 @@ class DockerService:
                         soft_failed_step = current_step
                     if soft_failed_step is None:
                         await self.install_pod_ssh_host_key(
-                            docker_client,
+                            ssh_client,
+                            docker_client=docker_client,
                             container_name=container_name,
                             pod_id=payload.pod_id,
                             log_extra=default_extra,
@@ -9626,14 +9649,29 @@ class DockerService:
     ) -> None:
         """`docker start` plus :meth:`_restore_mount_and_sshd_after_start`, on clients the caller already
         holds — the undo of a failed edit (``_EditSwap.restore``), whose SSH session is open anyway."""
-        await run_logged_rental_docker_sdk_operation(
-            operation="start_container",
-            log_extra=default_extra,
-            call=lambda: docker_client.start(
-                container_name=container_name, network=RENTAL_NETWORK_NAME
-            ),
-            container_name=container_name,
-        )
+
+        async def _start() -> None:
+            await run_logged_rental_docker_sdk_operation(
+                operation="start_container",
+                log_extra=default_extra,
+                call=lambda: docker_client.start(
+                    container_name=container_name, network=RENTAL_NETWORK_NAME
+                ),
+                container_name=container_name,
+            )
+
+        try:
+            await _start()
+        except Exception as exc:
+            # park's `docker stop` can leave the vloopback mountpoint dir behind, so the parked
+            # container's own start fails on "file exists" and the customer's pod stays down
+            # (pod 6577912c, 22 Oct). Same repair as the create retry: rmdir only an empty,
+            # unmounted mountpoint, then start once more.
+            if not _is_stale_vloopback_mountpoint_error(str(exc)) or not await self._repair_stale_mountpoint_of_container_volume(
+                ssh_client, container_name, default_extra
+            ):
+                raise
+            await _start()
         await self._restore_mount_and_sshd_after_start(
             docker_client=docker_client,
             ssh_client=ssh_client,
