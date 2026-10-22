@@ -89,7 +89,7 @@ async def test_disagreement_fails_closed_and_emits(caplog):
 @pytest.mark.asyncio
 async def test_unreadable_proc_recorded_distinctly(caplog):
     # honest casualty: /proc map unreadable (non-zero exit) while XML answers. The overwrite is refused
-    # and the event and records proc_unreadable=True so ops can tell it apart from a real spoof.
+    # and the event records proc_unreadable=True so ops can tell it apart from a real spoof.
     ssh = _fake_ssh(FakeRun("proc boom", "err", exit_status=1), FakeRun(_XML_BOTH))
 
     with caplog.at_level("WARNING"):
