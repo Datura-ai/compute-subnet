@@ -6,6 +6,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
@@ -15,6 +16,7 @@ from uuid import UUID
 
 import pytest
 import requests
+import storage_runner
 from storage.models import (
     OperationResultQuality,
     OperationSpecError,
@@ -386,6 +388,7 @@ def test_plain_backup_uses_read_only_volume_and_keeps_secrets_out_of_arguments()
     assert command[command.index("--memory") + 1] == "4g"
     assert command[command.index("--oom-score-adj") + 1] == "1000"
     assert "GOGC=50" in command
+    assert command[command.index("--label") + 1] == f"lium.backup-helper={OPERATION_ID}"
     assert "AWS_ACCESS_KEY_ID" in command
     assert "AWS_SESSION_TOKEN" in command
     assert "access-key" not in command
@@ -762,6 +765,40 @@ def test_killed_helper_reports_oom_only_when_docker_says_so(
 
     with pytest.raises(ResticOperationError, match=message):
         runner.run()
+    assert calls[-1][1:3] == ["rm", "--force"]
+
+
+class _TerminatedRunnerPopen(_FakePopen):
+    pid = 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        os.kill(os.getpid(), signal.SIGTERM)
+        return 0
+
+    def poll(self) -> int:
+        return 0
+
+
+def test_sigterm_to_runner_removes_the_helper_container(monkeypatch: pytest.MonkeyPatch) -> None:
+    operation = StorageOperationSpec.from_mapping(_operation_payload())
+    workspace = WorkspaceResolver(environ={"LIUM_STORAGE_HELPER_IMAGE": "executor:test"}).resolve(operation)
+    runner = ResticStorageRunner(operation, workspace)
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], *args: object, **kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+    monkeypatch.setattr("storage.restic.subprocess.run", fake_run)
+    monkeypatch.setattr("storage.restic.subprocess.Popen", _TerminatedRunnerPopen)
+    previous = signal.signal(signal.SIGTERM, storage_runner._cancel_on_sigterm)
+    try:
+        with pytest.raises(StorageOperationCancelled, match="SIGTERM"):
+            runner.run()
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+    assert [c[1:] for c in calls if "prune" in c] == [["container", "prune", "--force", "--filter", "label=lium.backup-helper"]]
     assert calls[-1][1:3] == ["rm", "--force"]
 
 

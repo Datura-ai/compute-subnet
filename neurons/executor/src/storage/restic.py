@@ -37,6 +37,7 @@ RESTIC_HELPER_MEMORY = "4g"
 RESTIC_HELPER_OOM_SCORE_ADJ = "1000"
 RESTIC_HELPER_GOGC = "50"
 SIGKILL_EXIT = 137
+HELPER_LABEL = "lium.backup-helper"
 # Without `|| exit`, a failed cd leaves sh in the helper's own directory and restic backs that up instead.
 # sh's own cd error is dropped: StorageEventReporter keeps the first diagnostic, which must be ours.
 # Runs the backup inside a helper (docker volume or encrypted namespace). A missing or empty path exits 66 before
@@ -453,6 +454,7 @@ class ResticStorageRunner:
         # The helper runs without --rm so its OOMKilled state can be read after exit, then it is removed.
         helper = not isinstance(self._workspace, LocalWorkspace)
         if helper:
+            self._remove_stopped_helpers()
             self._remove_helper_container()
         process = subprocess.Popen(
             command,
@@ -525,6 +527,8 @@ class ResticStorageRunner:
             exit_code = process.wait()
             return exit_code, summary
         except StorageOperationCancelled:
+            if process.poll() is None:  # SIGTERM to the runner, not a cancel that already stopped it
+                self._terminate_process(process)
             raise
         except Exception:
             self._terminate_process(process)
@@ -550,6 +554,14 @@ class ResticStorageRunner:
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=5)
+
+    def _remove_stopped_helpers(self) -> None:
+        # A runner killed before cleanup leaves its stopped helper (and its credentials) behind.
+        subprocess.run(
+            [self._docker_binary, "container", "prune", "--force", "--filter", f"label={HELPER_LABEL}"],
+            capture_output=True,
+            text=True,
+        )
 
     def _remove_helper_container(self) -> bool:
         """Remove the helper container; return whether docker recorded it as OOM-killed."""
@@ -704,6 +716,8 @@ class ResticStorageRunner:
             "run",
             "--name",
             self._helper_container_name(),
+            "--label",
+            f"{HELPER_LABEL}={self._operation.operation_id}",
             "--log-driver",
             "none",
             "--memory",

@@ -184,6 +184,9 @@ async def test_cancel_waits_for_runner_then_reports_terminal_status(
     cancel_command = ssh_client.run.await_args_list[1].args[0]
     assert f"{OPERATION_ID}.cancel" in cancel_command
     assert "kill -0" in cancel_command
+    # the fallback removes the stopped helper after TERMing the runner, so no credentials stay on the host
+    helper_removal = f"/usr/bin/docker rm -f -- lium-storage-{str(OPERATION_ID)[:12]}"
+    assert cancel_command.index(helper_removal) > cancel_command.index('kill -TERM "$pid"')
 
 
 @pytest.mark.asyncio
