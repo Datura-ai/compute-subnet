@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import IO
@@ -38,6 +39,7 @@ RESTIC_HELPER_OOM_SCORE_ADJ = "1000"
 RESTIC_HELPER_GOGC = "50"
 SIGKILL_EXIT = 137
 HELPER_LABEL = "lium.backup-helper"
+STALE_HELPER_AGE = timedelta(minutes=10)
 # Without `|| exit`, a failed cd leaves sh in the helper's own directory and restic backs that up instead.
 # sh's own cd error is dropped: StorageEventReporter keeps the first diagnostic, which must be ours.
 # Runs the backup inside a helper (docker volume or encrypted namespace). A missing or empty path exits 66 before
@@ -556,12 +558,34 @@ class ResticStorageRunner:
             process.wait(timeout=5)
 
     def _remove_stopped_helpers(self) -> None:
-        # A runner killed before cleanup leaves its stopped helper (and its credentials) behind.
-        subprocess.run(
-            [self._docker_binary, "container", "prune", "--force", "--filter", f"label={HELPER_LABEL}"],
+        # A runner killed before cleanup leaves its exited helper (and its credentials) behind. Only long-exited
+        # helpers are removed: a created or running one may belong to another operation that is starting now.
+        listed = subprocess.run(
+            [self._docker_binary, "ps", "--all", "--quiet", "--filter", f"label={HELPER_LABEL}",
+             "--filter", "status=exited"],
             capture_output=True,
             text=True,
         )
+        container_ids = listed.stdout.split() if listed.returncode == 0 else []
+        if not container_ids:
+            return
+        inspected = subprocess.run(
+            [self._docker_binary, "inspect", "--format", "{{.Id}} {{.State.Status}} {{.State.FinishedAt}}",
+             *container_ids],
+            capture_output=True,
+            text=True,
+        )
+        cutoff = datetime.now(timezone.utc) - STALE_HELPER_AGE
+        for line in inspected.stdout.splitlines():
+            fields = line.split()
+            if len(fields) != 3 or fields[1] != "exited":
+                continue
+            try:  # FinishedAt has nanoseconds; seconds are enough for a 10-minute cutoff
+                finished_at = datetime.strptime(fields[2][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if finished_at < cutoff:
+                subprocess.run([self._docker_binary, "rm", "--force", fields[0]], capture_output=True, text=True)
 
     def _remove_helper_container(self) -> bool:
         """Remove the helper container; return whether docker recorded it as OOM-killed."""

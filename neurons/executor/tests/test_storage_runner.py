@@ -10,6 +10,7 @@ import signal
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import UUID
@@ -798,8 +799,32 @@ def test_sigterm_to_runner_removes_the_helper_container(monkeypatch: pytest.Monk
     finally:
         signal.signal(signal.SIGTERM, previous)
 
-    assert [c[1:] for c in calls if "prune" in c] == [["container", "prune", "--force", "--filter", "label=lium.backup-helper"]]
     assert calls[-1][1:3] == ["rm", "--force"]
+
+
+def test_stale_helper_cleanup_removes_only_long_exited_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    operation = StorageOperationSpec.from_mapping(_operation_payload())
+    workspace = WorkspaceResolver(environ={"LIUM_STORAGE_HELPER_IMAGE": "executor:test"}).resolve(operation)
+    runner = ResticStorageRunner(operation, workspace)
+    old = (datetime.now(timezone.utc) - timedelta(minutes=11)).strftime("%Y-%m-%dT%H:%M:%S.123456789Z")
+    fresh = (datetime.now(timezone.utc) - timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S.123456789Z")
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], *args: object, **kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        stdout = ""
+        if command[1] == "ps":
+            stdout = "old\nfresh\nrestarted\n"
+        elif command[1] == "inspect":
+            stdout = f"old exited {old}\nfresh exited {fresh}\nrestarted running {old}\n"
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr("storage.restic.subprocess.run", fake_run)
+
+    runner._remove_stopped_helpers()
+
+    assert "status=exited" in calls[0] and "label=lium.backup-helper" in calls[0]
+    assert [c[1:] for c in calls if c[1] == "rm"] == [["rm", "--force", "old"]]
 
 
 def test_docker_restore_uses_native_json_restore_to_requested_directory() -> None:
