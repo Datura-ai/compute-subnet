@@ -9892,6 +9892,9 @@ class DockerService:
             )
             return False
         logger.warning(_m("POD_PARKED_CONTAINER_RENAMED_BACK", extra=get_extra_info(log_extra)))
+        # the unclean stop left the volume's mountpoint dir behind; without this the first start
+        # fails with "file exists" and waits a cycle for the stale-mount recovery (ticket-0729)
+        await self._repair_stale_mountpoint_of_container_volume(ssh_client, container_name, log_extra)
         known_hosts_policy = await self._prepare_known_hosts_policy(
             executor_info, miner_hotkey, log_extra
         )
@@ -9907,6 +9910,62 @@ class DockerService:
                 default_extra=log_extra,
             )
         return True
+
+    async def encrypted_volume_mount_missing(
+        self, ssh_client: asyncssh.SSHClientConnection, container_name: str
+    ) -> bool:
+        """True when a running pod container holds an encrypted volume at /lium-cipher but no
+        gocryptfs mount: a bare ``docker start`` (by hand, or dockerd's restart policy) brought it up,
+        so the renter's workspace is an empty dir and writes to it land unencrypted on the host
+        disk (ticket-0729). False when it cannot tell."""
+        q_name = shlex.quote(container_name)
+        probed = await ssh_client.run(
+            f"/usr/bin/docker inspect {q_name} "
+            "--format '{{range .Mounts}}{{println .Destination}}{{end}}' && echo ---- && "
+            f"/usr/bin/docker exec {q_name} cat /proc/mounts",
+            timeout=_VLOOPBACK_REPAIR_COMMAND_TIMEOUT_SEC,
+        )
+        if getattr(probed, "exit_status", 1) != 0 or "\n----\n" not in (probed.stdout or ""):
+            return False
+        destinations, mounts = (probed.stdout or "").split("\n----\n", 1)
+        if _LIUM_CIPHER_MOUNT not in destinations.split():
+            return False
+        return not any(
+            len(fields) > 2 and fields[2] == "fuse.gocryptfs"
+            for fields in (line.split() for line in mounts.splitlines())
+        )
+
+    async def restore_volume_mount_of_running_container(
+        self,
+        *,
+        ssh_client: asyncssh.SSHClientConnection,
+        executor_info: ExecutorSSHInfo,
+        private_key: str,
+        container_name: str,
+        pod_id: str,
+        local_volume_path: str,
+        default_extra: dict[str, Any],
+    ) -> None:
+        """Remount a running pod's encrypted volume (never re-initialised) and its sshd, what
+        ``start_existing_container`` adds after a start. Raises when the remount fails."""
+        async with self.rental_docker_client_factory.connect(
+            executor_info=executor_info,
+            private_key=private_key,
+        ) as docker_client:
+            await self._restore_mount_and_sshd_after_start(
+                docker_client=docker_client,
+                ssh_client=ssh_client,
+                container_name=container_name,
+                local_volume_path=local_volume_path,
+                pod_id=pod_id,
+                default_extra=default_extra,
+            )
+        logger.warning(
+            _m(
+                "POD_VOLUME_MOUNT_RESTORED",
+                extra=get_extra_info({**default_extra, "container_name": container_name}),
+            )
+        )
 
     async def _local_volume_encryption_state(
         self,

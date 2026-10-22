@@ -1104,6 +1104,46 @@ async def test_tenant_enforcement_renames_back_a_stranded_parked_container(
         lock.release.assert_awaited_once()
 
 
+@pytest.mark.parametrize(
+    "create_in_flight, local_volume_path, expected_restored",
+    [
+        pytest.param(False, "/workspace", True, id="restored"),
+        pytest.param(True, "/workspace", False, id="create_in_flight"),
+        pytest.param(False, None, False, id="plaintext_path_unknown"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_tenant_enforcement_remounts_a_running_pods_missing_encrypted_volume(
+    context_factory, create_in_flight, local_volume_path, expected_restored
+):
+    # ticket-0729: the provider started the pod by hand, so it ran without its gocryptfs workspace
+    ssh = DummySSHClient(pod_running=True, ssh_keys=["ssh-rsa renter"])
+    docker = AsyncMock()
+    docker.encrypted_volume_mount_missing.return_value = True
+    lock = Mock(acquire=AsyncMock(return_value=True), release=AsyncMock())
+    redis = Mock(
+        renting_in_progress=AsyncMock(return_value=create_in_flight),
+        executor_create_lock=Mock(return_value=lock),
+    )
+    ctx = build_recovery_context(
+        context_factory,
+        ssh,
+        docker,
+        backend=DummyBackendClient(active=True, local_volume_path=local_volume_path),
+        redis=redis,
+    )
+
+    result = await TenantEnforcementCheck().run(ctx)
+
+    assert result.passed is True, result.event
+    if expected_restored:
+        kwargs = docker.restore_volume_mount_of_running_container.await_args.kwargs
+        assert (kwargs["container_name"], kwargs["local_volume_path"]) == ("pod_pod-1", "/workspace")
+        lock.release.assert_awaited_once()
+    else:
+        docker.restore_volume_mount_of_running_container.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_tenant_enforcement_emits_transport_unreachable_when_recheck_loses_ssh(
     context_factory,

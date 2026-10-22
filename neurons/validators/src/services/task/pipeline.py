@@ -85,6 +85,22 @@ class PodRecoverer(Protocol):
         default_extra: dict[str, Any],
     ) -> bool: ...
 
+    async def encrypted_volume_mount_missing(
+        self, ssh_client: asyncssh.SSHClientConnection, container_name: str
+    ) -> bool: ...
+
+    async def restore_volume_mount_of_running_container(
+        self,
+        *,
+        ssh_client: asyncssh.SSHClientConnection,
+        executor_info: ExecutorSSHInfo,
+        private_key: str,
+        container_name: str,
+        pod_id: str,
+        local_volume_path: str,
+        default_extra: dict[str, Any],
+    ) -> None: ...
+
 
 @dataclass(frozen=True)
 class ContextServices:

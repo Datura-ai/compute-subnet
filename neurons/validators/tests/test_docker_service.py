@@ -7795,6 +7795,8 @@ async def test_recover_parked_pod_container(
     monkeypatch.setattr(docker_service, "start_existing_container", start_existing_container)
     monkeypatch.setattr(docker_service, "_prepare_known_hosts_policy", AsyncMock(return_value=None))
     monkeypatch.setattr("services.docker_service.require_rental_docker_ssh_host_key", Mock())
+    repair = AsyncMock(return_value=None)
+    monkeypatch.setattr(docker_service, "_repair_stale_mountpoint_of_container_volume", repair)
 
     recovered = await docker_service.recover_parked_pod_container(
         ssh_client=ssh_client,
@@ -7816,9 +7818,32 @@ async def test_recover_parked_pod_container(
         start_kwargs = start_existing_container.await_args.kwargs
         assert start_kwargs["container_name"] == "pod_pod-1"
         assert start_kwargs["local_volume_path"] == "/workspace"
+        # the unclean stop's leftover mountpoint dir is cleared before the start, not a cycle later
+        assert repair.await_args.args[1] == "pod_pod-1"
     else:
         assert renames == []
         start_existing_container.assert_not_awaited()
+
+
+_GOCRYPTFS_MOUNT = "/lium-cipher /workspace fuse.gocryptfs rw,nosuid,nodev 0 0\n"
+
+
+@pytest.mark.parametrize(
+    "stdout, exit_status, expected_missing",
+    [
+        pytest.param("/lium-cipher\n\n----\noverlay / overlay rw 0 0\n", 0, True, id="encrypted_unmounted"),
+        pytest.param("/lium-cipher\n\n----\n" + _GOCRYPTFS_MOUNT, 0, False, id="encrypted_mounted"),
+        pytest.param("/workspace\n\n----\noverlay / overlay rw 0 0\n", 0, False, id="plain_volume"),
+        pytest.param("", 1, False, id="probe_failed"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_encrypted_volume_mount_missing(docker_service, stdout, exit_status, expected_missing):
+    # ticket-0729: a hand `docker start` brought the pod up with /lium-cipher but no gocryptfs mount
+    ssh_client = AsyncMock()
+    ssh_client.run = AsyncMock(return_value=_make_ssh_command_result(stdout=stdout, exit_status=exit_status))
+
+    assert await docker_service.encrypted_volume_mount_missing(ssh_client, "pod_pod-1") is expected_missing
 
 
 @pytest.mark.asyncio
