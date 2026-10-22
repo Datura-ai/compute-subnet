@@ -101,8 +101,9 @@ def _gpu_usage_violation_details(
 def _rental_of_validated_miner(
     ctx: Context, rented_executor: RentedExecutor | None
 ) -> RentedExecutor | None:
-    """The rental listed under this executor's UUID, or None when enforcement is on and it belongs
-    to another miner. The mismatch is logged either way."""
+    """The rental listed under this executor's UUID, or None when it belongs to another miner on a
+    different endpoint (logged as RENTED_OWNER_MISMATCH). On the same IP and port the renter's pod
+    is on this box, so it stays rented and the VerifyX/matmul probes never run beside it."""
     if not rented_executor or rented_executor.miner_hotkey == ctx.miner_hotkey:
         return rented_executor
     logger.warning(
@@ -113,12 +114,15 @@ def _rental_of_validated_miner(
                     **ctx.default_extra,
                     "executor_uuid": ctx.executor.uuid,
                     "rental_miner_hotkey": rented_executor.miner_hotkey,
-                    "enforced": settings.RENTED_OWNER_MISMATCH_ENFORCEMENT_ENABLED,
                 }
             ),
         )
     )
-    return None if settings.RENTED_OWNER_MISMATCH_ENFORCEMENT_ENABLED else rented_executor
+    same_endpoint = (rented_executor.executor_ip_address, str(rented_executor.executor_ip_port)) == (
+        ctx.executor.address,
+        str(ctx.executor.port),
+    )
+    return rented_executor if same_endpoint else None
 
 
 def _within_container_name_grace(pod: RentedPod) -> bool:
