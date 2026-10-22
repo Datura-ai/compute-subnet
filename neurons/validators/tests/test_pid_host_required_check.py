@@ -26,7 +26,6 @@ async def test_not_host_pid_unrented_fails_with_reason(context_factory, pid_mode
     [
         ({"executor_pid_mode": "host"}, False),
         ({}, False),  # old scrape / inspect failed: unknown, never fails
-        ({"executor_pid_mode": ""}, True),  # live rentals are not disrupted
     ],
 )
 async def test_passes(context_factory, specs, rented):
@@ -36,3 +35,14 @@ async def test_passes(context_factory, specs, rented):
 
     assert result.passed is True
     assert result.event.reason_code == Msg.OK.reason
+
+
+@pytest.mark.asyncio
+async def test_not_host_pid_rented_warns_and_passes(context_factory):
+    state = build_state(specs={"executor_pid_mode": ""}, rented_data=_rented_data())
+
+    result = await PidHostRequiredCheck().run(context_factory(state=state))
+
+    assert result.passed is True
+    assert result.event.reason_code == Msg.MISSING.reason
+    assert result.event.severity == "warning"

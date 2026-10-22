@@ -11,7 +11,7 @@ class PidHostRequiredCheck:
     Backups read the rental's /proc/<pid> from the executor, which only works in the host PID
     namespace. Reads ``specs.executor_pid_mode`` (docker HostConfig.PidMode of the executor's own
     container). A missing value (old scrape, inspect failed) is unknown and passes. Rented nodes
-    are left alone, like SysboxRequiredCheck, so live rentals are never disrupted.
+    get a warning with the same reason and keep their score, so live rentals are never disrupted.
     """
 
     check_id = "executor.validate.pid_host_required"
@@ -22,7 +22,11 @@ class PidHostRequiredCheck:
         rented = ctx.state.rented_data.executors.get(ctx.executor.uuid) if ctx.state.rented_data else None
         is_rented = rented is not None and len(rented.pods) > 0
         what = {"executor_pid_mode": pid_mode, "is_rented": is_rented}
-        if isinstance(pid_mode, str) and pid_mode != "host" and not is_rented:
+        if isinstance(pid_mode, str) and pid_mode != "host":
+            if is_rented:
+                # warn only: the score is unchanged so the live rental is not disrupted
+                event = render_message(Msg.RENTED_WARNING, ctx=ctx, check_id=self.check_id, what=what)
+                return CheckResult(passed=True, event=event)
             return CheckResult(
                 passed=False, event=render_message(Msg.MISSING, ctx=ctx, check_id=self.check_id, what=what)
             )

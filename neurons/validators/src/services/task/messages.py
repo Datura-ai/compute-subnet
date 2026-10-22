@@ -885,6 +885,14 @@ class PidHostRequiredMessages:
         impact="Score set to 0 for this cycle; verification is kept until repeated failures deactivate the executor",
         remediation="executor must run with pid: host (see docker-compose.app.yml); backups cannot run",
     )
+    RENTED_WARNING = MessageTemplate(
+        event="Executor not in the host PID namespace",
+        reason="EXECUTOR_PID_HOST_MISSING",
+        severity="warning",
+        category="policy",
+        impact="Warning only while the node is rented: score and incentive unchanged",
+        remediation="executor must run with pid: host (see docker-compose.app.yml); backups cannot run",
+    )
     OK = MessageTemplate(
         event="Executor PID namespace check passed",
         reason="EXECUTOR_PID_HOST_OK",

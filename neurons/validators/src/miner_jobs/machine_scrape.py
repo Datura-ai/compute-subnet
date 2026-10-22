@@ -709,6 +709,17 @@ def docker_api_get(path):
         conn.close()
 
 
+def get_executor_pid_mode():
+    # PidMode of the executor's own container (hostname = container id): "host", or "" when private.
+    # A missing or non-string value raises, so the scrape reports unknown instead of a failing mode.
+    inspection = docker_api_get(f"/containers/{socket.gethostname()}/json")
+    host_config = inspection.get("HostConfig") if isinstance(inspection, dict) else None
+    pid_mode = host_config.get("PidMode") if isinstance(host_config, dict) else None
+    if not isinstance(pid_mode, str):
+        raise ValueError(f"docker inspect has no HostConfig.PidMode: {pid_mode!r}")
+    return pid_mode
+
+
 def get_vloopback_volume_bytes(docker_root_dir):
     # disk held by loopback-backed volumes, which /system/df misses entirely: it only accounts for
     # the `local` driver. The plugin keeps one backing file per volume, named after the volume.
@@ -2239,9 +2250,7 @@ def get_machine_specs():
     # DAH: the executor's PID namespace mode, read from its own container (hostname = container id).
     # "host" is required: backups read /proc/<rental pid> of the host. Missing key = unknown, never fails.
     try:
-        data["data_executor_pid_mode"] = (
-            (docker_api_get(f"/containers/{socket.gethostname()}/json") or {}).get("HostConfig") or {}
-        ).get("PidMode", "")
+        data["data_executor_pid_mode"] = get_executor_pid_mode()
     except Exception as exc:
         data["data_executor_pid_mode_scrape_error"] = repr(exc)
 
