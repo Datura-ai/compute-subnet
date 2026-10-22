@@ -1432,7 +1432,8 @@ class RegistryPullMessages:
 
 CONTAINER_DOWNLOAD_SLOW_REMEDIATION = (
     "a container on this node downloads from PyPI or Hugging Face far slower than the host does, so a renter's "
-    "`pip install` or model download crawls; remove NAT/firewall rules and any traffic shaping on docker traffic; "
+    "`pip install` or model download crawls; remove any traffic shaping or extra firewall rules added on docker "
+    "traffic (keep docker's own NAT rules); "
     "if the uplink MTU (`ip link`) is below 1500, recreate the rentals network with it while no pod runs: "
     "`docker network rm lium-rentals` then `docker network create -d bridge -o "
     "com.docker.network.bridge.enable_icc=false -o com.docker.network.driver.mtu=<MTU> lium-rentals`; then "
