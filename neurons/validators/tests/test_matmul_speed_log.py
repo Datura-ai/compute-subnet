@@ -17,19 +17,7 @@ from neurons.validators.src.services.task.messages import CapabilityMessages as 
 from services import matrix_validation_service as mvs
 from services.matrix_validation_service import ValidationResult
 from tests.helpers import build_context_config, build_services, build_state
-from neurons.validators.src.services.task.checks.local_verify import LocalVerifyCheck
-from tests.test_local_verify import (  # noqa: F401 - keypair, local_verify_on and verifyx_service are fixtures
-    SPECS,
-    FakeExecutor,
-    FakeSSH,
-    client_factory,
-    context,
-    keypair,
-    local_verify_on,
-    matmul_service,
-    run_local_then_consumers,
-    verifyx_service,
-)
+from tests.test_local_verify import SPECS, matmul_service
 
 NODE_METRICS = {
     "device": "NVIDIA H100 80GB HBM3",
@@ -328,34 +316,6 @@ async def test_ssh_run_times_the_remote_command(monkeypatch):
     assert result.elapsed_seconds == 7.5
     assert result.elapsed_source == "validator_wall_clock"
     assert result.sealed is True
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("local_verify_on")
-async def test_local_transport_logs_the_executor_step_time(request, monkeypatch, caplog):
-    signer = request.getfixturevalue("keypair")
-    verifyx = request.getfixturevalue("verifyx_service")
-    validation = matmul_service(monkeypatch)
-
-    async with FakeExecutor(signer, step_sleep=0.02) as executor:
-        ctx = context(
-            signer,
-            executor.executor_info,
-            validation=validation,
-            verifyx=verifyx,
-            ssh=FakeSSH(),
-        )
-        with caplog.at_level(logging.INFO, logger=speed_log.logger.name):
-            _local, _verifyx, capability = await run_local_then_consumers(
-                ctx, LocalVerifyCheck(client_factory=client_factory(signer))
-            )
-
-    assert capability.passed
-    (record,) = _speed_records(caplog)
-    assert record["transport"] == "local_verify"
-    assert record["elapsed_source"] == "executor_reported"
-    assert record["elapsed_seconds"] == 0.02
-    assert record["sealed"] is True
 
 
 # --- the capability check writes the line and keeps its verdict -----------------------------------

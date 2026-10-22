@@ -228,15 +228,12 @@ async def test_agreeing_verdicts_are_logged_as_one_structured_line(
         record = await _shadow(ctx, fake)
 
     assert record["outcome"] == "compared" and record["agree"] is True
+    # The matmul stays on SSH (the all-cards work-proof): reported, never compared.
     assert record["steps"]["matmul"] == {
         "today": "pass",
         "today_reason_code": "GPU_VERIFY_OK",
         "today_ms": 26_000,
-        "liumd_status": "ok",
-        "liumd_verdict": "pass",
-        "liumd_reason": "ok",
-        "liumd_ms": 20_000,
-        "agree": True,
+        "liumd_reason": "allcards_ssh",
     }
     assert record["steps"]["verifyx"]["agree"] is True
     # The shadow's judgement never counts in the live network-gate tally.
@@ -258,7 +255,7 @@ async def test_the_intent_mirrors_todays_steps_and_sizing(keypair, monkeypatch, 
     [intent] = fake.intents
     assert intent["miner_hotkey"] == "5Miner" and intent["executor_uuid"] == UUID
     assert intent["parallel_gpu"] is True
-    assert intent["steps"]["matmul"] and intent["steps"]["verifyx"]
+    assert intent["steps"]["matmul"] is None and intent["steps"]["verifyx"]
     # The budget is what the task has left, and the host is told to stop 30 s before it.
     [timeout] = fake.timeouts
     assert 199.0 < timeout <= 200.0
@@ -269,69 +266,20 @@ async def test_the_intent_mirrors_todays_steps_and_sizing(keypair, monkeypatch, 
 @pytest.mark.parametrize(
     "sealed,fake_args,ok,events,matmul_agree,verifyx_agree,agree",
     [
-        ("GPU-SPOOFED", dict(verifyx_ok=False), True, PASSED, False, False, False),
+        ("GPU-SPOOFED", dict(verifyx_ok=False), True, PASSED, None, False, False),
         (
             "challenge",
             {},
             False,
             [_event(VERIFYX, "VERIFYX_OK"), _event(CAPABILITY, "GPU_VERIFY_FAILED")],
-            False,
-            True,
-            False,
-        ),
-        ("challenge", dict(matmul={"status": "skipped", "ms": 0}), True, PASSED, None, True, None),
-        (
-            "challenge",
-            dict(
-                matmul={
-                    "status": "failed",
-                    "ms": 5,
-                    "exit_status": 1,
-                    "stdout": "",
-                    "stderr_tail": "",
-                }
-            ),
-            True,
-            PASSED,
-            False,
-            True,
-            False,
-        ),
-        # Matmul timed out at its own 120 s cap while another step reached the suite deadline:
-        # the agent keeps the step's time, so it is a failure, not a deadline cut.
-        (
-            "challenge",
-            dict(
-                matmul={"status": "timeout", "ms": 120_005, "error": "timed out after 120s"},
-                deadline_hit=True,
-            ),
-            True,
-            PASSED,
-            False,
-            True,
-            False,
-        ),
-        # Cut at the suite deadline: the agent resets the step's time to 0; it never ran to a verdict.
-        (
-            "challenge",
-            dict(
-                matmul={"status": "timeout", "ms": 0, "error": "suite deadline reached"},
-                deadline_hit=True,
-            ),
-            True,
-            PASSED,
             None,
             True,
-            None,
+            True,
         ),
     ],
     ids=[
         "liumd-fails",
-        "today-fails",
-        "step-skipped",
-        "step-failed",
-        "own-cap-timeout",
-        "deadline-cut",
+        "today-matmul-fails",
     ],
 )
 async def test_agreement_per_step_and_overall(
@@ -643,14 +591,13 @@ async def test_refusals_and_unavailability_are_logged_outcomes(
     ctx = _ctx(keypair, monkeypatch, verifyx_service)
     record = await _shadow(ctx, FakeLiumd(result=refused))
     assert (record["outcome"], record["reason"], record["exit_status"]) == ("refused", "busy", 5)
-    # The native matmul generator is freed on every way out, not only after a judged answer.
-    ctx.services.validation.wrapper.free.assert_called_once_with("ptr")
+    # The matmul stays on SSH: no native matmul generator is built.
+    assert ctx.services.validation.wrapper.generateChallenge.call_count == 0
 
     gone = LocalVerifyUnavailable("not_supported", "exit 127: no liumd on this host")
     ctx = _ctx(keypair, monkeypatch, verifyx_service)
     record = await _shadow(ctx, FakeLiumd(result=gone))
     assert (record["outcome"], record["reason"]) == ("unavailable", "not_supported")
-    ctx.services.validation.wrapper.free.assert_called_once_with("ptr")
 
 
 # --- scoring: identical with the flag on and off ----------------------------------------------
