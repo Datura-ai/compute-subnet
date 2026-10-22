@@ -1303,7 +1303,7 @@ class RentalPriceIncentive(DefaultIncentive):
         # stays active).
         insufficient_disk = (
             self._insufficient_disk(job_result, log_if_cannot_measure=eligible_for_rental_share)
-            if self._should_run_idle_pool_gate(idle_pool_candidate, eligible_for_rental_share, True)
+            if self._should_run_idle_pool_gate(idle_pool_candidate, eligible_for_rental_share, enforced=True)
             else None
         )
         if insufficient_disk is not None:
