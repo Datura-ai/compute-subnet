@@ -33,7 +33,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from datura.requests.validator_requests import MatmulStep, VerifyXStep
+from datura.requests.validator_requests import VerifyXStep
 from services.liumd_exec_client import LiumdExecClient, LiumdRefusal
 from services.local_verify_client import (
     DETAIL_MAX_CHARS,
@@ -201,8 +201,7 @@ async def _compare(
     if _workload_on_node(ctx, today):
         return _skipped("workload", steps=steps)
     # All-cards enforcement can reject a card before today's matmul; the shadow's one ordinary
-    # matmul is not comparable (checks/local_verify.py `allcards_ssh`).
-    ask_matmul = False
+    # matmul is not comparable (checks/local_verify.py `allcards_ssh`), so it is never asked for.
     # On a never-measured executor today's check may re-measure a cold sample below the gate
     # (DAH-2959) and pass on the second; the shadow's one sample is not comparable.
     cold_retry = _cold_retry_possible(ctx)
@@ -217,7 +216,7 @@ async def _compare(
     elif fallback_cap:
         steps["verifyx"]["liumd_reason"] = "package_fallback_cap"
     ask_verifyx = today["verifyx"].verdict in RAN and not cold_retry and not fallback_cap
-    if not (ask_matmul or ask_verifyx):
+    if not ask_verifyx:
         return _skipped("no_gpu_step_ran", steps=steps)
     specs = ctx.state.specs
     if not specs:
@@ -232,72 +231,42 @@ async def _compare(
     # The judging functions log with this extra; the transport field keeps the shadow's lines
     # apart from today's.
     extra = {**ctx.default_extra, "transport": "liumd_shadow"}
-    matmul_challenge = None
+    verifyx_challenge = ctx.services.verifyx.prepare_verifyx_challenge(
+        specs,
+        extra,
+        challenge_config_overrides=_first_pass_challenge_config() if first_pass else None,
+    )
+    intent = build_intent(
+        executor_uuid=ctx.executor.uuid,
+        miner_hotkey=ctx.miner_hotkey,
+        matmul=None,
+        verifyx=VerifyXStep(seed=verifyx_challenge.seed, cipher_text=verifyx_challenge.cipher_text),
+        parallel_gpu=first_pass,
+        deadline_s=executor_deadline_s(int(budget)),
+    )
+    client = client_factory(ctx, budget)
     try:
-        if ask_matmul:
-            matmul_challenge = ctx.services.validation.prepare_matmul_challenge(
-                specs,
-                extra,
-                vram_budget_mb=settings.FIRST_PASS_MATMUL_VRAM_MB if first_pass else None,
-            )
-            if not matmul_challenge.params.cipher_text:
-                return _skipped("cipher_generation_failed", steps=steps)
-        verifyx_challenge = (
-            ctx.services.verifyx.prepare_verifyx_challenge(
-                specs,
-                extra,
-                challenge_config_overrides=_first_pass_challenge_config() if first_pass else None,
-            )
-            if ask_verifyx
-            else None
-        )
-        intent = build_intent(
-            executor_uuid=ctx.executor.uuid,
-            miner_hotkey=ctx.miner_hotkey,
-            matmul=(
-                MatmulStep(
-                    dim_n=matmul_challenge.params.dim_n,
-                    dim_k=matmul_challenge.params.dim_k,
-                    seed=matmul_challenge.params.seed,
-                    cipher_text=matmul_challenge.params.cipher_text,
-                )
-                if matmul_challenge is not None
-                else None
-            ),
-            verifyx=(
-                VerifyXStep(seed=verifyx_challenge.seed, cipher_text=verifyx_challenge.cipher_text)
-                if verifyx_challenge is not None
-                else None
-            ),
-            parallel_gpu=first_pass,
-            deadline_s=executor_deadline_s(int(budget)),
-        )
-        client = client_factory(ctx, budget)
-        try:
-            answer = await client.run(ctx.ssh, intent)
-        except LocalVerifyUnavailable as exc:
-            return {
-                "outcome": "unavailable",
-                "reason": exc.reason,
-                "detail": exc.detail[:DETAIL_MAX_CHARS],
-                "steps": steps,
-                "first_pass": first_pass,
-            }
-        if isinstance(answer, LiumdRefusal):
-            return {
-                "outcome": "refused",
-                "reason": answer.error,
-                "detail": answer.detail,
-                "exit_status": answer.exit_status,
-                "echoed": answer.echoed,
-                "round_trip_ms": answer.round_trip_ms,
-                "steps": steps,
-                "first_pass": first_pass,
-            }
-        return _judged(ctx, answer, today, steps, matmul_challenge, verifyx_challenge, extra)
-    finally:
-        if matmul_challenge is not None:
-            matmul_challenge.close()
+        answer = await client.run(ctx.ssh, intent)
+    except LocalVerifyUnavailable as exc:
+        return {
+            "outcome": "unavailable",
+            "reason": exc.reason,
+            "detail": exc.detail[:DETAIL_MAX_CHARS],
+            "steps": steps,
+            "first_pass": first_pass,
+        }
+    if isinstance(answer, LiumdRefusal):
+        return {
+            "outcome": "refused",
+            "reason": answer.error,
+            "detail": answer.detail,
+            "exit_status": answer.exit_status,
+            "echoed": answer.echoed,
+            "round_trip_ms": answer.round_trip_ms,
+            "steps": steps,
+            "first_pass": first_pass,
+        }
+    return _judged(ctx, answer, today, steps, verifyx_challenge, extra)
 
 
 def _not_run_or_fail(step, answer: LocalVerifyAnswer) -> str:
@@ -336,23 +305,9 @@ def _judged(
     answer: LocalVerifyAnswer,
     today: dict[str, TodayStep],
     steps: dict[str, dict[str, Any]],
-    matmul_challenge,
     verifyx_challenge,
     extra: dict,
 ) -> dict[str, Any]:
-    if matmul_challenge is not None:
-        step = answer.step("matmul")
-        if step.status != "ok" or step.stdout is None:
-            verdict, reason = (
-                _not_run_or_fail(step, answer),
-                _step_reason(step),
-            )
-        else:
-            result = ctx.services.validation.evaluate_matmul_output(
-                matmul_challenge, stdout=step.stdout, stderr=step.stderr_tail or ""
-            )
-            verdict, reason = ("pass", "ok") if result.success else ("fail", "local_failed")
-        steps["matmul"].update(_liumd_fields(step, verdict, reason))
     if verifyx_challenge is not None:
         step = answer.step("verifyx")
         if step.status != "ok" or step.stdout is None:
@@ -386,9 +341,7 @@ def _judged(
             }
 
     # Every step asked for needs a comparable verdict, else the outcome is incomplete.
-    requested = [
-        n for n, c in (("matmul", matmul_challenge), ("verifyx", verifyx_challenge)) if c is not None
-    ]
+    requested = ["verifyx"] if verifyx_challenge is not None else []
     compared = []
     for name in requested:
         entry = steps[name]
