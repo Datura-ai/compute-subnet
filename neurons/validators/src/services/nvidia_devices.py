@@ -244,7 +244,7 @@ async def build_gpu_docker_config_for_executor(
         # 1a: the kernel-truth verdict (a rented UUID absent from procfs) otherwise dies as a bare
         # WARNING. Surface it as a stable structured event so ops can alert on it; behavior is
         # unchanged — we still fall back to the legacy --gpus string below.
-        if isinstance(exc, MissingRentedGpuError) and settings.KERNEL_GPU_VERDICT_CHECK_ENABLED:
+        if isinstance(exc, MissingRentedGpuError):
             _emit_missing_rented_gpu(
                 ssh_client, exc, executor_id=executor_id, default_extra=default_extra
             )
@@ -325,7 +325,7 @@ async def _query_gpu_nodes_for_uuids(
             xml_uuid_to_minor = {}
 
         overwrite_with_xml = bool(xml_uuid_to_minor)
-        if xml_uuid_to_minor and settings.KERNEL_GPU_VERDICT_CHECK_ENABLED:
+        if xml_uuid_to_minor:
             xml_would_add = [
                 u for u in gpu_uuids if u not in uuid_to_minor and u in xml_uuid_to_minor
             ]
