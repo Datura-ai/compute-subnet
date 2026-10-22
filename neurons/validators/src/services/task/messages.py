@@ -1379,15 +1379,6 @@ class RegistryPullMessages:
         impact="Score set to 0",
         remediation=REGISTRY_PULL_REMEDIATION,
     )
-    # the same finding while REGISTRY_PULL_ENFORCEMENT_ENABLED is off: logged, score unchanged
-    REGISTRY_PULL_FAILED_OBSERVED = MessageTemplate(
-        event="Docker Hub image pull fails through this node's registry path (not enforced)",
-        reason="REGISTRY_PULL_FAILED_OBSERVED",
-        severity="warning",
-        category="runtime",
-        impact="None: REGISTRY_PULL_ENFORCEMENT_ENABLED is off",
-        remediation=REGISTRY_PULL_REMEDIATION,
-    )
     # one failed pull: a finding only once the next pull fails too
     REGISTRY_PULL_FAILED_ONCE = MessageTemplate(
         event="Docker Hub image pull failed once; the next pull decides",
