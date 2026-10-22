@@ -17,7 +17,11 @@ from neurons.validators.src.services.task.checks.banned_gpu import BannedGpuChec
 from neurons.validators.src.services.task.checks.banned_provider import BannedProviderCheck
 from neurons.validators.src.services.task.messages import BannedGpuMessages, BannedProviderMessages
 from neurons.validators.src.services.task.pipeline import CheckResult, Context
-from protocol.vc_protocol.compute_requests import RentedExecutorsResponse
+from protocol.vc_protocol.compute_requests import (
+    RentedExecutor,
+    RentedExecutorsResponse,
+    RentedPod,
+)
 
 from services import nvidia_devices  # the module banned_provider.py reads the timeout from
 from tests.helpers import build_state
@@ -284,6 +288,32 @@ async def test_kernel_list_read_through_an_overlay_is_not_trusted_and_fails(
     ]
     assert "kernel_gpu_uuids" not in result.updates["state"].specs
     assert "is_provider_banned" not in result.updates
+    assert result.fatal is True
+
+
+@pytest.mark.asyncio
+async def test_overlaid_kernel_view_on_a_live_rental_is_not_fatal(context_factory):
+    """Like a ban, the overlay finding must not stop verifying a node whose pod is in use."""
+    ctx = context_factory(
+        ssh=_ssh_with_procfs([f"{SPOOFED}, 0"], mounts=[*CONTAINER_MOUNTS, OVERLAY_MOUNT])
+    )
+    rented = RentedExecutorsResponse(
+        executors={
+            ctx.executor.uuid: RentedExecutor(
+                miner_hotkey="miner-hotkey",
+                executor_ip_address=ctx.executor.address,
+                executor_ip_port=str(ctx.executor.port),
+                pods=[RentedPod(pod_id="pod-1", container_name="pod_p1")],
+            )
+        },
+    )
+    ctx = ctx.model_copy(update={"state": build_state(gpu_uuids=SPOOFED, rented_data=rented)})
+
+    result = await BannedProviderCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.event.reason_code == BannedProviderMessages.KERNEL_GPU_VIEW_OVERLAID.reason
+    assert result.fatal is False
 
 
 @pytest.mark.asyncio

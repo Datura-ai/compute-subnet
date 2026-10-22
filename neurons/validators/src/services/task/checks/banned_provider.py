@@ -110,7 +110,9 @@ class BannedProviderCheck:
             event = render_message(
                 Msg.KERNEL_GPU_VIEW_OVERLAID, ctx=ctx, check_id=self.check_id, what=what
             )
-            return CheckResult(passed=False, event=event, updates=updates)
+            return CheckResult(
+                passed=False, event=event, updates=updates, fatal=not has_live_rental(ctx)
+            )
 
         event = render_message(Msg.PROVIDER_ALLOWED, ctx=ctx, check_id=self.check_id, what=what)
         return CheckResult(passed=True, event=event, updates=updates)
