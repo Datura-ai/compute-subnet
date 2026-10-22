@@ -1,7 +1,7 @@
 """DAH-1997 (Fish 21 Oct): the storage limit is required only of hosts that can build it.
 
 storage_limit_capable() in machine_scrape.py: docker's data root already on xfs (only `pquota` missing), or a
-blank whole disk of 100 GiB+ that `lium gpu-splitting setup` takes (not mounted, not swap, no holders, not
+blank whole disk of 100 GiB+ that passes `lium gpu-splitting setup`'s target checks (not mounted, not swap, no holders, not
 partitioned, writable, not removable or non-local, no signature). Partitions and free regions are never counted.
 A host with one disk, all of it in use, is not capable and keeps the STORAGE_LIMIT_MISSING warning only.
 """

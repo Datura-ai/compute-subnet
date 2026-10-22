@@ -1956,7 +1956,8 @@ def get_docker_root_disk_type() -> str:
 
 
 # DAH-1997 (Fish 21 Oct): the storage limit is required only of hosts that can build it - docker's data
-# root already on xfs (only `pquota` missing), or a blank whole disk `lium gpu-splitting setup` takes. A host
+# root already on xfs (only `pquota` missing), or a blank whole disk that passes `lium gpu-splitting setup`'s target checks
+# (setup itself runs only on docker's default /var/lib/docker; with another data root, the manual steps at docs.lium.io/providers/nodes/docker-storage). A host
 # with one disk, all of it in use, cannot, and keeps the warning only.
 STORAGE_CAPABLE_MIN_BYTES = 100 * 1024 ** 3
 SYSFS_SECTOR_BYTES = 512
@@ -1983,7 +1984,8 @@ def carries_signature(node_path: str, size_bytes: int) -> bool:
 
 
 def spare_block_device(mounts_text: str) -> str | None:
-    """The kernel name of a blank whole disk that `lium gpu-splitting setup` takes (its blank_whole_disk):
+    """The kernel name of a blank whole disk that passes `lium gpu-splitting setup`'s target checks (its blank_whole_disk;
+    with a non-default docker data root setup refuses and the manual steps at docs.lium.io/providers/nodes/docker-storage apply):
     STORAGE_CAPABLE_MIN_BYTES or more, not partitioned, not mounted, not swap, no holders (LVM / RAID /
     dm-crypt), not read-only, not removable or attached over usb / mmc / iscsi / fc, and no signature.
     None when there is none. Partitions and free space after the last partition are not counted: setup
