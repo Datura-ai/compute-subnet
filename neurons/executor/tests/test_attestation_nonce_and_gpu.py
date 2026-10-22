@@ -265,8 +265,8 @@ def test_get_quote_rejects_malformed_nonce(tdx_service, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_gpu_collection_disabled_by_default():
-    # Arrange — both flags default off
+def test_gpu_collection_disabled_without_tdx_attestation():
+    # Arrange — ENABLE_TDX_ATTESTATION defaults off
     service = GPUAttestationService()
 
     # Act / Assert
@@ -274,9 +274,8 @@ def test_gpu_collection_disabled_by_default():
 
 
 def test_gpu_collection_skipped_in_host_mode(monkeypatch):
-    # Arrange — flags on but no dstack guest socket (bare-metal topology)
+    # Arrange — TDX attestation on but no dstack guest socket (bare-metal topology)
     monkeypatch.setattr(settings, "ENABLE_TDX_ATTESTATION", True)
-    monkeypatch.setattr(settings, "ENABLE_GPU_ATTESTATION", True)
     monkeypatch.setattr(settings, "DSTACK_SOCKET_PATH", "/nonexistent/dstack.sock")
     service = GPUAttestationService()
 
@@ -290,7 +289,6 @@ def test_gpu_collection_survives_missing_nvidia_stack(monkeypatch, tmp_path):
     socket = tmp_path / "dstack.sock"
     socket.touch()
     monkeypatch.setattr(settings, "ENABLE_TDX_ATTESTATION", True)
-    monkeypatch.setattr(settings, "ENABLE_GPU_ATTESTATION", True)
     monkeypatch.setattr(settings, "DSTACK_SOCKET_PATH", str(socket))
     service = GPUAttestationService()
 
