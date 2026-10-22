@@ -29,7 +29,6 @@ def test_type_error_names_the_field_and_omits_the_value(monkeypatch: pytest.Monk
 def test_custom_validator_error_names_the_field_and_omits_the_value(monkeypatch: pytest.MonkeyPatch):
     text = _startup_error(
         monkeypatch,
-        ENABLE_VOLUME_ENCRYPTION="true",
         VOLUME_MASTER_SECRET=f"x{MARKER}",
     )
 
@@ -56,7 +55,6 @@ def test_custom_validator_error_names_the_field_and_omits_the_value(monkeypatch:
 def test_a_volume_secret_that_repeats_a_unit_of_at_most_8_bytes_starts_with_a_warning_that_omits_it(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, secret: str, warned: bool
 ):
-    monkeypatch.setenv("ENABLE_VOLUME_ENCRYPTION", "true")
     monkeypatch.setenv("VOLUME_MASTER_SECRET", secret)
 
     with caplog.at_level(logging.WARNING, logger="core.config"):
