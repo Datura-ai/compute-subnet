@@ -18,8 +18,8 @@
 # then re-asserts it every 15 min (a provider's config management writing
 # vm.dirty_ratio zeroes dirty_bytes). A provider's own lower cap is left alone.
 #
-# Everything is fail-open: a failure logs a warning and the executor runs with the
-# host's values.
+# Everything is fail-open: a failure logs a warning and the executor runs with whatever
+# the host has (a half-applied setup is completed by the janitor's next pass).
 #
 # Usage: setup_dirty_cap.sh [setup|janitor]
 
@@ -32,36 +32,47 @@ VM="$SYS_ROOT/proc/sys/vm"
 
 log() { echo "[dirty-cap] $*"; }
 
-dirty_bytes_now() {
-    awk '/^Dirty:/ { print $2 * 1024; found = 1 } END { exit !found }' "$MEMINFO" 2>/dev/null
+pending_bytes_now() {
+    # Dirty + Writeback: pages already handed to the disk still count against the cap. Summed in
+    # kB by awk (fits any awk's integer range), scaled in bash: awk prints big products as 5.4e+11
+    local kb
+    kb=$(awk '/^(Dirty|Writeback):/ { kb += $2; found = 1 } END { if (found) print kb; exit !found }' "$MEMINFO" 2>/dev/null) || return 1
+    echo $((kb * 1024))
 }
 
 cap_now() { cat "$VM/dirty_bytes" 2>/dev/null; }
+background_now() { cat "$VM/dirty_background_bytes" 2>/dev/null; }
 
 apply_cap() {
     echo "$1" > "$VM/dirty_bytes" && echo "$(($1 / 4))" > "$VM/dirty_background_bytes"
 }
 
 cap_is_settled() {
-    # 0 = dirty_ratio mode (the default, or a provider reset); anything up to the target is fine
-    local cap="$1"
-    [ -n "$cap" ] && [ "$cap" -gt 0 ] && [ "$cap" -le "$TARGET_BYTES" ]
+    # both at or under the target; 0 = dirty_ratio mode (the default, a provider reset, or a
+    # half-applied setup whose second write failed)
+    local cap="$1" background="$2"
+    [ -n "$cap" ] && [ -n "$background" ] &&
+        [ "$cap" -gt 0 ] && [ "$cap" -le "$TARGET_BYTES" ] &&
+        [ "$background" -gt 0 ] && [ "$background" -le "$cap" ]
 }
 
 step_toward_target() {
     # lower the cap one notch: 0 once it is at (or a provider put it under) the target, 2 while
     # the ramp is still above it, 1 when /proc cannot be read or written
-    local dirty cap want
-    dirty=$(dirty_bytes_now) || { log "cannot read Dirty from $MEMINFO"; return 1; }
+    local pending cap background want
+    pending=$(pending_bytes_now) || { log "cannot read Dirty from $MEMINFO"; return 1; }
     cap=$(cap_now) || { log "cannot read $VM/dirty_bytes"; return 1; }
-    cap_is_settled "$cap" && return 0
-    want=$((dirty + dirty / 10))
+    background=$(background_now) || { log "cannot read $VM/dirty_background_bytes"; return 1; }
+    cap_is_settled "$cap" "$background" && return 0
+    want=$((pending + pending / 10))
     [ "$want" -gt "$TARGET_BYTES" ] || want=$TARGET_BYTES
-    if [ "$cap" -eq 0 ] || [ "$want" -lt "$cap" ]; then
+    # never raise a cap that is already set, ours or the provider's
+    [ "$cap" -eq 0 ] || [ "$want" -le "$cap" ] || want=$cap
+    if [ "$want" -ne "$cap" ] || [ "$((want / 4))" -ne "$background" ]; then
         apply_cap "$want" || { log "write to $VM failed"; return 1; }
-        log "dirty_bytes=$want dirty_background_bytes=$((want / 4)) (Dirty $dirty, target $TARGET_BYTES)"
+        log "dirty_bytes=$want dirty_background_bytes=$((want / 4)) (Dirty+Writeback $pending, target $TARGET_BYTES)"
     fi
-    cap_is_settled "$want" || return 2
+    cap_is_settled "$want" "$((want / 4))" || return 2
 }
 
 janitor_loop() {

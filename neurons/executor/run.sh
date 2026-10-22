@@ -5,7 +5,7 @@ set -eux -o pipefail
 bash setup_disk_reserve.sh || echo "[disk-reserve] setup failed; continuing without reserve"
 bash setup_disk_reserve.sh janitor &
 # dirty page cache cap: a container removal must not wait for a host-sized flush (DAH-4978)
-bash setup_dirty_cap.sh || echo "[dirty-cap] setup failed; continuing with the host's values"
+bash setup_dirty_cap.sh || echo "[dirty-cap] setup failed; the janitor retries every minute"
 bash setup_dirty_cap.sh janitor &
 # re-enter cwd through the overlay mount (the old dentry would bypass it)
 cd /root/app

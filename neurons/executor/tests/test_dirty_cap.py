@@ -26,9 +26,10 @@ def sys_root(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def set_dirty(sys_root: Path, dirty_bytes: int) -> None:
+def set_dirty(sys_root: Path, dirty_bytes: int, writeback_bytes: int = 0) -> None:
     (sys_root / "proc" / "meminfo").write_text(
-        f"MemTotal:       4294967296 kB\nDirty:          {dirty_bytes // 1024} kB\nWriteback:      0 kB\n"
+        f"MemTotal:       4294967296 kB\nDirty:          {dirty_bytes // 1024} kB\n"
+        f"Writeback:      {writeback_bytes // 1024} kB\n"
     )
 
 
@@ -80,6 +81,32 @@ def test_repeated_steps_lower_the_cap_as_dirty_falls_and_never_raise_it(sys_root
 
     set_dirty(sys_root, 300 * 1024**2)
     run_setup(sys_root)
+    assert cap(sys_root) == (TARGET, TARGET_BG)
+
+
+def test_pages_already_in_writeback_count_toward_the_safe_cap(sys_root: Path) -> None:
+    # writers are throttled on Dirty + Writeback, so a slow disk still draining 10 GiB must not
+    # see a 1 GiB cap yet
+    set_dirty(sys_root, 100 * 1024**2, writeback_bytes=10 * GIB)
+
+    run_setup(sys_root)
+
+    pending = 100 * 1024**2 + 10 * GIB
+    assert cap(sys_root)[0] == pending + pending // 10
+
+
+def test_half_applied_setup_is_completed_on_the_next_pass(sys_root: Path) -> None:
+    background = sys_root / "proc" / "sys" / "vm" / "dirty_background_bytes"
+    background.chmod(0o444)
+    failed = run_setup(sys_root)
+    half_applied = cap(sys_root)
+    background.chmod(0o644)
+
+    completed = run_setup(sys_root)
+
+    assert failed.returncode == 1 and "write to" in failed.stdout
+    assert half_applied == (TARGET, 0)
+    assert completed.returncode == 0
     assert cap(sys_root) == (TARGET, TARGET_BG)
 
 
