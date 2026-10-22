@@ -142,6 +142,7 @@ def _image(image_id: str, tags: list[str]) -> MagicMock:
 
 def _prune_client(images: list[MagicMock], container_image_ids: list[str]) -> MagicMock:
     client = MagicMock()
+    client.info.return_value = {}
     client.images.list.return_value = images
     client.containers.list.return_value = [
         MagicMock(attrs={"Image": image_id}, status="running") for image_id in container_image_ids
@@ -174,6 +175,18 @@ def test_a_disk_over_the_listing_floor_removes_nothing(monkeypatch):
     client = _prune_client([_image("sha256:old", ["someone/old:1"])], [])
     assert cache_template_service._prune_unused_images_when_disk_low(client, set()) == 0
     client.images.remove.assert_not_called()
+
+
+def test_a_low_docker_data_root_prunes_even_when_root_has_room(monkeypatch, tmp_path):
+    _disk(monkeypatch, free_gb=500, percent=50)
+    low = MagicMock(free=30 * 1024**3, percent=97)
+    roomy = cache_template_service.psutil.disk_usage
+    monkeypatch.setattr(
+        cache_template_service.psutil, "disk_usage", lambda path: low if path == str(tmp_path) else roomy(path)
+    )
+    client = _prune_client([_image("sha256:old", ["someone/old:1"])], [])
+    client.info.return_value = {"DockerRootDir": str(tmp_path)}
+    assert cache_template_service._prune_unused_images_when_disk_low(client, set()) == 1
 
 
 @pytest.mark.parametrize("busy_after_first_removal", [False, True])

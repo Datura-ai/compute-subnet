@@ -18,6 +18,7 @@ decision: state failures are swallowed inside ``cache_prefetch_state``.
 """
 
 import asyncio
+import os
 import random
 import time
 
@@ -300,8 +301,16 @@ def _prune_unused_images_when_disk_low(client: "docker.DockerClient", keep_refs:
     before its container exists. Removal is never forced, so docker itself refuses an image a
     container still holds. Returns how many images were removed.
     """
-    usage = psutil.disk_usage("/")
-    if usage.free >= LISTING_MIN_FREE_GB * 1024**3 and usage.percent <= LISTING_MAX_DISK_USED_PERCENT:
+    # "/" is what the listing reads; Docker's data root can be a separate filesystem
+    paths = ["/"]
+    root = client.info().get("DockerRootDir")
+    if isinstance(root, str) and os.path.isdir(root):
+        paths.append(root)
+    usages = [psutil.disk_usage(path) for path in paths]
+    if all(
+        u.free >= LISTING_MIN_FREE_GB * 1024**3 and u.percent <= LISTING_MAX_DISK_USED_PERCENT
+        for u in usages
+    ):
         return 0
     in_use = {container.attrs.get("Image") for container in client.containers.list(all=True)}
     removed = 0
