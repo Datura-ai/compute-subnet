@@ -1860,6 +1860,23 @@ class PinnedMemoryProbeMessages:
         category="env",
         impact="Proceed without penalty",
     )
+    FILLER_SKIPPED = MessageTemplate(
+        event="Pinned-memory copy probe skipped for active filler",
+        reason="PINNED_MEMORY_PROBE_SKIPPED_ACTIVE_FILLER",
+        severity="info",
+        category="policy",
+        impact="Active filler runtime preserved; the probe would compete with it for the GPUs.",
+    )
+    WORKLOAD_SKIPPED = MessageTemplate(
+        event="Pinned-memory copy probe not scored: a Lium workload took the cards during this cycle",
+        reason="PINNED_MEMORY_PROBE_SKIPPED_RENTED",
+        severity="info",
+        category="policy",
+        impact=(
+            "Score unchanged; a copy hung beside a Lium pod or default job that started after this "
+            "cycle's rental snapshot. The next cycle probes again."
+        ),
+    )
 
 
 class ScoreMessages:
