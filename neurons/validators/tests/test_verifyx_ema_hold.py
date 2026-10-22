@@ -200,26 +200,23 @@ async def _cycle_with_the_image_check(context_factory, probes, rented_data, redi
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("grace", "hold", "cold_retry", "cycle_2_passes", "cycle_2_ema"),
+    ("grace", "hold", "cycle_2_passes", "cycle_2_ema"),
     [
-        pytest.param(False, False, True, False, 86.7, id="main"),
+        pytest.param(False, False, False, 86.7, id="main"),
         # the grace alone: cycle 1 passes as PENDING and seeds 120
-        pytest.param(True, False, True, False, 86.7, id="grace"),
+        pytest.param(True, False, False, 86.7, id="grace"),
         # the hold alone: cycle 1 fails the image check and is held
-        pytest.param(False, True, True, True, 238.0, id="hold"),
+        pytest.param(False, True, True, 238.0, id="hold"),
         # both: cycle 1 passes as PENDING and is held
-        pytest.param(True, True, True, True, 238.0, id="grace-and-hold"),
-        # the hold without the re-measure: cycle 2 is judged on its one cold sample
-        pytest.param(False, True, False, False, 53.4, id="hold-without-cold-retry"),
+        pytest.param(True, True, True, 238.0, id="grace-and-hold"),
     ],
 )
 async def test_the_incident_with_the_fresh_node_grace(
-    monkeypatch, context_factory, grace, hold, cold_retry, cycle_2_passes, cycle_2_ema
+    monkeypatch, context_factory, grace, hold, cycle_2_passes, cycle_2_ema
 ):
     monkeypatch.setattr(settings, "CACHED_TEMPLATE_CUTOFF", datetime.utcnow() - timedelta(days=1))
     monkeypatch.setattr(settings, "CACHED_TEMPLATE_FRESH_NODE_GRACE_ENABLED", grace)
     monkeypatch.setattr(settings, "VERIFYX_EMA_HOLD_ENABLED", hold)
-    monkeypatch.setattr(settings, "VERIFYX_COLD_SAMPLE_RETRY_ENABLED", cold_retry)
     redis = _fake_redis_service()
 
     # Cycle 1: a fresh node, its executor's first pre-pull still running; VerifyX samples 120.

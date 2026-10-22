@@ -26,8 +26,7 @@ Public surface
 
 Failure handling
 ----------------
-`build_gpu_flags` raises only one thing: `MissingRentedGpuError`, while
-KERNEL_GPU_VERDICT_CHECK_ENABLED is on — a rented UUID the kernel cannot see must not become a
+`build_gpu_flags` raises only one thing: `MissingRentedGpuError` — a rented UUID the kernel cannot see must not become a
 container (DAH-2671, item 1). Every other probe failure (SSH error, missing
 nvidia-smi, etc.) is logged at WARNING and the function falls
 back to the legacy `--gpus`-only string. The pod still gets created — it
@@ -47,7 +46,6 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import asyncssh
 
-from core.config import settings
 from services.rental_docker_sdk import GpuDockerConfig, build_gpu_docker_config
 
 if TYPE_CHECKING:
@@ -242,7 +240,7 @@ async def build_gpu_docker_config_for_executor(
     except Exception as exc:
         # 1a: the kernel-truth verdict (a rented UUID absent from procfs) otherwise dies as a bare
         # WARNING. Surface it as a stable structured event so ops can alert on it.
-        if isinstance(exc, MissingRentedGpuError) and settings.KERNEL_GPU_VERDICT_CHECK_ENABLED:
+        if isinstance(exc, MissingRentedGpuError):
             _emit_missing_rented_gpu(
                 ssh_client, exc, executor_id=executor_id, default_extra=default_extra
             )
@@ -322,7 +320,7 @@ async def _query_gpu_nodes_for_uuids(
             xml_uuid_to_minor = {}
 
         overwrite_with_xml = bool(xml_uuid_to_minor)
-        if xml_uuid_to_minor and settings.KERNEL_GPU_VERDICT_CHECK_ENABLED:
+        if xml_uuid_to_minor:
             xml_would_add = [
                 u for u in gpu_uuids if u not in uuid_to_minor and u in xml_uuid_to_minor
             ]

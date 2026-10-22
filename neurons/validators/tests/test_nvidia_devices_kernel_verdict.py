@@ -41,12 +41,6 @@ def _fake_ssh(*responses):
     return ssh
 
 
-@pytest.fixture(autouse=True)
-def _check_on(monkeypatch):
-    # default posture for every test: check on (enforcement always applies while it is on).
-    monkeypatch.setattr(nd.settings, "KERNEL_GPU_VERDICT_CHECK_ENABLED", True, raising=False)
-
-
 # ---------------------------- 1a: missing-GPU verdict emits ----------------------------
 
 
@@ -134,16 +128,3 @@ async def test_empty_kernel_map_under_enforcement_refuses_the_container(caplog):
     with caplog.at_level("WARNING"):
         with pytest.raises(MissingRentedGpuError):
             await build_gpu_docker_config_for_executor(ssh, ["GPU-bbb"], executor_id="exec-9")
-
-
-@pytest.mark.asyncio
-async def test_check_disabled_preserves_legacy_behavior(monkeypatch, caplog):
-    # master switch off → no emit, XML overwrites exactly as before the change.
-    monkeypatch.setattr(nd.settings, "KERNEL_GPU_VERDICT_CHECK_ENABLED", False, raising=False)
-    ssh = _fake_ssh(FakeRun("GPU-aaa, 0\n"), FakeRun(_XML_BOTH))
-
-    with caplog.at_level("WARNING"):
-        nodes, _ = await _query_gpu_nodes_for_uuids(ssh, ["GPU-bbb"])
-
-    assert nodes == ("/dev/nvidia1",)
-    assert not any(r.message == nd._KERNEL_GPU_VERDICT_DISAGREE_MSG for r in caplog.records)
