@@ -11,6 +11,7 @@ import asyncio
 from unittest.mock import MagicMock
 
 import docker
+import pytest
 
 # conftest replaces the docker module with a MagicMock; except-clauses in the
 # service need a real exception class to catch.
@@ -175,9 +176,16 @@ def test_a_disk_over_the_listing_floor_removes_nothing(monkeypatch):
     client.images.remove.assert_not_called()
 
 
-def test_a_busy_node_keeps_its_images(monkeypatch):
+@pytest.mark.parametrize("busy_after_first_removal", [False, True])
+def test_a_busy_node_keeps_its_images(monkeypatch, busy_after_first_removal):
     _disk(monkeypatch, free_gb=30, percent=97.8)
-    monkeypatch.setattr(cache_template_service, "rental_activity", lambda client: "docker-over-ssh session")
-    client = _prune_client([_image("sha256:old", ["someone/old:1"])], [])
-    assert cache_template_service._prune_unused_images_when_disk_low(client, set()) == 0
-    client.images.remove.assert_not_called()
+    client = _prune_client([_image("old", ["old:1"]), _image("rental", ["customer/app:1"])], [])
+    # a rental can start mid-sweep, after it found its image locally and skipped the pull
+    monkeypatch.setattr(
+        cache_template_service,
+        "rental_activity",
+        lambda _: "docker-over-ssh session" if client.images.remove.called or not busy_after_first_removal else None,
+    )
+    expected = ["old:1"] if busy_after_first_removal else []
+    assert cache_template_service._prune_unused_images_when_disk_low(client, set()) == len(expected)
+    assert [call.args[0] for call in client.images.remove.call_args_list] == expected

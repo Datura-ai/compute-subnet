@@ -8,6 +8,7 @@ reclaims, and it decides on real free space: below the rental listing floor the 
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from uuid import UUID
 
 import pytest
 
@@ -238,3 +239,20 @@ async def test_an_empty_snapshot_or_a_kept_verdict_removes_no_volume(cleanup):
     assert await cleanup.remove_orphan_rental_volumes(ssh_client, None, "exec-1", AsyncMock(return_value=True)) == 0
     assert await cleanup.remove_orphan_rental_volumes(ssh_client, _snapshot([LIVE]), "exec-1", AsyncMock(return_value=False)) == 0
     assert _removed(ssh_client) == []
+
+
+@pytest.mark.asyncio
+async def test_kept_candidates_never_starve_the_volumes_behind_the_per_pass_cap(cleanup):
+    ids = [str(UUID(int=i)) for i in range(1, 52)]
+    names = [f"volume_{uid}" for uid in ids]
+    ssh_client = VolumeHostSsh(dangling=names, created={name: "2026-09-10T08:00:00Z" for name in names}, volumes=names)
+    seen = []
+
+    async def is_orphan(volume_id, age):
+        seen.append(volume_id)
+        return volume_id == ids[-1]  # the first 50 are kept (e.g. failed pods), only the 51st is over
+
+    passes = [await cleanup.remove_orphan_rental_volumes(ssh_client, _snapshot([LIVE]), "exec-1", is_orphan) for _ in range(2)]
+    assert passes == [0, 1]
+    assert seen[:50] == ids[:50] and ids[-1] in seen[50:]
+    assert _removed(ssh_client) == [names[-1]]

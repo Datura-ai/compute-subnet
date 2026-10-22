@@ -110,6 +110,8 @@ class ContainerCleanup:
     def __init__(self, stale_threshold_minutes: int = FILLER_CONTAINER_GRACE_MINUTES, dry_run: bool = False):
         self.stale_threshold_minutes = stale_threshold_minutes
         self.dry_run = dry_run
+        # per executor: the last orphan-volume candidate examined, so a capped pass resumes after it
+        self._orphan_volume_cursor: dict[str, str] = {}
 
     def _get_rented_containers(
         self, rented_data: Optional[RentedExecutorsResponse], executor_uuid: str
@@ -371,16 +373,23 @@ class ContainerCleanup:
             listed_pod_ids: set[str] = {
                 pod.pod_id for executor in rented_data.executors.values() for pod in executor.pods
             }
-            candidates: list[str] = [
+            candidates: list[str] = sorted(
                 name
                 for name in dangling or []
                 if (match := POD_VOLUME_NAME_PATTERN.match(name))
                 and match[1] not in listed_pod_ids
                 and f"{POD_CONTAINER_PREFIX}{match[1]}" not in listed_names
                 and f"{FILLER_CONTAINER_PREFIX}{match[1]}" not in listed_names
-            ][:ORPHAN_VOLUME_LOOKUPS_PER_PASS]
+            )
+            # resume after the last pass's batch, wrapping around, so volumes that are kept or cannot
+            # be dated never starve the ones behind them
+            after: str = self._orphan_volume_cursor.get(executor_uuid, "")
+            candidates = ([n for n in candidates if n > after] + [n for n in candidates if n <= after])[
+                :ORPHAN_VOLUME_LOOKUPS_PER_PASS
+            ]
             if not candidates:
                 return 0
+            self._orphan_volume_cursor[executor_uuid] = candidates[-1]
 
             ages: dict[str, timedelta] = await self._volume_ages(ssh_client, candidates)
             orphans: list[str] = [

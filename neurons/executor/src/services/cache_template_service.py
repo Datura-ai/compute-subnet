@@ -303,17 +303,22 @@ def _prune_unused_images_when_disk_low(client: "docker.DockerClient", keep_refs:
     usage = psutil.disk_usage("/")
     if usage.free >= LISTING_MIN_FREE_GB * 1024**3 and usage.percent <= LISTING_MAX_DISK_USED_PERCENT:
         return 0
-    busy = rental_activity(client)
-    if busy:
-        logger.info(f"Disk low but node busy ({busy}); unused images kept this cycle")
-        return 0
     in_use = {container.attrs.get("Image") for container in client.containers.list(all=True)}
     removed = 0
     for image in client.images.list():
         if image.id in in_use or keep_refs.intersection(image.tags):
             continue
         # by tag, so an image with several tags goes; an untagged one only has its id
-        if all([_remove_ref(client, ref) for ref in image.tags or [image.id]]):
+        ok = True
+        for ref in image.tags or [image.id]:
+            # rechecked before every removal: a rental that starts mid-sweep may already
+            # have found this image locally and skipped its pull
+            busy = rental_activity(client)
+            if busy:
+                logger.info(f"Disk low but node busy ({busy}); unused images kept this cycle")
+                return removed
+            ok = _remove_ref(client, ref) and ok
+        if ok:
             removed += 1
             logger.info(f"Disk low: removed unused image {image.tags or image.id}")
     return removed
