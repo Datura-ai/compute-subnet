@@ -1320,7 +1320,7 @@ class RentalPriceIncentive(DefaultIncentive):
         # DAH-2546 flagship capability gate
         missing_capability = (
             self._missing_flagship_capability(job_result, base_model)
-            if self._should_run_idle_pool_gate(idle_pool_candidate, eligible_for_rental_share, True)
+            if self._should_run_idle_pool_gate(idle_pool_candidate, eligible_for_rental_share, enforced=True)
             else None
         )
         if missing_capability is not None:
