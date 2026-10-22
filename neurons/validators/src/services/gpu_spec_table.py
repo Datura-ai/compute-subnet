@@ -74,6 +74,7 @@ GPU_VRAM_SIZES_MB: dict[str, list[int]] = {
     "NVIDIA H800 PCIe":                                   [81920],         # 80 GB
     # Blackwell consumer
     "NVIDIA GeForce RTX 5090":                            [32768],         # 32 GB; observed: 32607
+    "NVIDIA GeForce RTX 5090 D":                          [32768],         # 32 GB; China SKU
     "NVIDIA GeForce RTX 5080":                            [16384],         # 16 GB
     "NVIDIA GeForce RTX 5070 Ti":                         [16384],         # 16 GB
     "NVIDIA GeForce RTX 5070":                            [12288],         # 12 GB
