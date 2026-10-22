@@ -292,6 +292,9 @@ async def _ensure_template(
     state.note_cleanup_error(image_ref, cleanup_error)
 
 
+HOST_ROOT = "/proc/1/root"
+
+
 def _prune_unused_images_when_disk_low(client: "docker.DockerClient", keep_refs: set[str]) -> int:
     """Remove every image no container uses, once the disk is under the listing floor.
 
@@ -301,11 +304,14 @@ def _prune_unused_images_when_disk_low(client: "docker.DockerClient", keep_refs:
     before its container exists. Removal is never forced, so docker itself refuses an image a
     container still holds. Returns how many images were removed.
     """
-    # "/" is what the listing reads; Docker's data root can be a separate filesystem
+    # "/" is what the listing reads; Docker's data root can be a separate filesystem. That root
+    # is a host path: in the executor container (pid: host) the host's filesystem is /proc/1/root
     paths = ["/"]
     root = client.info().get("DockerRootDir")
-    if isinstance(root, str) and os.path.isdir(root):
-        paths.append(root)
+    if isinstance(root, str) and root.startswith("/"):
+        seen = next((p for p in (HOST_ROOT + root, root) if os.path.isdir(p)), None)
+        if seen:
+            paths.append(seen)
     usages = [psutil.disk_usage(path) for path in paths]
     if all(
         u.free >= LISTING_MIN_FREE_GB * 1024**3 and u.percent <= LISTING_MAX_DISK_USED_PERCENT

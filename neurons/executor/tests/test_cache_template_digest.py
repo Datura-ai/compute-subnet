@@ -189,6 +189,24 @@ def test_a_low_docker_data_root_prunes_even_when_root_has_room(monkeypatch, tmp_
     assert cache_template_service._prune_unused_images_when_disk_low(client, set()) == 1
 
 
+def test_a_low_docker_data_root_is_read_through_the_host_root(monkeypatch, tmp_path):
+    # the executor runs in a container: DockerRootDir names a host path, seen under /proc/1/root
+    _disk(monkeypatch, free_gb=500, percent=50)
+    (tmp_path / "var/lib/docker").mkdir(parents=True)
+    monkeypatch.setattr(cache_template_service, "HOST_ROOT", str(tmp_path))
+    low = MagicMock(free=30 * 1024**3, percent=97)
+    roomy = cache_template_service.psutil.disk_usage
+    host_root = str(tmp_path / "var/lib/docker")
+    monkeypatch.setattr(
+        cache_template_service.psutil,
+        "disk_usage",
+        lambda path: low if path == host_root else roomy(path),
+    )
+    client = _prune_client([_image("sha256:old", ["someone/old:1"])], [])
+    client.info.return_value = {"DockerRootDir": "/var/lib/docker"}
+    assert cache_template_service._prune_unused_images_when_disk_low(client, set()) == 1
+
+
 @pytest.mark.parametrize("busy_after_first_removal", [False, True])
 def test_a_busy_node_keeps_its_images(monkeypatch, busy_after_first_removal):
     _disk(monkeypatch, free_gb=30, percent=97.8)
