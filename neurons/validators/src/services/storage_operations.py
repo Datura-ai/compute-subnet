@@ -178,7 +178,7 @@ async def start_storage_operation(
         await ssh_client.run(launch_command, check=True)
         return files
     except Exception as error:
-        await _report_launch_failure(operation_id, spec, error)
+        await report_launch_failure(operation_id, spec, error)
         raise
 
 
@@ -348,7 +348,7 @@ async def _remove_operation_artifacts(
     )
 
 
-async def _report_launch_failure(
+async def report_launch_failure(
     operation_id: UUID,
     spec: Mapping[str, object],
     error: Exception,
