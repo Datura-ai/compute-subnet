@@ -2,6 +2,11 @@
   "$defs": {
     "AddDebugSshKeyRequest": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "executor_id": {
           "title": "Executor Id",
           "type": "string"
@@ -53,6 +58,11 @@
     },
     "AddSshPublicKeyRequest": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "container_name": {
           "title": "Container Name",
           "type": "string"
@@ -242,6 +252,11 @@
         },
         "backup_volume_info": {
           "$ref": "#/$defs/ExternalVolumeInfo"
+        },
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
         },
         "container_name": {
           "anyOf": [
@@ -478,6 +493,11 @@
     },
     "CancelStorageOperationRequest": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "executor_id": {
           "title": "Executor Id",
           "type": "string"
@@ -685,6 +705,11 @@
             }
           ],
           "default": null
+        },
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
         },
         "cpu_count": {
           "anyOf": [
@@ -1241,6 +1266,11 @@
     },
     "ContainerDeleteRequest": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "container_name": {
           "title": "Container Name",
           "type": "string"
@@ -1392,6 +1422,11 @@
     },
     "ContainerStartRequest": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "container_name": {
           "title": "Container Name",
           "type": "string"
@@ -1541,6 +1576,11 @@
     },
     "ContainerStopRequest": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "container_name": {
           "title": "Container Name",
           "type": "string"
@@ -2140,6 +2180,11 @@
     },
     "ExecutorRentFinishedRequest": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "executor_id": {
           "title": "Executor Id",
           "type": "string"
@@ -3169,6 +3214,11 @@
     },
     "GetPodLogsRequestFromServer": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "container_name": {
           "title": "Container Name",
           "type": "string"
@@ -3302,7 +3352,7 @@
       "type": "object"
     },
     "GpuResetErrorCode": {
-      "description": "1.13.0: why a pod GPU reset did not run, or did not finish.",
+      "description": "1.14.0: why a pod GPU reset did not run, or did not finish.",
       "enum": [
         "MigEnabled",
         "NvlinkPeersOutsidePod",
@@ -3528,6 +3578,11 @@
     },
     "InstallJupyterServerRequest": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "container_name": {
           "title": "Container Name",
           "type": "string"
@@ -4096,7 +4151,7 @@
       "type": "object"
     },
     "PodGpuResetResult": {
-      "description": "1.13.0: the answer to `backend_to_validator.ResetPodGpuRequest`, same `request_id`. `gpus` is\none outcome per GPU the validator reset (possibly more than asked: NVLink peers inside the pod are\nreset together); empty when a precheck refused before anything changed.",
+      "description": "1.14.0: the answer to `backend_to_validator.ResetPodGpuRequest`, same `request_id`. `gpus` is\none outcome per GPU the validator reset (possibly more than asked: NVLink peers inside the pod are\nreset together); empty when a precheck refused before anything changed.",
       "properties": {
         "container_restarted": {
           "default": false,
@@ -4634,6 +4689,11 @@
     },
     "RemoveSshPublicKeysRequest": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "container_name": {
           "title": "Container Name",
           "type": "string"
@@ -5172,8 +5232,13 @@
       "type": "object"
     },
     "ResetPodGpuRequest": {
-      "description": "1.13.0: the renter asked to reset the GPUs of their running pod. `gpu_uuids` is every GPU\nthe backend holds for the pod; `gpu_indices` picks some of them by pod index (the pod's GPUs sorted by\nhost PCI bus id, the 0..n-1 order `nvidia-smi` shows inside the pod), None for all of them. Answered by\n`validator_to_backend.PodGpuResetResult` with the same `request_id`.",
+      "description": "1.14.0: the renter asked to reset the GPUs of their running pod. `gpu_uuids` is every GPU\nthe backend holds for the pod; `gpu_indices` picks some of them by pod index (the pod's GPUs sorted by\nhost PCI bus id, the 0..n-1 order `nvidia-smi` shows inside the pod), None for all of them. Answered by\n`validator_to_backend.PodGpuResetResult` with the same `request_id`.",
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "container_name": {
           "title": "Container Name",
           "type": "string"
@@ -5391,6 +5456,11 @@
         },
         "backup_volume_info": {
           "$ref": "#/$defs/ExternalVolumeInfo"
+        },
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
         },
         "container_name": {
           "anyOf": [
@@ -6065,7 +6135,7 @@
       "$ref": "#/$defs/RentedExecutorsResponse"
     }
   },
-  "protocol_version": "1.13.0",
+  "protocol_version": "1.14.0",
   "socket_replies": {
     "RentedMachineResponse": {
       "$ref": "#/$defs/RentedMachineResponse"

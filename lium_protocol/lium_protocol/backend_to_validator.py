@@ -39,7 +39,7 @@ class BackendMessageType(enum.Enum):
     ForcedValidationCycleRequest = "ForcedValidationCycleRequest"
     # ask the validator for an exact rental estimate; it answers with EstimateResponse
     GetEstimateRequest = "GetEstimateRequest"
-    # 1.13.0: reset a running pod's GPUs; the validator answers with PodGpuResetResult
+    # 1.14.0: reset a running pod's GPUs; the validator answers with PodGpuResetResult
     ResetPodGpuRequest = "ResetPodGpuRequest"
 
 
@@ -53,6 +53,7 @@ class BackendMessage(Message):
 class ServerRequest(BackendMessage):
     """A request about one executor of one miner."""
 
+    command_id: str = ""
     miner_hotkey: str
     executor_id: str
     # the validator's copy carries where the miner listens; the backend does not send them
@@ -294,7 +295,7 @@ class InstallJupyterServerRequest(ContainerRequest):
 
 @BACKEND_MESSAGES.register
 class ResetPodGpuRequest(ContainerRequest):
-    """1.13.0: the renter asked to reset the GPUs of their running pod. `gpu_uuids` is every GPU
+    """1.14.0: the renter asked to reset the GPUs of their running pod. `gpu_uuids` is every GPU
     the backend holds for the pod; `gpu_indices` picks some of them by pod index (the pod's GPUs sorted by
     host PCI bus id, the 0..n-1 order `nvidia-smi` shows inside the pod), None for all of them. Answered by
     `validator_to_backend.PodGpuResetResult` with the same `request_id`."""

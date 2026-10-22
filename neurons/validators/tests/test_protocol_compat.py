@@ -203,3 +203,15 @@ def test_the_excluded_executor_id_is_the_validators_failed_miner_uuid() -> None:
     from lium_protocol.validator_to_backend import EXCLUDED_PROVIDER_EMISSION_EXECUTOR_ID
 
     assert EXCLUDED_PROVIDER_EMISSION_EXECUTOR_ID == FAILED_MINER_EXECUTOR_UUID
+
+
+@pytest.mark.parametrize(
+    "entry", recorded("backend_to_validator"), ids=_ids("backend_to_validator")
+)
+def test_validator_preserves_command_id(entry: dict) -> None:
+    from lium_protocol.backend_to_validator import ServerRequest
+
+    if isinstance(lium_protocol.BACKEND_MESSAGES.parse_obj(entry["message"]), ServerRequest):
+        for command_id in ("", "retry"):
+            message = {**entry["message"], "command_id": command_id}
+            assert payloads.BaseServerRequest.parse(json.dumps(message)).command_id == command_id

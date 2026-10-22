@@ -216,6 +216,7 @@ class WorkloadKind(enum.Enum):
 
 
 class BaseServerRequest(BaseRequest):
+    command_id: str = ""
     message_type: ContainerRequestType
     miner_hotkey: str
     miner_address: str | None = None
@@ -425,7 +426,7 @@ class InstallJupyterServerRequest(ContainerBaseRequest):
 
 
 class ResetPodGpuRequest(ContainerBaseRequest):
-    """DAH-4658: reset the GPUs of a running pod; answered by PodGpuResetResult (lium_protocol 1.13.0)."""
+    """DAH-4658: reset the GPUs of a running pod; answered by PodGpuResetResult (lium_protocol 1.14.0)."""
 
     message_type: ContainerRequestType = ContainerRequestType.ResetPodGpuRequest
     container_name: str
