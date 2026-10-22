@@ -352,7 +352,6 @@ def test_best_effort_delete_step_is_info_only_for_an_already_gone_object(caplog)
 
 
 def _miner_service(mocker, rest_error: Exception) -> MinerService:
-    from core.config import settings
 
     my_key = Mock(ss58_address="validator")
     my_key.sign.return_value = b"\x01\x02"
@@ -360,7 +359,6 @@ def _miner_service(mocker, rest_error: Exception) -> MinerService:
         "core.config.Settings.get_bittensor_wallet",
         return_value=Mock(get_hotkey=Mock(return_value=my_key)),
     )
-    mocker.patch.object(settings, "USE_REST_API", True)
     ssh_service = Mock()
     ssh_service.generate_ssh_key.return_value = (b"priv", b"ssh-ed25519 pub")
     service = MinerService(

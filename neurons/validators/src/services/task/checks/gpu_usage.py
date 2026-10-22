@@ -117,9 +117,6 @@ class GpuUsageCheck:
         decides whom to ask, the backend still gives the answer. A foreign holder fails the
         check. Returns None when the card is clean, leaving the legacy verdict to the caller.
         """
-        if not settings.FOREIGN_GPU_WORKLOAD_CHECK_ENABLED:
-            return None
-
         # No backend truth this cycle means no allowlist to judge against — an inability to
         # measure, which never withholds money here.
         if ctx.state.rented_data is None:
