@@ -1340,7 +1340,7 @@ class RentalPriceIncentive(DefaultIncentive):
         # is not logged here, only its reason is recorded.
         power_cap_incapable: PowerCapIncapable | None = (
             self._power_cap_incapable(job_result, log_if_cannot_measure=eligible_for_rental_share)
-            if self._should_run_idle_pool_gate(idle_pool_candidate, eligible_for_rental_share, True)
+            if self._should_run_idle_pool_gate(idle_pool_candidate, eligible_for_rental_share, enforced=True)
             else None
         )
         if power_cap_incapable is not None:
