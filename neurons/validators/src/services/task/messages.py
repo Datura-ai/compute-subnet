@@ -1880,13 +1880,6 @@ class ScoreMessages:
 
 
 class RentalVerificationMessages:
-    SKIPPED = MessageTemplate(
-        event="Rental verification skipped",
-        reason="RENTAL_CHECK_DISABLED",
-        severity="info",
-        category="policy",
-        impact="Proceed without backend rental verification",
-    )
     VERIFIED = MessageTemplate(
         event="Rental verification successful",
         reason="RENTAL_VERIFIED",
