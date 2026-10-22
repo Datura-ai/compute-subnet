@@ -215,6 +215,7 @@ class WorkloadKind(enum.Enum):
 
 
 class BaseServerRequest(BaseRequest):
+    command_id: str = ""
     message_type: ContainerRequestType
     miner_hotkey: str
     miner_address: str | None = None

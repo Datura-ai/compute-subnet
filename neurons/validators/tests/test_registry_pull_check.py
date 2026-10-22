@@ -9,7 +9,6 @@ node passed every one.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import shutil
@@ -196,7 +195,6 @@ def make_ctx(
 def flags(
     *,
     check: bool = True,
-    enforced: bool = True,
     interval_hours: float = 6.0,
     retry_minutes: float = 30.0,
     hub: FakeHub | None = None,
@@ -206,7 +204,6 @@ def flags(
     at once and every interval after; the fleet simulations turn it off and use each uuid's real phase."""
     fake = SimpleNamespace(
         REGISTRY_PULL_CHECK_ENABLED=check,
-        REGISTRY_PULL_ENFORCEMENT_ENABLED=enforced,
         REGISTRY_PULL_PROBE_INTERVAL_HOURS=interval_hours,
         REGISTRY_PULL_PROBE_RETRY_MINUTES=retry_minutes,
     )
@@ -228,11 +225,11 @@ def flags(
         yield clock
 
 
-def test_defaults_log_only_and_bounded():
-    """Regression: enforcement ships on before the 48 h log-only review, or the pull runs every 15-minute cycle."""
+def test_defaults_bounded():
+    """Regression: the check is on with no enforcement switch, pulls every 6 h and retries a failure after 30 min."""
     fields = type(module.settings).model_fields
     assert fields["REGISTRY_PULL_CHECK_ENABLED"].default is True
-    assert fields["REGISTRY_PULL_ENFORCEMENT_ENABLED"].default is False
+    assert "REGISTRY_PULL_ENFORCEMENT_ENABLED" not in fields
     assert fields["REGISTRY_PULL_PROBE_INTERVAL_HOURS"].default == 6.0
     assert fields["REGISTRY_PULL_PROBE_RETRY_MINUTES"].default == 30.0
     assert not [name for name in fields if name.startswith("REGISTRY_PULL_FLEET")]
@@ -489,24 +486,17 @@ def test_the_script_runs_without_timeout_on_the_path(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "enforced,passed,reason",
-    [
-        (True, False, Msg.REGISTRY_PULL_FAILED.reason),
-        (False, True, Msg.REGISTRY_PULL_FAILED_OBSERVED.reason),
-    ],
-)
-async def test_ticket_0361_mirror_dns_timeout_twice_in_a_row(enforced, passed, reason):
+async def test_ticket_0361_mirror_dns_timeout_twice_in_a_row():
     """Regression: the ticket-0361 node's dockerd pulls through docker.m.daocloud.io, whose lookup times out; 16 rents of
     uncached templates failed in 24 h while the node passed every check."""
     ctx, runner, _ = make_ctx(result(MIRROR_DNS_TIMEOUT), result(MIRROR_DNS_TIMEOUT))
     check = RegistryPullCheck()
-    with flags(enforced=enforced) as clock:
+    with flags() as clock:
         first = await check.run(ctx)
         clock.now += 30 * 60
         second = await check.run(ctx)
     assert first.passed and first.event.reason_code == Msg.REGISTRY_PULL_FAILED_ONCE.reason
-    assert second.passed is passed and second.event.reason_code == reason
+    assert second.passed is False and second.event.reason_code == Msg.REGISTRY_PULL_FAILED.reason
     what = second.event.what_we_saw
     assert what["failures_in_a_row"] == 2 and what["probed_this_cycle"] is True
     assert what["pull"]["outcome"] == "timeout"
@@ -1012,47 +1002,10 @@ def _zeroed(seen) -> dict[str, float]:
     }
 
 
-def _synchronise(redis: FakeRedis, nodes, at: float) -> None:
-    """Every node's last pull at `at`, as after a deploy that pulled them all in one cycle."""
-    for ctx in nodes:
-        redis.store[f"registry_pull_probe:{ctx.executor.uuid}"] = json.dumps(
-            {"at": at, "outcome": "ok"}
-        )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("start", ["synchronised", "fresh"])
-async def test_log_only_an_outage_only_the_nodes_see_zeroes_nobody_and_shows_in_the_observed_rows(
-    start,
-):
-    """60 idle nodes of 6 miners; six hours in, a Docker Hub CDN incident only the nodes see (the control is up)
-    lasts 2 h. With enforcement off, as it ships, nobody scores 0 and the nodes that pulled twice in it are
-    REGISTRY_PULL_FAILED_OBSERVED: the fleet-wide pattern the review before enforcement reads."""
-    redis = FakeRedis()
-    check = RegistryPullCheck()
-    with flags(enforced=False, phase_at_start=False) as clock:
-        t0 = clock.now
-        miners = [f"miner-{i % 6}" for i in range(60)]
-        nodes = _fleet(clock, redis, miners=miners, start=t0 + 6 * 3600, end=t0 + 8 * 3600)
-        if start == "synchronised":
-            _synchronise(redis, nodes, t0)
-        seen = await _cycles(check, nodes, clock, hours=14)
-    reasons = {reason for rows in seen.values() for _, reason in rows}
-    assert Msg.REGISTRY_PULL_FAILED.reason not in reasons
-    observed = {
-        uuid
-        for uuid, rows in seen.items()
-        if any(reason == Msg.REGISTRY_PULL_FAILED_OBSERVED.reason for _, reason in rows)
-    }
-    assert len(observed) >= 10
-    # the pulls spread: no node pulls more than its schedule plus the retries of one streak
-    assert max(ctx.runner.pulls for ctx in nodes) <= 8
-
-
 @pytest.mark.asyncio
 async def test_enforced_an_outage_only_the_nodes_see_zeroes_nodes_until_their_first_pull_after_it():
     """The accepted risk, with no fleet guard: enforced, a 2 h outage only the nodes see scores 0 every node that
-    pulls twice in it; each is back on its first pull after it ends. The review before enforcement is the guard."""
+    pulls twice in it; each is back on its first pull after it ends."""
     redis = FakeRedis()
     check = RegistryPullCheck()
     with flags(phase_at_start=False) as clock:
