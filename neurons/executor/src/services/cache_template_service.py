@@ -495,9 +495,6 @@ async def run_cache_template_prefetch(state_path: str | None = STATE_PATH) -> No
                         pre_puller.protected = frozenset(
                             f"{repo}:{tag}" for repo, tag in mandatory_refs if repo and tag
                         )
-                    for data in templates:
-                        if not data.get("pre_pull"):
-                            await _ensure_template(client, data, state, keep_tags)
                     try:
                         await asyncio.to_thread(
                             _prune_unused_images_when_disk_low,
@@ -505,8 +502,12 @@ async def run_cache_template_prefetch(state_path: str | None = STATE_PATH) -> No
                             {f"{d.get('docker_image')}:{d.get('docker_image_tag')}" for d in templates},
                         )
                     except Exception as e:
-                        # best-effort: a failed prune must not hold the default image's refresh
+                        # best-effort: a failed prune must not hold the default image's refresh.
+                        # Runs before the pull: a full Docker disk fails that pull every time.
                         logger.warning(f"Unused image prune failed: {e}")
+                    for data in templates:
+                        if not data.get("pre_pull"):
+                            await _ensure_template(client, data, state, keep_tags)
                     if pre_puller:
                         # The default image's outcome is what the validator reads (DAH-2470): publish
                         # it now, not after a sweep that can wait out the start jitter and one pull.

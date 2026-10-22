@@ -197,3 +197,16 @@ def test_the_detailed_stream_error_is_preferred():
         )
 
     assert str(raised.value) == REGISTRY_ERROR
+
+
+def test_low_disk_prune_runs_before_the_pull_that_a_full_disk_fails(monkeypatch, tmp_path):
+    # a full Docker disk fails the pull every time; pruning after it would never run
+    calls: list[str] = []
+    monkeypatch.setattr(
+        cache_template_service,
+        "_prune_unused_images_when_disk_low",
+        lambda client, keep_refs: calls.append(f"prune {sorted(keep_refs)}") or 1,
+    )
+    failure = PullStreamError("no space left on device")
+    _drive_loop(monkeypatch, [failure], sleeps_before_stop=1, tmp_path=tmp_path)
+    assert calls == [f"prune {[IMAGE_REF]}"]
