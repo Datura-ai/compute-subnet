@@ -1303,8 +1303,11 @@ async def _explain_add_public_keys_failure(
     )
 
 
-# how long `docker kill` gets to land before park() re-reads the container state
+# after `docker kill`, park() re-reads the container state every _PARK_KILL_SETTLE_SECONDS for up to
+# _PARK_KILL_WAIT_SECONDS: a stuck DinD pod can take most of a minute to exit (prod 22 Oct: two reboots a
+# minute apart failed, the third worked)
 _PARK_KILL_SETTLE_SECONDS = 2
+_PARK_KILL_WAIT_SECONDS = 30
 
 
 class _EditSwap:
@@ -1416,11 +1419,14 @@ class _EditSwap:
 
     async def _killed_after_failed_stop(self, parked: str, stopped) -> bool:
         """DinD (sysbox) pods often fail the first `docker stop` while a retry seconds later works (prod 15-21 Oct
-        2026: 12 park failures on 10 hosts, all on dind-lium1). Kill it once; True when Docker then reports it stopped."""
+        2026: 12 park failures on 10 hosts, all on dind-lium1). Kill it once; True when Docker reports it stopped within _PARK_KILL_WAIT_SECONDS."""
         killed = await self.ssh_client.run(f"/usr/bin/docker kill {shlex.quote(parked)}")
-        await asyncio.sleep(_PARK_KILL_SETTLE_SECONDS)
-        running = await self.ssh_client.run(f"/usr/bin/docker inspect -f '{{{{.State.Running}}}}' {shlex.quote(parked)}")
-        is_stopped = running.exit_status == 0 and (running.stdout or "").strip() == "false"
+        for _ in range(max(1, _PARK_KILL_WAIT_SECONDS // max(_PARK_KILL_SETTLE_SECONDS, 1))):
+            await asyncio.sleep(_PARK_KILL_SETTLE_SECONDS)
+            running = await self.ssh_client.run(f"/usr/bin/docker inspect -f '{{{{.State.Running}}}}' {shlex.quote(parked)}")
+            is_stopped = running.exit_status == 0 and (running.stdout or "").strip() == "false"
+            if is_stopped:
+                break
         logger.warning(
             _m(
                 "docker stop failed while parking the current container; tried docker kill",

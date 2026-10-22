@@ -276,6 +276,7 @@ async def test_a_failed_edit_restores_the_previous_container(svc, monkeypatch):
 @pytest.mark.asyncio
 async def test_an_unstoppable_container_fails_the_edit_before_anything_is_destroyed(svc, monkeypatch, stop_exit, listed_with_ids, details, renamed):
     payload = _edit_payload()
+    monkeypatch.setattr("services.docker_service._PARK_KILL_SETTLE_SECONDS", 0)
     ssh = _ssh_recording(stop_exit=stop_exit, listed_with_ids=listed_with_ids)
     _patch_happy(svc, monkeypatch, ssh)
     name, parked = _pod_name(payload), _pod_name(payload) + EDIT_PARKED_SUFFIX
@@ -455,3 +456,27 @@ async def test_the_undo_removes_the_replacement_by_its_id_so_a_sibling_retry_und
 
     assert _docker(ssh.commands, "rm -fv") == [f"/usr/bin/docker rm -fv {'a' * 64} 2>/dev/null || true"]
     assert "/usr/bin/docker rm -fv pod_abc 2>/dev/null || true" not in ssh.commands
+
+
+@pytest.mark.asyncio
+async def test_park_waits_for_a_killed_container_that_exits_late(svc, monkeypatch):
+    # prod 22 Oct: the killed DinD pod exits tens of seconds later, not within the first re-read
+    monkeypatch.setattr("services.docker_service._PARK_KILL_SETTLE_SECONDS", 0)
+    payload = _edit_payload()
+    ssh = _ssh_recording(stop_exit=1, kill_stops=False)
+    reads = []
+    inner = ssh.run
+
+    async def exits_on_the_fourth_read(cmd, *args, **kwargs):
+        if "docker inspect -f '{{.State.Running}}'" in cmd:
+            reads.append(cmd)
+            return _ssh_result(stdout="false\n" if len(reads) >= 4 else "true\n")
+        return await inner(cmd, *args, **kwargs)
+
+    ssh.run = exits_on_the_fourth_read
+    _patch_happy(svc, monkeypatch, ssh)
+
+    result = await _run(svc, payload)
+
+    assert isinstance(result, ContainerCreated)
+    assert len(reads) == 4
