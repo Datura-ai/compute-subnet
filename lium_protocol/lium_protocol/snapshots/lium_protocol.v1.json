@@ -2852,6 +2852,11 @@
           "default": null,
           "title": "Build Log Tail"
         },
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "detail": {
           "anyOf": [
             {
@@ -5454,6 +5459,11 @@
     },
     "SshPubKeyAdded": {
       "properties": {
+        "command_id": {
+          "default": "",
+          "title": "Command Id",
+          "type": "string"
+        },
         "executor_id": {
           "title": "Executor Id",
           "type": "string"
@@ -5855,7 +5865,7 @@
       "$ref": "#/$defs/RentedExecutorsResponse"
     }
   },
-  "protocol_version": "1.13.0",
+  "protocol_version": "1.14.0",
   "socket_replies": {
     "RentedMachineResponse": {
       "$ref": "#/$defs/RentedMachineResponse"
