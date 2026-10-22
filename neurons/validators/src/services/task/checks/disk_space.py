@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from services.const import MAX_DISK_UTILIZATION_PERCENT, MIN_FREE_DISK_GB
@@ -46,15 +47,14 @@ class DiskSpaceCheck:
             "max_utilization_percent": MAX_DISK_UTILIZATION_PERCENT,
             "required_free_gb": MIN_FREE_DISK_GB,
         }
-        if (
-            not isinstance(hard_disk, dict)
-            or "utilization" not in hard_disk
-            or "free" not in hard_disk
-        ):
-            template = Msg.NOT_REPORTED
-        else:
+        utilization = free_kb = math.nan
+        if isinstance(hard_disk, dict) and "utilization" in hard_disk and "free" in hard_disk:
             utilization = _as_float(hard_disk.get("utilization"))
             free_kb = _as_float(hard_disk.get("free"))
+        # a missing figure, NaN or Infinity (which compare false both ways) is not a reading
+        if not (math.isfinite(utilization) and math.isfinite(free_kb)):
+            template = Msg.NOT_REPORTED
+        else:
             # compare unrounded KB like the listing did; round only the displayed figure
             what.update(utilization_percent=utilization, free_gb=round(free_kb / KB_PER_GB, 1))
             if utilization > MAX_DISK_UTILIZATION_PERCENT:

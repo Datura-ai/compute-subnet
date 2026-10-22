@@ -32,6 +32,11 @@ def _disk(utilization: float, free_gb: float) -> dict:
         (_disk(89.999, 100), Msg.OK.reason),
         (_disk(90, 100), Msg.OK.reason),
         (_disk(90.001, 100), Msg.TOO_FULL.reason),
+        ({"hard_disk": {"utilization": float("nan"), "free": 500 * KB_PER_GB}}, Msg.NOT_REPORTED.reason),
+        ({"hard_disk": {"utilization": "NaN", "free": 500 * KB_PER_GB}}, Msg.NOT_REPORTED.reason),
+        ({"hard_disk": {"utilization": 95, "free": float("inf")}}, Msg.NOT_REPORTED.reason),
+        ({"hard_disk": {"utilization": 50, "free": "Infinity"}}, Msg.NOT_REPORTED.reason),
+        ({"hard_disk": {"utilization": "-Infinity", "free": 500 * KB_PER_GB}}, Msg.NOT_REPORTED.reason),
     ],
 )
 async def test_idle_node_fails_the_listing_disk_floor(context_factory, specs, reason):
