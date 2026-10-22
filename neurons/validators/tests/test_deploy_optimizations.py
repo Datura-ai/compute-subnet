@@ -18,6 +18,7 @@ Covers (from the plan's Test Plan):
 
 from __future__ import annotations
 
+import shlex
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
@@ -36,6 +37,7 @@ from payload_models.payloads import (
     now_ms,
 )
 from services.docker_service import DockerService
+from services.prerun_host_probe import prerun_host_probe_command
 from services.rental_docker_sdk import ContainerExecResult, ContainerStateSnapshot, build_gpu_docker_config
 
 # ------------------------------------------------------------------
@@ -88,6 +90,12 @@ def _ssh_client(*, inspect_exit: int = 0, inspect_raises: bool = False):
         return _ssh_result(exit_status=0)
 
     client.run = AsyncMock(side_effect=_side)
+
+    # a bounded command opens its channel with create_process; route it through run so it is recorded
+    async def _create_process(command: str):
+        return Mock(wait=lambda: client.run(command), wait_closed=AsyncMock())
+
+    client.create_process = _create_process
     return client
 
 
@@ -614,8 +622,21 @@ async def test_a_present_public_hub_image_rent_makes_the_same_host_calls(
     assert _docker_client(svc).freshness_calls == []
     assert _docker_client(svc).login_calls == []
     assert _pulled_images(svc) == []
-    assert _ssh_run_cmds(ssh_client) == [
-        # the host's kernel.pid_max first — before any host side-effect (the filler removal below, the
+    # the volume-stage host probe (DAH-3240), bounded on the host, runs beside the steps below: its
+    # channel open lets them overtake it, so only that it ran once is asserted
+    host_cmds = _ssh_run_cmds(ssh_client)
+    volume_probe_cmd = f"timeout -k 5 {ds_module._VOLUME_HOST_PROBE_TIMEOUT_SECONDS} sh -c " + shlex.quote(
+        ds_module._volume_host_probe_command(with_df=svc.measures_host_for_volume_sizing(payload))
+    )
+    assert host_cmds.count(volume_probe_cmd) == 1
+    host_cmds.remove(volume_probe_cmd)
+    assert host_cmds == [
+        # the pre-run host probe (DAH-3257), started as soon as the SSH session is up; no image-label
+        # section (the volume is not encrypted), so the image name is in no host command
+        prerun_host_probe_command(
+            docker_image=payload.docker_image, image_label=None, with_power=True, miner_hotkey=payload.miner_hotkey
+        ),
+        # then the host's kernel.pid_max — before any host side-effect (the filler removal below, the
         # stale-container cleanup, the pull, the volume) so a rental whose pids.max can't be clamped below
         # it is refused with nothing to undo; a bare cat bounded by asyncssh's timeout, no `timeout` binary
         "cat /proc/sys/kernel/pid_max",

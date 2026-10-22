@@ -407,11 +407,9 @@ class RentalDockerSdkClient:
         api_client,
         *,
         pull_timeout_seconds: int | float | None = DEFAULT_DOCKER_PULL_TIMEOUT_SECONDS,
-        transport_retry_enabled: bool = False,
     ):
         self._api_client = api_client
         self._pull_timeout_seconds = pull_timeout_seconds
-        self._transport_retry_enabled = transport_retry_enabled
 
     async def login(self, *, username: str, password: str, image: str) -> None:
         # docker-py stores the credential under docker.io unless the registry
@@ -803,14 +801,14 @@ class RentalDockerSdkClient:
 
         Budget per call: the first attempt with its own timeout, one re-open bounded by
         `_DOCKER_SSH_REOPEN_TIMEOUT_SECONDS`, one more attempt with the same timeout — never a
-        third. Any other failure, and every failure while the flag is off, propagates unchanged;
+        third. Any other failure propagates unchanged;
         `rental_docker_error_class` still names it for the failure event.
         """
         started = time.monotonic()
         try:
             return await attempt()
         except Exception as exc:
-            if not self._transport_retry_enabled or not is_rental_docker_transport_error(exc):
+            if not is_rental_docker_transport_error(exc):
                 raise
             first_error = exc
 
@@ -1243,8 +1241,6 @@ class RentalDockerSdkClientFactory:
     api_client_factory: Callable[..., object] | None = None
     timeout: int = 60
     pull_timeout_seconds: int = DEFAULT_DOCKER_PULL_TIMEOUT_SECONDS
-    # DOCKER_TRANSPORT_RETRY_ENABLED: a bool, or a callable read once per connect (the settings flag)
-    transport_retry_enabled: bool | Callable[[], bool] = False
 
     @asynccontextmanager
     async def connect(
@@ -1275,12 +1271,6 @@ class RentalDockerSdkClientFactory:
             raise RentalDockerConnectionError(
                 _wrap_error_message("Docker SDK client construction failed", exc)
             ) from exc
-        transport_retry_enabled = (
-            bool(self.transport_retry_enabled())
-            if callable(self.transport_retry_enabled)
-            else bool(self.transport_retry_enabled)
-        )
-
         with tempfile.TemporaryDirectory(prefix="lium-rental-docker-ssh-") as temp_dir:
             ssh_home = Path(temp_dir)
             ssh_dir = ssh_home / ".ssh"
@@ -1315,7 +1305,7 @@ class RentalDockerSdkClientFactory:
                 except Exception as exc:
                     # the client asks the daemon for its version: a drop there costs one more
                     # connect (nothing on the host has changed yet), never a third
-                    if not transport_retry_enabled or not is_rental_docker_transport_error(exc):
+                    if not is_rental_docker_transport_error(exc):
                         raise
                     logger.warning(
                         _m(
@@ -1338,7 +1328,6 @@ class RentalDockerSdkClientFactory:
             client = RentalDockerSdkClient(
                 api_client,
                 pull_timeout_seconds=self.pull_timeout_seconds,
-                transport_retry_enabled=transport_retry_enabled,
             )
             try:
                 yield client
@@ -1377,6 +1366,8 @@ _INTERACTIVE_SHELLS = frozenset(
     {"sh", "bash", "zsh", "/bin/sh", "/bin/bash", "/bin/zsh", "/usr/bin/bash", "/usr/bin/zsh"}
 )
 KEEP_ALIVE_COMMAND: tuple[str, ...] = ("sleep", "infinity")
+# entrypoints that end in `exec "$@"`: with no Cmd they exit at start (the backend's image_startup_check lists the same)
+_PASS_THROUGH_ENTRYPOINTS = frozenset({"nvidia_entrypoint.sh"})
 
 
 def keep_alive_command_for(entrypoint: tuple[str, ...], cmd: tuple[str, ...]) -> tuple[str, ...]:
@@ -1388,6 +1379,12 @@ def keep_alive_command_for(entrypoint: tuple[str, ...], cmd: tuple[str, ...]) ->
     if len(cmd) == 1 and cmd[0] in _INTERACTIVE_SHELLS:
         return KEEP_ALIVE_COMMAND
     if not cmd and not entrypoint:
+        return KEEP_ALIVE_COMMAND
+    if (
+        not cmd
+        and len(entrypoint) == 1
+        and entrypoint[0].rsplit("/", 1)[-1] in _PASS_THROUGH_ENTRYPOINTS
+    ):
         return KEEP_ALIVE_COMMAND
     return ()
 

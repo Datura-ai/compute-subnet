@@ -21,6 +21,8 @@ GPU_MODEL_RATES = {
     "NVIDIA GeForce RTX 5060 Ti": 0.0,
     "NVIDIA GeForce RTX 5060": 0.0,
     "NVIDIA GeForce RTX 5090": 0.025,
+    # DAH-3289: the China SKU; supported, but excluded from the unrented pool by default.
+    "NVIDIA GeForce RTX 5090 D": 0.0,
     # Supported operationally, but excluded from the unrented pool by default.
     "NVIDIA GeForce RTX 4080 SUPER": 0.0,
     "NVIDIA GeForce RTX 4080": 0.0,
@@ -277,8 +279,8 @@ FILLER_CONTAINER_GRACE_MINUTES = 15
 # let a provider reuse the name of their own broken pod for a foreign workload.
 BROKEN_POD_CONTAINER_GRACE_MINUTES = 2 * FILLER_CONTAINER_GRACE_MINUTES
 # How long after a rental closes its pod container still counts as the unrent flow's teardown rather
-# than an orphan: with RENTAL_TEARDOWN_DEFERRAL_ENABLED on, the GPU usage check defers instead of
-# scoring 0 until this long after the close, which covers one run and occasionally two. A run is
+# than an orphan: the GPU usage check counts it as the renter's load, not ORPHANED_RENTAL_CONTAINER,
+# until this long after the close, which covers one run and occasionally two. A run is
 # shorter than this, so a rental that ends while the run is inside it always lands here. It must stay
 # short for the same reason as the grace above: the pod's name must not shield a workload for long.
 RENTAL_TEARDOWN_GRACE_MINUTES = 15

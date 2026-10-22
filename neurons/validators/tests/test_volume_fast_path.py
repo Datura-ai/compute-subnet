@@ -1,9 +1,9 @@
-"""DAH-3240 — rental volume fast path (RENTAL_VOLUME_FAST_PATH_ENABLED).
+"""DAH-3240 — rental volume fast path (always on; the flag is removed).
 
 The "Docker volume creation" stage of a rent ran five serial SSH commands before the volume
 existed (`docker info`, the df helper container, `docker volume ls`, `docker info` again and an
 unconditional `docker plugin install` that asks Docker Hub and then fails with "already exists").
-With the flag on, one probe command returns the same facts and the plugin install is skipped when
+Now one probe command returns the same facts and the plugin install is skipped when
 the plugin is already enabled. Covered here:
 
 - the probe command names every section and reuses the df helper command `df_available_bytes` runs;
@@ -17,8 +17,7 @@ the plugin is already enabled. Covered here:
 - `create_local_volume` with an enabled plugin runs no SSH command and creates the identical volume;
   with the plugin absent it still installs (negative control); with the plugin installed but
   disabled it runs `docker plugin enable` and re-reads the state, failing fast when it stays off;
-- `create_container` never probes with the flag off, probes once with it on and hands the probe to
-  both the sizing and the create.
+- `create_container` probes once and hands the probe to both the sizing and the create.
 """
 
 from __future__ import annotations
@@ -864,22 +863,7 @@ def _create_payload() -> ContainerCreateRequest:
 
 
 @pytest.mark.asyncio
-async def test_create_container_flag_off_never_probes(svc, monkeypatch):
-    monkeypatch.setattr(settings, "RENTAL_VOLUME_FAST_PATH_ENABLED", False)
-    ssh_client = _deploy_ssh_client()
-    _patch_happy(svc, monkeypatch, ssh_client)
-    monkeypatch.setattr(svc, "probe_volume_host", AsyncMock())
-
-    await _run_create_container(svc, _create_payload())
-
-    svc.probe_volume_host.assert_not_awaited()
-    assert svc.resolve_volume_sizing.await_args.kwargs["host_probe"] is None
-    assert svc.create_local_volume.await_args.kwargs["host_probe"] is None
-
-
-@pytest.mark.asyncio
-async def test_create_container_flag_on_probes_once_and_passes_it_on(svc, monkeypatch):
-    monkeypatch.setattr(settings, "RENTAL_VOLUME_FAST_PATH_ENABLED", True)
+async def test_create_container_probes_once_and_passes_it_on(svc, monkeypatch):
     ssh_client = _deploy_ssh_client()
     _patch_happy(svc, monkeypatch, ssh_client)
     probe = VolumeHostProbe(
@@ -906,12 +890,11 @@ async def test_create_container_flag_on_probes_once_and_passes_it_on(svc, monkey
         dict(storage_limit_gb=None, volume_limit_gb=2),  # storage_opt_unsupported passthrough
     ],
 )
-async def test_create_container_flag_on_passthrough_sizing_with_a_limit_probes_without_df(
+async def test_create_container_passthrough_sizing_with_a_limit_probes_without_df(
     svc, monkeypatch, overrides
 ):
     # Sizing is a passthrough (no df to measure) but the volume has a size, so the create still
     # needs the root dir and the plugin state: probe, without the helper container.
-    monkeypatch.setattr(settings, "RENTAL_VOLUME_FAST_PATH_ENABLED", True)
     ssh_client = _deploy_ssh_client()
     _patch_happy(svc, monkeypatch, ssh_client)
     monkeypatch.setattr(svc, "probe_volume_host", AsyncMock(return_value=None))
@@ -923,12 +906,11 @@ async def test_create_container_flag_on_passthrough_sizing_with_a_limit_probes_w
 
 
 @pytest.mark.asyncio
-async def test_create_container_flag_on_unlimited_volume_on_passthrough_never_probes(
+async def test_create_container_unlimited_volume_on_passthrough_never_probes(
     svc, monkeypatch
 ):
     # No df to measure (passthrough) and no `-o size=` volume (no plugin, no root dir needed):
     # nothing would read the probe, so it is not run.
-    monkeypatch.setattr(settings, "RENTAL_VOLUME_FAST_PATH_ENABLED", True)
     ssh_client = _deploy_ssh_client()
     _patch_happy(svc, monkeypatch, ssh_client)
     monkeypatch.setattr(svc, "probe_volume_host", AsyncMock())
@@ -940,8 +922,7 @@ async def test_create_container_flag_on_unlimited_volume_on_passthrough_never_pr
 
 
 @pytest.mark.asyncio
-async def test_create_container_flag_on_probe_failure_takes_the_per_command_path(svc, monkeypatch):
-    monkeypatch.setattr(settings, "RENTAL_VOLUME_FAST_PATH_ENABLED", True)
+async def test_create_container_probe_failure_takes_the_per_command_path(svc, monkeypatch):
     ssh_client = _deploy_ssh_client()
     _patch_happy(svc, monkeypatch, ssh_client)
     monkeypatch.setattr(svc, "probe_volume_host", AsyncMock(return_value=None))

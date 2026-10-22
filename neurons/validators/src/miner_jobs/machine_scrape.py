@@ -1331,6 +1331,30 @@ def get_host_boot_id() -> str:
         return ""
 
 
+# The node is listed at the geo of the address the validator connects to; behind a reverse proxy
+# that is the proxy's. The backend geolocates the host's own egress address instead (Cloudflare's
+# trace echoes the caller's IP). "" when the fetch fails: the backend then keeps the connect address.
+EGRESS_TRACE_HOST = "www.cloudflare.com"
+EGRESS_TRACE_PATH = "/cdn-cgi/trace"
+EGRESS_TRACE_TIMEOUT_SECONDS = 5
+
+
+def get_egress_ip() -> str:
+    try:
+        conn = http.client.HTTPSConnection(EGRESS_TRACE_HOST, timeout=EGRESS_TRACE_TIMEOUT_SECONDS)
+        try:
+            conn.request("GET", EGRESS_TRACE_PATH)
+            body = conn.getresponse().read(4096).decode(errors="replace")
+        finally:
+            conn.close()
+    except Exception:
+        return ""
+    for line in body.splitlines():
+        if line.startswith("ip="):
+            return line[3:].strip()[:64]
+    return ""
+
+
 def read_sysfs_value(path: str) -> str:
     try:
         with open(path) as sysfs_file:
@@ -2134,6 +2158,7 @@ def get_machine_specs():
     if ncu_profiling.scrape_error:
         data["data_ncu_profiling_scrape_error"] = ncu_profiling.scrape_error
     data["data_boot_id"] = get_host_boot_id()
+    data["data_egress_ip"] = get_egress_ip()
 
     power_cap_probe = probe_gpu_power_cap_ability()
     data["data_container_cap_eff"] = power_cap_probe.cap_eff
