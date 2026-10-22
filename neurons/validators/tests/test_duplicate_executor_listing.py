@@ -24,9 +24,6 @@ pytest_plugins = ["fixtures.rest_miner_fixtures"]
 
 B300 = "NVIDIA B300 SXM6 AC"
 LISTED_TWICE = "Executor listed twice by miner; scored once"
-EXPRESS_LANE_ON_AND_OFF = pytest.mark.parametrize("express_lane", [False, True], ids=["lane-off", "lane-on"])
-
-
 def _idle_b300_1x(executor_id: str) -> JobResult:
     return JobResult(
         executor_info=_executor_info(executor_id),
@@ -93,7 +90,6 @@ async def _score(job_results: dict[str, list[JobResult]]) -> RentalPriceIncentiv
     return incentive
 
 
-@EXPRESS_LANE_ON_AND_OFF
 @pytest.mark.parametrize(
     ("listed", "verified", "listed_counts"),
     [
@@ -104,11 +100,8 @@ async def _score(job_results: dict[str, list[JobResult]]) -> RentalPriceIncentiv
 )
 @pytest.mark.asyncio
 async def test_each_executor_uuid_gets_one_validation_task(
-    rest_miner_service, monkeypatch, caplog, express_lane, listed, verified, listed_counts
+    rest_miner_service, caplog, listed, verified, listed_counts
 ):
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "EXPRESS_LANE_ENABLED", express_lane)
     rest_miner_service.miner_returns(*listed)
 
     with caplog.at_level(logging.WARNING):
@@ -118,20 +111,13 @@ async def test_each_executor_uuid_gets_one_validation_task(
     assert [r.executor_info.uuid for r in job["results"]] == verified
     repeats = [r for r in caplog.records if LISTED_TWICE in r.getMessage()]
     assert {r.msg.extra["executor_uuid"]: r.msg.extra["listed_count"] for r in repeats} == listed_counts
-    if express_lane:
-        assert rest_miner_service.in_flight == dict.fromkeys(verified, CYCLE_DONE)
-    else:
-        assert rest_miner_service.in_flight == {}
+    assert rest_miner_service.in_flight == dict.fromkeys(verified, CYCLE_DONE)
 
 
-@EXPRESS_LANE_ON_AND_OFF
 @pytest.mark.asyncio
-async def test_an_executor_listed_twice_is_one_gpu_in_its_idle_tier(rest_miner_service, monkeypatch, express_lane):
+async def test_an_executor_listed_twice_is_one_gpu_in_its_idle_tier(rest_miner_service):
     """End to end: the 23-25 Sep shape (a repeated 1x B300 beside three distinct ones, cap 4)
     fills the tier with 4 GPUs, not 5, so every node is paid in full."""
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "EXPRESS_LANE_ENABLED", express_lane)
     rest_miner_service.miner_returns("exec-twin", "exec-twin", "exec-b", "exec-c", "exec-d")
 
     job = await _request(rest_miner_service)
@@ -141,14 +127,10 @@ async def test_an_executor_listed_twice_is_one_gpu_in_its_idle_tier(rest_miner_s
     assert incentive.cap_multiplier_by_bucket[("B300", 1)] == pytest.approx(1.0)
 
 
-@EXPRESS_LANE_ON_AND_OFF
 def test_the_claim_both_miner_paths_share_keeps_the_first_entry_per_uuid(
-    rest_miner_service, monkeypatch, caplog, express_lane
+    rest_miner_service, caplog
 ):
     """The WebSocket and the REST path both take the wave's executors from `_claim_for_cycle`."""
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "EXPRESS_LANE_ENABLED", express_lane)
     first, repeat, other = _executor_info("exec-twin"), _executor_info("exec-twin"), _executor_info("exec-other")
     repeat.address = "203.0.113.9"
 
@@ -167,9 +149,6 @@ async def test_an_express_lane_request_answered_with_repeats_verifies_the_execut
 ):
     """A miner that answers the express lane's one-executor request with many copies of that
     executor gets one validation task, not one per copy."""
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "EXPRESS_LANE_ENABLED", True)
     rest_miner_service.in_flight["exec-new"] = EXPRESS_LANE
     rest_miner_service.miner_returns("exec-new", "exec-new", "exec-new", "exec-other")
 
@@ -184,9 +163,6 @@ async def test_an_express_lane_request_answered_with_repeats_verifies_the_execut
 
 
 def test_a_repeat_of_an_executor_the_express_lane_holds_stays_with_the_lane(rest_miner_service, monkeypatch):
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "EXPRESS_LANE_ENABLED", True)
     rest_miner_service.in_flight["exec-new"] = EXPRESS_LANE
     listed = [_executor_info("exec-new"), _executor_info("exec-new"), _executor_info("exec-known")]
 
@@ -196,10 +172,7 @@ def test_a_repeat_of_an_executor_the_express_lane_holds_stays_with_the_lane(rest
     assert rest_miner_service.in_flight["exec-new"] == EXPRESS_LANE
 
 
-def test_flag_off_a_list_without_repeats_is_handed_on_unchanged(rest_miner_service, monkeypatch):
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "EXPRESS_LANE_ENABLED", False)
+def test_a_list_without_repeats_is_handed_on_unchanged(rest_miner_service):
     listed = [_executor_info("exec-a"), _executor_info("exec-b")]
 
     assert rest_miner_service._claim_for_cycle(_payload(), listed, {}) == listed

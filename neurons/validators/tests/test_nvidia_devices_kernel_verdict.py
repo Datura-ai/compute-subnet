@@ -43,8 +43,7 @@ def _fake_ssh(*responses):
 
 @pytest.fixture(autouse=True)
 def _shadow_flags(monkeypatch):
-    # default posture for every test: master on, enforcement off; tests flip enforcement explicitly.
-    monkeypatch.setattr(nd.settings, "KERNEL_GPU_VERDICT_CHECK_ENABLED", True, raising=False)
+    # default posture for every test: enforcement off; tests flip it explicitly.
     monkeypatch.setattr(nd.settings, "KERNEL_GPU_VERDICT_ENFORCEMENT_ENABLED", False, raising=False)
 
 
@@ -183,16 +182,3 @@ async def test_empty_kernel_map_in_shadow_still_creates_the_container():
     config = await build_gpu_docker_config_for_executor(ssh, ["GPU-bbb"], executor_id="exec-9")
 
     assert [device.path_on_host for device in config.device_mounts] == ["/dev/nvidia1"]
-
-
-@pytest.mark.asyncio
-async def test_check_disabled_preserves_legacy_behavior(monkeypatch, caplog):
-    # master switch off → no emit, XML overwrites exactly as before the change.
-    monkeypatch.setattr(nd.settings, "KERNEL_GPU_VERDICT_CHECK_ENABLED", False, raising=False)
-    ssh = _fake_ssh(FakeRun("GPU-aaa, 0\n"), FakeRun(_XML_BOTH))
-
-    with caplog.at_level("WARNING"):
-        nodes, _ = await _query_gpu_nodes_for_uuids(ssh, ["GPU-bbb"])
-
-    assert nodes == ("/dev/nvidia1",)
-    assert not any(r.message == nd._KERNEL_GPU_VERDICT_DISAGREE_MSG for r in caplog.records)

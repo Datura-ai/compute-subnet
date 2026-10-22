@@ -41,7 +41,7 @@ from helpers import build_context_config, build_services, build_state
 
 EXECUTOR = "executor-123"
 # build_rented_data's owner of the rental
-RENTAL_OWNER = "test-miner"
+RENTAL_OWNER = "miner-hotkey"
 ENCRYPT_KEY = "test-encrypt-key"
 POD_ID = "pod-1"
 # repr() of the shipped scrape's NVMLError (machine_scrape.py): the class name and the nvml.h return code
