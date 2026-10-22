@@ -50,3 +50,16 @@ def _normalise(value):
     return json_keys(value)
 
 
+@pytest.mark.parametrize("entry", recorded("backend_to_validator"), ids=_ids("backend_to_validator"))
+def test_command_id_is_optional_and_ignored_by_old_message_model(entry: dict) -> None:
+    from lium_protocol.backend_to_validator import ServerRequest
+    from lium_protocol.base import Message
+
+    model = BACKEND_MESSAGES.parse_obj(entry["message"])
+    if isinstance(model, ServerRequest):
+        assert model.command_id == ""
+        payload = {**entry["message"], "command_id": "retry"}
+        assert BACKEND_MESSAGES.parse_obj(payload).command_id == "retry"
+        assert "command_id" not in Message.model_validate(model.model_dump()).model_dump()
+    else:
+        assert "command_id" not in type(model).model_fields

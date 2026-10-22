@@ -25,6 +25,13 @@ from protocol.vc_protocol import validator_requests  # noqa: E402
 
 # declared in both enums, sent by neither peer, and the validator has no model for it
 VALIDATOR_TYPES_WITHOUT_A_VALIDATOR_MODEL = {"MachineSpecRequest"}
+# the validator sends this body to the backend and builds it ad hoc: no model to compare
+# fields the backend puts on the wire that the validator's model does not declare (so ignores):
+# the known drift, by recording. A new entry here is a wire field the validator silently drops —
+# decide whether the validator should read it before adding it.
+VALIDATOR_IGNORES: dict[str, set[str]] = {
+    "RentedMachineResponse": {"machines[].rented_ports", "machines[].containers[].rented_ports"},
+}
 
 
 def _ids(direction: str) -> list[str]:
@@ -138,3 +145,13 @@ def test_what_the_backend_sends_parses_through_the_validators_own_parser(entry: 
     _same_wire_view(message, ours, theirs)
 
 
+@pytest.mark.parametrize(
+    "entry", recorded("backend_to_validator"), ids=_ids("backend_to_validator")
+)
+def test_validator_preserves_command_id(entry: dict) -> None:
+    from lium_protocol.backend_to_validator import ServerRequest
+
+    if isinstance(lium_protocol.BACKEND_MESSAGES.parse_obj(entry["message"]), ServerRequest):
+        for command_id in ("", "retry"):
+            message = {**entry["message"], "command_id": command_id}
+            assert payloads.BaseServerRequest.parse(json.dumps(message)).command_id == command_id
