@@ -37,7 +37,6 @@ from unittest.mock import AsyncMock, Mock
 
 import asyncssh
 import pytest
-from core.config import settings
 from payload_models.payloads import WorkloadKind
 from services.docker_service import (
     DOCKER_FILLER_VOLUME_LS_NAME_DRIVER_CMD,
