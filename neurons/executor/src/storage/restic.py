@@ -30,6 +30,12 @@ TAR_RECORD_SIZE_BYTES = 20 * 512
 TAR_CHECKPOINT_RECORDS = 1024
 MEBIBYTE = 1024 * 1024
 RESTIC_TMPFS_BYTES = 512 * MEBIBYTE
+# DAH-2002: bound the helper so a large backup cannot OOM the rental; restic stays well under this with GOGC=50.
+RESTIC_HELPER_MEMORY = "4g"
+# Highest OOM score: the kernel kills the helper before the rental.
+RESTIC_HELPER_OOM_SCORE_ADJ = "1000"
+RESTIC_HELPER_GOGC = "50"
+OUT_OF_MEMORY_EXIT = 137
 # Without `|| exit`, a failed cd leaves sh in the helper's own directory and restic backs that up instead.
 # sh's own cd error is dropped: StorageEventReporter keeps the first diagnostic, which must be ours.
 # Runs the backup inside a helper (docker volume or encrypted namespace). A missing or empty path exits 66 before
@@ -377,6 +383,8 @@ class ResticStorageRunner:
             return ResticResult("COMPLETED", OperationResultQuality.FULL, snapshot_id, exit_code)
         if exit_code == 3 and snapshot_id:
             return ResticResult("COMPLETED", OperationResultQuality.PARTIAL, snapshot_id, exit_code)
+        if exit_code == OUT_OF_MEMORY_EXIT:
+            raise ResticOperationError("backup ran out of memory")
         raise ResticOperationError(
             f"restic backup failed with exit {exit_code}"
             + (" without a snapshot ID" if not snapshot_id else "")
@@ -676,6 +684,12 @@ class ResticStorageRunner:
             self._helper_container_name(),
             "--log-driver",
             "none",
+            "--memory",
+            RESTIC_HELPER_MEMORY,
+            "--oom-score-adj",
+            RESTIC_HELPER_OOM_SCORE_ADJ,
+            "-e",
+            f"GOGC={RESTIC_HELPER_GOGC}",
             "--read-only",
             "--tmpfs",
             f"/tmp:rw,nosuid,nodev,size={RESTIC_TMPFS_BYTES}",

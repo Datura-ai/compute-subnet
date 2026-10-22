@@ -383,6 +383,9 @@ def test_plain_backup_uses_read_only_volume_and_keeps_secrets_out_of_arguments()
     assert command[script + 2 : script + 4] == ["/workspace/checkpoints", runner._restic_binary]
     assert command[command.index("--log-driver") + 1] == "none"
     assert command[command.index("--tmpfs") + 1] == "/tmp:rw,nosuid,nodev,size=536870912"
+    assert command[command.index("--memory") + 1] == "4g"
+    assert command[command.index("--oom-score-adj") + 1] == "1000"
+    assert "GOGC=50" in command
     assert "AWS_ACCESS_KEY_ID" in command
     assert "AWS_SESSION_TOKEN" in command
     assert "access-key" not in command
@@ -612,6 +615,33 @@ def test_encrypted_workspace_fails_closed_when_pid_cgroup_does_not_match(
         ).resolve(operation)
 
 
+def test_encrypted_workspace_without_host_pid_namespace_names_the_host_fault(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    operation = StorageOperationSpec.from_mapping(_operation_payload(mode="encrypted_running"))
+    inspection = json.dumps(
+        [
+            {
+                "Id": CONTAINER_ID,
+                "State": {"Running": True, "Pid": 4321},
+                "Mounts": [{"Name": "customer-volume", "Destination": "/lium-cipher"}],
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        "storage.workspace.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=inspection, stderr=""),
+    )
+
+    with pytest.raises(WorkspaceResolutionError, match=r"host PID namespace \(pid: host\)"):
+        WorkspaceResolver(
+            docker_binary="docker",
+            proc_root=tmp_path,
+            environ={"LIUM_STORAGE_HELPER_IMAGE": "executor:test"},
+        ).resolve(operation)
+
+
 def test_encrypted_workspace_fails_closed_when_container_restarts_during_resolution(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -703,6 +733,28 @@ def test_exit_code_three_with_snapshot_is_completed_partial(
     assert result.result_quality is OperationResultQuality.PARTIAL
     assert result.snapshot_id == SNAPSHOT_ID
     assert '"result_quality":"PARTIAL"' in output.getvalue()
+
+
+class _OomKilledPopen(_FakePopen):
+    def wait(self) -> int:
+        return 137
+
+
+def test_backup_killed_by_oom_reports_out_of_memory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    operation = StorageOperationSpec.from_mapping(_operation_payload())
+    (tmp_path / "file").write_text("x")
+    runner = ResticStorageRunner(operation, LocalWorkspace(tmp_path))
+    monkeypatch.setattr(
+        "storage.restic.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="[]", stderr=""),
+    )
+    monkeypatch.setattr("storage.restic.subprocess.Popen", _OomKilledPopen)
+
+    with pytest.raises(ResticOperationError, match="^backup ran out of memory$"):
+        runner.run()
 
 
 def test_docker_restore_uses_native_json_restore_to_requested_directory() -> None:
