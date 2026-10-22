@@ -69,6 +69,7 @@ from services.attestation_service import AttestationError, AttestationService
 from services import build_context as build_context_service
 from services.const import (
     EDIT_PARKED_SUFFIX,
+    LEGACY_LOOPBACK_PLUGIN_ALIAS,
     LOOPBACK_PLUGIN_ALIAS,
     FILLER_CACHE_VOLUME_PREFIXES,
     DPHN_CACHE_FREE_MARGIN_GB,
@@ -620,7 +621,6 @@ class VolumeSizingResult:
 # New volumes go to a second plugin installed beside the old one under the same name with a tag:
 # `_is_vloopback_driver` matches both. The untagged name resolves to the old `vloopback:latest`,
 # whose volumes live inside its rootfs, so only `_fall_back_to_old_loopback_plugin` may name it.
-_LOOPBACK_PLUGIN_ALIAS = LOOPBACK_PLUGIN_ALIAS
 _LOOPBACK_PLUGIN_INSTALL_TIMEOUT_SECONDS = 60
 # how much longer than the host's `timeout` the validator waits: for a connection that stops answering
 _HOST_TIMEOUT_VALIDATOR_MARGIN_SECONDS = 10
@@ -637,7 +637,7 @@ def _loopback_plugin_state_command(loopback_plugin_alias: str) -> str:
     )
 
 
-_LOOPBACK_PLUGIN_STATE_COMMAND = _loopback_plugin_state_command(_LOOPBACK_PLUGIN_ALIAS)
+_LOOPBACK_PLUGIN_STATE_COMMAND = _loopback_plugin_state_command(LOOPBACK_PLUGIN_ALIAS)
 
 
 class NoUsableLoopbackPluginError(Exception):
@@ -647,7 +647,7 @@ class NoUsableLoopbackPluginError(Exception):
     def __init__(self, v2_unusable_reason: str, old_plugin_state: str):
         super().__init__(
             f"no usable vloopback plugin on host (v2: {v2_unusable_reason}; "
-            f"old plugin {_VLOOPBACK_DRIVER_PREFIX} state {old_plugin_state})"
+            f"old plugin {LEGACY_LOOPBACK_PLUGIN_ALIAS} state {old_plugin_state})"
         )
 
 
@@ -5894,7 +5894,7 @@ class DockerService:
         until it is retired a node without v2 keeps renting. Returns the driver to create on, else
         raises NoUsableLoopbackPluginError; never installs or enables the old plugin.
         The only place a plugin command may name the old plugin; it goes away with it."""
-        old_plugin_alias = _VLOOPBACK_DRIVER_PREFIX
+        old_plugin_alias = LEGACY_LOOPBACK_PLUGIN_ALIAS
         try:
             state_result = await _run_with_host_timeout(
                 ssh_client, _loopback_plugin_state_command(old_plugin_alias), timeout
@@ -5923,7 +5923,7 @@ class DockerService:
             return "unknown"
         return (state_result.stdout or "").strip()
 
-    async def _prepare_loopback_plugin(
+    async def _pick_loopback_driver_for_new_volume(
         self,
         ssh_client: asyncssh.SSHClientConnection,
         timeout: int,
@@ -5935,22 +5935,22 @@ class DockerService:
                 ssh_client, timeout, log_extra, "v2 disabled by LOOPBACK_PLUGIN_V2_ENABLED"
             )
         if host_probe is not None and host_probe.loopback_plugin_enabled:
-            return _LOOPBACK_PLUGIN_ALIAS
+            return LOOPBACK_PLUGIN_ALIAS
         root = host_probe.docker_root_dir if host_probe else await self.get_docker_root_dir(ssh_client)
         if not root.startswith("/"):
             # An existing enabled v2 remains usable even when DockerRootDir could not be read.
             if await self._get_loopback_v2_state(ssh_client, timeout) == "true":
-                return _LOOPBACK_PLUGIN_ALIAS
+                return LOOPBACK_PLUGIN_ALIAS
             reason = "Docker data root unknown"
         else:
             try:
                 result = await _run_with_host_timeout(
                     ssh_client,
-                    loopback_plugin_setup_command(root, _LOOPBACK_PLUGIN_ALIAS),
+                    loopback_plugin_setup_command(root, LOOPBACK_PLUGIN_ALIAS),
                     _LOOPBACK_PLUGIN_INSTALL_TIMEOUT_SECONDS,
                 )
                 if result.exit_status == 0:
-                    return _LOOPBACK_PLUGIN_ALIAS
+                    return LOOPBACK_PLUGIN_ALIAS
                 reason = f"v2 setup exit {result.exit_status}: {(result.stderr or '').strip()[:_PROBE_OUTPUT_LOG_CAP]}"
             except (SshSessionMayStillBeTakenError, asyncssh.Error):
                 raise
@@ -5981,7 +5981,7 @@ class DockerService:
             field_name="local_volume",
         )
         if limit:
-            loopback_plugin_name = await self._prepare_loopback_plugin(
+            loopback_plugin_name = await self._pick_loopback_driver_for_new_volume(
                 ssh_client, requested_timeout, log_extra, host_probe
             )
 
@@ -6129,8 +6129,8 @@ class DockerService:
         second `docker info` + the unconditional `docker plugin install` (create) — five serial
         commands, one of them a Docker Hub round trip — with one command and, when vloopback
         volumes exist, the same `docker volume inspect` as before. On any failure it returns None
-        and the callers take the exact path they take with the flag off, except when its channel
-        may still hold the host's only SSH session: SshSessionMayStillBeTakenError stops the create.
+        and the callers take the per-command path, except when its channel may still hold the
+        host's only SSH session: SshSessionMayStillBeTakenError stops the create.
         """
         started = now_ms()
         try:
