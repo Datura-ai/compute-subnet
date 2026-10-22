@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import re
+import shlex
 from collections.abc import Callable
 from dataclasses import replace
 
+from services.executor_connectivity.dind_probe import diagnose_docker_run_error
 from services.executor_image_policy import (
     ImageVerdict,
     normalize_sha256_digest,
@@ -15,6 +18,33 @@ from ..messages import render_message
 from ..pipeline import CheckResult, Context
 
 _EXECUTOR_NAME = re.compile(r"(?:^|-)executor-\d+$")
+# Same GPU probe the executor updater runs before an update (neurons/executor/EXECUTOR_UPDATE.md),
+# with its label so the updater removes a container this one leaves behind.
+_UPDATE_HOLD_PROBE_TIMEOUT_SECONDS = 60
+
+
+async def updater_holds_on_nvidia_mismatch(ctx: Context) -> bool:
+    """Whether a new GPU container fails on this host with the NVIDIA driver/library mismatch, the
+    condition on which the executor updater holds the node on its old image. False on any doubt."""
+    docker = (ctx.state.specs or {}).get("docker")
+    container_id = docker.get("container_id") if isinstance(docker, dict) else None
+    if not isinstance(container_id, str) or not container_id:
+        return False
+    image = f"$(/usr/bin/docker inspect --format '{{{{.Image}}}}' {shlex.quote(container_id)})"
+    cmd = (
+        "/usr/bin/docker run --rm --gpus all --label io.lium.watchtower.probe=nvidia-runtime "
+        f'--entrypoint true "{image}"'
+    )
+    try:
+        result = await asyncio.wait_for(
+            ctx.ssh.run(cmd, check=False), timeout=_UPDATE_HOLD_PROBE_TIMEOUT_SECONDS
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    if getattr(result, "exit_status", 0) == 0:
+        return False
+    cause = diagnose_docker_run_error(getattr(result, "stderr", None))
+    return cause is not None and cause.code == "NVIDIA_RUNTIME_MISMATCH"
 
 
 def _single_digest(
@@ -85,17 +115,29 @@ class ExecutorImageCheck:
             rented_executor = rented_data.executors.get(ctx.executor.uuid) if rented_data else None
             is_rented = rented_executor is not None and len(rented_executor.pods) > 0
             passed = is_rented
+            if is_rented and await updater_holds_on_nvidia_mismatch(ctx):
+                report = replace(report, update_held=True)
+                updated_state = replace(updated_state, executor_image_report=report)
+                what = report.as_dict()
             event = render_message(
                 Msg.OUTDATED,
                 ctx=ctx,
                 check_id=self.check_id,
                 what=what,
                 impact=(
-                    "Rental can continue, but no incentive until the image is current"
+                    "Rental continues and incentive is kept: the updater holds this host on the old "
+                    "image until the NVIDIA driver/library mismatch is fixed (reboot once the rental ends)"
+                    if report.update_held
+                    else "Rental can continue, but no incentive until the image is current"
                     if is_rented
                     else "Validation failed - executor unavailable for rent until the image is current"
                 ),
-                remediation=outdated_image_remediation(report.expected_ref),
+                remediation=(
+                    "Once the rental ends, reboot the host or reload the NVIDIA driver, then run "
+                    "`docker compose up -d`; the updater then installs the current image."
+                    if report.update_held
+                    else outdated_image_remediation(report.expected_ref)
+                ),
                 extra={
                     "executor_image_status": report.status.value,
                     "executor_image_check_enforced": True,

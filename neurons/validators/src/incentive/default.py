@@ -110,7 +110,8 @@ class DefaultIncentive(BaseIncentive):
     def _record_outdated_image_reason(result: JobResult) -> bool:
         """True when an OUTDATED executor image excludes this result from both pools (DAH-2701)."""
         report = result.executor_image_report or {}
-        if report.get("status") != "OUTDATED":
+        # A rented host the updater holds on the old image (NVIDIA mismatch) keeps its incentive.
+        if report.get("status") != "OUTDATED" or report.get("update_held"):
             return False
         if not any(
             reason.reason == ZeroIncentiveReason.OUTDATED_EXECUTOR_IMAGE.value

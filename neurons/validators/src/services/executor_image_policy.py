@@ -30,6 +30,9 @@ class ExecutorImageReport:
     observed_digest: str | None
     expected_ref: str
     expected_digest: str
+    # A rented host whose GPU runtime cannot start a new GPU container (NVIDIA driver/library
+    # mismatch): the executor updater holds it on the old image so the running pod keeps serving.
+    update_held: bool = False
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -37,6 +40,7 @@ class ExecutorImageReport:
             "observed_digest": self.observed_digest,
             "expected_ref": self.expected_ref,
             "expected_digest": self.expected_digest,
+            "update_held": self.update_held,
         }
 
 

@@ -34,9 +34,14 @@ def calculate_scores(
     job_score = 1.0
     actual_score = 1.0
 
-    # Outdated executor image (DAH-2701).
+    # Outdated executor image (DAH-2701). A host the updater holds on the old image (NVIDIA
+    # driver/library mismatch) still serves its renter, so it is exempt.
     image_report = getattr(ctx.state, "executor_image_report", None)
-    if image_report and image_report.status is ImageVerdict.OUTDATED:
+    if (
+        image_report
+        and image_report.status is ImageVerdict.OUTDATED
+        and not image_report.update_held
+    ):
         actual_score = 0.0
         job_score = 0.0
         warning_messages.append("Required executor image is outdated")

@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from protocol.vc_protocol.compute_requests import (
@@ -128,6 +129,79 @@ async def test_rented_outdated_executor_passes_validation():
 
     assert result.passed is True
     assert result.updates["state"].executor_image_report.status is ImageVerdict.OUTDATED
+
+
+MISMATCH_STDERR = (
+    "docker: Error response from daemon: failed to create task for container: OCI runtime create "
+    "failed: nvidia-container-cli: initialization error: nvml error: driver/library version mismatch"
+)
+
+
+def ssh_answering(exit_status: int, stderr: str):
+    run = AsyncMock(return_value=SimpleNamespace(exit_status=exit_status, stdout="", stderr=stderr))
+    return SimpleNamespace(run=run)
+
+
+@pytest.mark.asyncio
+async def test_rented_outdated_executor_held_by_updater_keeps_its_score():
+    ssh = ssh_answering(125, MISMATCH_STDERR)
+    context = make_context(
+        config=build_context_config(executor_image_snapshot=policy()),
+        state=build_state(specs=specs(executor_digest=STALE_DIGEST), rented_data=rented_data()),
+        ssh=ssh,
+    )
+
+    result = await ExecutorImageCheck().run(context)
+
+    report = result.updates["state"].executor_image_report
+    assert result.passed is True
+    assert report.status is ImageVerdict.OUTDATED
+    assert report.update_held is True
+    assert "--gpus all" in ssh.run.await_args.args[0]
+    scored = make_context(state=build_state(gpu_model="NVIDIA H200", executor_image_report=report))
+    actual_score, _, warning = calculate_scores(scored, True)
+    assert actual_score == 1.0
+    assert "Required executor image is outdated" not in warning
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exit_status", "stderr"),
+    [(0, ""), (125, "docker: Error response from daemon: no such image")],
+)
+async def test_rented_outdated_executor_not_held_is_still_zeroed(exit_status: int, stderr: str):
+    context = make_context(
+        config=build_context_config(executor_image_snapshot=policy()),
+        state=build_state(specs=specs(executor_digest=STALE_DIGEST), rented_data=rented_data()),
+        ssh=ssh_answering(exit_status, stderr),
+    )
+
+    result = await ExecutorImageCheck().run(context)
+
+    report = result.updates["state"].executor_image_report
+    assert report.update_held is False
+    scored = make_context(state=build_state(gpu_model="NVIDIA H200", executor_image_report=report))
+    actual_score, _, warning = calculate_scores(scored, True)
+    assert actual_score == 0.0
+    assert "Required executor image is outdated" in warning
+
+
+@pytest.mark.asyncio
+async def test_unrented_outdated_executor_is_not_probed():
+    ssh = ssh_answering(125, MISMATCH_STDERR)
+    context = make_context(
+        config=build_context_config(executor_image_snapshot=policy()),
+        state=build_state(
+            specs=specs(executor_digest=STALE_DIGEST), rented_data=SimpleNamespace(executors={})
+        ),
+        ssh=ssh,
+    )
+
+    result = await ExecutorImageCheck().run(context)
+
+    assert result.passed is False
+    assert result.updates["state"].executor_image_report.update_held is False
+    ssh.run.assert_not_awaited()
 
 
 @pytest.mark.asyncio

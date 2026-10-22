@@ -115,3 +115,11 @@ def redis_with_full_portion() -> AsyncMock:
     return redis
 
 
+@pytest.mark.asyncio
+async def test_rented_executor_held_on_old_image_records_no_outdated_reason():
+    result = failed_idle_result().model_copy(update={"is_rented": True})
+    result.executor_image_report["update_held"] = True
+    incentive = DefaultIncentive(IncentiveConfig(), AsyncMock(), {"miner": [result]}, {})
+
+    assert incentive._record_outdated_image_reason(result) is False
+    assert result.zero_incentive_reasons == []
