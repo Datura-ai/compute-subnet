@@ -87,7 +87,7 @@ def build_rented_data(
     ]
 
     executor = RentedExecutor(
-        miner_hotkey="test-miner",
+        miner_hotkey="miner-hotkey",
         executor_ip_address="127.0.0.1",
         executor_ip_port="22",
         pods=pods,
