@@ -147,7 +147,7 @@ def test_is_over_soft_price_limit_no_price(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_enforced_drops_rental_eligibility(monkeypatch):
-    # Arrange — over the limit and flag on
+    # Arrange — over the limit
     _set_p90(monkeypatch, {H200: 2.0})
     incentive = _build_incentive()
 
@@ -161,7 +161,7 @@ async def test_enforced_drops_rental_eligibility(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_enforced_under_threshold_keeps_eligibility(monkeypatch):
-    # Arrange — flag on but price within the p90 ceiling (2.1 < 2.2)
+    # Arrange — price within the p90 ceiling (2.1 < 2.2)
     _set_p90(monkeypatch, {H200: 2.0})
     incentive = _build_incentive()
 

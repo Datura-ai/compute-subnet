@@ -1284,7 +1284,7 @@ class RentalPriceIncentive(DefaultIncentive):
         # DAH-2250 soft price limit: an otherwise-eligible unrented executor priced
         # above the market p90 ceiling forfeits the unrented incentive (node stays active).
         if self._should_run_idle_pool_gate(
-            idle_pool_candidate, eligible_for_rental_share, True
+            idle_pool_candidate, eligible_for_rental_share, enforced=True
         ) and self._is_over_soft_price_limit(job_result):
             if eligible_for_rental_share:
                 self._log_soft_price_limit(job_result)
