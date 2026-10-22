@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import re
 import shlex
@@ -424,7 +425,9 @@ class TenantEnforcementCheck:
         container_state = _container_state_from_diagnostics(diagnostics)
         if self.recover_stale_pods:
             try:
-                if await _recover_pod_after_stale_vloopback_mount(
+                if await _recover_parked_pod_container(
+                    ctx, container_name, pod_id, pod_status, diagnostics, local_volume_path
+                ) or await _recover_pod_after_stale_vloopback_mount(
                     ctx, container_name, pod_id, diagnostics, local_volume_path
                 ):
                     # Re-read the pod, so the recovered container's own SSH keys are what gets
@@ -742,6 +745,70 @@ async def _recover_pod_after_stale_vloopback_mount(
             )
         )
         return False
+
+
+# A lone `<name>__prev` is renamed back only for a pod no operation is under: a *_PENDING pod (or a
+# STOPPED one) is the backend's to drive.
+_PARKED_RECOVERY_POD_STATUSES = (None, "RUNNING", REBOOT_FAILED_POD_STATUS)
+
+
+async def _recover_parked_pod_container(
+    ctx: Context,
+    container_name: str,
+    pod_id: str,
+    pod_status: str | None,
+    diagnostics: dict[str, object],
+    local_volume_path: str | None,
+) -> bool:
+    # A reboot or edit whose undo never ran leaves the pod's only container under <name>__prev and
+    # no <name>; nothing but the pod's next create renamed it back (22 Oct, REBOOT_FAILED pod).
+    # Only when no create for the pod can be in flight: one between park and `docker run` looks the
+    # same, and renaming under it would make its undo remove the renter's container by name.
+    if (
+        not ctx.executor_ssh_private_key
+        or diagnostics.get("container_missing") is not True
+        or pod_status not in _PARKED_RECOVERY_POD_STATUSES
+    ):
+        return False
+    redis = ctx.services.redis
+    try:
+        # the create's pending-pod mark (it expires after 30 min, so a cancelled create's does too)
+        if await redis.renting_in_progress(ctx.miner_hotkey, ctx.executor.uuid, pod_id):
+            return False
+        lock = redis.executor_create_lock(ctx.executor.uuid)
+        if not await lock.acquire(blocking=False):
+            return False
+    except Exception:
+        return False  # whether a create is in flight is unknown: leave the pod as it is
+    try:
+        return await ctx.services.pod_recovery.recover_parked_pod_container(
+            ssh_client=ctx.ssh,
+            executor_info=ctx.executor,
+            miner_hotkey=ctx.miner_hotkey,
+            private_key=ctx.executor_ssh_private_key,
+            container_name=container_name,
+            pod_id=pod_id,
+            local_volume_path=local_volume_path,
+            default_extra=ctx.default_extra,
+        )
+    except (asyncssh.Error, OSError):
+        raise
+    except Exception as exc:
+        logger.warning(
+            _m(
+                "POD_PARKED_CONTAINER_RECOVERY_FAILED",
+                extra=get_extra_info({
+                    **ctx.default_extra,
+                    "container_name": container_name,
+                    "pod_id": pod_id,
+                    "error": str(exc),
+                }),
+            )
+        )
+        return False
+    finally:
+        with contextlib.suppress(Exception):  # a release past the TTL: the lock is not held anyway
+            await lock.release()
 
 
 async def _every_listed_pod_stale(ctx: Context, rented_pods: list[RentedPod], stale_pod_index: int) -> bool:

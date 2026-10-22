@@ -7773,6 +7773,54 @@ async def test_recover_pod_starts_when_the_provider_already_removed_the_stale_di
         assert "POD_STALE_MOUNT_RECOVERY_REPAIR_FAILED" in events
 
 
+@pytest.mark.parametrize(
+    "listed, expected_recovered",
+    [
+        pytest.param("pod_pod-1__prev\n", True, id="lone_parked_is_renamed_back_and_started"),
+        pytest.param("pod_pod-1\npod_pod-1__prev\n", False, id="pod_exists_parked_left_alone"),
+        pytest.param("", False, id="nothing_parked"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_recover_parked_pod_container(
+    docker_service, monkeypatch, listed, expected_recovered
+):
+    # 22 Oct: a failed reboot left the pod's only container as pod_<id>__prev and nothing renamed it back
+    async def run(command, *_args, **_kwargs):
+        return _make_ssh_command_result(stdout=listed if "docker ps" in command else "")
+
+    ssh_client = AsyncMock()
+    ssh_client.run = AsyncMock(side_effect=run)
+    start_existing_container = AsyncMock()
+    monkeypatch.setattr(docker_service, "start_existing_container", start_existing_container)
+    monkeypatch.setattr(docker_service, "_prepare_known_hosts_policy", AsyncMock(return_value=None))
+    monkeypatch.setattr("services.docker_service.require_rental_docker_ssh_host_key", Mock())
+
+    recovered = await docker_service.recover_parked_pod_container(
+        ssh_client=ssh_client,
+        executor_info=_executor_without_host_key("executor-1"),
+        miner_hotkey="miner-1",
+        private_key="key",
+        container_name="pod_pod-1",
+        pod_id="pod-1",
+        local_volume_path="/workspace",
+        default_extra={},
+    )
+
+    assert recovered is expected_recovered
+    commands = [call.args[0] for call in ssh_client.run.await_args_list]
+    renames = [c for c in commands if "docker rename" in c]
+    assert not any("docker rm" in c for c in commands)
+    if expected_recovered:
+        assert renames == ["/usr/bin/docker rename pod_pod-1__prev pod_pod-1"]
+        start_kwargs = start_existing_container.await_args.kwargs
+        assert start_kwargs["container_name"] == "pod_pod-1"
+        assert start_kwargs["local_volume_path"] == "/workspace"
+    else:
+        assert renames == []
+        start_existing_container.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_recover_pod_repairs_then_starts_through_the_full_start_path(
     docker_service, monkeypatch

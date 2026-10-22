@@ -899,6 +899,7 @@ def build_recovery_context(
     *,
     private_key: str | None = "ssh-key",
     backend: DummyBackendClient | None = None,
+    redis: Mock | None = None,
 ) -> Context:
     rented_data = build_rented_data(
         "executor-123",
@@ -909,6 +910,7 @@ def build_recovery_context(
         container_cleanup=MockContainerCleanup(),
         backend=backend if backend is not None else DummyBackendClient(active=True),
         pod_recovery=docker,
+        **({"redis": redis} if redis is not None else {}),
     )
     return context_factory(
         services=services,
@@ -1047,6 +1049,59 @@ async def test_tenant_enforcement_penalises_when_recovery_raises(context_factory
 
     assert result.passed is False
     assert result.event.reason_code == Msg.POD_NOT_RUNNING.reason
+
+
+class MissingPodSSHClient(DummySSHClient):
+    """The pod's container is gone: `docker inspect` answers No such object."""
+
+    async def run(self, command: str):
+        if "docker inspect" in command and not self.pod_running:
+            self.commands_called.append(command)
+            return Mock(stdout="", stderr="Error: No such object: pod_pod-1", exit_status=1)
+        return await super().run(command)
+
+
+@pytest.mark.parametrize("create_in_flight", [False, True])
+@pytest.mark.asyncio
+async def test_tenant_enforcement_renames_back_a_stranded_parked_container(
+    context_factory, create_in_flight
+):
+    # 22 Oct: a failed reboot left only pod_<id>__prev; the cycle gives it its name back, but never
+    # while the pod's create may still be between its park and `docker run`
+    ssh = MissingPodSSHClient(pod_running=False, ssh_keys=["ssh-rsa recovered"])
+    docker = AsyncMock()
+    docker.recover_pod_after_stale_vloopback_mount.return_value = False
+
+    async def rename_back_and_start(**kwargs):
+        ssh.pod_running = True
+        return True
+
+    docker.recover_parked_pod_container.side_effect = rename_back_and_start
+    lock = Mock(acquire=AsyncMock(return_value=True), release=AsyncMock())
+    redis = Mock(
+        renting_in_progress=AsyncMock(return_value=create_in_flight),
+        executor_create_lock=Mock(return_value=lock),
+    )
+    ctx = build_recovery_context(
+        context_factory,
+        ssh,
+        docker,
+        backend=DummyBackendClient(active=True, local_volume_path="/workspace"),
+        redis=redis,
+    )
+
+    result = await TenantEnforcementCheck().run(ctx)
+
+    if create_in_flight:
+        assert result.passed is False
+        assert result.event.reason_code == Msg.POD_NOT_RUNNING.reason
+        docker.recover_parked_pod_container.assert_not_awaited()
+    else:
+        assert result.passed is True, result.event
+        assert result.updates["default_extra"]["recovered_pods"] == ["pod_pod-1"]
+        kwargs = docker.recover_parked_pod_container.await_args.kwargs
+        assert (kwargs["container_name"], kwargs["local_volume_path"]) == ("pod_pod-1", "/workspace")
+        lock.release.assert_awaited_once()
 
 
 @pytest.mark.asyncio

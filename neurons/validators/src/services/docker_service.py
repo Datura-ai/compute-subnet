@@ -9853,6 +9853,61 @@ class DockerService:
         )
         return True
 
+    async def recover_parked_pod_container(
+        self,
+        *,
+        ssh_client: asyncssh.SSHClientConnection,
+        executor_info: ExecutorSSHInfo,
+        miner_hotkey: str,
+        private_key: str,
+        container_name: str,
+        pod_id: str,
+        local_volume_path: str | None,
+        default_extra: dict[str, Any],
+    ) -> bool:
+        """Give a stranded ``<name>__prev`` its name back and start it. True once renamed and started.
+
+        A reboot or edit whose undo never ran (cancelled, SSH lost, validator restarted) leaves the
+        pod's only container parked and stopped with no ``<name>``; only the pod's next create used
+        to rename it back (``_EditSwap.park``), so the renter stayed down until then. The caller has
+        made sure no create for the pod is in flight. A failed start raises: the container keeps its
+        name, and the stale-mount recovery picks up a "file exists" start next cycle.
+        """
+        parked = f"{container_name}{EDIT_PARKED_SUFFIX}"
+        q_name, q_parked = shlex.quote(container_name), shlex.quote(parked)
+        listed = await ssh_client.run(
+            f'/usr/bin/docker ps -a --format "{{{{.Names}}}}" '
+            f"--filter name=^{q_name}$ --filter name=^{q_parked}$"
+        )
+        if listed.exit_status != 0 or set((listed.stdout or "").split()) != {parked}:
+            return False
+        log_extra = {**default_extra, "container_name": container_name, "parked": parked}
+        renamed = await ssh_client.run(f"/usr/bin/docker rename {q_parked} {q_name}")
+        if renamed.exit_status != 0:
+            logger.warning(
+                _m(
+                    "POD_PARKED_CONTAINER_RENAME_FAILED",
+                    extra=get_extra_info({**log_extra, "error": (renamed.stderr or "").strip()}),
+                )
+            )
+            return False
+        logger.warning(_m("POD_PARKED_CONTAINER_RENAMED_BACK", extra=get_extra_info(log_extra)))
+        known_hosts_policy = await self._prepare_known_hosts_policy(
+            executor_info, miner_hotkey, log_extra
+        )
+        require_rental_docker_ssh_host_key(executor_info)
+        with node_owner(miner_hotkey):
+            await self.start_existing_container(
+                executor_info=executor_info,
+                private_key=private_key,
+                known_hosts_policy=known_hosts_policy,
+                container_name=container_name,
+                local_volume_path=local_volume_path,
+                pod_id=pod_id,
+                default_extra=log_extra,
+            )
+        return True
+
     async def _local_volume_encryption_state(
         self,
         ssh_client: asyncssh.SSHClientConnection,

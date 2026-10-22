@@ -72,6 +72,19 @@ class PodRecoverer(Protocol):
         default_extra: dict[str, Any],
     ) -> bool: ...
 
+    async def recover_parked_pod_container(
+        self,
+        *,
+        ssh_client: asyncssh.SSHClientConnection,
+        executor_info: ExecutorSSHInfo,
+        miner_hotkey: str,
+        private_key: str,
+        container_name: str,
+        pod_id: str,
+        local_volume_path: str | None,
+        default_extra: dict[str, Any],
+    ) -> bool: ...
+
 
 @dataclass(frozen=True)
 class ContextServices:
