@@ -94,12 +94,12 @@ class PodRecoverer(Protocol):
         *,
         ssh_client: asyncssh.SSHClientConnection,
         executor_info: ExecutorSSHInfo,
-        private_key: str,
+        private_key: str | None,
         container_name: str,
         pod_id: str,
-        local_volume_path: str,
+        local_volume_path: str | None,
         default_extra: dict[str, Any],
-    ) -> None: ...
+    ) -> bool: ...
 
 
 @dataclass(frozen=True)

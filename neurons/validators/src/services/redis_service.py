@@ -632,6 +632,10 @@ class RedisService:
     async def remove_inflight_backend_create(self, pod_id: str) -> None:
         await self.hdel(INFLIGHT_BACKEND_CREATES_KEY, pod_id)
 
+    async def backend_create_inflight(self, pod_id: str) -> bool:
+        """Whether the connector is running a create, reboot or edit of the pod (another process)."""
+        return await self.hget(INFLIGHT_BACKEND_CREATES_KEY, pod_id) is not None
+
     async def inflight_backend_creates(self) -> dict[str, InflightBackendCreate]:
         """pod id -> the create the backend sent for it"""
         raw = await self.hgetall(INFLIGHT_BACKEND_CREATES_KEY)

@@ -1866,6 +1866,21 @@ def _is_stale_vloopback_mountpoint_error(error_text: str) -> bool:
     return all(phrase in error_text for phrase in _VLOOPBACK_MOUNT_ERROR_PHRASES)
 
 
+async def _cleanup_to_completion(cleanup: Awaitable[Any]) -> Any:
+    """Await recovery cleanup that a cancellation (the recovery deadline) must not cut short: a
+    cancel waits for the cleanup to finish and then propagates."""
+    task = asyncio.ensure_future(cleanup)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    if cancelled:
+        raise asyncio.CancelledError
+    return task.result()
+
+
 def _is_safe_docker_volume_name(volume_name: str) -> bool:
     return bool(_DOCKER_VOLUME_NAME_RE.fullmatch(volume_name))
 
@@ -9821,21 +9836,16 @@ class DockerService:
                     pod_id=pod_id,
                     default_extra=log_extra,
                 )
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, Exception) as exc:
             # the whole check runs under an outer timeout, so a cancellation can land between
             # `docker start` and the gocryptfs remount and leave the container up with its
-            # plaintext path unmounted — exactly the state the Exception branch below stops. The
-            # stop is shielded because an unshielded await in a cancelled task never runs; the
-            # cancellation itself still propagates.
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.shield(
-                    self._stop_half_recovered_container(ssh_client, container_name)
-                )
-            raise
-        except Exception as exc:
-            container_stopped = await self._stop_half_recovered_container(
-                ssh_client, container_name
+            # plaintext path unmounted. The stop runs to completion even when the deadline cancels
+            # it mid-way; the cancellation itself still propagates.
+            container_stopped = await _cleanup_to_completion(
+                self._stop_half_recovered_container(ssh_client, container_name)
             )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             logger.error(
                 _m(
                     "POD_STALE_MOUNT_RECOVERY_START_FAILED",
@@ -9907,14 +9917,26 @@ class DockerService:
                 executor_info, miner_hotkey, log_extra
             )
             require_rental_docker_ssh_host_key(executor_info)
-            if inflight_creates.is_running(pod_id):
-                return False
+        except TimeoutError:
+            logger.warning(_m("POD_PARKED_CONTAINER_RECOVERY_TIMED_OUT", extra=get_extra_info(log_extra)))
+            return False
+        try:
             renamed = await ssh_client.run(
                 f"/usr/bin/docker rename {shlex.quote(container_id)} {q_name}",
                 timeout=_VLOOPBACK_REPAIR_COMMAND_TIMEOUT_SEC,
             )
-        except TimeoutError:
-            logger.warning(_m("POD_PARKED_CONTAINER_RECOVERY_TIMED_OUT", extra=get_extra_info(log_extra)))
+        except (asyncio.CancelledError, Exception) as exc:
+            # the reply is lost, not necessarily the rename: park the container again by its own id
+            # (a no-op when the rename never applied), so the next cycle still finds it parked
+            parked_again = await _cleanup_to_completion(self._park_by_id(ssh_client, container_id, parked))
+            logger.warning(
+                _m(
+                    "POD_PARKED_CONTAINER_RENAME_UNANSWERED",
+                    extra=get_extra_info({**log_extra, "error": repr(exc), "parked_again": parked_again}),
+                )
+            )
+            if not isinstance(exc, TimeoutError):
+                raise
             return False
         if renamed.exit_status != 0:
             logger.warning(
@@ -9939,18 +9961,17 @@ class DockerService:
                     pod_id=pod_id,
                     default_extra=log_extra,
                 )
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, Exception) as exc:
             # as in the stale-mount recovery: a cancellation between `docker start` and the remount
             # would leave the pod up with its plaintext path unmounted
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.shield(
-                    self._put_back_parked_container(ssh_client, container_id, container_name, parked, None)
+            cancelled = isinstance(exc, asyncio.CancelledError)
+            parked_again = await _cleanup_to_completion(
+                self._put_back_parked_container(
+                    ssh_client, container_id, container_name, parked, None if cancelled else str(exc)
                 )
-            raise
-        except Exception as exc:
-            parked_again = await self._put_back_parked_container(
-                ssh_client, container_id, container_name, parked, str(exc)
             )
+            if cancelled:
+                raise
             logger.error(
                 _m(
                     "POD_PARKED_CONTAINER_START_FAILED",
@@ -9973,6 +9994,11 @@ class DockerService:
         stopped = await self._stop_half_recovered_container(ssh_client, container_name)
         if not stopped or (start_error and _is_stale_vloopback_mountpoint_error(start_error)):
             return False
+        return await self._park_by_id(ssh_client, container_id, parked)
+
+    async def _park_by_id(
+        self, ssh_client: asyncssh.SSHClientConnection, container_id: str, parked: str
+    ) -> bool:
         with contextlib.suppress(Exception):
             result = await ssh_client.run(
                 f"/usr/bin/docker rename {shlex.quote(container_id)} {shlex.quote(parked)}",
@@ -10010,32 +10036,57 @@ class DockerService:
         *,
         ssh_client: asyncssh.SSHClientConnection,
         executor_info: ExecutorSSHInfo,
-        private_key: str,
+        private_key: str | None,
         container_name: str,
         pod_id: str,
-        local_volume_path: str,
+        local_volume_path: str | None,
         default_extra: dict[str, Any],
-    ) -> None:
+    ) -> bool:
         """Remount a running pod's encrypted volume (never re-initialised) and its sshd, what
-        ``start_existing_container`` adds after a start. Raises when the remount fails."""
-        async with self.rental_docker_client_factory.connect(
-            executor_info=executor_info,
-            private_key=private_key,
-        ) as docker_client:
-            await self._restore_mount_and_sshd_after_start(
-                docker_client=docker_client,
-                ssh_client=ssh_client,
-                container_name=container_name,
-                local_volume_path=local_volume_path,
-                pod_id=pod_id,
-                default_extra=default_extra,
+        ``start_existing_container`` adds after a start. True once remounted. Anything else stops the
+        container, a cancellation (the recovery deadline) included: left up without its mount, the
+        pod takes the renter's writes unencrypted onto the host disk."""
+        try:
+            # never at a guessed path, and only with the secret the volume was made with
+            if not private_key or not _can_remount_encrypted_volume(local_volume_path):
+                raise RuntimeError("no usable plaintext path, master secret or SSH key to remount with")
+            async with self.rental_docker_client_factory.connect(
+                executor_info=executor_info,
+                private_key=private_key,
+            ) as docker_client:
+                await self._restore_mount_and_sshd_after_start(
+                    docker_client=docker_client,
+                    ssh_client=ssh_client,
+                    container_name=container_name,
+                    local_volume_path=local_volume_path,
+                    pod_id=pod_id,
+                    default_extra=default_extra,
+                )
+        except (asyncio.CancelledError, Exception) as exc:
+            container_stopped = await _cleanup_to_completion(
+                self._stop_half_recovered_container(ssh_client, container_name)
             )
+            logger.error(
+                _m(
+                    "POD_VOLUME_MOUNT_RESTORE_FAILED",
+                    extra=get_extra_info({
+                        **default_extra,
+                        "container_name": container_name,
+                        "error": repr(exc),
+                        "container_stopped": container_stopped,
+                    }),
+                )
+            )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            return False
         logger.warning(
             _m(
                 "POD_VOLUME_MOUNT_RESTORED",
                 extra=get_extra_info({**default_extra, "container_name": container_name}),
             )
         )
+        return True
 
     async def _local_volume_encryption_state(
         self,
