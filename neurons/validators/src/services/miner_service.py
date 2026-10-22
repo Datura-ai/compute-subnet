@@ -12,6 +12,7 @@ import aiohttp
 from asyncssh import SSHKey
 import asyncssh
 import bittensor
+from clients.subtensor_client import SubtensorClient
 from datura.requests.miner_requests import (
     AcceptSSHKeyRequest,
     ExecutorSSHInfo,
@@ -76,6 +77,10 @@ from services.task_service import TaskService, JobResult
 from services.storage_operations import cancel_storage_operation, start_storage_operation, supports_workspace_field
 
 logger = logging.getLogger(__name__)
+
+# I-78: bittensor packs a.b.c into axon_info.version as a*1000**2 + b*1000 + c. 10.5.0 is what
+# miner-v1.003+ announces; the upload nonce field shipped in miner-v1.002 (fbfbde79, DAH-2338).
+MIN_DATED_NONCE_MINER_AXON_VERSION = 10_005_000
 
 
 def _miner_job_script_path(script_name: str) -> str:
@@ -404,13 +409,27 @@ class MinerService:
     def _normalize_public_key(public_key: bytes | str) -> str:
         return public_key.decode("utf-8") if isinstance(public_key, bytes) else public_key
 
-    def _dated_upload_nonce_if_enabled(self) -> str | None:
+    def _upload_nonce_for_miner(self, miner_hotkey: str) -> str | None:
         """A dated nonce for an SSH-key upload, so a captured signature goes stale (I-78).
 
-        Off until miners/executors older than the nonce field (Jul 2026) are gone: they drop or
-        mis-verify it and the upload fails.
+        Only for a miner proven to relay the nonce field: the central miner, or an axon announcing
+        bittensor 10.5.0+. Older miners drop the field and the upload fails, so they get none.
         """
-        return fresh_upload_nonce() if settings.ENABLE_DATED_UPLOAD_NONCE else None
+        subtensor = SubtensorClient.get_instance()
+        if miner_hotkey in subtensor.hotkeys_routed_via_central_miner:
+            return fresh_upload_nonce()
+        # in-memory metagraph snapshot only: no chain read on the upload path
+        neuron = next((n for n in subtensor.miners if n.hotkey == miner_hotkey), None)
+        axon_version = getattr(neuron.axon_info, "version", None) if neuron is not None else None
+        if axon_version and axon_version >= MIN_DATED_NONCE_MINER_AXON_VERSION:
+            return fresh_upload_nonce()
+        logger.info(
+            _m(
+                "dated_upload_nonce_skipped",
+                extra=get_extra_info({"miner_hotkey": miner_hotkey, "axon_version": axon_version}),
+            )
+        )
+        return None
 
     def _sign_validator_pubkey(
         self,
@@ -1748,7 +1767,7 @@ class MinerService:
             attestation_nonce = await self.attestation_service.maybe_issue_nonce(
                 payload.miner_hotkey
             )
-            nonce_hex = attestation_nonce.value_hex if attestation_nonce else self._dated_upload_nonce_if_enabled()
+            nonce_hex = attestation_nonce.value_hex if attestation_nonce else self._upload_nonce_for_miner(payload.miner_hotkey)
 
             # Prepare request
             ssh_request = SSHPubKeySubmitRequest(
@@ -2008,7 +2027,7 @@ class MinerService:
             # Generate SSH key and send it to miner
             private_key, public_key = self.ssh_service.generate_ssh_key(my_key.ss58_address)
 
-            upload_nonce = self._dated_upload_nonce_if_enabled()
+            upload_nonce = self._upload_nonce_for_miner(payload.miner_hotkey)
             ssh_request = SSHPubKeySubmitRequest(
                 public_key=public_key,
                 validator_signature=self._sign_validator_pubkey(my_key, public_key, nonce=upload_nonce),
@@ -2402,7 +2421,7 @@ class MinerService:
             headers = self._generate_auth_headers(my_key, payload.miner_hotkey)
             headers["Content-Type"] = "application/json"
             
-            upload_nonce = self._dated_upload_nonce_if_enabled()
+            upload_nonce = self._upload_nonce_for_miner(payload.miner_hotkey)
             ssh_request = SSHPubKeySubmitRequest(
                 public_key=payload.public_key,
                 validator_signature=self._sign_validator_pubkey(my_key, payload.public_key, nonce=upload_nonce),
