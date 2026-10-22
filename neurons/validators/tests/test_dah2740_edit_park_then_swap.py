@@ -18,6 +18,7 @@ from test_deploy_optimizations import _executor_info, _patch_happy, _payload, _s
 
 from core.utils import retry_ssh_command
 from services.docker_service import EDIT_PARKED_SUFFIX, DockerService, create_steps_after_reply, inflight_creates
+from services.prerun_host_probe import prerun_host_probe_command
 
 
 @pytest.fixture
@@ -119,6 +120,10 @@ async def test_a_successful_edit_runs_the_same_host_commands(svc, monkeypatch):
         f'/usr/bin/docker ps -a --no-trunc --format "{{{{.Names}}}} {{{{.ID}}}}" --filter name=^{name}$ --filter name=^{parked}$',
         f"/usr/bin/docker rename {name} {parked}",
         f"/usr/bin/docker stop -t 10 {parked}",
+        # the pre-run host probe (DAH-3257); no image-label section, the volume is not encrypted
+        prerun_host_probe_command(
+            docker_image=payload.docker_image, image_label=None, with_power=True, miner_hotkey=payload.miner_hotkey
+        ),
         '/usr/bin/docker volume ls --format "{{.Name}}"',
         # the live power floor read twice: beside the volume create, and again right before docker run
         "nvidia-smi --query-gpu=uuid,power.limit,power.default_limit,power.min_limit,power.max_limit"
