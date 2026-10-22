@@ -120,7 +120,6 @@ def _nras_response(
 
 @pytest.fixture()
 def service(monkeypatch):
-    monkeypatch.setattr(settings, "ENABLE_TDX_ATTESTATION", True)
     monkeypatch.setattr(settings, "TDX_VERIFIER_URL", "https://verifier.example/verify")
     monkeypatch.setattr(settings, "ENABLE_ATTESTATION_WHITELIST", False)
     monkeypatch.setattr(settings, "ENABLE_GPU_ATTESTATION_ENFORCEMENT", False)
@@ -242,7 +241,6 @@ def test_g3_legacy_no_nonce_still_accepted(service):
 
 async def test_g3_maybe_issue_nonce_respects_interval(monkeypatch):
     # Arrange
-    monkeypatch.setattr(settings, "ENABLE_TDX_ATTESTATION", True)
     monkeypatch.setattr(settings, "TDX_VERIFIER_URL", "https://verifier.example/verify")
     monkeypatch.setattr(settings, "ENABLE_ATTESTATION_NONCE", True)
     monkeypatch.setattr(settings, "TDX_REATTEST_INTERVAL_SECONDS", 3600)
@@ -469,7 +467,6 @@ def test_g1_attestation_passed_invariant():
 
 async def test_g5_ratcheted_executor_omitting_quote_fails_closed(monkeypatch):
     # Arrange — executor previously attested (in the ratchet set), now no quote
-    monkeypatch.setattr(settings, "ENABLE_TDX_ATTESTATION", True)
     monkeypatch.setattr(settings, "TDX_VERIFIER_URL", "https://verifier.example/verify")
     redis = FakeRedis()
     await redis.sadd(TDX_ATTESTED_EXECUTOR_SET, "test-executor")
@@ -483,7 +480,6 @@ async def test_g5_ratcheted_executor_omitting_quote_fails_closed(monkeypatch):
 
 async def test_g5_unknown_executor_without_quote_unaffected(monkeypatch):
     # Arrange — bare-metal executor (never attested) stays on the legacy path
-    monkeypatch.setattr(settings, "ENABLE_TDX_ATTESTATION", True)
     monkeypatch.setattr(settings, "TDX_VERIFIER_URL", "https://verifier.example/verify")
     import asyncssh
 
@@ -518,10 +514,7 @@ def _score_ctx(tdx_quote, attestation_passed):
     )
 
 
-def test_g5_score_gate_zeroes_failed_cvm(monkeypatch):
-    # Arrange
-    monkeypatch.setattr(settings, "ENABLE_TDX_ATTESTATION", True)
-
+def test_g5_score_gate_zeroes_failed_cvm():
     # Act
     actual, job, warning = calculate_scores(_score_ctx('{"quote":"00"}', False), rented=False)
 
@@ -531,10 +524,7 @@ def test_g5_score_gate_zeroes_failed_cvm(monkeypatch):
     assert "CVM attestation not passed" in warning
 
 
-def test_g5_score_gate_passes_attested_cvm_and_bare_metal(monkeypatch):
-    # Arrange
-    monkeypatch.setattr(settings, "ENABLE_TDX_ATTESTATION", True)
-
+def test_g5_score_gate_passes_attested_cvm_and_bare_metal():
     # Act / Assert — attested CVM keeps its score
     actual, _, _ = calculate_scores(_score_ctx('{"quote":"00"}', True), rented=False)
     assert actual == 1.0
