@@ -16,6 +16,7 @@ import pytest
 import pytest_asyncio
 from tenacity import Future, RetryError
 
+from core.docker_utils import DockerCommand
 import services.docker_service as docker_service_module
 from services.attestation_service import AttestationError
 from services.cvm_quote_broker import DSTACK_GUEST_SOCKET_PATH, QUOTE_BROKER_SOCKET_PATH
@@ -8098,6 +8099,92 @@ async def test_recover_pod_reports_failure_when_start_raises(docker_service, mon
     # the container may already be up with no plaintext mount, and no later cycle revisits a
     # running pod — put it back down so POD_NOT_RUNNING keeps matching what the customer sees
     assert "docker stop pod_pod-1" in ssh_client.run.await_args.args[0]
+
+
+_ORPHANED_TASK_ID = "fb6f342621aa2a7ec0c5b657557740e930cf8f064639c2401ed34950446a4edc"
+# ticket-0729 (pod 1169acd1, 22 Oct): State.Error after the host's dockerd/containerd restart
+_ORPHANED_TASK_ERROR = (
+    f"failed to create task for container: AlreadyExists: task {_ORPHANED_TASK_ID}: already exists"
+)
+
+
+def _orphaned_shim_ssh_client(container_id: str, status: str = "exited") -> AsyncMock:
+    async def run(command, *_args, **_kwargs):
+        if ".Destination" in command:
+            return _make_ssh_command_result(stdout="/root\n")
+        if "{{.Id}} {{.State.Status}}" in command:
+            return _make_ssh_command_result(stdout=f"{container_id} {status}\n")
+        if "containerd-shim" in command:
+            return _make_ssh_command_result(stdout="killed shim=4141 init=4242\n")
+        return _make_ssh_command_result(stdout="volume_pod-1\n")
+
+    ssh_client = AsyncMock()
+    ssh_client.run = AsyncMock(side_effect=run)
+    return ssh_client
+
+
+@pytest.mark.parametrize(
+    "container_id, status, expected_recovered",
+    [
+        pytest.param(_ORPHANED_TASK_ID, "exited", True, id="own_task_kills_shim_repairs_and_starts"),
+        pytest.param("c" * 64, "exited", False, id="task_of_another_container_untouched"),
+        pytest.param(_ORPHANED_TASK_ID, "running", False, id="running_container_untouched"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_recover_pod_clears_its_own_orphaned_shim_then_starts(
+    docker_service, monkeypatch, container_id, status, expected_recovered
+):
+    repair_mountpoint = AsyncMock(return_value=True)
+    monkeypatch.setattr(docker_service, "repair_stale_vloopback_mountpoint", repair_mountpoint)
+    start_existing_container = AsyncMock()
+    monkeypatch.setattr(docker_service, "start_existing_container", start_existing_container)
+    monkeypatch.setattr(docker_service, "_prepare_known_hosts_policy", AsyncMock(return_value=None))
+    monkeypatch.setattr("services.docker_service.require_rental_docker_ssh_host_key", Mock())
+    ssh_client = _orphaned_shim_ssh_client(container_id, status)
+
+    recovered = await _attempt_stale_mount_recovery(docker_service, _ORPHANED_TASK_ERROR, ssh_client)
+
+    assert recovered is expected_recovered
+    commands = [call.args[0] for call in ssh_client.run.await_args_list]
+    killed = [c for c in commands if "containerd-shim" in c]
+    if expected_recovered:
+        assert killed == [DockerCommand.kill_orphaned_task_shim(_ORPHANED_TASK_ID)]
+        assert repair_mountpoint.await_args.args[1] == "volume_pod-1"
+        start_existing_container.assert_awaited_once()
+    else:
+        assert killed == []
+        repair_mountpoint.assert_not_awaited()
+        start_existing_container.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recover_pod_starts_an_orphaned_shim_pod_without_a_stale_mountpoint(
+    docker_service, monkeypatch
+):
+    # the shim was the only blocker: no mountpoint to repair is not a reason to leave the pod down
+    monkeypatch.setattr(
+        docker_service, "repair_stale_vloopback_mountpoint", AsyncMock(return_value=False)
+    )
+    start_existing_container = AsyncMock()
+    monkeypatch.setattr(docker_service, "start_existing_container", start_existing_container)
+    monkeypatch.setattr(docker_service, "_prepare_known_hosts_policy", AsyncMock(return_value=None))
+    monkeypatch.setattr("services.docker_service.require_rental_docker_ssh_host_key", Mock())
+
+    recovered = await _attempt_stale_mount_recovery(
+        docker_service, _ORPHANED_TASK_ERROR, _orphaned_shim_ssh_client(_ORPHANED_TASK_ID)
+    )
+
+    assert recovered is True
+    start_existing_container.assert_awaited_once()
+
+
+def test_orphaned_shim_kill_refuses_anything_but_a_full_container_id():
+    with pytest.raises(ValueError):
+        DockerCommand.kill_orphaned_task_shim("fb6f; reboot")
+    cmd = DockerCommand.kill_orphaned_task_shim(_ORPHANED_TASK_ID)
+    assert f"' -id {_ORPHANED_TASK_ID} '" in cmd
+    assert "restart" not in cmd  # never the daemon: other tenants live on the node
 
 
 # DAH-2703: a create that fails because the container was removed from the host mid-creation is
