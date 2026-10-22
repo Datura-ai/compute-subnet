@@ -95,19 +95,26 @@ def test_pages_already_in_writeback_count_toward_the_safe_cap(sys_root: Path) ->
     assert cap(sys_root)[0] == pending + pending // 10
 
 
-def test_half_applied_setup_is_completed_on_the_next_pass(sys_root: Path) -> None:
-    background = sys_root / "proc" / "sys" / "vm" / "dirty_background_bytes"
-    background.chmod(0o444)
-    failed = run_setup(sys_root)
-    half_applied = cap(sys_root)
-    background.chmod(0o644)
+def test_a_backlog_past_two_tebibytes_is_still_read_as_an_integer(sys_root: Path) -> None:
+    # the kB sum passes 2^31 here; mawk would print it as 3.2e+09 without printf
+    set_dirty(sys_root, 3 * 1024 * GIB)
 
     completed = run_setup(sys_root)
 
-    assert failed.returncode == 1 and "write to" in failed.stdout
-    assert half_applied == (TARGET, 0)
+    assert completed.returncode == 0, completed.stdout
+    assert cap(sys_root)[0] == 3 * 1024 * GIB + 3 * 1024 * GIB // 10
+
+
+def test_half_applied_setup_is_completed_on_the_next_pass(sys_root: Path) -> None:
+    # the state a pass leaves when its second write fails: dirty_bytes set, background still 0
+    # (seeded directly: a chmod-based failure would not hold for root, CAP_DAC_OVERRIDE)
+    (sys_root / "proc" / "sys" / "vm" / "dirty_bytes").write_text(f"{TARGET}\n")
+
+    completed = run_setup(sys_root)
+
     assert completed.returncode == 0
     assert cap(sys_root) == (TARGET, TARGET_BG)
+    assert "dirty_background_bytes=268435456" in completed.stdout
 
 
 def test_a_providers_lower_cap_is_left_alone(sys_root: Path) -> None:

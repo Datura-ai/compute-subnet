@@ -33,10 +33,10 @@ VM="$SYS_ROOT/proc/sys/vm"
 log() { echo "[dirty-cap] $*"; }
 
 pending_bytes_now() {
-    # Dirty + Writeback: pages already handed to the disk still count against the cap. Summed in
-    # kB by awk (fits any awk's integer range), scaled in bash: awk prints big products as 5.4e+11
+    # Dirty + Writeback: pages already handed to the disk still count against the cap.
+    # printf %.0f: a plain print renders sums past 2^31 kB as 2.1e+09, which bash rejects
     local kb
-    kb=$(awk '/^(Dirty|Writeback):/ { kb += $2; found = 1 } END { if (found) print kb; exit !found }' "$MEMINFO" 2>/dev/null) || return 1
+    kb=$(awk '/^(Dirty|Writeback):/ { kb += $2; found = 1 } END { if (found) printf "%.0f\n", kb; exit !found }' "$MEMINFO" 2>/dev/null) || return 1
     echo $((kb * 1024))
 }
 
