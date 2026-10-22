@@ -24,7 +24,8 @@ class PidHostRequiredCheck:
         what = {"executor_pid_mode": pid_mode, "is_rented": is_rented}
         if isinstance(pid_mode, str) and pid_mode != "host":
             if is_rented:
-                # warn only: the score is unchanged so the live rental is not disrupted
+                # warn only, in the validator log (not shown to the provider); the score is unchanged so
+                # the live rental is not disrupted. The loop notifies rented hosts directly.
                 event = render_message(Msg.RENTED_WARNING, ctx=ctx, check_id=self.check_id, what=what)
                 return CheckResult(passed=True, event=event)
             return CheckResult(

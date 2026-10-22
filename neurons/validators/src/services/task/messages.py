@@ -883,7 +883,12 @@ class PidHostRequiredMessages:
         severity="warning",
         category="policy",
         impact="Score set to 0 for this cycle; verification is kept until repeated failures deactivate the executor",
-        remediation="executor must run with pid: host (see docker-compose.app.yml); backups cannot run",
+        remediation=(
+            "The executor must run with pid: host (see docker-compose.app.yml); encrypted pod backups and "
+            "restores cannot run. Standard stack: cd ~/compute-subnet/neurons/executor && docker compose up -d "
+            "--force-recreate executor-runner. Custom stack: docker compose -f docker-compose.app.yml up -d "
+            "--force-recreate."
+        ),
     )
     RENTED_WARNING = MessageTemplate(
         event="Executor not in the host PID namespace",
@@ -891,7 +896,12 @@ class PidHostRequiredMessages:
         severity="warning",
         category="policy",
         impact="Warning only while the node is rented: score and incentive unchanged",
-        remediation="executor must run with pid: host (see docker-compose.app.yml); backups cannot run",
+        remediation=(
+            "The executor must run with pid: host (see docker-compose.app.yml); encrypted pod backups and "
+            "restores cannot run. Standard stack: cd ~/compute-subnet/neurons/executor && docker compose up -d "
+            "--force-recreate executor-runner. Custom stack: docker compose -f docker-compose.app.yml up -d "
+            "--force-recreate."
+        ),
     )
     OK = MessageTemplate(
         event="Executor PID namespace check passed",

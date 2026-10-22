@@ -17,7 +17,7 @@ async def test_not_host_pid_unrented_fails_with_reason(context_factory, pid_mode
 
     assert result.passed is False
     assert result.event.reason_code == Msg.MISSING.reason
-    assert "pid: host" in Msg.MISSING.remediation and "backups cannot run" in Msg.MISSING.remediation
+    assert "pid: host" in Msg.MISSING.remediation and "encrypted pod backups and restores cannot run" in Msg.MISSING.remediation
 
 
 @pytest.mark.asyncio
