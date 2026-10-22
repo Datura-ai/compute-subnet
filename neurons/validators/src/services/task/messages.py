@@ -1431,7 +1431,7 @@ class RegistryPullMessages:
 
 
 CONTAINER_DOWNLOAD_SLOW_REMEDIATION = (
-    "a container on this node downloads from PyPI or Hugging Face far slower than the host does, so a renter's "
+    "a container on this node downloads from PyPI or Hugging Face too slowly or cannot connect, so a renter's "
     "`pip install` or model download crawls; remove any traffic shaping or extra firewall rules added on docker "
     "traffic (keep docker's own NAT rules); "
     "if the uplink MTU (`ip link`) is below 1500, recreate the rentals network with it while no pod runs: "
