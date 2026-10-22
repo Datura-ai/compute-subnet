@@ -1,4 +1,4 @@
-"""A host port already bound moves the pod to the next free mapped port (PORT_COLLISION_RETRY_ENABLED).
+"""A host port already bound moves the pod to the next free mapped port.
 
 Five failed rents on four nodes (16–21 Sep): dockerd refused the bind of a host port the backend
 handed the pod — `failed to bind host port <ip>:<port>: address already in use` (3) and `Bind for
@@ -104,16 +104,6 @@ def service() -> DockerService:
 
 
 @pytest.fixture
-def flag_on(monkeypatch):
-    monkeypatch.setattr("services.docker_service.settings.PORT_COLLISION_RETRY_ENABLED", True)
-
-
-@pytest.fixture
-def flag_off(monkeypatch):
-    monkeypatch.setattr("services.docker_service.settings.PORT_COLLISION_RETRY_ENABLED", False)
-
-
-@pytest.fixture
 def no_sleep(monkeypatch):
     monkeypatch.setattr("services.docker_service.asyncio.sleep", AsyncMock())
 
@@ -205,7 +195,7 @@ def test_listening_ports_are_read_from_ss_and_netstat_lines():
 
 
 @pytest.mark.asyncio
-async def test_second_candidate_takes_the_pod_and_the_mapping_reports_it(service, flag_on):
+async def test_second_candidate_takes_the_pod_and_the_mapping_reports_it(service):
     client = _RunRecorder(RentalDockerOperationError(ADDRESS_IN_USE_TEXT), None)
     port_maps = [(22, 9101, 29101)]
     spare = [_pair(9102), _pair(9103), _pair(9104)]
@@ -230,7 +220,7 @@ async def test_second_candidate_takes_the_pod_and_the_mapping_reports_it(service
 
 
 @pytest.mark.asyncio
-async def test_port_allocated_text_takes_the_same_path(service, flag_on):
+async def test_port_allocated_text_takes_the_same_path(service):
     client = _RunRecorder(RentalDockerOperationError(PORT_ALLOCATED_TEXT), None)
     port_maps = [(22, 9101, 29101), (8888, 9105, 29105)]
 
@@ -241,7 +231,7 @@ async def test_port_allocated_text_takes_the_same_path(service, flag_on):
 
 
 @pytest.mark.asyncio
-async def test_all_candidates_taken_fails_as_the_port_collision_class(service, flag_on):
+async def test_all_candidates_taken_fails_as_the_port_collision_class(service):
     client = _RunRecorder(RentalDockerOperationError(ADDRESS_IN_USE_TEXT))
     port_maps = [(22, 9101, 29101)]
     ssh_client = RecordingSSHClient(
@@ -265,7 +255,7 @@ async def test_all_candidates_taken_fails_as_the_port_collision_class(service, f
 
 @pytest.mark.asyncio
 async def test_a_second_refusal_on_the_new_mapping_fails_without_a_third_candidate(
-    service, flag_on
+    service
 ):
     client = _RunRecorder(
         RentalDockerOperationError(ADDRESS_IN_USE_TEXT),
@@ -285,7 +275,7 @@ async def test_a_second_refusal_on_the_new_mapping_fails_without_a_third_candida
 
 
 @pytest.mark.asyncio
-async def test_an_unreadable_probe_lets_docker_run_try_the_first_candidate(service, flag_on):
+async def test_an_unreadable_probe_lets_docker_run_try_the_first_candidate(service):
     client = _RunRecorder(RentalDockerOperationError(ADDRESS_IN_USE_TEXT), None)
     port_maps = [(22, 9101, 29101)]
     ssh_client = RecordingSSHClient(stdout="", exit_status=127)
@@ -304,7 +294,7 @@ async def test_an_unreadable_probe_lets_docker_run_try_the_first_candidate(servi
 
 @pytest.mark.asyncio
 async def test_a_refusal_naming_no_port_of_this_pod_keeps_the_same_mapping_wait(
-    service, flag_on, no_sleep
+    service, no_sleep
 ):
     # the bound port is not one of the pod's: nothing to move, the DAH-1991 wait runs as before
     client = _RunRecorder(
@@ -319,7 +309,7 @@ async def test_a_refusal_naming_no_port_of_this_pod_keeps_the_same_mapping_wait(
 
 
 @pytest.mark.asyncio
-async def test_no_spare_pair_keeps_the_same_mapping_wait(service, flag_on, no_sleep):
+async def test_no_spare_pair_keeps_the_same_mapping_wait(service, no_sleep):
     client = _RunRecorder(RentalDockerOperationError(ADDRESS_IN_USE_TEXT), None)
     port_maps = [(22, 9101, 29101)]
 
@@ -330,20 +320,7 @@ async def test_no_spare_pair_keeps_the_same_mapping_wait(service, flag_on, no_sl
 
 
 @pytest.mark.asyncio
-async def test_flag_off_retries_the_same_mapping_and_never_probes(service, flag_off, no_sleep):
-    client = _RunRecorder(RentalDockerOperationError(ADDRESS_IN_USE_TEXT), None)
-    port_maps = [(22, 9101, 29101)]
-    ssh_client = RecordingSSHClient(stdout=SS_9101_AND_9102_LISTEN)
-
-    await _run(service, client, port_maps=port_maps, spare=[_pair(9103)], ssh_client=ssh_client)
-
-    assert port_maps == [(22, 9101, 29101)]
-    assert [spec.ports[0].host_port for spec in client.specs] == [9101, 9101]
-    assert ssh_client.commands == []
-
-
-@pytest.mark.asyncio
-async def test_a_daemon_error_is_not_a_collision_and_is_not_retried(service, flag_on):
+async def test_a_daemon_error_is_not_a_collision_and_is_not_retried(service):
     client = _RunRecorder(RentalDockerOperationError(NO_SUCH_IMAGE_TEXT), None)
     port_maps = [(22, 9101, 29101)]
     ssh_client = RecordingSSHClient(stdout=SS_9101_AND_9102_LISTEN)
@@ -388,7 +365,7 @@ def _create_payload_with_spare_pairs():
 
 @pytest.mark.asyncio
 async def test_create_container_answers_with_the_port_the_pod_really_got(
-    service, executor, monkeypatch, flag_on
+    service, executor, monkeypatch
 ):
     _patch_create_harness(monkeypatch, service, RecordingSSHClient())
     client = service.rental_docker_client_factory.client
@@ -421,7 +398,7 @@ async def test_create_container_answers_with_the_port_the_pod_really_got(
 
 
 @pytest.mark.asyncio
-async def test_the_ssh_port_line_follows_a_remap_of_port_22(service, executor, monkeypatch, flag_on):
+async def test_the_ssh_port_line_follows_a_remap_of_port_22(service, executor, monkeypatch):
     # the port line goes out before `docker run`; the renter's starting command must not keep
     # naming the port dockerd refused
     _patch_create_harness(monkeypatch, service, RecordingSSHClient())
@@ -464,7 +441,7 @@ async def test_the_ssh_port_line_follows_a_remap_of_port_22(service, executor, m
 
 @pytest.mark.asyncio
 async def test_create_failure_event_carries_the_stage_and_the_port_collision_class(
-    service, executor, monkeypatch, flag_on
+    service, executor, monkeypatch
 ):
     _patch_create_harness(monkeypatch, service, RecordingSSHClient())
     client = service.rental_docker_client_factory.client
@@ -491,7 +468,7 @@ async def test_create_failure_event_carries_the_stage_and_the_port_collision_cla
 
 @pytest.mark.asyncio
 async def test_create_failure_event_has_no_class_for_a_daemon_answer(
-    service, executor, monkeypatch, flag_on
+    service, executor, monkeypatch
 ):
     _patch_create_harness(monkeypatch, service, RecordingSSHClient())
     service.rental_docker_client_factory.client.run_container_error = RentalDockerOperationError(
@@ -509,25 +486,3 @@ async def test_create_failure_event_has_no_class_for_a_daemon_answer(
     assert result.failure_step == "docker_run"
     assert "error_class" not in result.detail
 
-
-@pytest.mark.asyncio
-async def test_flag_off_create_failure_still_carries_the_class(
-    service, executor, monkeypatch, flag_off, no_sleep
-):
-    _patch_create_harness(monkeypatch, service, RecordingSSHClient())
-    service.rental_docker_client_factory.client.run_container_error = RentalDockerOperationError(
-        PORT_ALLOCATED_TEXT
-    )
-    # the 90 s same-mapping budget: already spent
-    monkeypatch.setattr("services.docker_service._PORT_ALLOCATED_RETRY_BUDGET_SEC", -1)
-
-    result = await service.create_container(
-        payload=_create_payload_with_spare_pairs(),
-        executor_info=executor,
-        keypair=Mock(ss58_address="validator-hotkey"),
-        private_key="encrypted-private-key",
-    )
-
-    assert isinstance(result, FailedContainerRequest)
-    assert result.failure_step == "docker_run"
-    assert '"error_class": "port_collision"' in result.detail
