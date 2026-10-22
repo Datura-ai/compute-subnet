@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import asyncssh
 
-from core.config import settings
-
 from ..messages import CpuTruthMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
@@ -37,10 +35,6 @@ class CpuTruthCheck:
 
     async def run(self, ctx: Context) -> CheckResult:
         # compare advertised CPU(s) against the kernel-present population over ssh
-        if not settings.CPU_TRUTH_CHECK_ENABLED:
-            event = render_message(Msg.SKIPPED, ctx=ctx, check_id=self.check_id)
-            return CheckResult(passed=True, event=event)
-
         advertised = advertised_cpu_count(ctx)
         if advertised is None:
             return self._unknown(ctx, reason="advertised CPU count missing from specs")
