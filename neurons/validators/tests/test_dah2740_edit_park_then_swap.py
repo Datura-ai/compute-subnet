@@ -437,3 +437,49 @@ async def test_the_undo_removes_the_replacement_by_its_id_so_a_sibling_retry_und
 
     assert _docker(ssh.commands, "rm -fv") == [f"/usr/bin/docker rm -fv {'a' * 64} 2>/dev/null || true"]
     assert "/usr/bin/docker rm -fv pod_abc 2>/dev/null || true" not in ssh.commands
+
+
+_STALE_MOUNT_START_ERROR = (
+    "Docker SDK start failed: 500 Server Error: error while mounting volume '': VolumeDriver.Mount: 01M5: "
+    "cannot create mount point dir '/mnt/volume_x': mkdir /mnt/volume_x: file exists"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "start_error, repaired, starts, raises",
+    [
+        (_STALE_MOUNT_START_ERROR, "volume_x", 2, False),  # the 22 Oct undo: repair, start again, pod up
+        (_STALE_MOUNT_START_ERROR, None, 1, True),  # nothing safe to repair: the start's own error stands
+        ("Docker SDK start failed: 500 no such device", None, 1, True),  # another error is never repaired
+    ],
+)
+async def test_the_undo_repairs_a_stale_vloopback_mountpoint_left_by_park_and_starts_again(svc, start_error, repaired, starts, raises):
+    docker_client = Mock()
+    docker_client.start = AsyncMock(side_effect=[RuntimeError(start_error), None])
+    svc._repair_stale_mountpoint_of_container_volume = AsyncMock(return_value=repaired)
+    svc._restore_mount_and_sshd_after_start = AsyncMock()
+    ssh = Mock()
+
+    async def bring_up():
+        await svc._bring_up_existing_container(
+            docker_client=docker_client,
+            ssh_client=ssh,
+            container_name="pod_abc",
+            local_volume_path="/root",
+            pod_id="abc",
+            default_extra={},
+        )
+
+    if raises:
+        with pytest.raises(Exception, match="start failed"):
+            await bring_up()
+        svc._restore_mount_and_sshd_after_start.assert_not_awaited()
+    else:
+        await bring_up()
+        svc._restore_mount_and_sshd_after_start.assert_awaited_once()
+    assert docker_client.start.await_count == starts
+    if "file exists" in start_error:
+        svc._repair_stale_mountpoint_of_container_volume.assert_awaited_once_with(ssh, "pod_abc", {})
+    else:
+        svc._repair_stale_mountpoint_of_container_volume.assert_not_awaited()
