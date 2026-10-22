@@ -27,10 +27,9 @@ from tests.helpers import build_context_config, build_services, build_state, def
 
 
 @contextmanager
-def foreign_gate(*, enforce: bool = True, check_enabled: bool = True):
+def foreign_gate(*, enforce: bool = True):
     """DAH-2735: the ownership gate ships shadow-first, like every money-withholding gate."""
     with patch("neurons.validators.src.services.task.checks.gpu_usage.settings") as s:
-        s.FOREIGN_GPU_WORKLOAD_CHECK_ENABLED = check_enabled
         s.FOREIGN_GPU_WORKLOAD_ENFORCEMENT_ENABLED = enforce
         yield s
 
@@ -998,21 +997,6 @@ async def test_foreign_process_only_warns_while_enforcement_is_off(context_facto
     assert result.passed is True
     assert result.event.reason_code == Msg.FOREIGN_PROCESS.reason
     assert result.event.severity == "warning"
-
-
-@pytest.mark.asyncio
-async def test_disabled_check_leaves_the_legacy_verdict_untouched(context_factory):
-    state = _idle_state(
-        [{"gpu_utilization": 0, "memory_utilization": 0, "memory_used_mb": 22400}],
-        [{"pid": 4242, "container_name": "nodexo-rental-1cd1ba2b"}],
-    )
-    ctx = context_factory(services=build_services(), config=build_context_config(), state=state)
-
-    with foreign_gate(check_enabled=False):
-        result = await GpuUsageCheck().run(ctx)
-
-    assert result.passed is True
-    assert result.event.reason_code == Msg.USAGE_OK.reason
 
 
 @pytest.mark.asyncio
