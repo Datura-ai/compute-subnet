@@ -53,8 +53,7 @@ DUPLICATED = UUIDS[:7] + [UUIDS[0]]
 @pytest.fixture(autouse=True)
 def _check_on():
     rented_gpu_drop._LOCAL_MARKS.clear()
-    with patch.object(rented_gpu_drop.settings, "RENTED_GPU_DROP_CHECK_ENABLED", True):
-        yield
+    yield
     rented_gpu_drop._LOCAL_MARKS.clear()
 
 
@@ -801,22 +800,16 @@ async def test_a_failed_mark_delete_does_not_hide_the_next_incident(context_fact
 
 
 @pytest.mark.asyncio
-async def test_the_pipeline_check_with_default_settings_logs_the_drop_and_posts_nothing(
-    context_factory, monkeypatch
-):
-    monkeypatch.delenv("RENTED_GPU_DROP_CHECK_ENABLED", raising=False)
+async def test_the_pipeline_check_with_default_settings_reports_the_drop(context_factory):
     defaults = type(rented_gpu_drop.settings)(_env_file=None)
     check = next(c for c in PipelineFactory.build_checks() if isinstance(c, RentedGpuDropCheck))
     services = _services()
 
     with patch.object(rented_gpu_drop, "settings", defaults):
-        result = await check.run(
-            _ctx(context_factory, services, listed=UUIDS[:5], scrape_error="NVMLError(999)")
-        )
+        result = await check.run(_ctx(context_factory, services, listed=UUIDS[:5]))
 
     assert result.passed and result.event.reason_code == Msg.DROP.reason
-    services.backend.report_rented_gpu_drop.assert_not_awaited()
-    assert services.redis.calls == 0 and services.redis.store == {}
+    services.backend.report_rented_gpu_drop.assert_awaited_once()
 
 
 HEALTHY_CYCLES = [
