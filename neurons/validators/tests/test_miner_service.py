@@ -406,7 +406,9 @@ async def test_an_old_executor_image_reports_its_specific_reason(mocker, miner_s
     executor = Mock(address="h", ssh_port=22, ssh_username="root", python_path="python3")
 
     with pytest.raises(RuntimeError, match="exclude_patterns"):
-        await miner_service.handle_backup_container_req(executor, payload, Mock(), Mock())
+        await miner_service.handle_backup_container_req(
+            executor, payload, Mock(), Mock(_prepare_known_hosts_policy=AsyncMock(return_value=None))
+        )
 
     start.assert_not_awaited()
     assert "update the executor image" in str(report.await_args.args[2])
