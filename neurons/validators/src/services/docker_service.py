@@ -2149,6 +2149,7 @@ class DockerService:
             or RentalDockerSdkClientFactory(pull_timeout_seconds=_DOCKER_PULL_TIMEOUT_SECONDS)
         )
         self.lock = asyncio.Lock()
+        self._pods_in_recovery: set[str] = set()
         self.logs_queue: list[dict] = []
         self.log_task: asyncio.Task | None = None
         self.log_stream_finish_requested = asyncio.Event()
@@ -9735,7 +9736,39 @@ class DockerService:
             orphaned_task_id or _is_stale_vloopback_mountpoint_error(container_error)
         ):
             return False
+        # one recovery per pod at a time: a second check cycle acting on the same stale verdict
+        # could otherwise stop or kill what the first one has just started
+        if container_name in self._pods_in_recovery:
+            return False
+        self._pods_in_recovery.add(container_name)
+        try:
+            return await self._recover_pod(
+                ssh_client=ssh_client,
+                executor_info=executor_info,
+                miner_hotkey=miner_hotkey,
+                private_key=private_key,
+                container_name=container_name,
+                pod_id=pod_id,
+                orphaned_task_id=orphaned_task_id,
+                local_volume_path=local_volume_path,
+                default_extra=default_extra,
+            )
+        finally:
+            self._pods_in_recovery.discard(container_name)
 
+    async def _recover_pod(
+        self,
+        *,
+        ssh_client: asyncssh.SSHClientConnection,
+        executor_info: ExecutorSSHInfo,
+        miner_hotkey: str,
+        private_key: str,
+        container_name: str,
+        pod_id: str,
+        orphaned_task_id: str | None,
+        local_volume_path: str | None,
+        default_extra: dict[str, Any],
+    ) -> bool:
         log_extra = {**default_extra, "container_name": container_name}
         try:
             encryption_state = await self._local_volume_encryption_state(
@@ -9862,17 +9895,21 @@ class DockerService:
                 )
             )
             return False
+        # the command re-reads the state and pins the shim generation on the host itself, so a pod
+        # started again since the inspect above (by its provider or another cycle) is left alone
         killed = await ssh_client.run(
             DockerCommand.kill_orphaned_task_shim(container_id),
             timeout=_VLOOPBACK_REPAIR_COMMAND_TIMEOUT_SEC,
         )
+        result = (killed.stdout or "").strip()
+        cleared = result.startswith(("killed ", "no shim"))
         logger.info(
             _m(
-                "POD_ORPHANED_SHIM_KILLED",
-                extra=get_extra_info({**log_extra, "result": (killed.stdout or "").strip()}),
+                "POD_ORPHANED_SHIM_KILLED" if cleared else "POD_ORPHANED_SHIM_RECOVERY_SKIPPED",
+                extra=get_extra_info({**log_extra, "result": result}),
             )
         )
-        return True
+        return cleared
 
     async def _local_volume_encryption_state(
         self,

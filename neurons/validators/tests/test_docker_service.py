@@ -6,7 +6,9 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
+import time
 from unittest.mock import AsyncMock, Mock, MagicMock, patch
 from uuid import uuid4, UUID
 
@@ -8108,14 +8110,16 @@ _ORPHANED_TASK_ERROR = (
 )
 
 
-def _orphaned_shim_ssh_client(container_id: str, status: str = "exited") -> AsyncMock:
+def _orphaned_shim_ssh_client(
+    container_id: str, status: str = "exited", kill_stdout: str = "killed shim=4141 init=4242\n"
+) -> AsyncMock:
     async def run(command, *_args, **_kwargs):
         if ".Destination" in command:
             return _make_ssh_command_result(stdout="/root\n")
         if "{{.Id}} {{.State.Status}}" in command:
             return _make_ssh_command_result(stdout=f"{container_id} {status}\n")
         if "containerd-shim" in command:
-            return _make_ssh_command_result(stdout="killed shim=4141 init=4242\n")
+            return _make_ssh_command_result(stdout=kill_stdout)
         return _make_ssh_command_result(stdout="volume_pod-1\n")
 
     ssh_client = AsyncMock()
@@ -8177,6 +8181,126 @@ async def test_recover_pod_starts_an_orphaned_shim_pod_without_a_stale_mountpoin
 
     assert recovered is True
     start_existing_container.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_recover_pod_stops_when_the_host_side_recheck_skips_the_kill(
+    docker_service, monkeypatch
+):
+    # the pod came back between the inspect and the kill: no repair, no second start
+    repair_mountpoint = AsyncMock(return_value=True)
+    monkeypatch.setattr(docker_service, "repair_stale_vloopback_mountpoint", repair_mountpoint)
+    start_existing_container = AsyncMock()
+    monkeypatch.setattr(docker_service, "start_existing_container", start_existing_container)
+    ssh_client = _orphaned_shim_ssh_client(
+        _ORPHANED_TASK_ID, kill_stdout="skipped state=running\n"
+    )
+
+    recovered = await _attempt_stale_mount_recovery(
+        docker_service, _ORPHANED_TASK_ERROR, ssh_client
+    )
+
+    assert recovered is False
+    repair_mountpoint.assert_not_awaited()
+    start_existing_container.assert_not_awaited()
+
+
+def _start_fake_shim(container_id: str) -> subprocess.Popen:
+    # argv0 and `-id <id>` exactly as dockerd starts containerd-shim-runc-v2
+    return subprocess.Popen(
+        ["containerd-shim-runc-v2", "-c", "import time; time.sleep(60)", "-id", container_id, "-a"],
+        executable=sys.executable,
+    )
+
+
+def _run_shim_kill_on_this_host(tmp_path, fake_docker_body: str) -> str:
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text(f"#!/bin/bash\n{fake_docker_body}\n")
+    fake_docker.chmod(0o755)
+    command = DockerCommand.kill_orphaned_task_shim(_ORPHANED_TASK_ID).replace(
+        "/usr/bin/docker", str(fake_docker)
+    )
+    return subprocess.run(
+        ["sh", "-c", command.replace("sleep 3", "true")], capture_output=True, text=True, timeout=60
+    ).stdout
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="needs /proc")
+@pytest.mark.parametrize(
+    "status, killed", [("exited", True), ("created", True), ("running", False)]
+)
+def test_orphaned_shim_kill_rechecks_the_state_on_the_host(tmp_path, status, killed):
+    shim = _start_fake_shim(_ORPHANED_TASK_ID)
+    try:
+        time.sleep(0.3)
+        out = _run_shim_kill_on_this_host(tmp_path, f"echo {status}")
+        assert (shim.wait(timeout=5) == -9 if killed else shim.poll() is None), out
+    finally:
+        shim.kill()
+        shim.wait()
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="needs /proc")
+def test_orphaned_shim_kill_spares_a_replacement_shim_started_in_between(tmp_path):
+    # another actor (the provider, or a second check cycle) clears the orphan and starts the same
+    # container between the scan and the kill; dockerd's answer is stale. The new shim must live.
+    old_shim = _start_fake_shim(_ORPHANED_TASK_ID)
+    pid_file = tmp_path / "replacement.pid"
+    try:
+        time.sleep(0.3)
+        _run_shim_kill_on_this_host(
+            tmp_path,
+            f"kill -9 {old_shim.pid}; "
+            f"(exec -a containerd-shim-runc-v2 {sys.executable} -c 'import time; time.sleep(60)' "
+            f"-id {_ORPHANED_TASK_ID} -a) >/dev/null 2>&1 & echo $! > {pid_file}; "
+            "sleep 0.3; echo exited",
+        )
+        replacement = int(pid_file.read_text())
+        os.kill(replacement, 0)  # raises if the replacement shim was killed
+    finally:
+        old_shim.kill()
+        old_shim.wait()
+        if pid_file.exists():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(pid_file.read_text()), 9)
+
+
+@pytest.mark.asyncio
+async def test_recover_pod_runs_once_at_a_time_per_pod(docker_service, monkeypatch):
+    # two overlapping check cycles on the same stale verdict: only the first one recovers
+    release = asyncio.Event()
+
+    async def slow_start(**_kwargs):
+        await release.wait()
+
+    monkeypatch.setattr(
+        docker_service, "repair_stale_vloopback_mountpoint", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr(
+        docker_service, "start_existing_container", AsyncMock(side_effect=slow_start)
+    )
+    monkeypatch.setattr(docker_service, "_prepare_known_hosts_policy", AsyncMock(return_value=None))
+    monkeypatch.setattr("services.docker_service.require_rental_docker_ssh_host_key", Mock())
+    first_ssh = _orphaned_shim_ssh_client(_ORPHANED_TASK_ID)
+    second_ssh = _orphaned_shim_ssh_client(_ORPHANED_TASK_ID)
+
+    first = asyncio.create_task(
+        _attempt_stale_mount_recovery(docker_service, _ORPHANED_TASK_ERROR, first_ssh)
+    )
+    while not docker_service.start_existing_container.await_count:
+        await asyncio.sleep(0)
+    second_task = asyncio.create_task(
+        _attempt_stale_mount_recovery(docker_service, _ORPHANED_TASK_ERROR, second_ssh)
+    )
+    await asyncio.sleep(0.05)
+    release.set()
+    second = await second_task
+
+    assert await first is True
+    assert second is False
+    second_ssh.run.assert_not_awaited()
+    # released afterwards: a later cycle may recover the pod again
+    assert docker_service._pods_in_recovery == set()
 
 
 def test_orphaned_shim_kill_refuses_anything_but_a_full_container_id():
