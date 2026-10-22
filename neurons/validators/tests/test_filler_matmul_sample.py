@@ -62,13 +62,19 @@ async def _filler_cycles(context_factory, service, cycles: int, specs=None) -> l
 
 
 @pytest.mark.asyncio
-async def test_no_sample_runs_by_default(context_factory):
+async def test_no_sample_runs_when_off(context_factory, monkeypatch):
+    monkeypatch.setattr(capability.settings, "FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES", 0)
     service = SamplingValidationService()
 
     results = await _filler_cycles(context_factory, service, 5)
 
     assert service.budgets == []
     assert all(r.event.what_we_saw == {"filler_container": "filler_active"} for r in results)
+
+
+def test_sampling_is_on_by_default_about_once_a_day():
+    # prod does not set it, so the default is what runs
+    assert type(capability.settings).model_fields["FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES"].default == 96
 
 
 @pytest.mark.asyncio
