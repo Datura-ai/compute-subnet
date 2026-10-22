@@ -270,10 +270,13 @@ async def cancel_storage_operation(
         'if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; '
         'attempt=0; while kill -0 "$pid" 2>/dev/null && test "$attempt" -lt 20; do '
         "sleep 0.1; attempt=$((attempt + 1)); done; fi; "
+        # the stopped helper still holds the repository credentials; remove it, not just stop it
+        f"/usr/bin/docker rm -f -- {shlex.quote(helper_name)} >/dev/null 2>&1 || true; "
         "fi; "
         'kill -0 "$pid" 2>/dev/null && exit 3 || true; '
         "else "
         f"/usr/bin/docker stop --time 5 {shlex.quote(helper_name)} >/dev/null 2>&1 || true; "
+        f"/usr/bin/docker rm -f -- {shlex.quote(helper_name)} >/dev/null 2>&1 || true; "
         "fi"
     )
     result = await ssh_client.run(command, check=False)
