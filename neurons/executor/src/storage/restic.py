@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import IO
 
 from storage.models import (
@@ -48,6 +48,14 @@ class ResticOperationError(RuntimeError):
 
 class StorageOperationCancelled(RuntimeError):
     pass
+
+
+class CredentialsExpired(ResticOperationError):
+    pass
+
+
+# DAH-4945: the backend renews scoped credentials up to 4 sessions' worth after the backup started.
+CREDENTIAL_RENEWALS = 3
 
 
 @dataclass(frozen=True)
@@ -110,6 +118,10 @@ class JsonEventWriter:
     @property
     def heartbeat_interval_seconds(self) -> float:
         return self._heartbeat_interval_seconds
+
+    @property
+    def reporter(self) -> StorageEventReporter | None:
+        return self._reporter
 
     @property
     def cancellation_requested(self) -> bool:
@@ -367,7 +379,17 @@ class ResticStorageRunner:
                 raise ResticOperationError("the backup path is not a directory")
             if not path.exists() or not any(path.iterdir()):
                 return nothing
-        exit_code, summary = self._stream(command, working_directory=True)
+        renewals = 0
+        while True:
+            try:
+                exit_code, summary = self._stream(command, working_directory=True)
+                break
+            except CredentialsExpired:
+                if renewals >= CREDENTIAL_RENEWALS:
+                    raise
+                renewals += 1
+                # restic resumes from the blobs its repository already indexed
+                self._renew_credentials()
         snapshot_id = _snapshot_id(summary)
         # DAH-4693: an empty snapshot is a no-op only when excludes removed every file
         snapshot_empty = self._snapshot_empty and bool(self._operation.workspace.exclude_patterns)
@@ -381,6 +403,23 @@ class ResticStorageRunner:
             f"restic backup failed with exit {exit_code}"
             + (" without a snapshot ID" if not snapshot_id else "")
         )
+
+    def _renew_credentials(self) -> None:
+        reporter = self._events.reporter
+        credentials = reporter.renew_credentials() if reporter else None
+        if not credentials:
+            raise ResticOperationError("storage credentials expired and could not be renewed")
+        self._operation = replace(
+            self._operation, repository=replace(self._operation.repository, **credentials)
+        )
+        self._environment = self._build_environment()
+        # the stopped helper's --rm removal can lag; the rerun reuses its name
+        subprocess.run(
+            [self._docker_binary, "rm", "-f", self._helper_container_name()],
+            capture_output=True,
+            text=True,
+        )
+        self._events.diagnostic("storage credentials expired; renewed them, restarting the backup")
 
     def _restore(self) -> ResticResult:
         if self._operation.engine is StorageEngine.TAR_AWS_CLI:
@@ -491,6 +530,8 @@ class ResticStorageRunner:
                 try:
                     payload = json.loads(line)
                 except json.JSONDecodeError:
+                    if not _snapshot_id(summary):
+                        self._raise_if_credentials_expired(line)
                     self._events.diagnostic(_redact(line, self._secret_values()))
                     continue
                 if not isinstance(payload, dict):
@@ -498,6 +539,9 @@ class ResticStorageRunner:
                     continue
                 if payload.get("message_type") == "exit_error" and payload.get("message") == SNAPSHOT_EMPTY_MESSAGE:
                     self._snapshot_empty = True
+                # an expiry after the summary (restic's lock cleanup) must not rerun a finished backup
+                if not _snapshot_id(summary):
+                    self._raise_if_credentials_expired(_error_text(payload))
                 self._events.restic_event(payload)
                 self._events.heartbeat_if_due()
                 self._cancel_if_requested(process)
@@ -513,6 +557,11 @@ class ResticStorageRunner:
             raise
         finally:
             output_reader.join(timeout=1)
+
+    def _raise_if_credentials_expired(self, error_text: str) -> None:
+        # restic 0.19 retries an expired session for 15 minutes before failing; stop it now
+        if self._operation.repository.session_token and _credentials_expired(error_text):
+            raise CredentialsExpired("storage credentials expired")
 
     def _cancel_if_requested(self, process: subprocess.Popen[str]) -> None:
         if not self._events.cancellation_requested:
@@ -746,6 +795,26 @@ def _is_retryable_repository_failure(failure_detail: str) -> bool:
     # Normalization matches both "Access Denied" and compact "AccessDenied" forms.
     normalized_detail = "".join(failure_detail.casefold().split())
     return any(marker in normalized_detail for marker in retryable_failure_markers)
+
+
+def _credentials_expired(error_text: str) -> bool:
+    # S3: "ExpiredToken: The provided token has expired."; minio-go often prints only the message.
+    # Only the last ": " component counts, so a file name like "open ExpiredToken.java: ..." never matches.
+    normalized = "".join(error_text.rsplit(":", 1)[-1].casefold().split()).rstrip(".")
+    return normalized in ("expiredtoken", "theprovidedtokenhasexpired")
+
+
+def _error_text(payload: Mapping[str, object]) -> str:
+    """the message of a restic error/exit_error event, never its file names (item, current_files)"""
+    if payload.get("message_type") not in ("error", "exit_error"):
+        return ""
+    error = payload.get("error")
+    message = error.get("message") if isinstance(error, Mapping) else payload.get("message")
+    if not isinstance(message, str):
+        return ""
+    item = payload.get("item")
+    # restic repeats the file name in the message ("open /workspace/ExpiredToken.java: permission denied")
+    return message.replace(item, "") if isinstance(item, str) and item else message
 
 
 def _snapshot_id(summary: Mapping[str, object] | None) -> str | None:
