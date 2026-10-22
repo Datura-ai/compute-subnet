@@ -96,6 +96,33 @@ async def test_gpu_uuid_match_fails(context_factory):
 
 
 @pytest.mark.asyncio
+async def test_node_of_banned_pool_account_fails(context_factory):
+    # default_executor().uuid is "executor-123"; case and whitespace differ on purpose
+    rented_data = RentedExecutorsResponse.model_validate(
+        {"executors": {}, "banned_executor_ids": [" EXECUTOR-123 "]}
+    )
+    state = build_state(gpu_uuids="gpu-1", rented_data=rented_data)
+    ctx = context_factory(
+        services=build_services(),
+        config=build_context_config(),
+        state=state,
+    )
+
+    result = await BannedProviderCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.event.reason_code == Msg.PROVIDER_BANNED.reason
+    assert result.updates["is_provider_banned"] is True
+
+
+def test_response_without_banned_executor_ids_bans_no_node():
+    rented_data = RentedExecutorsResponse.model_validate({"executors": {}})
+
+    assert rented_data.banned_executor_ids == []
+    assert rented_data.is_provider_banned(miner_hotkey="miner-hotkey", executor_uuid="executor-123") is False
+
+
+@pytest.mark.asyncio
 async def test_clean_provider_passes(context_factory):
     state = build_state(
         gpu_uuids="gpu-1",

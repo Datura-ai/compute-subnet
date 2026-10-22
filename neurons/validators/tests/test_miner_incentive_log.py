@@ -28,6 +28,7 @@ def test_reason_enum_pins_the_stable_code_contract():
         "provider_discord_not_connected",
         "new_rentals_paused",
         "miner_default_job",
+        "hotkey_excluded_from_scoring",
         "gpu_model_not_eligible_for_unrented_incentive",
         "price_above_market_p90_soft_limit",
         "no_unrented_capacity_for_gpu_count",
@@ -38,10 +39,12 @@ def test_reason_enum_pins_the_stable_code_contract():
         "cannot_apply_gpu_power_cap",
         "outdated_executor_image",
         "port_limited_remainder",
+        "provider_email_not_confirmed",
         "spot_without_lium_filler",
         "spot_no_filler_revenue_for_gpu_config",
         "spot_no_headroom_at_burn_cap",
         "validation_failed",
+        "rented_sysbox_not_confirmed",
     }
 
 
@@ -91,6 +94,11 @@ def _job(**overrides) -> JobResult:
             "Discord",
         ),
         (
+            lambda job: MinerLogLine.no_payout_because_email_not_confirmed(job),
+            "provider_email_not_confirmed",
+            "A listed node stays listed and rented. Other listing and incentive requirements still apply.",
+        ),
+        (
             lambda job: MinerLogLine.no_payout_because_paused_for_new_rentals(job),
             "new_rentals_paused",
             "paused for new rentals",
@@ -99,6 +107,11 @@ def _job(**overrides) -> JobResult:
             lambda job: MinerLogLine.no_payout_because_running_own_default_job(job),
             "miner_default_job",
             "own default job",
+        ),
+        (
+            lambda job: MinerLogLine.no_payout_because_hotkey_excluded_from_scoring(job),
+            "hotkey_excluded_from_scoring",
+            "excludes this hotkey from scoring",
         ),
         (
             lambda job: MinerLogLine.no_payout_because_gpu_model_not_in_unrented_program(job),
@@ -131,6 +144,11 @@ def _job(**overrides) -> JobResult:
             lambda job: MinerLogLine.no_payout_because_sysbox_not_enabled(job),
             "sysbox_not_enabled",
             "sysbox",
+        ),
+        (
+            lambda job: MinerLogLine.no_payout_because_rented_sysbox_not_confirmed(job),
+            "rented_sysbox_not_confirmed",
+            "rented node",
         ),
         (
             lambda job: MinerLogLine.no_payout_because_flagship_without_ncu_or_split(

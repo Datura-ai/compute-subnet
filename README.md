@@ -57,7 +57,7 @@ Per GPU host (the full list is in the [Node Quickstart](https://docs.lium.io/pro
 - **GPU:** an NVIDIA model on the [supported list](https://docs.lium.io/providers/architecture#supported-gpus) (the validator's source of truth is `GPU_MODEL_RATES` in [`neurons/validators/src/services/const.py`](neurons/validators/src/services/const.py)), with the driver installed (`nvidia-smi` works).
 - **Docker Engine**, installed and running.
 - **Network:** a public IP and at least **100 Mbps download**, as measured by the validator.
-- **Hardware:** at least 8 GB RAM and 100 GB free disk. For idle pay, total disk must be at least **1.5× total GPU VRAM**.
+- **Hardware:** at least 8 GB RAM and 140 GB free disk before the first install (100 GB once the node's images are pulled). For idle pay, total disk must be at least **1.5× total GPU VRAM**.
 - **A registered hotkey** on Subnet 51 (below). Keep your coldkey off the server.
 
 ### Ports
@@ -144,7 +144,7 @@ The validator code here is open so anyone can read what it checks and how it sco
 flowchart LR
     R["Renters<br/>lium.io · CLI · SDK · API"] --> P["Lium platform"]
     P <-->|"WebSocket<br/>lium_protocol"| V["Validator<br/>neurons/validators"]
-    V <-->|"WebSocket<br/>datura"| M["Provider coordinator<br/>neurons/miners"]
+    V <-->|"REST<br/>datura"| M["Provider coordinator<br/>neurons/miners"]
     M -->|"signed HTTP"| E["Node agent<br/>neurons/executor<br/>on each GPU host"]
     V -->|"SSH: checks<br/>and rental pods"| E
     R -.->|"SSH into the pod"| E
@@ -179,7 +179,7 @@ Issues and pull requests are welcome. Open an [issue](https://github.com/Datura-
 cd neurons/validators && pdm install && \
 BITTENSOR_WALLET_NAME=test_wallet BITTENSOR_WALLET_HOTKEY_NAME=test_hotkey \
 SQLALCHEMY_DATABASE_URI=sqlite:///test.db ASYNC_SQLALCHEMY_DATABASE_URI=sqlite+aiosqlite:///test.db \
-ENABLE_TDX_ATTESTATION=True TDX_VERIFIER_URL=http://localhost:8000/verify \
+TDX_VERIFIER_URL=http://localhost:8000/verify \
 pdm run pytest tests/ --tb=short --strict-markers
 ```
 
