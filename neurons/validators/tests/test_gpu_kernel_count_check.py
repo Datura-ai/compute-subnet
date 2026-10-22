@@ -29,7 +29,7 @@ from neurons.validators.src.services.task.checks.gpu_kernel_count import (
     evaluate_kernel_view,
 )
 from neurons.validators.src.services.task.messages import GpuKernelCountMessages as Msg
-from neurons.validators.src.services.task.pipeline import Pipeline
+from neurons.validators.src.services.task.pipeline import Context, Pipeline
 from protocol.vc_protocol.compute_requests import (
     RentedExecutor,
     RentedExecutorsResponse,
@@ -102,7 +102,7 @@ def _ctx(
     )
 
 
-def _rented(ctx):
+def _with_live_rental(ctx: Context) -> Context:
     rented = RentedExecutorsResponse(
         executors={
             ctx.executor.uuid: RentedExecutor(
@@ -147,7 +147,9 @@ async def test_mismatch_on_a_rented_node_fails_but_does_not_stop_the_run(
     context_factory, check_enabled
 ):
     # same rule as the ban checks: a node with a renter's pod on it keeps being verified
-    ctx = _rented(_ctx(context_factory, reported=[REAL[0], *OTHER_CARDS], kernel=[REAL[0]]))
+    ctx = _with_live_rental(
+        _ctx(context_factory, reported=[REAL[0], *OTHER_CARDS], kernel=[REAL[0]])
+    )
 
     result = await GpuKernelCountCheck().run(ctx)
     ok, _, _ = await Pipeline([GpuKernelCountCheck()], _Sink()).run(ctx)
@@ -163,7 +165,7 @@ async def test_mismatch_on_a_rented_node_fails_but_does_not_stop_the_run(
 async def test_match_on_a_rented_node_passes_and_keeps_the_score_flag(
     context_factory, check_enabled
 ):
-    ctx = _rented(_ctx(context_factory, reported=REAL, kernel=REAL))
+    ctx = _with_live_rental(_ctx(context_factory, reported=REAL, kernel=REAL))
 
     result = await GpuKernelCountCheck().run(ctx)
 
@@ -176,7 +178,7 @@ async def test_match_on_a_rented_node_passes_and_keeps_the_score_flag(
 async def test_not_evaluated_on_a_rented_node_passes_and_keeps_the_score_flag(
     context_factory, check_enabled
 ):
-    ctx = _rented(_ctx(context_factory, reported=REAL, kernel=None))
+    ctx = _with_live_rental(_ctx(context_factory, reported=REAL, kernel=None))
 
     result = await GpuKernelCountCheck().run(ctx)
 
