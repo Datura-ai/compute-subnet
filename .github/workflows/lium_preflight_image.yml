@@ -1,7 +1,8 @@
 name: "CD: lium mine preflight image"
 
-# Builds neurons/validators/Dockerfile.preflight and pushes daturaai/lium-validator:latest, the
-# image `lium mine` runs for its GPU check before a node is added. It is published from main
+# Builds neurons/validators/Dockerfile.preflight and pushes daturaai/compute-subnet-validator:preflight,
+# the image `lium mine` runs for its GPU check before a node is added. A tag of the validator
+# repository, because the lium-io-publish OIDC ruleset already covers it. It is published from main
 # when its inputs change, not with a validator tag: validator releases no longer push tags, and
 # a stale image rejects every GPU model added since it was built.
 
@@ -40,7 +41,7 @@ jobs:
       - name: Build the image
         run: |
           cd neurons/validators
-          docker build -f Dockerfile.preflight -t daturaai/lium-validator:latest .
+          docker build -f Dockerfile.preflight -t daturaai/compute-subnet-validator:preflight .
 
       - name: Log in to Docker Hub (OIDC, no stored token)
         uses: docker/login-action@v4   # >= 4.5.0 for Docker Hub OIDC
@@ -51,4 +52,4 @@ jobs:
           username: daturaai
 
       - name: Push the image
-        run: docker push daturaai/lium-validator:latest
+        run: docker push daturaai/compute-subnet-validator:preflight
