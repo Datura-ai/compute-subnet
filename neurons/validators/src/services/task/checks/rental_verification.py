@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -24,8 +23,6 @@ from ..messages import MessageTemplate, render_message
 from ..messages import RentalVerificationMessages as Msg
 from ..pipeline import CheckResult, Context
 from .cpu_truth import advertised_cpu_count
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
