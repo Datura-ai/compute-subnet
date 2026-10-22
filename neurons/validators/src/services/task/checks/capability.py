@@ -125,7 +125,7 @@ class CapabilityCheck:
             failure_details = {"error": failure_reason}
 
         if _probe_gave_no_answer(result):
-            lium_workload = await _lium_workload_live_now(ctx)
+            lium_workload = await lium_workload_live_now(ctx)
             if lium_workload is not None:
                 event = render_message(
                     Msg.RENTED_SKIPPED,
@@ -186,7 +186,7 @@ class _LiumWorkload:
     snapshot: RentedExecutorsResponse
 
 
-async def _lium_workload_live_now(ctx: Context) -> _LiumWorkload | None:
+async def lium_workload_live_now(ctx: Context) -> _LiumWorkload | None:
     """Ask the backend whether a workload it started holds this node's cards right now.
 
     `rented_data` is read once, at cycle start. A filler the backend starts right after a rental
