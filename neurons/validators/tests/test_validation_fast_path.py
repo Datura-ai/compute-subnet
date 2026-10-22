@@ -37,6 +37,7 @@ from neurons.validators.src.services.task.checks import (
     PostRentalGpuRecheckCheck,
     RegistryPullCheck,
     RentalVerificationCheck,
+    PidHostRequiredCheck,
     SysboxRequiredCheck,
     TenantEnforcementCheck,
     VerifyXCheck,
@@ -315,6 +316,7 @@ def test_fast_path_checks_are_the_serial_checks_re_ordered():
             RegistryPullCheck,
             ContainerDownloadSpeedCheck,
             SysboxRequiredCheck,
+            PidHostRequiredCheck,
             RentalVerificationCheck,
         ],
         [

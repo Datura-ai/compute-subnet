@@ -2236,6 +2236,15 @@ def get_machine_specs():
     except Exception as exc:
         data["data_disk_health_scrape_error"] = repr(exc)
 
+    # DAH: the executor's PID namespace mode, read from its own container (hostname = container id).
+    # "host" is required: backups read /proc/<rental pid> of the host. Missing key = unknown, never fails.
+    try:
+        data["data_executor_pid_mode"] = (
+            (docker_api_get(f"/containers/{socket.gethostname()}/json") or {}).get("HostConfig") or {}
+        ).get("PidMode", "")
+    except Exception as exc:
+        data["data_executor_pid_mode_scrape_error"] = repr(exc)
+
     data["data_os"] = ""
     try:
         data["data_os"] = run_cmd('lsb_release -d | grep -Po "Description:\\s*\\K.*"').strip()
