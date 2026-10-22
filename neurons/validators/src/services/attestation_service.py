@@ -550,11 +550,10 @@ class AttestationService:
         """Verify TDX quote and return (attestation_digest, tee_type).
 
         Validates the quote string, calls the external verifier, extracts
-        os_image_hash / compose_hash from the response, and checks the whitelist
-        when ENABLE_ATTESTATION_WHITELIST is set.
+        os_image_hash / compose_hash from the response, and checks the whitelist.
 
         Raises AttestationError if the quote is missing, the verifier rejects it,
-        or the digest is not in the whitelist when whitelisting is enabled.
+        or the digest is not in the whitelist.
         """
         quote = executor.tdx_quote
         if not isinstance(quote, str) or not quote.strip():
@@ -589,28 +588,27 @@ class AttestationService:
             }),
         ))
 
-        if settings.ENABLE_ATTESTATION_WHITELIST:
-            if not attestation_digest:
-                raise AttestationError(
-                    f"Missing attestation digest for executor {executor.address}:{executor.port}"
-                )
-
-            is_whitelisted = await self._check_whitelist(
-                compose_hash=compose_hash, os_image_hash=os_image_hash, executor=executor
+        if not attestation_digest:
+            raise AttestationError(
+                f"Missing attestation digest for executor {executor.address}:{executor.port}"
             )
-            if not is_whitelisted:
-                raise AttestationError(
-                    f"Attestation digest {attestation_digest} with TEE type {tee_type} not in whitelist for executor {executor.address}:{executor.port}"
-                )
 
-            logger.info(_m(
-                "Attestation digest verified against whitelist",
-                extra=get_extra_info({
-                    "executor": f"{executor.address}:{executor.port}",
-                    "attestation_digest": attestation_digest,
-                    "tee_type": tee_type,
-                }),
-            ))
+        is_whitelisted = await self._check_whitelist(
+            compose_hash=compose_hash, os_image_hash=os_image_hash, executor=executor
+        )
+        if not is_whitelisted:
+            raise AttestationError(
+                f"Attestation digest {attestation_digest} with TEE type {tee_type} not in whitelist for executor {executor.address}:{executor.port}"
+            )
+
+        logger.info(_m(
+            "Attestation digest verified against whitelist",
+            extra=get_extra_info({
+                "executor": f"{executor.address}:{executor.port}",
+                "attestation_digest": attestation_digest,
+                "tee_type": tee_type,
+            }),
+        ))
 
         logger.info(_m(
             "TDX quote verified",

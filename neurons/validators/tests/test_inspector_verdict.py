@@ -605,7 +605,6 @@ async def test_a_falsy_non_list_findings_is_still_a_sensor_error(context_factory
 
 @pytest.mark.asyncio
 async def test_tdx_attested_host_marks_the_sensor_attested_and_skips_the_shell_checksum(context_factory, monkeypatch):
-    monkeypatch.setattr(settings, "ENABLE_ATTESTATION_WHITELIST", True)  # the image was compared to TDX_WHITELIST
     ctx, service = _ctx(context_factory, [], tdx_attestation_passed=True)
 
     result = await InspectorRentedCheck().run(ctx)
@@ -613,15 +612,3 @@ async def test_tdx_attested_host_marks_the_sensor_attested_and_skips_the_shell_c
     assert service.sensor_attested is True
     assert result.updates["state"].inspector_event["context"]["verdict"]["sensor"] == SENSOR_ATTESTED
 
-
-@pytest.mark.asyncio
-async def test_a_passed_attestation_without_the_whitelist_leaves_the_sensor_unattested(context_factory, monkeypatch):
-    # prod runs ENABLE_ATTESTATION_WHITELIST=false: the quote is genuine but nothing compared the image
-    # against TDX_WHITELIST, so the sensor binary is not measured and the shell checksum must stay — taiberium, 9 Sep
-    monkeypatch.setattr(settings, "ENABLE_ATTESTATION_WHITELIST", False)
-    ctx, service = _ctx(context_factory, [], tdx_attestation_passed=True)
-
-    result = await InspectorRentedCheck().run(ctx)
-
-    assert service.sensor_attested is False
-    assert result.updates["state"].inspector_event["context"]["verdict"]["sensor"] == SENSOR_UNATTESTED

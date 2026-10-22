@@ -152,9 +152,9 @@ def test_release_notes_section_carries_digest_and_hash():
         "a second '## ' heading inside the section would end it early for release_notes_update.sh"
     )
     # the digest is the 2026-08-19 runner, older than any tag that ships it: the section says so, and
-    # says what an unknown hash costs under each setting of the validator's whitelist flag
+    # says what an unknown hash costs
     assert f"pushed {compose_hash.APPROVED_RUNNER_IMAGE_PUSHED}" in section
-    assert "ENABLE_ATTESTATION_WHITELIST" in section
+    assert "scores zero" in section
     preview = compose_hash.release_notes_section("prod", "sha256:" + "0" * 64)
     assert "not the approved runner" in preview and "pushed" not in preview
 

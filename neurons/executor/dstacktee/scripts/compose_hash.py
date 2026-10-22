@@ -4,9 +4,8 @@
 The validator whitelists the sha256 of shared/app-compose.json (dstack's compose_hash, measured
 into RTMR3). That file is built from three measured inputs plus the runner digest stamped into
 the compose: app/docker-compose.yml, app/init_script.sh, app/pre_launch_script.sh. Editing any
-of them moves the hash. A hash the validator does not know fails its whitelist check: with
-ENABLE_ATTESTATION_WHITELIST on the CVM scores zero, with it off (the default) the validator
-accepts the unknown hash and scores the node as before (DAH-3602).
+of them moves the hash. A hash the validator does not know fails its whitelist check and the
+validator scores the CVM zero (DAH-3602).
 
     compose_hash.py                     # the prod hash for the approved runner digest
     compose_hash.py --env staging       # another compose file
@@ -103,13 +102,10 @@ def release_notes_section(env: str = "prod", digest: str = APPROVED_RUNNER_IMAGE
             "does the comparison and exits 1 on a mismatch.",
             "",
             "The output must equal the expected compose hash. Any other value means the measured files "
-            "or the digest differ from the release, and the validator does not know the hash. What that "
-            "costs depends on the validator's whitelist enforcement (`ENABLE_ATTESTATION_WHITELIST`): "
-            "with it on, the validator rejects the CVM and it scores zero; with it off (the default), "
-            "the validator accepts the unknown hash and scores the node as before. Do not run a CVM that does not "
-            "match the release either way. Under enforcement a matching value scores only once the "
-            "validator release that whitelists this hash is deployed; until then a correct CVM scores "
-            "zero as well.",
+            "or the digest differ from the release, and the validator does not know the hash: the "
+            "validator rejects the CVM and it scores zero. Do not run a CVM that does not match the "
+            "release. A matching value scores only once the validator release that whitelists this "
+            "hash is deployed; until then a correct CVM scores zero as well.",
         ]
     )
 
