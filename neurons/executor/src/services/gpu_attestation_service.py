@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-import os
+from pathlib import Path
 import secrets
 
 from core.config import settings
@@ -36,7 +36,7 @@ class GPUAttestationService:
 
     @staticmethod
     def _in_cvm() -> bool:
-        return os.path.exists(settings.DSTACK_SOCKET_PATH)
+        return Path(settings.DSTACK_SOCKET_PATH).is_socket()  # Docker makes a missing path a dir
 
     @staticmethod
     def _normalise_nonce(nonce: str | None) -> str | None:

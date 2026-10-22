@@ -1,4 +1,5 @@
 import asyncio
+import socket as socketlib
 import hashlib
 import json
 import os
@@ -15,6 +16,13 @@ os.environ.setdefault("MINER_HOTKEY_SS58_ADDRESS", "5TestMinerHotkeyAddress")
 
 from core.config import settings  # noqa: E402
 from neurons.executor.src.services.tdx_service import TDXQuoteService  # noqa: E402
+
+
+def _bind_unix_socket(path):
+    """A real Unix socket file: the service checks is_socket(), not exists()."""
+    sock = socketlib.socket(socketlib.AF_UNIX)
+    sock.bind(str(path))
+    sock.close()
 
 
 async def _run_quote_flow(monkeypatch, tmp_path):
@@ -38,7 +46,7 @@ async def _run_quote_flow(monkeypatch, tmp_path):
     monkeypatch.setenv("DSTACK_SIMULATOR_ENDPOINT", f"http://127.0.0.1:{port}")
 
     socket = tmp_path / "dstack.sock"
-    socket.touch()
+    _bind_unix_socket(socket)
     monkeypatch.setattr(settings, "DSTACK_SOCKET_PATH", str(socket))
     original_timeout = settings.TDX_QUOTE_TIMEOUT
     settings.TDX_QUOTE_TIMEOUT = 2
@@ -82,3 +90,11 @@ def test_tdx_quote_service_off_outside_a_cvm(monkeypatch, tmp_path):
     service = TDXQuoteService()
     result = asyncio.run(service.get_quote("ssh-ed25519 AAAAC3NzaTest executor"))
     assert result is None
+
+
+def test_tdx_quote_service_off_when_docker_made_the_path_a_directory(monkeypatch, tmp_path):
+    # bare metal: Docker creates a missing bind-mount source as a directory
+    path = tmp_path / "dstack.sock"
+    path.mkdir()
+    monkeypatch.setattr(settings, "DSTACK_SOCKET_PATH", str(path))
+    assert TDXQuoteService().enabled is False
