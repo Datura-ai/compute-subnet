@@ -78,16 +78,17 @@ async def test_live_rental_is_not_failed_for_its_disk(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "pod_ids, live, exempt",
+    "pod_ids, running, live, exempt",
     [
-        (["pod-a", "pod-b"], {"pod-b"}, True),  # split node: A ended, B still rented
-        (["pod-a", "pod-b"], {"pod-a"}, True),
-        (["pod-a", "pod-b"], set(), False),  # every listed pod ended
-        (["pod-a"], set(), False),  # the only rental ended since the cycle started
+        (["pod-a", "pod-b"], {"pod-b"}, {"pod-b"}, True),  # split node: A ended, B still rented
+        (["pod-a", "pod-b"], {"pod-a"}, {"pod-a"}, True),
+        (["pod-a", "pod-b"], set(), set(), False),  # every listed pod ended
+        (["pod-a"], set(), set(), False),  # the only rental ended since the cycle started
+        (["pod-a", "pod-b"], {"pod-b"}, set(), False),  # both ended, B's container not torn down yet
     ],
 )
-async def test_ended_rental_exempts_only_while_a_listed_pod_is_live(
-    context_factory, pod_ids, live, exempt
+async def test_ended_rental_exempts_only_while_a_listed_rental_is_active(
+    context_factory, pod_ids, running, live, exempt
 ):
     rented_data = RentedExecutorsResponse(
         executors={
@@ -105,7 +106,7 @@ async def test_ended_rental_exempts_only_while_a_listed_pod_is_live(
     ctx = context_factory(
         state=build_state(specs=_disk(95, 500), rented_data=rented_data),
         services=build_services(backend=PerPodBackendClient(active=live)),
-        ssh=PerPodSSHClient(running={f"container_{p}" for p in live}),
+        ssh=PerPodSSHClient(running={f"container_{p}" for p in running}),
         rented=False,
     )
 
