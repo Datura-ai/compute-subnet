@@ -37,6 +37,9 @@ RESTIC_TMPFS_BYTES = 512 * MEBIBYTE
 BACKUP_SOURCE_SCRIPT = '[ -e "$1" ] || exit 66; cd "$1" 2>/dev/null || exit 1; [ -n "$(ls -A)" ] || exit 66; shift; exec "$@"'
 BACKUP_SOURCE_MISSING_EXIT = 66
 
+# restic 0.19.1 prints this as the exit_error JSON "message" with --json, else as a plain stderr line
+SNAPSHOT_EMPTY_MESSAGE = "Fatal: unable to save snapshot: snapshot is empty"
+
 class ResticOperationError(RuntimeError):
     def __init__(self, message: str, *, error_code: str | None = None) -> None:
         super().__init__(message)
@@ -164,6 +167,7 @@ class ResticStorageRunner:
             operation.heartbeat_interval_seconds,
         )
         self._environment = self._build_environment()
+        self._snapshot_empty = False
 
     def run(self) -> ResticResult:
         if self._operation.engine is StorageEngine.RESTIC:
@@ -355,7 +359,7 @@ class ResticStorageRunner:
             *(f"--exclude={pattern}" for pattern in self._operation.workspace.exclude_patterns),
             ".",
         ]
-        # DAH-2002: a missing or empty path is a no-op, not a failed run
+        # DAH-2002/DAH-4693: a missing, empty or fully excluded path is a no-op, not a failed run
         nothing = ResticResult("COMPLETED", OperationResultQuality.EMPTY, None, 0)
         if isinstance(self._workspace, LocalWorkspace):
             path = self._workspace.path
@@ -365,7 +369,9 @@ class ResticStorageRunner:
                 return nothing
         exit_code, summary = self._stream(command, working_directory=True)
         snapshot_id = _snapshot_id(summary)
-        if exit_code == BACKUP_SOURCE_MISSING_EXIT and not snapshot_id:
+        # DAH-4693: an empty snapshot is a no-op only when excludes removed every file
+        snapshot_empty = self._snapshot_empty and bool(self._operation.workspace.exclude_patterns)
+        if (exit_code == BACKUP_SOURCE_MISSING_EXIT or snapshot_empty) and not snapshot_id:
             return nothing
         if exit_code == 0 and snapshot_id:
             return ResticResult("COMPLETED", OperationResultQuality.FULL, snapshot_id, exit_code)
@@ -472,6 +478,8 @@ class ResticStorageRunner:
                 line = raw_line.strip()
                 if not line:
                     continue
+                # DAH-4693: restic refuses to save an empty snapshot (plain-text form)
+                self._snapshot_empty = self._snapshot_empty or line == SNAPSHOT_EMPTY_MESSAGE
                 checkpoint = _restore_checkpoint(line)
                 if checkpoint is not None and restore_stats is not None:
                     self._events.restic_event(
@@ -488,6 +496,8 @@ class ResticStorageRunner:
                 if not isinstance(payload, dict):
                     self._events.diagnostic("restic emitted a non-object JSON message")
                     continue
+                if payload.get("message_type") == "exit_error" and payload.get("message") == SNAPSHOT_EMPTY_MESSAGE:
+                    self._snapshot_empty = True
                 self._events.restic_event(payload)
                 self._events.heartbeat_if_due()
                 self._cancel_if_requested(process)

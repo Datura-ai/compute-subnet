@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 import json
 import logging
 import os
@@ -13,10 +12,9 @@ import aiohttp
 from asyncssh import SSHKey
 import asyncssh
 import bittensor
-from clients.miner_client import MinerClient
+from clients.subtensor_client import SubtensorClient
 from datura.requests.miner_requests import (
     AcceptSSHKeyRequest,
-    DeclineJobRequest,
     ExecutorSSHInfo,
     FailedRequest,
     PodLogsResponse,
@@ -57,7 +55,6 @@ from payload_models.payloads import (
     WorkloadKind,
     now_ms,
 )
-from tenacity import RetryError
 
 from core.config import settings
 from core.utils import _m, _StructuredMessage, get_extra_info
@@ -80,6 +77,10 @@ from services.task_service import TaskService, JobResult
 from services.storage_operations import cancel_storage_operation, start_storage_operation, supports_workspace_field
 
 logger = logging.getLogger(__name__)
+
+# I-78: bittensor packs a.b.c into axon_info.version as a*1000**2 + b*1000 + c. 10.5.0 is what
+# miner-v1.003+ announces; the upload nonce field shipped in miner-v1.002 (fbfbde79, DAH-2338).
+MIN_DATED_NONCE_MINER_AXON_VERSION = 10_005_000
 
 
 def _miner_job_script_path(script_name: str) -> str:
@@ -131,7 +132,6 @@ def _missing_executor_failure(
     reach, ExecutorUnreachable; an id the miner does not list is InvalidExecutorId, worded "the
     miner no longer lists this executor" (DAH-4481). A miner that predates known_executor_ids sends
     None: it is still InvalidExecutorId, worded by `_ssh_key_not_accepted_text` (DAH-3508).
-    Both twins of the container flow (websocket and REST) call this, so they cannot drift apart.
     """
     if msg.known_executor_ids is not None and executor_id in msg.known_executor_ids:
         return (
@@ -258,6 +258,8 @@ REST_SSH_SUBMIT_TIMEOUT = 30  # Timeout for SSH key submission requests
 REST_CONTAINER_OP_TIMEOUT = 30  # Timeout for container operations
 REST_POD_LOGS_TIMEOUT = 30  # Timeout for pod logs requests
 REST_SSH_REMOVE_TIMEOUT = 10  # Timeout for SSH key removal requests
+MINER_RESTART_WAIT_S = 90  # how long a create waits for a miner that refuses connections
+MINER_RESTART_RETRY_S = 5
 
 # Emitted instead of a validation result for an executor under a special manual (bare-metal)
 # rental. Distinct string so manual passes are greppable in Loki and can never be mistaken for a
@@ -407,13 +409,27 @@ class MinerService:
     def _normalize_public_key(public_key: bytes | str) -> str:
         return public_key.decode("utf-8") if isinstance(public_key, bytes) else public_key
 
-    def _dated_upload_nonce_if_enabled(self) -> str | None:
+    def _upload_nonce_for_miner(self, miner_hotkey: str) -> str | None:
         """A dated nonce for an SSH-key upload, so a captured signature goes stale (I-78).
 
-        Off until miners/executors older than the nonce field (Jul 2026) are gone: they drop or
-        mis-verify it and the upload fails.
+        Only for a miner proven to relay the nonce field: the central miner, or an axon announcing
+        bittensor 10.5.0+. Older miners drop the field and the upload fails, so they get none.
         """
-        return fresh_upload_nonce() if settings.ENABLE_DATED_UPLOAD_NONCE else None
+        subtensor = SubtensorClient.get_instance()
+        if miner_hotkey in subtensor.hotkeys_routed_via_central_miner:
+            return fresh_upload_nonce()
+        # in-memory metagraph snapshot only: no chain read on the upload path
+        neuron = next((n for n in subtensor.miners if n.hotkey == miner_hotkey), None)
+        axon_version = getattr(neuron.axon_info, "version", None) if neuron is not None else None
+        if axon_version and axon_version >= MIN_DATED_NONCE_MINER_AXON_VERSION:
+            return fresh_upload_nonce()
+        logger.info(
+            _m(
+                "dated_upload_nonce_skipped",
+                extra=get_extra_info({"miner_hotkey": miner_hotkey, "axon_version": axon_version}),
+            )
+        )
+        return None
 
     def _sign_validator_pubkey(
         self,
@@ -468,7 +484,7 @@ class MinerService:
         executor_id: str | None = None,
         first_pass: bool = False,
     ):
-        """Request job to miner - uses REST API if configured, otherwise WebSocket.
+        """Request job to miner over the miner's REST API.
 
         executor_id (DAH-2958): None asks the miner for every executor it has for this validator
         (the cycle); a uuid asks for that one executor only (the express lane) — the miner already
@@ -476,323 +492,23 @@ class MinerService:
         first_pass (DAH-3011): this is the executor's first, unscored verification; handed to
         TaskService.create_task, where it shrinks the probes. The cycle never sets it.
         """
-        if settings.USE_REST_API:
-            logger.info(
-                _m(
-                    "Routing request_job_to_miner to REST API",
-                    extra=get_extra_info({
-                        "use_rest_api": settings.USE_REST_API,
-                        "miner_hotkey": payload.miner_hotkey,
-                    }),
-                ),
-            )
-            return await self._request_job_to_miner(
-                payload,
-                encrypted_files,
-                rented_data,
-                default_docker_image_digests,
-                executor_image_snapshot,
-                executor_id=executor_id,
-                first_pass=first_pass,
-            )
-        else:
-            logger.info(
-                _m(
-                    "Routing request_job_to_miner to WebSocket",
-                    extra=get_extra_info({
-                        "use_rest_api": settings.USE_REST_API,
-                        "miner_hotkey": payload.miner_hotkey,
-                    }),
-                ),
-            )
-        
-        loop = asyncio.get_event_loop()
-        # DAH-2667: what the RoCE probe subtracts from the cycle's own wait, so a job that already
-        # spent most of it takes a shorter sweep instead of overrunning and scoring the miner zero.
-        job_started_at: float = time.monotonic()
-        my_key: bittensor.Keypair = settings.get_bittensor_wallet().get_hotkey()
-        default_extra = {
-            "job_batch_id": payload.job_batch_id,
-            "miner_hotkey": payload.miner_hotkey,
-            "miner_address": payload.miner_address,
-            "miner_port": payload.miner_port,
-        }
-
-        try:
-            logger.info(_m("Requesting job to miner", extra=get_extra_info(default_extra)))
-            miner_client = MinerClient(
-                loop=loop,
-                miner_address=payload.miner_address,
-                miner_port=payload.miner_port,
-                miner_hotkey=payload.miner_hotkey,
-                my_hotkey=my_key.ss58_address,
-                keypair=my_key,
-                miner_url=f"ws://{payload.miner_address}:{payload.miner_port}/websocket/{my_key.ss58_address}"
-            )
-
-            async with miner_client:
-                # generate ssh key and send it to miner
-                private_key, public_key = self.ssh_service.generate_ssh_key(my_key.ss58_address)
-
-                # G3 — attestation event: when due, mint a challenge that executors
-                # must echo in TDX report_data[32:64] / GPU evidence. The nonce is
-                # covered by validator_signature so it cannot be stripped or swapped.
-                attestation_nonce = await self.attestation_service.maybe_issue_nonce(
-                    payload.miner_hotkey
-                )
-                nonce_hex = attestation_nonce.value_hex if attestation_nonce else self._dated_upload_nonce_if_enabled()
-
-                await miner_client.send_model(
-                    SSHPubKeySubmitRequest(
-                        public_key=public_key,
-                        validator_signature=self._sign_validator_pubkey(my_key, public_key, nonce=nonce_hex),
-                        validator_miner_signature=self._sign_validator_pubkey(
-                            my_key, public_key, nonce=nonce_hex, miner_hotkey=payload.miner_hotkey
-                        ),
-                        miner_hotkey=payload.miner_hotkey, # include miner's hotkey in the request
-                        executor_id=executor_id,
-                        nonce=nonce_hex,
-                    )
-                )
-
-                try:
-                    msg = await asyncio.wait_for(
-                        miner_client.job_state.miner_accepted_ssh_key_or_failed_future, JOB_LENGTH
-                    )
-                except TimeoutError:
-                    logger.error(
-                        _m(
-                            "Waiting accepted ssh key or failed request from miner resulted in TimeoutError",
-                            extra=get_extra_info(default_extra),
-                        ),
-                    )
-                    msg = None
-                except Exception:
-                    logger.error(
-                        _m(
-                            "Waiting accepted ssh key or failed request from miner resulted in an exception",
-                            extra=get_extra_info(default_extra),
-                        ),
-                    )
-                    msg = None
-
-                if msg is None:
-                    # Deliberately NOT force-passed, unlike the zero-executors case below. There we
-                    # know the miner is alive and chose to drop the executor because it could not
-                    # install our key -- exactly the manual-rental shape. Here we have no signal
-                    # from the miner at all, so we cannot distinguish "renter holds the box" from
-                    # "this miner is gone"; force-passing would pay emissions on strictly less
-                    # evidence than the case it is meant to cover. This assumes the miner neuron is
-                    # shared infrastructure independent of the rented host (CENTRAL_MODE), so that
-                    # an unreachable miner is a real fault rather than an expected consequence of
-                    # handing the box over -- CENTRAL_MODE defaults to False and confirming the
-                    # target deployment is still an open question on the plan.
-                    # Accepted for beta -- see the plan's V3 "Known limitation".
-                    return self._build_failed_job_result(
-                        payload,
-                        "Miner did not respond after SSH key submission",
-                    )
-
-                if isinstance(msg, AcceptSSHKeyRequest):
-                    logger.info(
-                        _m(
-                            "Received AcceptSSHKeyRequest for miner. Running tasks for executors",
-                            extra=get_extra_info(
-                                {**default_extra, "executors": len(msg.executors)}
-                            ),
-                        ),
-                    )
-                    if (
-                        len(msg.executors) == 0
-                        and not self._has_manual_rental_executors(payload, rented_data)
-                        and not self._has_not_listed_rented_executors(
-                            payload, rented_data, msg.executors, executor_id
-                        )
-                        and not self._build_unreachable_known_results(
-                            payload, rented_data, msg, executor_id, log=False
-                        )
-                    ):
-                        # Zero executors is normally a miner failure. It is the *expected* shape when
-                        # every executor this miner has is under a manual rental, though -- the miner
-                        # drops each one because it can no longer install our key. Only fail when
-                        # there is genuinely nothing to score; otherwise fall through to synthesis.
-                        # DAH-3558 (flag): a miner whose rented nodes are all down answers the same
-                        # way; fall through so each node gets its own failed row.
-                        return self._build_failed_job_result(
-                            payload,
-                            "Miner returned zero executors in AcceptSSHKeyRequest",
-                        )
-                    executors = (
-                        self._claim_for_cycle(payload, msg.executors, default_extra)
-                        if executor_id is None
-                        else self._only_requested(msg.executors, executor_id, default_extra)
-                    )
-                    # DAH-3019: one start report for the whole miner, as its executors are launched.
-                    self.task_service.report_verification_started(payload, executors)
-                    try:
-                        tasks = [
-                            asyncio.create_task(
-                                asyncio.wait_for(
-                                    self.task_service.create_task(
-                                        miner_info=payload,
-                                        executor_info=executor_info,
-                                        keypair=my_key,
-                                        private_key=private_key.decode("utf-8"),
-                                        public_key=public_key.decode("utf-8"),
-                                        encrypted_files=encrypted_files,
-                                        rented_data=rented_data,
-                                        default_docker_image_digests=default_docker_image_digests,
-                                        executor_image_snapshot=executor_image_snapshot,
-                                        attestation_nonce=attestation_nonce,
-                                        first_pass=first_pass,
-                                    ),
-                                    timeout=settings.JOB_TIME_OUT - 120
-                                )
-                            )
-                            for executor_info in executors
-                        ]
-
-                        raw_results = await asyncio.gather(*tasks, return_exceptions=True)
-                    finally:
-                        self._release_cycle_claims(executors)
-                    results = self._filter_task_results(executors, raw_results, default_extra)
-                    results.extend(
-                        self._build_manual_rental_results(payload, rented_data, existing=results)
-                    )
-                    # DAH-3558: a rented node the miner left out of msg.executors gets a failed
-                    # result, so the wave records the outage instead of nothing (flag).
-                    results.extend(
-                        self._build_not_listed_rented_results(
-                            payload, rented_data, msg.executors, executor_id
-                        )
-                    )
-                    results.extend(
-                        self._build_unreachable_known_results(payload, rented_data, msg, executor_id)
-                    )
-
-                    # DAH-2667: while the miner's key is still installed and its idle hosts are
-                    # free, measure every RoCE pair. Best effort — an unmeasured pair is simply not
-                    # sold as a cluster.
-                    await measure_and_attach(
-                        results,
-                        self.ssh_service.decrypt_payload(
-                            my_key.ss58_address, private_key.decode("utf-8")
-                        ),
-                        default_extra,
-                        job_started_at,
-                    )
-
-                    logger.info(
-                        _m(
-                            "Finished running tasks for executors",
-                            extra=get_extra_info({**default_extra, "executors": len(results)}),
-                        ),
-                    )
-
-                    try:
-                        await miner_client.send_model(SSHPubKeyRemoveRequest(
-                            public_key=public_key,
-                            validator_signature=self._sign_validator_pubkey(my_key, public_key),
-                            miner_hotkey=payload.miner_hotkey,
-                            executor_id=executor_id,
-                        ))
-                    except Exception as e:
-                        logger.warning(
-                            _m(
-                                "Failed to send SSHPubKeyRemoveRequest (non-critical)",
-                                extra=get_extra_info({
-                                    **default_extra,
-                                    "error": _get_error_details(e),
-                                }),
-                            ),
-                        )
-
-                    return {
-                        "miner_hotkey": payload.miner_hotkey,
-                        "miner_coldkey": payload.miner_coldkey,
-                        "results": results,
-                    }
-                elif isinstance(msg, FailedRequest):
-                    logger.warning(
-                        _m(
-                            "Requesting job failed for miner",
-                            extra=get_extra_info({**default_extra, "msg": str(msg)}),
-                        ),
-                    )
-                    return self._build_failed_job_result(
-                        payload,
-                        f"Miner returned FailedRequest: {msg.details or 'unknown reason'}",
-                    )
-                elif isinstance(msg, DeclineJobRequest):
-                    logger.warning(
-                        _m(
-                            "Requesting job declined for miner",
-                            extra=get_extra_info({**default_extra, "msg": str(msg)}),
-                        ),
-                    )
-                    return self._build_failed_job_result(
-                        payload,
-                        "Miner declined the job request",
-                    )
-                else:
-                    logger.error(
-                        _m(
-                            "Unexpected msg",
-                            extra=get_extra_info({**default_extra, "msg": str(msg)}),
-                        ),
-                    )
-                    return self._build_failed_job_result(
-                        payload,
-                        f"Unexpected response from miner: {msg}",
-                    )
-        except asyncio.CancelledError:
-            logger.error(
-                _m("Requesting job to miner was cancelled", extra=get_extra_info(default_extra)),
-            )
-            return self._build_failed_job_result(
-                payload,
-                "Validator cancelled the request before completion",
-            )
-        except asyncio.TimeoutError:
-            logger.error(
-                _m("Requesting job to miner was timed out", extra=get_extra_info(default_extra)),
-            )
-            return self._build_failed_job_result(
-                payload,
-                "Request to miner timed out",
-            )
-        except RetryError as e:
-            last_attempt = getattr(e, "last_attempt", None)
-            root_exc = last_attempt.exception() if last_attempt else None
-            if isinstance(root_exc, AttributeError):
-                friendly_reason = "Failed to send SSH key because miner websocket never connected"
-            else:
-                friendly_reason = str(root_exc or e)
-
-            logger.error(
-                _m(
-                    "Requesting job to miner resulted in a retry exhaustion error",
-                    extra=get_extra_info({**default_extra, "error": friendly_reason}),
-                ),
-            )
-            return self._build_failed_job_result(
-                payload,
-                friendly_reason,
-            )
-        except Exception as e:
-            logger.error(
-                _m(
-                    "Requesting job to miner resulted in an exception",
-                    extra=get_extra_info({
-                        **default_extra,
-                        "error": _get_error_details(e),
-                    }),
-                ),
-            )
-            return self._build_failed_job_result(
-                payload,
-                str(e),
-            )
+        logger.info(
+            _m(
+                "Routing request_job_to_miner to REST API",
+                extra=get_extra_info({
+                    "miner_hotkey": payload.miner_hotkey,
+                }),
+            ),
+        )
+        return await self._request_job_to_miner(
+            payload,
+            encrypted_files,
+            rented_data,
+            default_docker_image_digests,
+            executor_image_snapshot,
+            executor_id=executor_id,
+            first_pass=first_pass,
+        )
 
     def _filter_task_results(
         self,
@@ -1573,630 +1289,46 @@ class MinerService:
             return await self._route_container(payload)
 
     async def _route_container(self, payload: ContainerBaseRequest):
-        """Route a container request - uses REST API if configured, otherwise WebSocket."""
-        if settings.USE_REST_API:
-            logger.info(
-                _m(
-                    "Routing handle_container to REST API",
-                    extra=get_extra_info({
-                        "use_rest_api": settings.USE_REST_API,
-                        "miner_hotkey": payload.miner_hotkey,
-                        "executor_id": payload.executor_id,
-                        "request_type": str(payload.message_type),
-                    }),
-                ),
-            )
-            return await self._handle_container(payload)
-        else:
-            logger.info(
-                _m(
-                    "Routing handle_container to WebSocket",
-                    extra=get_extra_info({
-                        "use_rest_api": settings.USE_REST_API,
-                        "miner_hotkey": payload.miner_hotkey,
-                        "executor_id": payload.executor_id,
-                        "request_type": str(payload.message_type),
-                    }),
-                ),
-            )
-        
-        loop = asyncio.get_event_loop()
-        my_key: bittensor.Keypair = settings.get_bittensor_wallet().get_hotkey()
-        default_extra = {
-            "miner_hotkey": payload.miner_hotkey,
-            "executor_id": payload.executor_id,
-            "pod_id": payload.pod_id,
-            "workload_kind": payload.workload_kind.value,
-            "executor_ip": payload.miner_address,
-            "executor_port": payload.miner_port,
-            "container_request_type": str(payload.message_type),
-        }
-
-        docker_service = DockerService(
-            ssh_service=self.ssh_service,
-            redis_service=self.redis_service,
-            attestation_service=self.attestation_service,
+        """Route a container request over the miner's REST API."""
+        logger.info(
+            _m(
+                "Routing handle_container to REST API",
+                extra=get_extra_info({
+                    "miner_hotkey": payload.miner_hotkey,
+                    "executor_id": payload.executor_id,
+                    "request_type": str(payload.message_type),
+                }),
+            ),
         )
-
-        try:
-            miner_client = MinerClient(
-                loop=loop,
-                miner_address=payload.miner_address,
-                miner_port=payload.miner_port,
-                miner_hotkey=payload.miner_hotkey,
-                my_hotkey=my_key.ss58_address,
-                keypair=my_key,
-                miner_url=f"ws://{payload.miner_address}:{payload.miner_port}/websocket/{my_key.ss58_address}",
-            )
-
-            async with contextlib.AsyncExitStack() as miner_connection:
-                await miner_connection.enter_async_context(miner_client)
-                # generate ssh key and send it to miner
-                private_key, public_key = self.ssh_service.generate_ssh_key(my_key.ss58_address)
-
-                upload_nonce = self._dated_upload_nonce_if_enabled()
-                await miner_client.send_model(
-                    SSHPubKeySubmitRequest(
-                        public_key=public_key,
-                        validator_signature=self._sign_validator_pubkey(my_key, public_key, nonce=upload_nonce),
-                        validator_miner_signature=self._sign_validator_pubkey(
-                            my_key, public_key, nonce=upload_nonce, miner_hotkey=payload.miner_hotkey
-                        ),
-                        executor_id=payload.executor_id,
-                        is_rental_request=isinstance(payload, ContainerCreateRequest),
-                        miner_hotkey=payload.miner_hotkey,
-                        nonce=upload_nonce,
-                    )
-                )
-
-                logger.info(
-                    _m("Sent SSH key to miner.", extra=get_extra_info(default_extra)),
-                )
-
-                msg = await asyncio.wait_for(
-                    miner_client.job_state.miner_accepted_ssh_key_or_failed_future,
-                    timeout=JOB_LENGTH,
-                )
-
-                if isinstance(msg, AcceptSSHKeyRequest):
-                    logger.info(
-                        _m(
-                            "Received AcceptSSHKeyRequest",
-                            extra=get_extra_info({**default_extra, "msg": str(msg)}),
-                        ),
-                    )
-
-                    try:
-                        executor = msg.executors[0]
-                    except Exception:
-                        executor = None
-
-                    if executor is None or executor.uuid != payload.executor_id:
-                        log_text, error_code = _missing_executor_failure(msg, payload.executor_id, default_extra)
-
-                        await miner_client.send_model(
-                            SSHPubKeyRemoveRequest(
-                                public_key=public_key, 
-                                validator_signature=self._sign_validator_pubkey(my_key, public_key),
-                                executor_id=payload.executor_id, 
-                                miner_hotkey=payload.miner_hotkey
-                            )
-                        )
-
-                        if executor:
-                            logger.info(
-                                _m(
-                                    "Remove rented machine from redis",
-                                    extra=get_extra_info(default_extra),
-                                ),
-                            )
-                            await self.redis_service.remove_rented_machine(executor)
-
-                        return self._handle_container_error(
-                            payload=payload,
-                            msg=log_text,
-                            error_code=error_code,
-                        )
-
-                    renting_in_progress = await self.redis_service.renting_in_progress(payload.miner_hotkey, payload.executor_id, payload.pod_id)
-                    if renting_in_progress and not _bypasses_renting_in_progress(payload):
-                        log_text = _m(
-                            "Decline renting pod request. Renting is still in progress",
-                            extra=get_extra_info(default_extra),
-                        )
-
-                        await miner_client.send_model(
-                            SSHPubKeyRemoveRequest(
-                                public_key=public_key, 
-                                validator_signature=self._sign_validator_pubkey(my_key, public_key),
-                                executor_id=payload.executor_id, 
-                                miner_hotkey=payload.miner_hotkey
-                            )
-                        )
-
-                        return self._handle_container_error(
-                            payload=payload,
-                            msg=log_text,
-                            error_code=FailedContainerErrorCodes.RentingInProgress,
-                        )
-
-                    # get private key for ssh connection - asyncssh
-                    ssh_pkey = asyncssh.import_private_key(
-                        self.ssh_service.decrypt_payload(
-                            my_key.ss58_address, private_key.decode("utf-8")
-                        )
-                    )
-
-
-                    if isinstance(payload, ContainerCreateRequest):
-                        logger.info(
-                            _m(
-                                "Creating container",
-                                extra=get_extra_info(
-                                    {**default_extra, "payload": str(payload)}
-                                ),
-                            ),
-                        )
-                        # DAH-3436 (review): the rental probe takes the same per-executor lock before its
-                        # own create, so its sweep of `pod_*` containers never runs beside this create
-                        async with self.redis_service.executor_create_exclusion(payload.executor_id):
-                            customer_creates.reached_create_container(payload)
-                            result = await docker_service.create_container(
-                                payload,
-                                executor,
-                                my_key,
-                                private_key.decode("utf-8"),
-                            )
-
-                        # DAH-3980: a create's reply does not wait for the miner; the steps after it own
-                        # the miner's socket and close it once the removal is sent
-                        remove_ssh_key = self._remove_ssh_key_via_websocket(
-                            miner_client,
-                            miner_connection.pop_all(),
-                            SSHPubKeyRemoveRequest(
-                                public_key=public_key,
-                                validator_signature=self._sign_validator_pubkey(my_key, public_key),
-                                executor_id=payload.executor_id,
-                                miner_hotkey=payload.miner_hotkey
-                            ),
-                            log_extra=default_extra,
-                        )
-                        create_steps_after_reply.start(
-                            payload.pod_id, self._log_ssh_key_removal_after_reply(remove_ssh_key, default_extra)
-                        )
-                        return result
-
-                    elif isinstance(payload, ContainerDeleteRequest):
-                        logger.info(
-                            _m(
-                                "Deleting container",
-                                extra=get_extra_info(
-                                    {**default_extra, "payload": str(payload)}
-                                ),
-                            ),
-                        )
-                        result = await docker_service.delete_container(
-                            payload,
-                            executor,
-                            my_key,
-                            private_key.decode("utf-8"),
-                        )
-
-                        logger.info(
-                            _m(
-                                "Deleted Container",
-                                extra=get_extra_info(
-                                    {**default_extra, "payload": str(payload)}
-                                ),
-                            ),
-                        )
-                        await miner_client.send_model(
-                            SSHPubKeyRemoveRequest(
-                                public_key=public_key,
-                                validator_signature=self._sign_validator_pubkey(my_key, public_key),
-                                executor_id=payload.executor_id,
-                                miner_hotkey=payload.miner_hotkey
-                            )
-                        )
-
-                        return result
-                    elif isinstance(payload, AddSshPublicKeyRequest):
-                        logger.info(
-                            _m(
-                                "adding ssh key to container",
-                                extra=get_extra_info(
-                                    {**default_extra, "payload": str(payload)}
-                                ),
-                            ),
-                        )
-                        result = await docker_service.add_ssh_key(
-                            payload,
-                            executor,
-                            my_key,
-                            private_key.decode("utf-8"),
-                        )
-
-                        logger.info(
-                            _m(
-                                "Added ssh to the container",
-                                extra=get_extra_info(
-                                    {**default_extra, "payload": str(payload)}
-                                ),
-                            ),
-                        )
-
-                        await miner_client.send_model(
-                            SSHPubKeyRemoveRequest(
-                                public_key=public_key,
-                                validator_signature=self._sign_validator_pubkey(my_key, public_key),
-                                executor_id=payload.executor_id,
-                                miner_hotkey=payload.miner_hotkey
-                            )
-                        )
-
-                        return result
-                    elif isinstance(payload, RemoveSshPublicKeysRequest):
-                        result = await docker_service.remove_ssh_keys(payload, executor, my_key, private_key.decode("utf-8"))
-
-                        await miner_client.send_model(
-                            SSHPubKeyRemoveRequest(
-                                public_key=public_key,
-                                validator_signature=self._sign_validator_pubkey(my_key, public_key),
-                                executor_id=payload.executor_id,
-                                miner_hotkey=payload.miner_hotkey
-                            )
-                        )
-
-                        return result
-                    elif isinstance(payload, InstallJupyterServerRequest):
-                        result = await docker_service.install_jupyter_server(payload, executor, my_key, private_key.decode("utf-8"))
-
-                        await miner_client.send_model(
-                            SSHPubKeyRemoveRequest(
-                                public_key=public_key,
-                                validator_signature=self._sign_validator_pubkey(my_key, public_key),
-                                executor_id=payload.executor_id,
-                                miner_hotkey=payload.miner_hotkey
-                            )
-                        )
-
-                        return result
-                    elif isinstance(payload, BackupContainerRequest):
-                        return await self.handle_backup_container_req(executor, payload, ssh_pkey)
-                    elif isinstance(payload, RestoreContainerRequest):
-                        return await self.handle_restore_container_req(executor, payload, ssh_pkey)
-                    elif isinstance(payload, CancelStorageOperationRequest):
-                        return await self.handle_cancel_storage_operation_req(executor, payload, ssh_pkey)
-                    else:
-                        log_text = _m(
-                            "Unexpected request",
-                            extra=get_extra_info(
-                                {**default_extra, "payload": str(payload)}
-                            ),
-                        )
-
-                        await miner_client.send_model(
-                            SSHPubKeyRemoveRequest(
-                                public_key=public_key,
-                                validator_signature=self._sign_validator_pubkey(my_key, public_key),
-                                executor_id=payload.executor_id,
-                                miner_hotkey=payload.miner_hotkey
-                            )
-                        )
-
-                        return self._handle_container_error(
-                            payload=payload,
-                            msg=log_text,
-                            error_code=FailedContainerErrorCodes.UnknownError,
-                        )
-
-                elif isinstance(msg, FailedRequest):
-                    log_text = _m(
-                        "Error: Miner failed job",
-                        extra=get_extra_info({**default_extra, "msg": str(msg)}),
-                    )
-
-                    return self._handle_container_error(
-                        payload=payload,
-                        msg=log_text,
-                        error_code=FailedContainerErrorCodes.FailedMsgFromMiner,
-                    )
-                else:
-                    log_text = _m(
-                        "Error: Unexpected msg",
-                        extra=get_extra_info({**default_extra, "msg": str(msg)}),
-                    )
-
-                    return self._handle_container_error(
-                        payload=payload,
-                        msg=log_text,
-                        error_code=FailedContainerErrorCodes.UnknownError,
-                    )
-        except Exception as e:
-            log_text = _m(
-                "Resulted in an exception",
-                extra=get_extra_info({**default_extra, "error": str(e)}),
-            )
-            return self._handle_container_error(
-                payload=payload,
-                msg=log_text,
-                error_code=FailedContainerErrorCodes.ExceptionError,
-            )
+        return await self._handle_container(payload)
 
     @for_payload_miner
     async def get_pod_logs(self, payload: GetPodLogsRequestFromServer) -> PodLogsResponseToServer:
-        """Get pod logs - uses REST API if configured, otherwise WebSocket."""
-        if settings.USE_REST_API:
-            logger.info(
-                _m(
-                    "Routing get_pod_logs to REST API",
-                    extra=get_extra_info({
-                        "use_rest_api": settings.USE_REST_API,
-                        "miner_hotkey": payload.miner_hotkey,
-                        "executor_id": payload.executor_id,
-                    }),
-                ),
-            )
-            return await self._get_pod_logs(payload)
-        else:
-            logger.info(
-                _m(
-                    "Routing get_pod_logs to WebSocket",
-                    extra=get_extra_info({
-                        "use_rest_api": settings.USE_REST_API,
-                        "miner_hotkey": payload.miner_hotkey,
-                        "executor_id": payload.executor_id,
-                    }),
-                ),
-            )
-        
-        loop = asyncio.get_event_loop()
-        my_key: bittensor.Keypair = settings.get_bittensor_wallet().get_hotkey()
-        default_extra = {
-            "miner_hotkey": payload.miner_hotkey,
-            "pod_id": payload.pod_id,
-            "executor_id": payload.executor_id,
-            "executor_ip": payload.miner_address,
-            "executor_port": payload.miner_port,
-            "container_name": payload.container_name,
-        }
-
-        try:
-            miner_client = MinerClient(
-                loop=loop,
-                miner_address=payload.miner_address,
-                miner_port=payload.miner_port,
-                miner_hotkey=payload.miner_hotkey,
-                my_hotkey=my_key.ss58_address,
-                keypair=my_key,
-                miner_url=f"ws://{payload.miner_address}:{payload.miner_port}/websocket/{my_key.ss58_address}",
-            )
-
-            async with miner_client:
-                # generate ssh key and send it to miner
-                await miner_client.send_model(
-                    GetPodLogsRequest(
-                        container_name=payload.container_name,
-                        pod_id=payload.pod_id,
-                        executor_id=payload.executor_id, 
-                        miner_hotkey=payload.miner_hotkey,
-                    )
-                )
-
-                logger.info(
-                    _m("Getting logs from executor", extra=get_extra_info(default_extra)),
-                )
-
-                msg = await asyncio.wait_for(
-                    miner_client.job_state.miner_accepted_ssh_key_or_failed_future,
-                    timeout=JOB_LENGTH,
-                )
-
-                if isinstance(msg, PodLogsResponse):
-                    logger.info(
-                        _m(
-                            "Pod Log result",
-                            extra=get_extra_info({**default_extra, "logs": len(msg.logs)}),
-                        )
-                    )
-                    return PodLogsResponseToServer(
-                        miner_hotkey=payload.miner_hotkey,
-                        pod_id=payload.pod_id,
-                        executor_id=payload.executor_id,
-                        container_name=payload.container_name,
-                        logs=msg.logs
-                    )
-
-                elif isinstance(msg, FailedRequest):
-                    log_text = _m(
-                        "Error: FailedRequest",
-                        extra=get_extra_info({**default_extra, "msg": str(msg)}),
-                    )
-                    logger.error(log_text)
-
-                    return FailedGetPodLogs(
-                        miner_hotkey=payload.miner_hotkey,
-                        pod_id=payload.pod_id,
-                        executor_id=payload.executor_id,
-                        container_name=payload.container_name,
-                        msg=log_text.to_full_string(),
-                    )
-
-                else:
-                    log_text = _m(
-                        "Error: Unexpected msg",
-                        extra=get_extra_info({**default_extra, "msg": str(msg)}),
-                    )
-                    logger.error(log_text)
-
-                    return FailedGetPodLogs(
-                        miner_hotkey=payload.miner_hotkey,
-                        pod_id=payload.pod_id,
-                        executor_id=payload.executor_id,
-                        container_name=payload.container_name,
-                        msg=log_text.to_full_string(),
-                    )
-
-        except Exception as e:
-            log_text = _m(
-                "Resulted in an exception",
-                extra=get_extra_info({**default_extra, "error": str(e)}),
-            )
-            logger.error(log_text)
-
-            return FailedGetPodLogs(
-                miner_hotkey=payload.miner_hotkey,
-                executor_id=payload.executor_id,
-                container_name=payload.container_name,
-                msg=log_text.to_full_string(),
-            )
+        """Get pod logs over the miner's REST API."""
+        logger.info(
+            _m(
+                "Routing get_pod_logs to REST API",
+                extra=get_extra_info({
+                    "miner_hotkey": payload.miner_hotkey,
+                    "executor_id": payload.executor_id,
+                }),
+            ),
+        )
+        return await self._get_pod_logs(payload)
 
     @for_payload_miner
     async def add_debug_ssh_key(self, payload: AddDebugSshKeyRequest) -> DebugSshKeyAdded:
-        """Add debug SSH key - uses REST API if configured, otherwise WebSocket."""
-        if settings.USE_REST_API:
-            logger.info(
-                _m(
-                    "Routing add_debug_ssh_key to REST API",
-                    extra=get_extra_info({
-                        "use_rest_api": settings.USE_REST_API,
-                        "miner_hotkey": payload.miner_hotkey,
-                        "executor_id": payload.executor_id,
-                    }),
-                ),
-            )
-            return await self._add_debug_ssh_key(payload)
-        else:
-            logger.info(
-                _m(
-                    "Routing add_debug_ssh_key to WebSocket",
-                    extra=get_extra_info({
-                        "use_rest_api": settings.USE_REST_API,
-                        "miner_hotkey": payload.miner_hotkey,
-                        "executor_id": payload.executor_id,
-                    }),
-                ),
-            )
-        
-        loop = asyncio.get_event_loop()
-        my_key: bittensor.Keypair = settings.get_bittensor_wallet().get_hotkey()
-        default_extra = {
-            "miner_hotkey": payload.miner_hotkey,
-            "executor_id": payload.executor_id,
-            "executor_ip": payload.miner_address,
-            "executor_port": payload.miner_port,
-        }
-
-        try:
-            miner_client = MinerClient(
-                loop=loop,
-                miner_address=payload.miner_address,
-                miner_port=payload.miner_port,
-                miner_hotkey=payload.miner_hotkey,
-                my_hotkey=my_key.ss58_address,
-                keypair=my_key,
-                miner_url=f"ws://{payload.miner_address}:{payload.miner_port}/websocket/{my_key.ss58_address}",
-            )
-
-            async with miner_client:
-
-                upload_nonce = self._dated_upload_nonce_if_enabled()
-                await miner_client.send_model(
-                    SSHPubKeySubmitRequest(
-                        public_key=payload.public_key,
-                        validator_signature=self._sign_validator_pubkey(my_key, payload.public_key, nonce=upload_nonce),
-                        validator_miner_signature=self._sign_validator_pubkey(
-                            my_key, payload.public_key, nonce=upload_nonce, miner_hotkey=payload.miner_hotkey
-                        ),
-                        executor_id=payload.executor_id,
-                        is_rental_request=False,
-                        miner_hotkey=payload.miner_hotkey,
-                        nonce=upload_nonce,
-                    )
-                )
-
-                logger.info(
-                    _m("Sent SSH key to miner.", extra=get_extra_info(default_extra)),
-                )
-
-                msg = await asyncio.wait_for(
-                    miner_client.job_state.miner_accepted_ssh_key_or_failed_future,
-                    timeout=JOB_LENGTH,
-                )
-
-                if isinstance(msg, AcceptSSHKeyRequest):
-                    logger.info(
-                        _m(
-                            "Received AcceptSSHKeyRequest",
-                            extra=get_extra_info({**default_extra, "msg": str(msg)}),
-                        ),
-                    )
-
-                    try:
-                        executor = msg.executors[0]
-                    except Exception:
-                        executor = None
-
-                    if executor is None or executor.uuid != payload.executor_id:
-                        log_text = _ssh_key_not_accepted_text(msg.executors, default_extra)
-                        logger.error(log_text)
-
-                        await miner_client.send_model(
-                            SSHPubKeyRemoveRequest(
-                                public_key=payload.public_key, 
-                                validator_signature=self._sign_validator_pubkey(my_key, payload.public_key),
-                                executor_id=payload.executor_id,
-                                miner_hotkey=payload.miner_hotkey
-                            )
-                        )
-
-                        return FailedAddDebugSshKey(
-                            miner_hotkey=payload.miner_hotkey,
-                            executor_id=payload.executor_id,
-                            msg=log_text.to_full_string(),
-                        )
-
-                    logger.info(
-                        _m(
-                            "Added debug public key",
-                            extra=get_extra_info(default_extra),
-                        ),
-                    )
-
-                    return DebugSshKeyAdded(
-                        miner_hotkey=payload.miner_hotkey,
-                        executor_id=payload.executor_id,
-                        address=executor.address,
-                        port=executor.port,
-                        ssh_username=executor.ssh_username,
-                        ssh_port=executor.ssh_port,
-                    )
-
-                else:
-                    log_text = _m(
-                        "Error: Failed to add debug public key",
-                        extra=get_extra_info({**default_extra, "msg": str(msg)}),
-                    )
-                    logger.error(log_text)
-
-                    return FailedAddDebugSshKey(
-                        miner_hotkey=payload.miner_hotkey,
-                        executor_id=payload.executor_id,
-                        msg=log_text.to_full_string(),
-                    )
-
-        except Exception as e:
-            log_text = _m(
-                "Resulted in an exception",
-                extra=get_extra_info({**default_extra, "error": str(e)}),
-            )
-            logger.error(log_text, exc_info=True)
-
-            return FailedAddDebugSshKey(
-                miner_hotkey=payload.miner_hotkey,
-                executor_id=payload.executor_id,
-                msg=log_text.to_full_string(),
-            )
+        """Add debug SSH key over the miner's REST API."""
+        logger.info(
+            _m(
+                "Routing add_debug_ssh_key to REST API",
+                extra=get_extra_info({
+                    "miner_hotkey": payload.miner_hotkey,
+                    "executor_id": payload.executor_id,
+                }),
+            ),
+        )
+        return await self._add_debug_ssh_key(payload)
 
     async def handle_backup_container_req(self, executor_info: ExecutorSSHInfo, payload: BackupContainerRequest, pkey: SSHKey):
         """Handle backup container request."""
@@ -2571,27 +1703,6 @@ class MinerService:
             )
             return False
 
-    async def _remove_ssh_key_via_websocket(
-        self,
-        miner_client: MinerClient,
-        miner_connection: contextlib.AsyncExitStack,
-        remove_request: SSHPubKeyRemoveRequest,
-        log_extra: dict,
-    ) -> bool:
-        # the WebSocket twin of _remove_ssh_key_via_rest: logs a failure instead of raising it, then closes the socket
-        async with miner_connection:
-            try:
-                await miner_client.send_model(remove_request)
-            except Exception as exc:
-                logger.warning(
-                    _m(
-                        "Failed to remove SSH key via WebSocket. Validator key may still be present on miner",
-                        extra=get_extra_info({**log_extra, "error_type": type(exc).__name__}),
-                    )
-                )
-                return False
-        return True
-
     async def _log_ssh_key_removal_after_reply(self, remove_ssh_key: Awaitable[bool], log_extra: dict) -> None:
         # the removal logs its own failure; this line puts it after the reply in the log
         started_ms = now_ms()
@@ -2633,8 +1744,8 @@ class MinerService:
         first_pass: bool = False,
     ):
         """REST API version of request_job_to_miner."""
-        # DAH-2667: see the WebSocket path — the RoCE probe measures the cycle's remaining time
-        # from here.
+        # DAH-2667: what the RoCE probe subtracts from the cycle's own wait, so a job that already
+        # spent most of it takes a shorter sweep instead of overrunning and scoring the miner zero.
         job_started_at: float = time.monotonic()
         my_key: bittensor.Keypair = settings.get_bittensor_wallet().get_hotkey()
         default_extra = {
@@ -2650,11 +1761,13 @@ class MinerService:
             # Generate SSH key
             private_key, public_key = self.ssh_service.generate_ssh_key(my_key.ss58_address)
 
-            # G3 — attestation event (REST path); see the WebSocket path for details.
+            # G3 — attestation event: when due, mint a challenge that executors
+            # must echo in TDX report_data[32:64] / GPU evidence. The nonce is
+            # covered by validator_signature so it cannot be stripped or swapped.
             attestation_nonce = await self.attestation_service.maybe_issue_nonce(
                 payload.miner_hotkey
             )
-            nonce_hex = attestation_nonce.value_hex if attestation_nonce else self._dated_upload_nonce_if_enabled()
+            nonce_hex = attestation_nonce.value_hex if attestation_nonce else self._upload_nonce_for_miner(payload.miner_hotkey)
 
             # Prepare request
             ssh_request = SSHPubKeySubmitRequest(
@@ -2714,9 +1827,10 @@ class MinerService:
                         payload, rented_data, msg, executor_id, log=False
                     )
                 ):
-                    # See the WebSocket path: zero executors is the expected shape when every
-                    # executor is under a manual rental (or, DAH-3558, every rented node is down),
-                    # so only fail when nothing can be scored.
+                    # Zero executors is normally a miner failure. It is the *expected* shape when
+                    # every executor this miner has is under a manual rental (the miner drops each
+                    # one because it can no longer install our key) or, DAH-3558, every rented node
+                    # is down, so only fail when nothing can be scored.
                     return self._build_failed_job_result(
                         payload,
                         "Miner returned zero executors in AcceptSSHKeyRequest",
@@ -2758,7 +1872,8 @@ class MinerService:
                 results.extend(
                     self._build_manual_rental_results(payload, rented_data, existing=results)
                 )
-                # DAH-3558: see the WebSocket path.
+                # DAH-3558: a rented node the miner left out of msg.executors gets a failed
+                # result, so the wave records the outage instead of nothing.
                 results.extend(
                     self._build_not_listed_rented_results(
                         payload, rented_data, msg.executors, executor_id
@@ -2909,13 +2024,10 @@ class MinerService:
 
         try:
             base_url = f"http://{payload.miner_address}:{payload.miner_port}"
-            headers = self._generate_auth_headers(my_key, payload.miner_hotkey)
-            headers["Content-Type"] = "application/json"
-            
             # Generate SSH key and send it to miner
             private_key, public_key = self.ssh_service.generate_ssh_key(my_key.ss58_address)
 
-            upload_nonce = self._dated_upload_nonce_if_enabled()
+            upload_nonce = self._upload_nonce_for_miner(payload.miner_hotkey)
             ssh_request = SSHPubKeySubmitRequest(
                 public_key=public_key,
                 validator_signature=self._sign_validator_pubkey(my_key, public_key, nonce=upload_nonce),
@@ -2932,15 +2044,29 @@ class MinerService:
                 _m("Sent SSH key to miner via REST API.", extra=get_extra_info(default_extra)),
             )
 
-            status, response_data = await self._make_rest_request(
-                method="POST",
-                url=f"{base_url}/api/validator/ssh-pubkey-submit",
-                json_data=self._serialize_request(ssh_request),
-                headers=headers,
-                timeout=REST_CONTAINER_OP_TIMEOUT,
-                log_extra=default_extra,
-                operation_name="SSH key submit",
-            )
+            # A restarting miner refuses connections for about a minute. Nothing has reached it
+            # yet, so a create waits that out instead of failing the renter's pod.
+            deadline = time.monotonic() + MINER_RESTART_WAIT_S
+            while True:
+                # The miner accepts a signed timestamp for 10 s only, so each attempt signs anew.
+                headers = self._generate_auth_headers(my_key, payload.miner_hotkey)
+                headers["Content-Type"] = "application/json"
+                try:
+                    status, response_data = await self._make_rest_request(
+                        method="POST",
+                        url=f"{base_url}/api/validator/ssh-pubkey-submit",
+                        json_data=self._serialize_request(ssh_request),
+                        headers=headers,
+                        timeout=REST_CONTAINER_OP_TIMEOUT,
+                        log_extra=default_extra,
+                        operation_name="SSH key submit",
+                    )
+                    break
+                except aiohttp.ClientConnectorError:
+                    is_create = isinstance(payload, ContainerCreateRequest)
+                    if not is_create or time.monotonic() >= deadline:
+                        raise
+                    await asyncio.sleep(MINER_RESTART_RETRY_S)
 
             if status != 200 or response_data is None:
                 error_msg = "Failed to submit SSH key"
@@ -3295,7 +2421,7 @@ class MinerService:
             headers = self._generate_auth_headers(my_key, payload.miner_hotkey)
             headers["Content-Type"] = "application/json"
             
-            upload_nonce = self._dated_upload_nonce_if_enabled()
+            upload_nonce = self._upload_nonce_for_miner(payload.miner_hotkey)
             ssh_request = SSHPubKeySubmitRequest(
                 public_key=payload.public_key,
                 validator_signature=self._sign_validator_pubkey(my_key, payload.public_key, nonce=upload_nonce),

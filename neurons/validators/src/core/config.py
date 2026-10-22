@@ -137,6 +137,9 @@ class Settings(BaseSettings):
     REDIS_PORT: int = Field(env="REDIS_PORT", default=6379)
     REDIS_USERNAME: str | None = Field(env="REDIS_USERNAME", default=None)
     REDIS_PASSWORD: str | None = Field(env="REDIS_PASSWORD", default=None)
+    BACKEND_COMMAND_CLAIM_TTL_SECONDS: int = Field(default=60, gt=0)
+    BACKEND_COMMAND_HEARTBEAT_SECONDS: float = Field(default=20, gt=0)
+    BACKEND_COMMAND_ANSWER_TTL_SECONDS: int = Field(default=900, gt=0)
     COMPUTE_APP_URI: str = Field(env="COMPUTE_APP_URI", default="wss://lium.io/api")
     COMPUTE_REST_API_URL: str | None = Field(
         env="COMPUTE_REST_API_URL", default="https://lium.io/api"
@@ -181,12 +184,7 @@ class Settings(BaseSettings):
     # A node this validator has just found without its recommended image is held as pending, not
     # failed, until the executor's first pre-pull sweep completes or GRACE_SECONDS after that first
     # sighting, whichever comes first. The express lane verifies a new node seconds after it is
-    # added, long before a multi-GB pull can finish. Off: the check fails the node as it did before
-    # the grace existed, and only logs the nodes the grace would have held. GRACE_SECONDS=0 turns
-    # the log off too.
-    CACHED_TEMPLATE_FRESH_NODE_GRACE_ENABLED: bool = Field(
-        env="CACHED_TEMPLATE_FRESH_NODE_GRACE_ENABLED", default=False
-    )
+    # added, long before a multi-GB pull can finish. GRACE_SECONDS=0 turns the grace off.
     CACHED_TEMPLATE_FRESH_NODE_GRACE_SECONDS: int = Field(
         env="CACHED_TEMPLATE_FRESH_NODE_GRACE_SECONDS", default=30 * 60, ge=0
     )
@@ -248,14 +246,8 @@ class Settings(BaseSettings):
     # A cycle that a check other than VerifyX failed publishes the VerifyX EMA the backend held
     # before it (none for a never-measured node) instead of one moved by its sample. A passing
     # cycle without the recommended image cached does not seed a never-measured node; a node with
-    # a stored EMA publishes its sample on every passing cycle. See verifyx_ema_hold_reason. Off:
-    # the EMA moves as before and the would-be hold is only logged.
-    VERIFYX_EMA_HOLD_ENABLED: bool = Field(env="VERIFYX_EMA_HOLD_ENABLED", default=False)
+    # a stored EMA publishes its sample on every passing cycle. See verifyx_ema_hold_reason.
     ENABLE_INSPECTOR: bool = True
-    INSPECTOR_ENSURE_COLLECTOR_ON_RENTED_CHECK: bool = Field(
-        env="INSPECTOR_ENSURE_COLLECTOR_ON_RENTED_CHECK",
-        default=True,
-    )
     # Rented cycles in a row in which the inspector saw nothing (error, failed canary, stopped or
     # just-started collector) are counted per node and logged as INSPECTOR_BLIND_STREAK from this
     # many on.
@@ -283,11 +275,6 @@ class Settings(BaseSettings):
         default="https://raw.githubusercontent.com/Datura-ai/lium-io/main/neurons/executor/libinspector.so",
         description="Raw GitHub URL the executor curls when the libinspector.so refresh is on and the hash does not match",
     )
-    # DAH-3257: on a rent, read the host listings the pre-run steps need (containers, volumes,
-    # mounted volumes, GPU minor map, device nodes, nvidia-smi power state, the image's
-    # encryption label) in ONE ssh command instead of ~8; every removal and write still runs its
-    # own command, and a probe that fails leaves every step on its own commands. Off: as before.
-    RENTAL_PRERUN_HOST_PROBE_ENABLED: bool = Field(env="RENTAL_PRERUN_HOST_PROBE_ENABLED", default=False)
     # A rental container with a memory limit runs with swap off (--memory-swap = --memory) and
     # RENTAL_CONTAINER_OOM_SCORE_ADJ, so a host-wide OOM picks its processes before the executor. The
     # memory limit stays the backend's memory_gb. 0 or below would protect the renter over host services, and Docker
@@ -478,11 +465,6 @@ class Settings(BaseSettings):
     # DAH-4457: a node whose GPU dropped out stays hidden (GPU_LOST availability entry, no new rentals) until its
     # cards have read clean this long after the last faulty cycle (GpuLossHoldCheck).
     GPU_LOSS_HOLD_SECONDS: int = Field(env="GPU_LOSS_HOLD_SECONDS", default=7200, gt=0)
-    # DAH-4482: a node GpuMemoryHealthCheck flagged while rented must pass the all-cards matmul and the
-    # kernel-fault probe on every card on its next unrented cycle, whatever the MATMUL_ALLCARDS_* /
-    # GPU_FAULT_PROBE_* flags say; a failure fails the node until a recheck passes. Off: that cycle only logs
-    # POST_RENTAL_GPU_RECHECK_WOULD_REQUIRE.
-    POST_RENTAL_GPU_RECHECK_ENABLED: bool = Field(env="POST_RENTAL_GPU_RECHECK_ENABLED", default=False)
     # DAH-2735 — judge an idle node's GPU by WHO holds it, not by utilization: a competitor's
     # rental idling on the card (Nodexo/SN106) passes every percentage gate. CHECK_ENABLED
     # observes and logs the verdict; ENFORCEMENT additionally zeroes the score. Enforcement
@@ -555,21 +537,15 @@ class Settings(BaseSettings):
     # runtime quarantine, and the failed step stands in Redis until a probe passes: a later cycle with
     # no verdict of its own (image gone, inconclusive) fails the node again with it; a
     # rented node is left alone. An idle node with the image pulled is probed again every cycle until
-    # it passes. DAH-4258: on by default, in shadow (enforcement below defaults off). Renters' most common
-    # complaint after GPU faults is a pod they cannot reach (SSH refused, "error connection"), the exact
-    # path this probe walks, and it sat dark in prod. It rents a container on every idle node every 6 h.
-    RENTAL_PROBE_ENABLED: bool = Field(env="RENTAL_PROBE_ENABLED", default=True)
-    # Off: shadow mode. The probe runs on the same interval and logs RENTAL_PROBE_FAILED_OBSERVED, but a
-    # failure changes no score, job score or verified job and is not kept as a standing failure.
-    # DAH-4258: off by default, so turning the probe on is a shadow run. Enforcing is the owner's call
-    # on the shadow counts; a validator that already enforces sets this explicitly.
-    RENTAL_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="RENTAL_PROBE_ENFORCEMENT_ENABLED", default=False)
+    # it passes. Renters' most common complaint after GPU faults is a pod they cannot reach (SSH refused,
+    # "error connection"), the exact path this probe walks. It rents a container on every idle node every
+    # 6 h. Always on and enforcing.
     RENTAL_PROBE_INTERVAL_HOURS: float = Field(env="RENTAL_PROBE_INTERVAL_HOURS", default=6.0, gt=0)
     RENTAL_PROBE_SSH_DEADLINE_SECONDS: int = Field(env="RENTAL_PROBE_SSH_DEADLINE_SECONDS", default=90, gt=0)
     # A node whose containers cannot reach the internet passed every check. CHECK runs the rental probe's
     # `egress` step, which resolves and fetches pypi.org inside its renter container; ENFORCEMENT fails the
-    # probe on it with NO_OUTBOUND_INTERNET (score 0). Slow still passes. Enforcement is off by default,
-    # same review and decider as REGISTRY_PULL_ENFORCEMENT_ENABLED below.
+    # probe on it with NO_OUTBOUND_INTERNET (score 0). Slow still passes. Enforcement is off by default
+    # until its log-only window is reviewed. Decider: taiberium; backup jam6099.
     NO_OUTBOUND_INTERNET_CHECK_ENABLED: bool = Field(env="NO_OUTBOUND_INTERNET_CHECK_ENABLED", default=True)
     NO_OUTBOUND_INTERNET_ENFORCEMENT_ENABLED: bool = Field(
         env="NO_OUTBOUND_INTERNET_ENFORCEMENT_ENABLED", default=False
@@ -580,11 +556,9 @@ class Settings(BaseSettings):
     # daemon (registry-mirrors apply) under a 30 s bound on idle nodes, once per INTERVAL_HOURS at a
     # per-node phase (RETRY_MINUTES after a failed pull, so the confirming pull comes soon). A Docker Hub
     # 429 is no verdict. Two failed pulls in a row (timeout, DNS error, unreachable, manifest unknown) are
-    # the finding: logged as REGISTRY_PULL_FAILED_OBSERVED, or with ENFORCEMENT a fail
-    # (REGISTRY_PULL_FAILED, score 0). A failed pull counts only if the validator itself reaches Docker
-    # Hub. Nothing guards an outage only the nodes see (a CDN region, a shared mirror), so enforcement
-    # is off by default: it goes on after a 48 h log-only window with the OBSERVED rows reviewed
-    # (count, outcomes, mirrors, fleet-wide pattern). Decider: taiberium; backup jam6099.
+    # the finding: a fail (REGISTRY_PULL_FAILED, score 0). A failed pull counts only if the validator
+    # itself reaches Docker Hub. Nothing guards an outage only the nodes see (a CDN region, a shared
+    # mirror). Enforced since the log-only window's prod logs were clean (21 Oct 2026).
     # DAH-3420: the host-side speed test runs on the host network; a renter's container crosses the docker bridge,
     # NAT and runtime and can get 1000x less (297-588 Mbps on the host, under 1 Mbps from PyPI in a container). CHECK
     # reads up to 16 MiB of a pinned PyPI wheel and a pinned Hugging Face file from a throwaway container on idle
@@ -605,7 +579,6 @@ class Settings(BaseSettings):
     # SSHD_BOOTSTRAP_FAILED_OBSERVED, score unchanged.
     SSHD_BOOTSTRAP_ENFORCEMENT_ENABLED: bool = Field(env="SSHD_BOOTSTRAP_ENFORCEMENT_ENABLED", default=True)
     REGISTRY_PULL_CHECK_ENABLED: bool = Field(env="REGISTRY_PULL_CHECK_ENABLED", default=True)
-    REGISTRY_PULL_ENFORCEMENT_ENABLED: bool = Field(env="REGISTRY_PULL_ENFORCEMENT_ENABLED", default=False)
     REGISTRY_PULL_PROBE_INTERVAL_HOURS: float = Field(
         env="REGISTRY_PULL_PROBE_INTERVAL_HOURS", default=6.0, gt=0
     )
@@ -786,8 +759,6 @@ class Settings(BaseSettings):
     # 32-byte challenge per attestation event, folds it into the signed SSH-key
     # request, and requires the executor to echo it in TDX report_data[32:64].
     ENABLE_ATTESTATION_NONCE: bool = Field(env="ENABLE_ATTESTATION_NONCE", default=False)
-    # I-78: sign every SSH-key upload over a dated nonce (datura fresh_upload_nonce); see MinerService._dated_upload_nonce_if_enabled
-    ENABLE_DATED_UPLOAD_NONCE: bool = Field(env="ENABLE_DATED_UPLOAD_NONCE", default=False)
     # A nonce-bound attestation event is required at most once per this interval per
     # miner (freshness = "bounded, provably recent", not "every wave") — GPU evidence
     # collection is too expensive to force fleet-wide every cycle.
@@ -801,6 +772,12 @@ class Settings(BaseSettings):
     # GPU evidence bound to the issued nonce; any failure raises AttestationError.
     ENABLE_GPU_ATTESTATION_ENFORCEMENT: bool = Field(
         env="ENABLE_GPU_ATTESTATION_ENFORCEMENT", default=False
+    )
+    # DAH-4551 - GpuAttestationIdentityCheck: each Hopper/Blackwell GPU's NVIDIA-signed identity, pinned to its
+    # UUID both ways. Shadow by default: a mismatch or forged evidence is logged as a warning event and the node
+    # passes. On = it fails the node (not fatal with a live rental). Unavailable evidence alone never fails it.
+    GPU_ATTESTATION_IDENTITY_ENFORCEMENT_ENABLED: bool = Field(
+        env="GPU_ATTESTATION_IDENTITY_ENFORCEMENT_ENABLED", default=False
     )
     # Hosted NRAS endpoint (interim verification locus; a local nv-verifier removes
     # this outbound SPOF before fleet enforcement — see remediation plan CD4).
@@ -852,9 +829,6 @@ class Settings(BaseSettings):
 
     def get_scoring_excluded_hotkeys(self) -> set[str]:
         return {s.strip() for s in self.SCORING_EXCLUDED_HOTKEYS.split(",") if s.strip()}
-
-    # Use REST API instead of WebSocket for miner communication
-    USE_REST_API: bool = Field(env="USE_REST_API", default=False)
 
     # A rented node missing from its miner's answer for ONE cycle is mostly a key upload that missed the miner's 10 s
     # window: 86 of the 347 RENTED_EXECUTOR_NOT_LISTED rows on 19 Oct were back in the next answer. On: the row is
@@ -1017,15 +991,7 @@ class Settings(BaseSettings):
         ),
     )
     
-    ENABLE_VOLUME_ENCRYPTION: bool = Field(env="ENABLE_VOLUME_ENCRYPTION", default=True)
     VOLUME_MASTER_SECRET: str | None = Field(env="VOLUME_MASTER_SECRET", default=None)
-    # DAH-2545 switch, off until the plaintext window is closed. A restarted container runs its own
-    # entrypoint and startup_commands before gocryptfs can be mounted into it, so writes to the
-    # plaintext path in that window land unencrypted in the container's upper layer on the miner's
-    # disk. The same window exists on the pod-creation path today; until it is closed for both,
-    # encrypted pods keep the pre-DAH-2545 behaviour — skipped, and the miner keeps the
-    # POD_NOT_RUNNING verdict.
-    RECOVER_ENCRYPTED_VOLUMES: bool = Field(env="RECOVER_ENCRYPTED_VOLUMES", default=False)
 
     DEPLOY_ENV: Literal["PROD", "LOCAL", "STAGE"] = Field(env="DEPLOY_ENV", default="PROD")
 
@@ -1035,21 +1001,15 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_volume_encryption_secret(self) -> "Settings":
-        if self.ENABLE_VOLUME_ENCRYPTION:
-            secret = self.VOLUME_MASTER_SECRET
-            if secret is None or len(secret) < 32:
-                raise ValueError(
-                    "ENABLE_VOLUME_ENCRYPTION requires VOLUME_MASTER_SECRET "
-                    "of at least 32 characters"
-                )
-            # one unit of up to 8 bytes repeated holds at most 64 bits however long it is; a random secret
-            # of 32+ characters is never one (odds about 2^-96 for hex). A warning, not a refusal: the
-            # remedy, a new secret, leaves every volume encrypted under the old one unreadable
-            encoded = secret.encode()
-            if any(encoded[period:] == encoded[:-period] for period in range(1, 9)):
-                logger.warning(
-                    "VOLUME_MASTER_SECRET repeats a unit of at most 8 bytes, so it holds at most 64 bits"
-                )
+        secret = self.VOLUME_MASTER_SECRET
+        if secret is None or len(secret) < 32:
+            raise ValueError("VOLUME_MASTER_SECRET is required and must be at least 32 characters")
+        # one unit of up to 8 bytes repeated holds at most 64 bits however long it is; a random secret
+        # of 32+ characters is never one (odds about 2^-96 for hex). A warning, not a refusal: the
+        # remedy, a new secret, leaves every volume encrypted under the old one unreadable
+        encoded = secret.encode()
+        if any(encoded[period:] == encoded[:-period] for period in range(1, 9)):
+            logger.warning("VOLUME_MASTER_SECRET repeats a unit of at most 8 bytes, so it holds at most 64 bits")
         return self
 
     def get_bittensor_wallet(self) -> "Wallet":

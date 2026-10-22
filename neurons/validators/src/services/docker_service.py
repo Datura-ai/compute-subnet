@@ -1978,8 +1978,7 @@ def _should_encrypt_local_volume(
         bool(local_volume)
         and workload_kind != WorkloadKind.FILLER
         and bool(is_sysbox)
-        and enable_volume_encryption
-        and settings.ENABLE_VOLUME_ENCRYPTION
+        and bool(enable_volume_encryption)
     )
 
 
@@ -2002,11 +2001,7 @@ def _can_remount_encrypted_volume(local_volume_path: str | None) -> bool:
     # derives a passphrase that simply will not mount. A plaintext path at or under the ciphertext
     # mount is refused as well: mounting the plaintext view inside the ciphertext it is decrypting
     # is not something recovery should attempt on customer data.
-    if not (
-        settings.RECOVER_ENCRYPTED_VOLUMES
-        and settings.VOLUME_MASTER_SECRET
-        and local_volume_path
-    ):
+    if not (settings.VOLUME_MASTER_SECRET and local_volume_path):
         return False
     if local_volume_path == _LIUM_CIPHER_MOUNT or local_volume_path.startswith(
         f"{_LIUM_CIPHER_MOUNT}/"
@@ -4708,15 +4703,16 @@ class DockerService:
         with_power: bool,
         miner_hotkey: str,
         log_extra: dict,
+        with_label: bool,
     ) -> PrerunHostProbe | None:
         """DAH-3257: the pre-run host listings in one SSH command; None on any failure.
 
-        None means every consumer runs its own listing command, exactly as with the flag off; the
+        None means every consumer runs its own listing command, exactly as without the probe; the
         probe is then one extra round trip. It reads the host and writes nothing.
         """
         command = prerun_host_probe_command(
             docker_image=docker_image,
-            image_label=_ENCRYPTED_VOLUME_IMAGE_LABEL,
+            image_label=_ENCRYPTED_VOLUME_IMAGE_LABEL if with_label else None,
             with_power=with_power,
             miner_hotkey=miner_hotkey,
         )
@@ -4725,7 +4721,7 @@ class DockerService:
             # Bounded like the nvidia-smi query it carries (a hung driver must not stall the rent);
             # asyncio.TimeoutError lands in the except below → None → the per-command path.
             result = await ssh_client.run(command, check=False, timeout=_PRERUN_HOST_PROBE_TIMEOUT_SECONDS)
-            probe = parse_prerun_host_probe(result.stdout or "", with_power=with_power)
+            probe = parse_prerun_host_probe(result.stdout or "", with_power=with_power, with_label=with_label)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -4759,7 +4755,7 @@ class DockerService:
                             ("shared_nodes", probe.shared_nodes),
                             ("shared_nodes_whole_host", probe.shared_nodes_whole_host_only),
                             ("power", probe.power_state_stdout if with_power else ""),
-                            ("image_label", probe.image_label_value),
+                            ("image_label", probe.image_label_value if with_label else ""),
                             ("port_check", probe.port_check_container_names),
                         )
                         if value is None
@@ -7529,6 +7525,13 @@ class DockerService:
                 payload.gpu_power_limits
             )
             probe_with_power = not brings_own_power_cap
+            # the image's label is read only for an encrypted volume (the same predicate as the volume step)
+            probe_with_label = _should_encrypt_local_volume(
+                local_volume or f"volume_{payload.pod_id}",
+                payload.workload_kind,
+                payload.is_sysbox,
+                payload.enable_volume_encryption,
+            )
             early_host_probe: asyncio.Task[AnswerWithOwnDuration] | None = None
             early_volume_probe: asyncio.Task[AnswerWithOwnDuration] | None = None
             # DAH-3980: a customer's create removes every filler (DAH-3706). The kill is started after the
@@ -7564,20 +7567,20 @@ class DockerService:
                 nonlocal early_host_probe, early_volume_probe
                 if not early_probes_allowed:
                     return
-                if settings.RENTAL_PRERUN_HOST_PROBE_ENABLED:
-                    early_host_probe = asyncio.create_task(
-                        _with_own_duration(
-                            self.probe_prerun_host(
-                                connected_ssh_client,
-                                docker_image=payload.docker_image,
-                                with_power=probe_with_power,
-                                miner_hotkey=payload.miner_hotkey,
-                                log_extra=default_extra,
-                            ),
-                            ProfilerStepName.PRERUN_HOST_PROBE_PARALLEL,
-                        )
+                early_host_probe = asyncio.create_task(
+                    _with_own_duration(
+                        self.probe_prerun_host(
+                            connected_ssh_client,
+                            docker_image=payload.docker_image,
+                            with_power=probe_with_power,
+                            miner_hotkey=payload.miner_hotkey,
+                            log_extra=default_extra,
+                            with_label=probe_with_label,
+                        ),
+                        ProfilerStepName.PRERUN_HOST_PROBE_PARALLEL,
                     )
-                    connections.callback(early_host_probe.cancel)
+                )
+                connections.callback(early_host_probe.cancel)
                 if wants_volume_probe:
                     early_volume_probe = asyncio.create_task(
                         _with_own_duration(
@@ -8024,23 +8027,23 @@ class DockerService:
                 # need (containers, volumes, mounted volumes, GPU minor map, device nodes, power
                 # state, the image's encryption label). Each consumer takes the probe in place of
                 # its own listing command; every removal and write below still runs as before.
-                # None (flag off, or the probe failed) leaves every consumer on its own commands.
+                # None (the probe failed) leaves every consumer on its own commands.
                 host_probe: PrerunHostProbe | None = None
-                if settings.RENTAL_PRERUN_HOST_PROBE_ENABLED:
-                    current_step = "prerun_host_probe"
-                    if early_host_probe is not None and image_present:
-                        host_probe, early_host_probe_step = await early_host_probe
-                        profilers.append(early_host_probe_step)
-                    else:
-                        host_probe = await self.probe_prerun_host(
-                            ssh_client,
-                            docker_image=payload.docker_image,
-                            # A PEARL filler caps its GPUs with live nvidia-smi queries of its own
-                            # (apply_filler_gpu_power_limits) and never reads the probe's power state.
-                            with_power=probe_with_power,
-                            miner_hotkey=payload.miner_hotkey,
-                            log_extra=default_extra,
-                        )
+                current_step = "prerun_host_probe"
+                if early_host_probe is not None and image_present:
+                    host_probe, early_host_probe_step = await early_host_probe
+                    profilers.append(early_host_probe_step)
+                else:
+                    host_probe = await self.probe_prerun_host(
+                        ssh_client,
+                        docker_image=payload.docker_image,
+                        # A PEARL filler caps its GPUs with live nvidia-smi queries of its own
+                        # (apply_filler_gpu_power_limits) and never reads the probe's power state.
+                        with_power=probe_with_power,
+                        miner_hotkey=payload.miner_hotkey,
+                        log_extra=default_extra,
+                        with_label=probe_with_label,
+                    )
                 # The probe is a snapshot. Once a step below removes a container or a volume, the
                 # container/volume listings are stale (a removed volume would still read as present,
                 # a removed container as still mounting its volume), so the later sweeps go back to
@@ -9207,20 +9210,15 @@ class DockerService:
         """Stamp a host-fault create failure as the node's standing rental probe failure.
 
         The node then scores 0 every cycle until a rental probe passes on it; the probe's interval stamp
-        is dropped so that probe runs on the next idle cycle. Without the probe there is nothing to
-        clear the stamp, so nothing is stamped while RENTAL_PROBE_ENABLED is off. In shadow
-        (RENTAL_PROBE_ENFORCEMENT_ENABLED off) only the interval stamp is dropped: a standing failure
-        written then is never cleared on a node a filler keeps busy, and would zero it once
-        enforcement is turned on.
+        is dropped so that probe runs on the next idle cycle.
         """
-        if not settings.RENTAL_PROBE_ENABLED or not is_host_fault_create_failure(current_step):
+        if not is_host_fault_create_failure(current_step):
             return
         try:
-            if settings.RENTAL_PROBE_ENFORCEMENT_ENABLED:
-                await self.redis_service.set(
-                    f"{RENTAL_PROBE_FAILED_PREFIX}:{executor_uuid}",
-                    f"{_RENTAL_PROBE_CONTAINER_START_STEP}:{current_step}",
-                )
+            await self.redis_service.set(
+                f"{RENTAL_PROBE_FAILED_PREFIX}:{executor_uuid}",
+                f"{_RENTAL_PROBE_CONTAINER_START_STEP}:{current_step}",
+            )
             await self.redis_service.delete(f"{RENTAL_PROBE_OK_PREFIX}:{executor_uuid}")
         except Exception:  # noqa: BLE001 — the create's own failure reply still goes out
             logger.warning(
