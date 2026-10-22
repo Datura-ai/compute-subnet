@@ -362,43 +362,108 @@ async def test_an_ssh_error_on_the_removal_lets_a_fresh_listing_decide(docker_se
 
 
 @pytest.mark.asyncio
-async def test_rm_retry_budget_goes_only_to_the_names_still_on_the_host(
-    docker_service, retry_ssh_mock
-):
-    # two stale fillers, one vanished, one still there: the full retry budget is spent on the second only
+async def test_rm_retries_go_only_to_the_names_still_on_the_host(docker_service, retry_ssh_mock, monkeypatch):
+    # two stale fillers, one vanished, one still there: only the second is removed again
+    monkeypatch.setattr(ds_module, "_SLOW_REMOVAL_POLL_SECONDS", 0)
     ssh_client = AsyncMock()
     ssh_client.run = AsyncMock(
         side_effect=[
             _listing("pod_target\nfiller_gone\nfiller_busy\n"),
             _removal("filler_busy", rm_exit=1),  # filler_gone left, filler_busy still there
-            _listing(""),  # the confirmation after the retried rm
+            _listing(""),  # the second rm
+            _listing(""),  # the listing after it: gone
         ]
     )
     report = ContainerCleanupReport()
 
     await _clean_for_customer(docker_service, ssh_client, report)
 
-    retried_rm = retry_ssh_mock.call_args_list[0]
-    assert "filler_busy" in retried_rm[0][1]
-    assert "filler_gone" not in retried_rm[0][1]
-    assert retried_rm.kwargs["max_attempts"] == 5  # the full budget, as before DAH-3706
-    assert "volume rm" in retry_ssh_mock.call_args_list[1][0][1]
-    assert ssh_client.run.await_count == 3
+    second_rm = ssh_client.run.call_args_list[2][0][0]
+    assert "filler_busy" in second_rm
+    assert "filler_gone" not in second_rm
+    assert "volume rm" in retry_ssh_mock.call_args_list[0][0][1]
+    assert ssh_client.run.await_count == 4
     assert report.removed_cleanly_without_volume_rm is False
 
 
 @pytest.mark.asyncio
-async def test_rm_that_fails_with_the_container_still_there_raises(docker_service, retry_ssh_mock):
-    retry_ssh_mock.side_effect = Exception("[clean_existing_containers] exit_code 1, stderr: busy")
-    ssh_client = AsyncMock()
-    ssh_client.run = AsyncMock(
-        side_effect=[_listing("pod_target\nfiller_stuck\n"), _removal("filler_stuck", rm_exit=1)]
-    )
+async def test_a_filler_that_stays_past_the_wait_fails_the_create(docker_service, retry_ssh_mock, monkeypatch):
+    monkeypatch.setattr(ds_module, "_SLOW_REMOVAL_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(ds_module, "_SLOW_REMOVAL_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(ds_module, "_CUSTOMER_CONTAINER_REMOVAL_TIMEOUT_SECONDS", 0.01)
+    replies = [_listing("pod_target\nfiller_stuck\n"), _removal("filler_stuck", rm_exit=1)]
 
-    with pytest.raises(Exception, match="busy"):
-        await _clean_for_customer(docker_service, ssh_client)
-    # the one removal, then the full-budget retry of the name still there
-    assert retry_ssh_mock.call_count == 1
+    async def run(cmd, *args, **kwargs):
+        if replies:
+            return replies.pop(0)
+        if cmd == ds_module.DOCKER_PS_ALL_NAMES_IDS_CMD:
+            return _listing("filler_stuck\n")
+        return _listing("", exit_status=1, stderr="busy")
+
+    ssh_client = AsyncMock()
+    ssh_client.run = AsyncMock(side_effect=run)
+
+    with pytest.raises(Exception, match="after a failed docker rm -fv did not finish"):
+        await asyncio.wait_for(_clean_for_customer(docker_service, ssh_client), 2)
+
+
+@pytest.mark.asyncio
+async def test_a_stale_pod_that_stays_fails_the_create_at_the_short_budget(docker_service, retry_ssh_mock, monkeypatch):
+    # only a filler's GPU teardown earns the long wait; a stuck pod_* still fails at the first budget
+    monkeypatch.setattr(ds_module, "_SLOW_REMOVAL_WAIT_SECONDS", 10)
+    monkeypatch.setattr(ds_module, "_SLOW_REMOVAL_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(ds_module, "_CUSTOMER_CONTAINER_REMOVAL_TIMEOUT_SECONDS", 0.05)
+    replies = [_listing("pod_target\npod_stuck\n"), _removal("pod_stuck", rm_exit=1)]
+
+    async def run(cmd, *args, **kwargs):
+        if replies:
+            return replies.pop(0)
+        if cmd == ds_module.DOCKER_PS_ALL_NAMES_IDS_CMD:
+            return _listing("pod_stuck\n")
+        return _listing("", exit_status=1, stderr="busy")
+
+    ssh_client = AsyncMock()
+    ssh_client.run = AsyncMock(side_effect=run)
+
+    with pytest.raises(Exception, match="after a failed docker rm -fv did not finish in 0.05 s"):
+        await asyncio.wait_for(_clean_for_customer(docker_service, ssh_client), 2)
+
+
+@pytest.mark.asyncio
+async def test_a_filler_that_goes_after_more_than_the_first_budget_does_not_fail_the_create(
+    docker_service, retry_ssh_mock, monkeypatch, caplog
+):
+    # pod 86750d41 (21 Oct): the first rm of an ENGY_TEE filler exited 1 after 12.6 s with the filler
+    # still there; it went minutes later, but the create had failed at 60 s. The rm's stderr is logged,
+    # and the create waits for the filler past the first budget.
+    monkeypatch.setattr(ds_module, "_CUSTOMER_CONTAINER_REMOVAL_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(ds_module, "_SLOW_REMOVAL_POLL_SECONDS", 0.03)
+    stuck = "tried to kill container, but did not receive an exit event"
+    replies = [_listing("pod_target\nfiller_engy\n"), _removal("filler_engy", rm_exit=1, stderr=stuck)]
+    loop = asyncio.get_running_loop()
+    gone_at = loop.time() + 0.2  # 4x the first budget
+
+    async def run(cmd, *args, **kwargs):
+        if replies:
+            return replies.pop(0)
+        if cmd == ds_module.DOCKER_PS_ALL_NAMES_IDS_CMD:
+            return _listing("" if loop.time() >= gone_at else "filler_engy\n")
+        return _listing("", exit_status=1, stderr="removal of container filler_engy is already in progress")
+
+    ssh_client = AsyncMock()
+    ssh_client.run = AsyncMock(side_effect=run)
+
+    with caplog.at_level(logging.INFO):
+        removed = await asyncio.wait_for(_clean_for_customer(docker_service, ssh_client), 2)
+
+    assert sorted(removed) == ["filler_engy", "pod_target"]
+    assert loop.time() >= gone_at
+    [removal_log] = [
+        record.msg
+        for record in caplog.records
+        if getattr(record.msg, "message", None) == "customer_container_removal"
+    ]
+    assert removal_log.extra["rm_stderr"] == stuck
 
 
 @pytest.mark.asyncio
@@ -635,6 +700,32 @@ async def test_a_replacement_fillers_volume_is_removed_once_the_replacement_is_g
 
 
 @pytest.mark.asyncio
+async def test_a_replacement_filler_after_a_slow_first_removal_gets_a_fresh_deadline(docker_service, monkeypatch):
+    # the slow filler wait outlasted the cleanup's first deadline; the replacement's removal must not fail at once
+    monkeypatch.setattr(ds_module, "_CUSTOMER_CONTAINER_REMOVAL_TIMEOUT_SECONDS", 0.05)
+    ssh_client = _host_where_a_same_name_container_replaces_the_listed_one("filler_x", [])
+    answer_like_the_host = ssh_client.run.side_effect
+
+    async def run(cmd, *args, **kwargs):
+        await asyncio.sleep(0)  # a real SSH round trip yields, so a deadline already passed fires
+        return await answer_like_the_host(cmd, *args, **kwargs)
+
+    ssh_client.run = AsyncMock(side_effect=run)
+    first_removal = docker_service._remove_stale_containers_tolerantly
+
+    async def slow_first_removal(*args, **kwargs):
+        _, listing_after = await first_removal(*args, **kwargs)
+        await asyncio.sleep(0.1)
+        return ds_module.CustomerContainerRemoval(False, listing_after)
+
+    monkeypatch.setattr(docker_service, "_remove_stale_containers_tolerantly", slow_first_removal)
+
+    await asyncio.wait_for(_clean_for_customer(docker_service, ssh_client), 2)
+
+    assert ssh_client.containers == {}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("hung_command", "hung_send", "removals"),
     [
@@ -686,6 +777,7 @@ async def test_a_survivor_retry_that_hangs_fails_the_cleanup_within_the_bound(
     # the rm exits 1 with the filler still listed; a step after it hangs on a wedged dockerd
     replies = [_listing("pod_target\nfiller_busy\n"), _removal("filler_busy", rm_exit=1)]
     replies += [_listing("")] * (answers_before_the_hang - 1)
+    monkeypatch.setattr(ds_module, "_SLOW_REMOVAL_WAIT_SECONDS", 0.05)
     hung: list[str] = []
 
     async def run(cmd, *args, **kwargs):
