@@ -384,3 +384,16 @@ async def test_an_email_held_node_reports_only_the_email_reason():
     log = "\n".join(result.incentive_logs)
     assert "provider_email_not_confirmed" in log
     assert "provider_discord_not_connected" not in log
+
+
+@pytest.mark.asyncio
+async def test_a_rented_email_held_node_earns_no_rented_extra():
+    # Past the e-mail grace the backend names listed nodes too, rented ones included.
+    incentive = _build_incentive()
+
+    result = await incentive.calculate_executor_score(
+        _make_job(1.0, is_rented=True, is_provider_email_held=True)
+    )
+
+    assert result.mining_score == 0
+    assert "provider_email_not_confirmed" in "\n".join(result.incentive_logs)

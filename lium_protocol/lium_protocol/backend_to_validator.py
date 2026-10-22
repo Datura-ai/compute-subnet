@@ -51,6 +51,7 @@ class BackendMessage(Message):
 class ServerRequest(BackendMessage):
     """A request about one executor of one miner."""
 
+    command_id: str = ""
     miner_hotkey: str
     executor_id: str
     # the validator's copy carries where the miner listens; the backend does not send them

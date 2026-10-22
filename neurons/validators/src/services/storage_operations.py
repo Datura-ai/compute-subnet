@@ -6,13 +6,14 @@ import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import aiohttp
 import asyncssh
 
 REMOTE_OPERATION_DIRECTORY = PurePosixPath("/root/app/storage-operations")
 REMOTE_RUNNER_PATH = "/root/app/src/storage_runner.py"
+REMOTE_SECRETS_DIRECTORY = PurePosixPath("/root/app/storage-secrets")
 
 
 class StorageOperationLaunchError(RuntimeError):
@@ -422,3 +423,25 @@ async def _report_operation_status(
         if attempt + 1 < attempts:
             await asyncio.sleep(2**attempt)
     return False
+
+
+async def upload_secrets_file(ssh_client: asyncssh.SSHClientConnection, auth_token: str, volume_info) -> str:
+    """Hand the legacy tar backup/restore scripts their credentials as a fresh 0600 file.
+
+    Keeps the values out of the remote command line. The file is
+    created exclusively with mode 0600 inside a 0700 directory; the script deletes it on read.
+    """
+    path = str(REMOTE_SECRETS_DIRECTORY / f"{uuid4().hex}.json")
+    await ssh_client.run(f"install -d -m 0700 {shlex.quote(str(REMOTE_SECRETS_DIRECTORY))}", check=True)
+    async with ssh_client.start_sftp_client() as sftp:
+        async with sftp.open(path, "x", asyncssh.SFTPAttrs(permissions=0o600)) as remote_file:
+            await remote_file.write(
+                json.dumps(
+                    {
+                        "auth_token": auth_token,
+                        "aws_access_key_id": volume_info.iam_user_access_key,
+                        "aws_secret_access_key": volume_info.iam_user_secret_key,
+                    }
+                )
+            )
+    return path
