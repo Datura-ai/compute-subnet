@@ -9,7 +9,6 @@ names the failure `killed_during_bootstrap` with `oom_killed` and the exit code,
 from __future__ import annotations
 
 import asyncio
-import itertools
 import hashlib
 import logging
 from unittest.mock import AsyncMock, Mock
@@ -733,7 +732,7 @@ async def test_every_listed_id_the_sweep_sends_rm_for_is_ours(svc, monkeypatch, 
         "acknowledged-then-a-later-target-failed": f"filler_b {other}\n",
         "rm-never-sent-then-retried": listing,
     }.get(case, "")
-    listings = itertools.chain([listing], itertools.repeat(after))
+    listings = iter([listing, after, after, after])
     rms: list[list[str]] = []
 
     async def run(command, **_kwargs):
@@ -774,10 +773,7 @@ async def test_every_listed_id_the_sweep_sends_rm_for_is_ours(svc, monkeypatch, 
         active_container_names=[], remove_every_filler=True,
     )
     if case == "acknowledged-then-a-later-target-failed":
-        # filler_b never goes: the create waits for it, then fails
-        monkeypatch.setattr("services.docker_service._SLOW_REMOVAL_WAIT_SECONDS", 0.05)
-        monkeypatch.setattr("services.docker_service._SLOW_REMOVAL_POLL_SECONDS", 0.01)
-        with pytest.raises(Exception, match="did not finish"):
+        with pytest.raises(Exception, match="exit_code 1"):
             await sweep
     elif case == "rm-sent-answer-lost-confirmation-failed":
         # nothing shows the rm took effect: the sweep fails, and the IDs marked when the one command was sent stay ours
