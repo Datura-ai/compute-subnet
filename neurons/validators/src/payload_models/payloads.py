@@ -215,6 +215,7 @@ class WorkloadKind(enum.Enum):
 
 
 class BaseServerRequest(BaseRequest):
+    command_id: str = ""
     message_type: ContainerRequestType
     miner_hotkey: str
     miner_address: str | None = None
@@ -693,6 +694,7 @@ class ContainerDeleted(ContainerBaseResponse):
 class SshPubKeyAdded(ContainerBaseResponse):
     message_type: ContainerResponseType = ContainerResponseType.SshPubKeyAdded
     user_public_keys: list[str] = []
+    command_id: str = ""
 
 
 class SshPubKeyRemoved(ContainerBaseResponse):
@@ -739,6 +741,7 @@ class FailedContainerErrorTypes(enum.Enum):
 
 class FailedContainerRequest(ContainerBaseResponse):
     message_type: ContainerResponseType = ContainerResponseType.FailedRequest
+    command_id: str = ""
     error_type: FailedContainerErrorTypes = FailedContainerErrorTypes.ContainerCreationFailed
     # Renter-safe HEADLINE only. The backend surfaces this in customer-facing events, so it must never
     # carry executor host details (IP, SSH port/username, hotkey) — those go in `detail`.

@@ -12,6 +12,7 @@ import aiohttp
 from asyncssh import SSHKey
 import asyncssh
 import bittensor
+from clients.subtensor_client import SubtensorClient
 from datura.requests.miner_requests import (
     AcceptSSHKeyRequest,
     ExecutorSSHInfo,
@@ -74,8 +75,13 @@ from services.task.availability import (
 from incentive.config import BASE_GPU_MAP
 from services.task_service import TaskService, JobResult
 from services.storage_operations import cancel_storage_operation, start_storage_operation, supports_workspace_field
+from services.storage_operations import upload_secrets_file
 
 logger = logging.getLogger(__name__)
+
+# I-78: bittensor packs a.b.c into axon_info.version as a*1000**2 + b*1000 + c. 10.5.0 is what
+# miner-v1.003+ announces; the upload nonce field shipped in miner-v1.002 (fbfbde79, DAH-2338).
+MIN_DATED_NONCE_MINER_AXON_VERSION = 10_005_000
 
 
 def _miner_job_script_path(script_name: str) -> str:
@@ -84,6 +90,15 @@ def _miner_job_script_path(script_name: str) -> str:
 
 def _nohup_command(argv: list[str], log_path: str) -> str:
     return f"{shlex.join(argv)} > {shlex.quote(log_path)} 2>&1 &"
+
+
+async def _storage_known_hosts(docker_service: DockerService, executor_info: ExecutorSSHInfo, payload):
+    """The same pinned host-key policy the rental paths use, for backup/restore/cancel SSH."""
+    return await docker_service._prepare_known_hosts_policy(
+        executor_info,
+        payload.miner_hotkey,
+        {"miner_hotkey": payload.miner_hotkey, "executor_id": payload.executor_id, "pod_id": payload.pod_id},
+    )
 
 
 def _get_error_details(error: Exception) -> str:
@@ -404,13 +419,27 @@ class MinerService:
     def _normalize_public_key(public_key: bytes | str) -> str:
         return public_key.decode("utf-8") if isinstance(public_key, bytes) else public_key
 
-    def _dated_upload_nonce_if_enabled(self) -> str | None:
+    def _upload_nonce_for_miner(self, miner_hotkey: str) -> str | None:
         """A dated nonce for an SSH-key upload, so a captured signature goes stale (I-78).
 
-        Off until miners/executors older than the nonce field (Jul 2026) are gone: they drop or
-        mis-verify it and the upload fails.
+        Only for a miner proven to relay the nonce field: the central miner, or an axon announcing
+        bittensor 10.5.0+. Older miners drop the field and the upload fails, so they get none.
         """
-        return fresh_upload_nonce() if settings.ENABLE_DATED_UPLOAD_NONCE else None
+        subtensor = SubtensorClient.get_instance()
+        if miner_hotkey in subtensor.hotkeys_routed_via_central_miner:
+            return fresh_upload_nonce()
+        # in-memory metagraph snapshot only: no chain read on the upload path
+        neuron = next((n for n in subtensor.miners if n.hotkey == miner_hotkey), None)
+        axon_version = getattr(neuron.axon_info, "version", None) if neuron is not None else None
+        if axon_version and axon_version >= MIN_DATED_NONCE_MINER_AXON_VERSION:
+            return fresh_upload_nonce()
+        logger.info(
+            _m(
+                "dated_upload_nonce_skipped",
+                extra=get_extra_info({"miner_hotkey": miner_hotkey, "axon_version": axon_version}),
+            )
+        )
+        return None
 
     def _sign_validator_pubkey(
         self,
@@ -1311,7 +1340,7 @@ class MinerService:
         )
         return await self._add_debug_ssh_key(payload)
 
-    async def handle_backup_container_req(self, executor_info: ExecutorSSHInfo, payload: BackupContainerRequest, pkey: SSHKey):
+    async def handle_backup_container_req(self, executor_info: ExecutorSSHInfo, payload: BackupContainerRequest, pkey: SSHKey, docker_service: DockerService):
         """Handle backup container request."""
         async with asyncssh.connect(
             host=executor_info.address,
@@ -1319,7 +1348,7 @@ class MinerService:
             **await public_host_sock(executor_info.address, executor_info.ssh_port),
             username=executor_info.ssh_username,
             client_keys=[pkey],
-            known_hosts=None,
+            known_hosts=await _storage_known_hosts(docker_service, executor_info, payload),
         ) as ssh_client:
 
             if payload.backup_engine == "restic":
@@ -1362,11 +1391,9 @@ class MinerService:
                 "--api-url", settings.COMPUTE_REST_API_URL_EXTERNAL,
                 "--source-volume", payload.source_volume,
                 "--backup-path", payload.backup_path,
-                "--auth-token", payload.auth_token,
+                "--secrets-file", await upload_secrets_file(ssh_client, payload.auth_token, payload.backup_volume_info),
                 "--backup-log-id", payload.backup_log_id,
                 "--backup-volume-name", payload.backup_volume_info.name,
-                "--backup-volume-iam_user_access_key", payload.backup_volume_info.iam_user_access_key,
-                "--backup-volume-iam_user_secret_key", payload.backup_volume_info.iam_user_secret_key,
                 "--source-volume-path", payload.source_volume_path,
                 "--backup-target-path", payload.backup_target_path,
             ]
@@ -1376,7 +1403,7 @@ class MinerService:
                 check=True,
             )
 
-    async def handle_restore_container_req(self, executor_info: ExecutorSSHInfo, payload: RestoreContainerRequest, pkey: SSHKey):
+    async def handle_restore_container_req(self, executor_info: ExecutorSSHInfo, payload: RestoreContainerRequest, pkey: SSHKey, docker_service: DockerService):
         """Handle restore container request."""
         async with asyncssh.connect(
             host=executor_info.address,
@@ -1384,7 +1411,7 @@ class MinerService:
             **await public_host_sock(executor_info.address, executor_info.ssh_port),
             username=executor_info.ssh_username,
             client_keys=[pkey],
-            known_hosts=None,
+            known_hosts=await _storage_known_hosts(docker_service, executor_info, payload),
         ) as ssh_client:
 
             if payload.backup_engine == "restic":
@@ -1421,11 +1448,9 @@ class MinerService:
                 "--target-volume", payload.target_volume,
                 "--restore-path", payload.restore_path,
                 "--backup-source-path", payload.backup_source_path,
-                "--auth-token", payload.auth_token,
+                "--secrets-file", await upload_secrets_file(ssh_client, payload.auth_token, payload.backup_volume_info),
                 "--restore-log-id", payload.restore_log_id,
                 "--backup-volume-name", payload.backup_volume_info.name,
-                "--backup-volume-iam_user_access_key", payload.backup_volume_info.iam_user_access_key,
-                "--backup-volume-iam_user_secret_key", payload.backup_volume_info.iam_user_secret_key,
                 "--target-volume-path", payload.target_volume_path,
             ]
             await ssh_client.run(
@@ -1439,6 +1464,7 @@ class MinerService:
         executor_info: ExecutorSSHInfo,
         payload: CancelStorageOperationRequest,
         pkey: SSHKey,
+        docker_service: DockerService,
     ) -> None:
         async with asyncssh.connect(
             host=executor_info.address,
@@ -1446,7 +1472,7 @@ class MinerService:
             **await public_host_sock(executor_info.address, executor_info.ssh_port),
             username=executor_info.ssh_username,
             client_keys=[pkey],
-            known_hosts=None,
+            known_hosts=await _storage_known_hosts(docker_service, executor_info, payload),
         ) as ssh_client:
             await cancel_storage_operation(ssh_client, UUID(payload.operation_id))
 
@@ -1748,7 +1774,7 @@ class MinerService:
             attestation_nonce = await self.attestation_service.maybe_issue_nonce(
                 payload.miner_hotkey
             )
-            nonce_hex = attestation_nonce.value_hex if attestation_nonce else self._dated_upload_nonce_if_enabled()
+            nonce_hex = attestation_nonce.value_hex if attestation_nonce else self._upload_nonce_for_miner(payload.miner_hotkey)
 
             # Prepare request
             ssh_request = SSHPubKeySubmitRequest(
@@ -2008,7 +2034,7 @@ class MinerService:
             # Generate SSH key and send it to miner
             private_key, public_key = self.ssh_service.generate_ssh_key(my_key.ss58_address)
 
-            upload_nonce = self._dated_upload_nonce_if_enabled()
+            upload_nonce = self._upload_nonce_for_miner(payload.miner_hotkey)
             ssh_request = SSHPubKeySubmitRequest(
                 public_key=public_key,
                 validator_signature=self._sign_validator_pubkey(my_key, public_key, nonce=upload_nonce),
@@ -2200,11 +2226,11 @@ class MinerService:
                 elif isinstance(payload, InstallJupyterServerRequest):
                     result = await docker_service.install_jupyter_server(payload, executor, my_key, private_key.decode("utf-8"))
                 elif isinstance(payload, BackupContainerRequest):
-                    result = await self.handle_backup_container_req(executor, payload, ssh_pkey)
+                    result = await self.handle_backup_container_req(executor, payload, ssh_pkey, docker_service)
                 elif isinstance(payload, RestoreContainerRequest):
-                    result = await self.handle_restore_container_req(executor, payload, ssh_pkey)
+                    result = await self.handle_restore_container_req(executor, payload, ssh_pkey, docker_service)
                 elif isinstance(payload, CancelStorageOperationRequest):
-                    result = await self.handle_cancel_storage_operation_req(executor, payload, ssh_pkey)
+                    result = await self.handle_cancel_storage_operation_req(executor, payload, ssh_pkey, docker_service)
                 else:
                     log_text = _m(
                         "Unexpected request",
@@ -2402,7 +2428,7 @@ class MinerService:
             headers = self._generate_auth_headers(my_key, payload.miner_hotkey)
             headers["Content-Type"] = "application/json"
             
-            upload_nonce = self._dated_upload_nonce_if_enabled()
+            upload_nonce = self._upload_nonce_for_miner(payload.miner_hotkey)
             ssh_request = SSHPubKeySubmitRequest(
                 public_key=payload.public_key,
                 validator_signature=self._sign_validator_pubkey(my_key, payload.public_key, nonce=upload_nonce),
