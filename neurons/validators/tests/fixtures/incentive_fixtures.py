@@ -39,7 +39,6 @@ def mock_settings(monkeypatch):
     monkeypatch.setattr(settings, "BURNERS", [0, 1])
     monkeypatch.setattr(settings, "NEW_BURNERS", [100, 101])
     monkeypatch.setattr(settings, "DRY_RUN", False)
-    monkeypatch.setattr(settings, "SKIP_COLLATERAL_PENALTY", False)
     monkeypatch.setattr(settings, "incentive", IncentiveConfig(
         algorithm="default",
     ))

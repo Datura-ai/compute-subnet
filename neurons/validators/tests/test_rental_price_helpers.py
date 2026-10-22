@@ -29,11 +29,7 @@ def expected_executor_score(
     if not sysbox_runtime:
         score *= 1 - settings.PORTION_FOR_SYSBOX
 
-    if not collateral_deposited:
-        uptime_ratio = min(1.0, uptime_minutes / settings.UPTIME_REQUIRED_MINUTES)
-        penalty_reduction = settings.PORTION_FOR_UPTIME * uptime_ratio
-        score *= 1 - settings.PORTION_FOR_UPTIME + penalty_reduction
-
+    # collateral_deposited / uptime_minutes no longer change the score (SKIP_COLLATERAL_PENALTY removed)
     return score
 
 
