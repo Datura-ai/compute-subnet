@@ -1766,8 +1766,9 @@ fillers_exiting_after_kill: set[str] = set()
 
 def _kill_and_read_filler_processes_command(container_ids: list[str]) -> str:
     """DAH-5012: SIGKILL every host process whose cgroup names one of ``container_ids``, wait a second,
-    then print `PROC<TAB>id<TAB>pid<TAB>state<TAB>flags<TAB>wchan` per process still there. `HOSTPID` first
-    when dockerd is visible: without the host's pid namespace no process line proves anything."""
+    then print `PROC<TAB>id<TAB>pid<TAB>state<TAB>flags<TAB>wchan` and `STACK<TAB>pid<TAB>kernel stack` per process
+    still there, then the host's Dirty/Writeback. `HOSTPID` first when dockerd is visible: without the host's
+    pid namespace no process line proves anything."""
     ids = " ".join(shlex.quote(container_id) for container_id in container_ids)
     return (
         "pgrep -x dockerd >/dev/null 2>&1 && echo HOSTPID; "
@@ -1777,7 +1778,10 @@ def _kill_and_read_filler_processes_command(container_ids: list[str]) -> str:
         "sleep 1; "
         "echo \"$pairs\" | while read -r id p; do [ -n \"$p\" ] || continue; "
         "s=$(sed 's/^.*) //' /proc/$p/stat 2>/dev/null); [ -n \"$s\" ] || continue; set -- $s; "
-        "printf 'PROC\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \"$id\" \"$p\" \"$1\" \"$7\" \"$(cat /proc/$p/wchan 2>/dev/null)\"; done"
+        "printf 'PROC\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \"$id\" \"$p\" \"$1\" \"$7\" \"$(cat /proc/$p/wchan 2>/dev/null)\"; "
+        "printf 'STACK\\t%s\\t%s\\n' \"$p\" \"$(tr '\\n' '|' < /proc/$p/stack 2>/dev/null)\"; done; "
+        # a dockerd umount waiting on writeback of a huge dirty page cache shows here (Mikhail, 21 Oct B300)
+        "grep -E '^(Dirty|Writeback):' /proc/meminfo"
     )
 
 
@@ -4260,6 +4264,7 @@ class DockerService:
                 )
             )
             raise _FillerRemovalStuck(f"{error}; its processes could not be read") from timeout_error
+        lines = (result.stdout or "").splitlines()
         host_pid_view, processes = _parse_stuck_filler_processes(result.stdout or "")
         # a filler listed without an ID cannot be found by its cgroup
         all_found_by_id = not set(targets) & set(fillers)
@@ -4274,6 +4279,8 @@ class DockerService:
                     "container_names": fillers,
                     "host_pid_view": host_pid_view,
                     "processes": [process._asdict() for process in processes[:20]],
+                    "stacks": [line.split("\t", 2)[1:] for line in lines if line.startswith("STACK\t")][:20],
+                    "dirty_writeback": [line for line in lines if line.startswith(("Dirty:", "Writeback:"))],
                     "exiting": exiting,
                 }),
             )

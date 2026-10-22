@@ -1038,7 +1038,11 @@ def test_a_process_is_exiting_once_killed_or_a_zombie():
 async def test_a_killed_filler_still_exiting_does_not_fail_the_customer_create(
     docker_service, retry_ssh_mock, _short_removal_bound, caplog
 ):
-    ssh_client = _stuck_filler_host(f"HOSTPID\nPROC\t{_STUCK_ID}\t4242\tD\t4194564\tnv_teardown\n")
+    ssh_client = _stuck_filler_host(
+        f"HOSTPID\nPROC\t{_STUCK_ID}\t4242\tD\t4194564\tnv_teardown\n"
+        "STACK\t4242\t[<0>] wb_wait_for_completion|[<0>] sync_filesystem|\n"
+        "Dirty:          812345678 kB\nWriteback:          1024 kB\n"
+    )
 
     with caplog.at_level(logging.INFO):
         removed = await docker_service.remove_fillers_at_ssh_connect(
@@ -1054,6 +1058,8 @@ async def test_a_killed_filler_still_exiting_does_not_fail_the_customer_create(
     ]
     assert stuck_log.extra["exiting"] is True
     assert stuck_log.extra["processes"][0]["wchan"] == "nv_teardown"
+    assert stuck_log.extra["stacks"] == [["4242", "[<0>] wb_wait_for_completion|[<0>] sync_filesystem|"]]
+    assert stuck_log.extra["dirty_writeback"] == ["Dirty:          812345678 kB", "Writeback:          1024 kB"]
 
 
 @pytest.mark.parametrize(
