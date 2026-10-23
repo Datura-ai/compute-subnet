@@ -495,9 +495,10 @@ def _get_local_verify_service() -> LocalVerifyService:
 
 
 async def _admit_verify_intent(request: Request) -> VerifyIntent:
-    """The guards a `/verify` intent passes before anything runs: the loopback peer, the body, the validator signature, the time window and the miner it names. Returns the admitted
-    intent; raises the HTTP refusal otherwise. Claims no nonce, so a refusal here leaves the signed
-    intent usable."""
+    """The guards a `/verify` intent passes before anything runs: the loopback peer, the body,
+    the validator signature, the time window and the miner it names. Returns the admitted intent;
+    raises the HTTP refusal otherwise. Claims no nonce, so a refusal here leaves the signed intent
+    usable."""
     if not _is_loopback_client(request):
         # Logged so a provider can see why a validator that still posts over the network gets the
         # SSH checks instead: the peer is the docker gateway or the CVM's slirp address, not loopback.
