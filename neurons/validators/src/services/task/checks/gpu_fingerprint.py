@@ -106,7 +106,15 @@ class GpuFingerprintCheck:
                     check_id=self.check_id,
                     what={**what, "anchor_hard_would_be": decision},
                 )
-                return CheckResult(passed=False, event=event, updates={"clear_verified_job_info": True})
+                return CheckResult(
+                    passed=False,
+                    event=event,
+                    updates={
+                        "clear_verified_job_info": True,
+                        # tells a missing card (a renter's GPU reset can cause it) from a swap
+                        "clear_verified_job_evidence": {"anchor_hard_would_be": decision},
+                    },
+                )
 
             if decision == DECISION_GPU_MISSING:
                 event = render_message(Msg.GPU_MISSING, ctx=ctx, check_id=self.check_id, what=what)
