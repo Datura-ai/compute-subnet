@@ -40,7 +40,8 @@ never answered posts `state=recovered` and deletes the mark once the backend ans
 that needs no retry; a fault after a posted recovery starts a new incident that still owes the recovery
 the backend did not acknowledge. A mark nothing was posted
 for is deleted without a post. A backend that is down or older (404) is no answer: the next cycle asks
-again. A dry run judges and logs only: it reads and writes no mark. Every mark is also kept in this process and preferred to
+again. A dry run judges and logs only: it
+posts nothing and reads and writes no mark. Every mark is also kept in this process and preferred to
 the Redis copy (a failed write or delete leaves Redis behind), so an
 incident that spans a Redis outage is still posted once and recovered; the check's verdict never depends
 on Redis.
@@ -336,11 +337,6 @@ class RentedGpuDropCheck:
     fatal = False
 
     async def run(self, ctx: Context) -> CheckResult:
-        if not settings.RENTED_GPU_DROP_CHECK_ENABLED:
-            return CheckResult(
-                passed=True, event=render_message(Msg.DISABLED, ctx=ctx, check_id=self.check_id)
-            )
-
         rented_data = ctx.state.rented_data
         rented_executor = rented_data.executors.get(ctx.executor.uuid) if rented_data else None
         # The executor UUID is miner-reported: a rental held under another miner's hotkey is not this node's.
