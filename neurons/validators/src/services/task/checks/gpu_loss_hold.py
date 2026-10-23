@@ -118,11 +118,22 @@ class GpuLossHoldCheck:
 
     async def run(self, ctx: Context) -> CheckResult:
         pods = rented_pods(ctx)
-        # DAH-4658: the cards leave nvidia-smi while the renter resets them; that cycle neither starts nor clears a hold
-        if await missing_gpus_under_reset(ctx, list(ctx.state.gpu_details or [])):
-            return CheckResult(
-                passed=True, event=render_message(Msg.GPU_RESET_IN_PROGRESS, ctx=ctx, check_id=self.check_id)
+        gpu_details = list(ctx.state.gpu_details or [])
+        # DAH-4658: the cards leave nvidia-smi while the renter resets them; that cycle neither starts nor clears a hold.
+        # Cards missing then are held as a zero-GPU scrape is (the score carries); GpuFingerprintCheck would zero it.
+        anchored_missing = set(split_uuids((ctx.verified or {}).get(GPU_ANCHOR_KEY) or "")) - set(_listed_uuids(gpu_details))
+        if await missing_gpus_under_reset(ctx, gpu_details):
+            if not anchored_missing:
+                return CheckResult(
+                    passed=True, event=render_message(Msg.GPU_RESET_IN_PROGRESS, ctx=ctx, check_id=self.check_id)
+                )
+            event = render_message(
+                Msg.MISSING_GPUS_UNDER_RESET,
+                ctx=ctx,
+                check_id=self.check_id,
+                what={"missing_uuids": sorted(anchored_missing)},
             )
+            return CheckResult(passed=False, event=event)
         drop = judge_scrape(ctx, pods)
         key = _key(ctx)
         mark: DropMark | None = None

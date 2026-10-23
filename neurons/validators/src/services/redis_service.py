@@ -189,6 +189,13 @@ class RedisWrites:
         return len(self.ops)
 
 
+class RecentGpuReset(BaseModel):
+    """DAH-4658: a renter GPU reset that ended a moment ago; a mark written before it named its GPUs has none."""
+
+    pod_id: str
+    gpu_uuids: list[str] = []
+
+
 def last_scored_result_key(miner_hotkey: str, executor_id: str) -> str:
     return f"{LAST_SCORED_RESULT_PREFIX}:{miner_hotkey}:{executor_id}"
 
@@ -697,14 +704,24 @@ class RedisService:
         pending_pods: list[dict] = await self.get_pending_pods(miner_hotkey, executor_id)
         return [item for item in pending_pods if item.get("kind") == GPU_RESET_PENDING_KIND]
 
-    async def mark_gpu_reset_recent(self, miner_hotkey: str, executor_id: str, pod_id: str, seconds: int) -> None:
+    async def mark_gpu_reset_recent(
+        self, miner_hotkey: str, executor_id: str, pod_id: str, gpu_uuids: list[str], seconds: int
+    ) -> None:
         # ponytail: one pod per node; a second pod's reset in the same window replaces the first
-        await self.set(f"{GPU_RESET_RECENT_PREFIX}:{miner_hotkey}:{executor_id}", pod_id, ex=seconds)
+        mark = RecentGpuReset(pod_id=pod_id, gpu_uuids=gpu_uuids)
+        await self.set(f"{GPU_RESET_RECENT_PREFIX}:{miner_hotkey}:{executor_id}", mark.model_dump_json(), ex=seconds)
 
-    async def gpu_reset_recent(self, miner_hotkey: str, executor_id: str) -> str | None:
-        """The pod of the node's renter GPU reset that ended within the mark's TTL, if any."""
-        pod_id = await self.get(f"{GPU_RESET_RECENT_PREFIX}:{miner_hotkey}:{executor_id}")
-        return pod_id.decode() if isinstance(pod_id, bytes) else pod_id
+    async def gpu_reset_recent(self, miner_hotkey: str, executor_id: str) -> RecentGpuReset | None:
+        """The node's renter GPU reset that ended within the mark's TTL, if any."""
+        raw = await self.get(f"{GPU_RESET_RECENT_PREFIX}:{miner_hotkey}:{executor_id}")
+        if not raw:
+            return None
+        raw = raw.decode() if isinstance(raw, bytes) else raw
+        try:
+            return RecentGpuReset.model_validate_json(raw)
+        except ValidationError:
+            # a mark written before it named its GPUs: the bare pod id
+            return RecentGpuReset(pod_id=raw)
 
     async def renting_in_progress(self, miner_hotkey: str, executor_id: str, pod_id: str | None = None) -> bool:
         pending_pods: list[dict] = await self.get_pending_pods(miner_hotkey, executor_id)

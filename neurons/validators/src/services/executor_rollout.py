@@ -27,6 +27,8 @@ from datetime import UTC, datetime
 
 from core.config import settings
 from core.utils import _m
+from incentive.config import BASE_GPU_MAP
+from protocol.vc_protocol.compute_requests import RentedExecutorsResponse
 from services.executor_image_policy import ImageVerdict, normalize_sha256_digest
 from services.redis_service import (
     LAST_SCORED_RESULT_TTL_SECONDS,
@@ -48,6 +50,7 @@ from services.task.messages import (
     UploadFilesMessages,
 )
 from services.task.models import JobResult
+from services.task.result_handler import pods_rented_gpu_count
 
 logger = logging.getLogger(__name__)
 
@@ -467,7 +470,7 @@ def withhold_renter_gpu_reset_verdicts(
     for miner_hotkey, results in job_results.items():
         standing_by_miner[miner_hotkey] = []
         for result in results:
-            if result.failure_reason_code != MachineSpecMessages.SCRAPE_GPU_RESET_IN_PROGRESS.reason:
+            if not _held_for_renter_gpu_reset(result):
                 standing_by_miner[miner_hotkey].append(result)
                 continue
             withheld.append(WithheldVerdict(miner_hotkey=miner_hotkey, result=result))
@@ -484,17 +487,45 @@ def withhold_renter_gpu_reset_verdicts(
     return standing_by_miner, withheld
 
 
+def has_renter_gpu_reset_holds(job_results: dict[str, list[JobResult]]) -> bool:
+    return any(_held_for_renter_gpu_reset(result) for results in job_results.values() for result in results)
+
+
+def _held_for_renter_gpu_reset(result: JobResult) -> bool:
+    return result.failure_reason_code == MachineSpecMessages.SCRAPE_GPU_RESET_IN_PROGRESS.reason
+
+
+# rental and pay flags the held result of this cycle reads fresh from the cycle's rental snapshot
+_FRESH_PAY_FIELDS = (
+    "is_spot",
+    "is_on_spot_pay_list",
+    "is_provider_email_held",
+    "provider_discord_connected",
+    "is_new_rentals_paused",
+    "default_job_owner",
+    "has_lium_filler",
+)
+
+
 async def carry_renter_gpu_reset_results(
-    job_results: dict[str, list[JobResult]], redis_service: RedisService
+    job_results: dict[str, list[JobResult]],
+    redis_service: RedisService,
+    rented_executor_ids: set[str],
+    rented_data: RentedExecutorsResponse | None,
+    miner_coldkeys: dict[str, str | None],
 ) -> None:
     """DAH-4658: a scrape held for the renter's own GPU reset takes the node's last scored result, in place.
 
-    The provider loses nothing: the carried result is scored as in the cycle it came from. A node without
-    a readable last result keeps the held one, and `withhold_renter_gpu_reset_verdicts` takes it out.
+    The provider loses nothing: the carried result is scored as in the cycle it came from, with this cycle's
+    pay flags and a fresh ban lookup. A node the backend no longer lists as rented (`rented_executor_ids`,
+    lower-case), or without a readable last result, keeps the held one, and `withhold_renter_gpu_reset_verdicts`
+    takes it out.
     """
     for miner_hotkey, results in job_results.items():
         for index, held in enumerate(results):
-            if held.failure_reason_code != MachineSpecMessages.SCRAPE_GPU_RESET_IN_PROGRESS.reason:
+            if not _held_for_renter_gpu_reset(held):
+                continue
+            if str(held.executor_info.uuid).lower() not in rented_executor_ids:
                 continue
             previous = await _last_scored_result(redis_service, miner_hotkey, held)
             if previous is None:
@@ -504,6 +535,14 @@ async def carry_renter_gpu_reset_results(
                     "executor_info": held.executor_info,
                     "job_batch_id": held.job_batch_id,
                     "carried_for_renter_gpu_reset": True,
+                    **{field: getattr(held, field) for field in _FRESH_PAY_FIELDS},
+                    "is_provider_banned": _banned_now(
+                        rented_data, miner_hotkey, miner_coldkeys.get(miner_hotkey), previous, held
+                    ),
+                    "filler_revenue_per_gpu_hour": _filler_revenue_now(rented_data, previous),
+                    # the hold ends the run before the rented check, so the held result counts no rented GPU
+                    "rented_gpu_count": pods_rented_gpu_count(rented_data, str(held.executor_info.uuid))
+                    or previous.rented_gpu_count,
                 }
             )
             logger.info(
@@ -520,6 +559,34 @@ async def carry_renter_gpu_reset_results(
                     },
                 )
             )
+
+
+def _banned_now(
+    rented_data: RentedExecutorsResponse | None,
+    miner_hotkey: str,
+    miner_coldkey: str | None,
+    previous: JobResult,
+    held: JobResult,
+) -> bool:
+    """BannedProviderCheck never ran on the held cycle: look the ban up as it does, on the carried GPUs."""
+    if rented_data is None:
+        return held.is_provider_banned or previous.is_provider_banned
+    gpu_details = ((previous.spec or {}).get("gpu") or {}).get("details") or []
+    return held.is_provider_banned or rented_data.is_provider_banned(
+        miner_hotkey=miner_hotkey,
+        miner_coldkey=miner_coldkey,
+        gpu_uuids=[detail["uuid"] for detail in gpu_details if detail.get("uuid")],
+        executor_uuid=str(held.executor_info.uuid),
+    )
+
+
+def _filler_revenue_now(rented_data: RentedExecutorsResponse | None, previous: JobResult) -> float | None:
+    """This cycle's filler average for the carried GPU configuration (the held scrape may list none)."""
+    if rented_data is None:
+        return previous.filler_revenue_per_gpu_hour
+    return rented_data.get_filler_revenue_per_gpu_hour(
+        BASE_GPU_MAP.get(previous.gpu_model or ""), previous.gpu_count, settings.FILLER_REVENUE_MIN_GPU_HOURS
+    )
 
 
 async def _last_scored_result(
@@ -544,18 +611,20 @@ async def remember_rented_scored_results(
 ) -> None:
     """DAH-4658: keep each rented node's scored result of this cycle for `carry_renter_gpu_reset_results`.
 
+    Any other standing result drops the kept one, so only the cycle right before a reset is carried.
     A carried result is not kept again, so the TTL bounds how long one result can stand in. A Redis
     error only logs: the next cycle writes again.
     """
     writes = RedisWrites()
     for miner_hotkey, results in job_results.items():
         for result in results:
-            if result.is_rented and result.is_successful and not result.carried_for_renter_gpu_reset:
-                writes.set(
-                    last_scored_result_key(miner_hotkey, result.executor_info.uuid),
-                    result.model_dump_json(),
-                    ex=LAST_SCORED_RESULT_TTL_SECONDS,
-                )
+            if result.carried_for_renter_gpu_reset:
+                continue
+            key = last_scored_result_key(miner_hotkey, result.executor_info.uuid)
+            if result.is_rented and result.is_successful:
+                writes.set(key, result.model_dump_json(), ex=LAST_SCORED_RESULT_TTL_SECONDS)
+            else:
+                writes.delete(key)
     try:
         await redis_service.write_atomically(writes)
     except Exception as exc:

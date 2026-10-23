@@ -10920,7 +10920,12 @@ class DockerService:
         finally:
             if after is not None:
                 await after(report, default_extra)
-            await self.redis_service.remove_pending_pod(payload.miner_hotkey, payload.executor_id, payload.pod_id)
+            try:
+                await self.redis_service.remove_pending_pod(payload.miner_hotkey, payload.executor_id, payload.pod_id)
+            except Exception as exc:
+                logger.warning(
+                    _m(f"{label}: pending mark not removed", extra=get_extra_info({**default_extra, "error": str(exc)}))
+                )
 
         logger.info(
             _m(
@@ -10955,7 +10960,11 @@ class DockerService:
             try:
                 if report is None or report.pod_stopped:
                     await self.redis_service.mark_gpu_reset_recent(
-                        payload.miner_hotkey, payload.executor_id, payload.pod_id, RECENT_RENTER_GPU_RESET_SECONDS
+                        payload.miner_hotkey,
+                        payload.executor_id,
+                        payload.pod_id,
+                        payload.gpu_uuids,
+                        RECENT_RENTER_GPU_RESET_SECONDS,
                     )
             except Exception as exc:
                 logger.warning(

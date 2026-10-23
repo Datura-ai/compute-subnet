@@ -64,7 +64,7 @@ from protocol.vc_protocol.compute_requests import (
     RentedGpuDropResponse,
     RentedPod,
 )
-from services.gpu_reset import renter_gpu_resets
+from services.gpu_reset import renter_gpu_reset_recent_mark, renter_gpu_resets
 from services.redis_service import GPU_ANCHOR_KEY
 
 from core.config import settings
@@ -293,11 +293,15 @@ def _listed_uuids(gpu_details: list[dict]) -> list[str]:
 
 
 async def missing_gpus_under_reset(ctx: Context, gpu_details: list[dict]) -> bool:
-    """DAH-4658: a GPU missing while the renter resets it is the renter's doing, but only when every missing
-    GPU is one being reset (as GpuUsageCheck); a mark that names no GPU covers the node. A dry run reads no Redis."""
+    """DAH-4658: a GPU missing while the renter resets it (or a moment after) is the renter's doing, but only when
+    every missing GPU is one being reset (as GpuUsageCheck). An in-progress mark that names no GPU covers the node;
+    a recent mark that names none (written before it named them) is no mark. A dry run reads no Redis."""
     if settings.DRY_RUN:
         return False
     resets = await renter_gpu_resets(ctx.services.redis, ctx.miner_hotkey, ctx.executor.uuid)
+    recent = await renter_gpu_reset_recent_mark(ctx.services.redis, ctx.miner_hotkey, ctx.executor.uuid)
+    if recent is not None and recent.gpu_uuids:
+        resets = [*resets, {"pod_id": recent.pod_id, "gpu_uuids": recent.gpu_uuids}]
     if not resets:
         return False
     missing = set(split_uuids((ctx.verified or {}).get(GPU_ANCHOR_KEY) or "")) - set(_listed_uuids(gpu_details))
