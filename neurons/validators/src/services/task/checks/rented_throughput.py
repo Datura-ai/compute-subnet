@@ -264,8 +264,10 @@ class RentedThroughputCheck:
         if await self._save(ctx, key, state):
             _UNSAVED.pop(ctx.executor.uuid, None)
         else:
-            for uuid in [u for u, s in _UNSAVED.items() if s.next_due_at() <= now]:
-                del _UNSAVED[uuid]  # bounded: only nodes read within their own interval stay
+            # bounded like Redis itself: a node not measured for _REDIS_TTL_SECONDS is gone; a due node keeps its
+            # unsaved streak until its own next reading replaces it
+            for uuid in [u for u, s in _UNSAVED.items() if now - s.at > _REDIS_TTL_SECONDS]:
+                del _UNSAVED[uuid]
             _UNSAVED[ctx.executor.uuid] = state
         return self._verdict(ctx, state, probed=True)
 

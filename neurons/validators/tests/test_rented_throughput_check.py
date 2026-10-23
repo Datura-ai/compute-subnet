@@ -6,11 +6,10 @@ from __future__ import annotations
 import subprocess
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from protocol.vc_protocol.compute_requests import RentedExecutor, RentedExecutorsResponse, RentedPod
-
 from services.task.checks import container_download_speed as download_module
 from services.task.checks import rented_throughput as module
 from services.task.checks.rented_throughput import (
@@ -20,8 +19,11 @@ from services.task.checks.rented_throughput import (
     throughput_command,
 )
 from services.task.messages import RentedThroughputMessages as Msg
+from services.task.score_calculator import calculate_scores
+
 from tests.helpers import build_services, build_state, default_executor, make_context
 from tests.test_container_download_speed_check import FAST, SLOW, Clock, FakeRedis, FakeRunner
+from tests.test_partial_rental_split_scoring import _build_incentive, _make_job
 
 EXECUTOR = default_executor()
 pytestmark = pytest.mark.asyncio
@@ -299,3 +301,89 @@ async def test_unrecorded_reading_still_holds_the_cadence():
         clock.now += 3 * 3600
         await check.run(ctx)
         assert len(runner.commands) == 2
+
+
+# Redis refuses writes for both nodes: each keeps its own unsaved streak (one node's failed save never drops the
+# other's), and once Redis takes writes again the saved state is used and nothing stays in memory
+async def test_unrecorded_streaks_grow_for_every_node_until_redis_recovers():
+    class FlakyRedis(FakeRedis):
+        down = True
+
+        async def set(self, key, value, ex=None):
+            if self.down:
+                raise ConnectionError("READONLY")
+            await super().set(key, value, ex=ex)
+
+    redis = FlakyRedis()
+    other = EXECUTOR.model_copy(update={"uuid": "other-node"})
+    nodes = []
+    for executor in (EXECUTOR, other):
+        redis.store[f"rented_throughput:{executor.uuid}"] = '{"at": 0}'
+        rented_data = rented()
+        rented_data.executors[executor.uuid] = rented_data.executors.pop(EXECUTOR.uuid)
+        ctx = make_context(
+            executor=executor,
+            state=build_state(rented_data=rented_data, sysbox_runtime=True),
+            runner=FakeRunner(*[SLOW_DISK] * 5),
+            services=build_services(redis=redis),
+        )
+        nodes.append(ctx)
+    check = RentedThroughputCheck()
+    with flags() as clock, patch.dict(module._UNSAVED, clear=True):
+        for streak in (1, 2, 3, 4):
+            clock.now += 31 * 60
+            for ctx in nodes:
+                await check.run(ctx)
+            assert [module._UNSAVED[c.executor.uuid].failures_in_a_row for c in nodes] == [
+                streak,
+                streak,
+            ]
+        redis.down = False
+        clock.now += 31 * 60
+        for ctx in nodes:
+            assert (await check.run(ctx)).passed is False
+        assert module._UNSAVED == {}
+        assert all(
+            '"failures_in_a_row": 5' in redis.store[f"rented_throughput:{c.executor.uuid}"]
+            for c in nodes
+        )
+
+
+# One incentive cycle from the check's verdict to the pools: a throughput-failed node earns from neither pool, also
+# when only part of a split node is rented (its free GPUs would otherwise draw idle pay)
+@pytest.mark.parametrize("rented_gpus", [8, 1])
+@pytest.mark.parametrize(
+    "answers, enabled, earns",
+    [
+        ([GOOD], True, True),
+        ([SLOW_DISK, SLOW_DISK], True, False),
+        ([SLOW_DISK, SLOW_DISK, GOOD], True, True),
+        ([SLOW_DISK, SLOW_DISK], False, True),
+    ],
+    ids=["pass", "fail", "recovery", "disabled"],
+)
+async def test_a_throughput_failed_node_earns_from_neither_pool(
+    rented_gpus, answers, enabled, earns
+):
+    with flags() as clock, patch.dict(module._UNSAVED, clear=True):
+        module.settings.RENTED_THROUGHPUT_CHECK_ENABLED = enabled
+        ctx, _ = make_ctx(*answers)
+        for _ in answers:
+            result = await RentedThroughputCheck().run(ctx)
+            clock.now += 31 * 60
+    unpriced = ctx.executor.model_copy(
+        update={"price_per_gpu": None}
+    )  # no market price table in tests
+    score_ctx = ctx.model_copy(update={**(result.updates or {}), "executor": unpriced})
+    score, job_score, _ = calculate_scores(score_ctx, rented=True)
+    job = _make_job(gpu_count=8, rented_gpu_count=rented_gpus)
+    job.score, job.job_score = score, job_score
+    incentive = _build_incentive(job)
+    incentive._calculate_rental_share = AsyncMock(return_value=0.1)
+    await incentive.calculate_mining_scores()
+
+    idle = job.incentive_idle or 0.0
+    assert ((job.incentive or 0.0) - idle > 0) is earns  # mining (rented) pool
+    assert idle == (
+        pytest.approx(0.1) if earns and rented_gpus == 1 else 0.0
+    )  # rental-share (idle) pool
