@@ -51,7 +51,7 @@ DUPLICATED = UUIDS[:7] + [UUIDS[0]]
 
 
 @pytest.fixture(autouse=True)
-def _check_on():
+def _clear_local_marks():
     rented_gpu_drop._LOCAL_MARKS.clear()
     yield
     rented_gpu_drop._LOCAL_MARKS.clear()
