@@ -530,20 +530,18 @@ class RentalPriceIncentive(DefaultIncentive):
     ) -> None:
         # structured log for every split remainder under the marketplace port floor; the reason
         # code is what Loki and the provider dashboard (DAH-3699) key off
-        enforced: bool = settings.ENABLE_UNRENTED_PORT_FLOOR_FOR_SPLIT_REMAINDER
         logger.info(
             _m(
-                "Free remainder of a partially rented split node is below the marketplace port floor"
-                + ("" if enforced else " (shadow only - flag off)"),
+                "Free remainder of a partially rented split node is below the marketplace port floor",
                 extra={
                     "executor_id": str(result.executor_info.uuid),
                     "gpu_model": result.gpu_model,
                     "gpu_count": result.gpu_count,
                     "available_port_count": port_limited.available_port_count,
                     "required_port_count": port_limited.required_port_count,
-                    "enforced": enforced,
+                    "enforced": True,
                     "reason": ZeroIncentiveReason.PORT_LIMITED_REMAINDER,
-                    "pool": "rental_excluded" if enforced else "rental_kept_shadow",
+                    "pool": "rental_excluded",
                 },
             )
         )
@@ -1258,20 +1256,18 @@ class RentalPriceIncentive(DefaultIncentive):
 
         # DAH-3698: a split remainder under the marketplace port floor is capacity nobody can
         # rent, so it earns no idle pay; first in the chain so it never reaches the shadow numbers.
-        port_floor_enforced: bool = settings.ENABLE_UNRENTED_PORT_FLOOR_FOR_SPLIT_REMAINDER
         port_limited_remainder: PortLimitedRemainder | None = (
             self._port_limited_remainder(job_result)
-            if self._should_run_idle_pool_gate(idle_pool_candidate, eligible_for_rental_share, port_floor_enforced)
+            if idle_pool_candidate
             else None
         )
         if port_limited_remainder is not None:
             if eligible_for_rental_share:
                 self._log_port_limited_remainder(job_result, port_limited_remainder)
-            if port_floor_enforced:
-                eligible_for_rental_share = False
-                job_result.record_incentive_log(
-                    MinerLogLine.no_payout_because_port_limited_remainder(job_result, port_limited_remainder)
-                )
+            eligible_for_rental_share = False
+            job_result.record_incentive_log(
+                MinerLogLine.no_payout_because_port_limited_remainder(job_result, port_limited_remainder)
+            )
 
         # DAH-2250 soft price limit: an otherwise-eligible unrented executor priced
         # above the market p90 ceiling forfeits the unrented incentive (node stays active).
