@@ -59,7 +59,7 @@ class GpuFaultProbeCheck:
     round-trips pinned memory through the copy engines, verifies every result on the device, and reads
     uncorrected ECC / remapped rows / recovery action from NVML before and after.
 
-    GPU_FAULT_PROBE_CHECK_ENABLED runs it; a fault always fails the (fatal) check. A probe that could not run
+    It always runs; a fault always fails the (fatal) check. A probe that could not run
     (no libcuda, cuInit, JIT) passes with GPU_FAULT_PROBE_UNKNOWN: inability to measure is not a fault.
     """
 
@@ -67,16 +67,10 @@ class GpuFaultProbeCheck:
     fatal = True
 
     def __init__(self, enforce: bool = False):
-        # enforce: run whatever GPU_FAULT_PROBE_CHECK_ENABLED says
-        # (the post-rental recheck, DAH-4482)
+        # enforce: probe even beside an active filler (the post-rental recheck, DAH-4482)
         self.enforce = enforce
 
     async def run(self, ctx: Context) -> CheckResult:
-        if not (self.enforce or settings.GPU_FAULT_PROBE_CHECK_ENABLED):
-            return CheckResult(
-                passed=True, event=render_message(Msg.DISABLED, ctx=ctx, check_id=self.check_id)
-            )
-
         filler_container = get_filler_only_container(ctx)
         # enforce: the recheck only probes beside a filler after it removed the node's Lium fillers
         if filler_container and not self.enforce:

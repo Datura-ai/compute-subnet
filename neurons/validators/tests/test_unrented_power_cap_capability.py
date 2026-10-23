@@ -2,9 +2,7 @@
 
 An unrented executor whose container provably cannot apply a GPU power cap
 (no CAP_SYS_ADMIN, or /dev/nvidiactl not owned by root — see DAH-2705) forfeits
-the unrented rental incentive while staying active. Enforcement is ON by default
-and can be switched off with ENABLE_UNRENTED_POWER_CAP_LIMIT; with the flag off
-the breach is only logged (shadow mode) and the payout is unchanged.
+the unrented rental incentive while staying active. Enforcement is always on.
 """
 
 import logging
@@ -13,7 +11,6 @@ from unittest.mock import AsyncMock
 import pytest
 from datura.requests.miner_requests import ExecutorSSHInfo
 
-from core.config import settings
 from incentive.config import IncentiveConfig
 from incentive.rental_price import RentalPriceIncentive
 from services.task_service import JobResult
@@ -23,6 +20,12 @@ H200 = "NVIDIA H200"  # base model H200 is rental-eligible by default
 CAPS_WITH_SYS_ADMIN = "000001ffffffffff"   # sysbox / privileged container: every capability
 CAPS_WITHOUT_SYS_ADMIN = "00000000a80425fb"  # prod 128.140.36.181: default docker caps
 NOBODY_UID = 65534  # what sysbox maps /dev/nvidiactl to (prod 88.22.127.152)
+
+
+@pytest.fixture(autouse=True)
+def _no_flagship_gate(monkeypatch):
+    # the 8x H200 jobs here are flagships; the always-on flagship gate has its own tests
+    monkeypatch.setattr(RentalPriceIncentive, "_missing_flagship_capability", lambda *_args: None)
 
 
 def _build_incentive() -> RentalPriceIncentive:
@@ -131,9 +134,8 @@ def test_unproven_probe_is_never_flagged(spec):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("spec", UNPROVEN_SPECS)
-async def test_malformed_scrape_never_breaks_scoring(monkeypatch, spec):
+async def test_malformed_scrape_never_breaks_scoring(spec):
     # Raising out of calculate_executor_score would cost EVERY miner this cycle's weights.
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_POWER_CAP_LIMIT", True)
     incentive = _build_incentive()
 
     result = await incentive.calculate_executor_score(_make_job(spec=spec))
@@ -188,33 +190,9 @@ def test_broken_probe_is_logged_as_unmeasured(caplog):
     assert unmeasured.extra["power_cap_probe_error"] == "cannot read /proc/self/status"
 
 
-def test_enforcement_is_on_by_default():
-    # Rollout contract: this gate ships enforced (the provider fix is one compose flag),
-    # so the flag default - not the env-resolved value - must stay True.
-    default = type(settings).model_fields["ENABLE_UNRENTED_POWER_CAP_LIMIT"].default
-
-    assert default is True
-
-
 @pytest.mark.asyncio
-async def test_shadow_mode_keeps_rental_eligibility(monkeypatch):
-    # Arrange — incapable container but flag off → shadow only
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_POWER_CAP_LIMIT", False)
-    incentive = _build_incentive()
-
-    # Act
-    result = await incentive.calculate_executor_score(_make_job())
-
-    # Assert — still eligible for the unrented rental pool, nothing told to the miner
-    assert result.eligible_for_rental_share is True
-    assert "cannot_apply_gpu_power_cap" not in "\n".join(result.incentive_logs)
-
-
-@pytest.mark.asyncio
-async def test_shadow_mode_emits_the_measurement_log(monkeypatch, caplog):
-    # The shadow log is the whole deliverable of the first deploy: the rollout decision
-    # is made from these fields, so they are a dashboard contract.
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_POWER_CAP_LIMIT", False)
+async def test_breach_emits_the_measurement_log(caplog):
+    # these fields are a dashboard contract
     incentive = _build_incentive()
 
     with caplog.at_level(logging.INFO):
@@ -224,17 +202,15 @@ async def test_shadow_mode_emits_the_measurement_log(monkeypatch, caplog):
         r.msg for r in caplog.records
         if hasattr(r.msg, "extra") and r.msg.extra.get("reason") == "cannot_apply_gpu_power_cap"
     )
-    assert "shadow only - flag off" in breach.message
     assert breach.extra["container_cap_eff"] == CAPS_WITHOUT_SYS_ADMIN
     assert breach.extra["nvidiactl_owner_uid"] == 0
-    assert breach.extra["enforced"] is False
-    assert breach.extra["pool"] == "rental_kept_shadow"
+    assert breach.extra["enforced"] is True
+    assert breach.extra["pool"] == "rental_excluded"
 
 
 @pytest.mark.asyncio
-async def test_enforced_drops_rental_eligibility(monkeypatch):
-    # Arrange — incapable container and flag on
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_POWER_CAP_LIMIT", True)
+async def test_enforced_drops_rental_eligibility():
+    # Arrange — incapable container
     incentive = _build_incentive()
 
     # Act
@@ -246,10 +222,9 @@ async def test_enforced_drops_rental_eligibility(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_enforced_appends_customer_facing_incentive_log(monkeypatch):
+async def test_enforced_appends_customer_facing_incentive_log():
     # DAH-2327: the zero-incentive reason must reach the customer-facing incentive log,
     # carrying both readings so the provider can tell which of the two to fix.
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_POWER_CAP_LIMIT", True)
     incentive = _build_incentive()
 
     result = await incentive.calculate_executor_score(
@@ -264,9 +239,8 @@ async def test_enforced_appends_customer_facing_incentive_log(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_capable_executor_keeps_eligibility_when_enforced(monkeypatch):
-    # Arrange — flag on but the container can apply a cap
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_POWER_CAP_LIMIT", True)
+async def test_capable_executor_keeps_eligibility_when_enforced():
+    # Arrange — the container can apply a cap
     incentive = _build_incentive()
 
     # Act
@@ -279,9 +253,8 @@ async def test_capable_executor_keeps_eligibility_when_enforced(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_rented_executor_is_not_gated(monkeypatch):
+async def test_rented_executor_is_not_gated():
     # A rented machine earns from the rented path and must not be touched by this gate.
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_POWER_CAP_LIMIT", True)
     incentive = _build_incentive()
 
     result = await incentive.calculate_executor_score(_make_job(is_rented=True))

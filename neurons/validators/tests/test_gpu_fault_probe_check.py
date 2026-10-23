@@ -23,9 +23,8 @@ from tests.helpers import build_context_config, build_services, build_state, def
 
 
 @contextmanager
-def probe_gate(*, check_enabled: bool = True, enforce_unknown_streak: bool = False):
+def probe_gate(*, enforce_unknown_streak: bool = False):
     with patch("neurons.validators.src.services.task.checks.gpu_fault_probe.settings") as s:
-        s.GPU_FAULT_PROBE_CHECK_ENABLED = check_enabled
         s.GPU_FAULT_PROBE_UNKNOWN_STREAK_ENFORCEMENT_ENABLED = enforce_unknown_streak
         yield s
 
@@ -112,25 +111,12 @@ def make_ctx(context_factory, runner, *, rented_data=None, first_pass=False):
 
 def test_the_probe_runs_by_default_and_always_enforces():
     fields = type(module.settings).model_fields
-    assert fields["GPU_FAULT_PROBE_CHECK_ENABLED"].default is True
+    assert "GPU_FAULT_PROBE_CHECK_ENABLED" not in fields
     assert "GPU_FAULT_PROBE_ENFORCEMENT_ENABLED" not in fields
 
 
 @pytest.mark.asyncio
-async def test_disabled_runs_nothing(context_factory):
-    runner = FakeRunner()
-    ctx = make_ctx(context_factory, runner)
-
-    with probe_gate(check_enabled=False):
-        result = await GpuFaultProbeCheck().run(ctx)
-
-    assert result.passed is True
-    assert result.event.reason_code == Msg.DISABLED.reason
-    assert runner.calls == []
-
-
-@pytest.mark.asyncio
-async def test_first_pass_under_enforcement_runs_the_probe(context_factory):
+async def test_first_pass_runs_the_probe(context_factory):
     runner = FakeRunner(probe_stdout("ok"))
     ctx = make_ctx(context_factory, runner, first_pass=True)
 
