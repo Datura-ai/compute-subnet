@@ -11,7 +11,12 @@ from services.inspector_validation_service import InspectorValidationResponse
 
 from core.config import settings
 
-from ..inspector_verdict import InspectorVerdict, build_verdict, host_write_findings
+from ..inspector_verdict import (
+    InspectorVerdict,
+    build_verdict,
+    host_exec_findings,
+    host_write_findings,
+)
 from ..messages import InspectorMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
@@ -239,7 +244,9 @@ class InspectorRentedCheck:
         carries its evidence. It is a record only: the check passes, nothing reaches the score
         and no renter or backend is asked to act — except the sensor's rental-interference verdict
         of a host write into a rented pod under INSPECTOR_HOST_WRITE_ENFORCEMENT_ENABLED
-        (DAH-4548), which fails the check and the score. A read is logged only."""
+        (DAH-4548), and a provider's host exec / attach / nsenter into a rented pod under
+        INSPECTOR_HOST_EXEC_ENFORCEMENT_ENABLED (DAH-5058), which fail the check and the score. A
+        read is logged only."""
         interference = host_write_findings(
             report, verdict.provider_findings, [p.pod_id for p in rented_pods]
         )
@@ -255,7 +262,8 @@ class InspectorRentedCheck:
             )
         else:
             writes, reads = interference
-        enforced = bool(writes) and settings.INSPECTOR_HOST_WRITE_ENFORCEMENT_ENABLED
+        write_enforced = bool(writes) and settings.INSPECTOR_HOST_WRITE_ENFORCEMENT_ENABLED
+        enforced = write_enforced
         if writes or reads:
             logger.warning(
                 _m(
@@ -263,7 +271,7 @@ class InspectorRentedCheck:
                     extra=get_extra_info(
                         {
                             **ctx.default_extra,
-                            "enforced": enforced,
+                            "enforced": write_enforced,
                             "host_writes": len(writes),
                             "host_reads": len(reads),
                             "commands": [
@@ -273,8 +281,35 @@ class InspectorRentedCheck:
                     ),
                 )
             )
-        if enforced:
+        execs = host_exec_findings(verdict.provider_findings, [p.pod_id for p in rented_pods])
+        exec_enforced = bool(execs) and settings.INSPECTOR_HOST_EXEC_ENFORCEMENT_ENABLED
+        if execs:
+            logger.warning(
+                _m(
+                    "INSPECTOR_HOST_EXEC",
+                    extra=get_extra_info(
+                        {
+                            **ctx.default_extra,
+                            "enforced": exec_enforced,
+                            "host_execs": len(execs),
+                            "execs": [
+                                {
+                                    "kind": f.get("kind"),
+                                    "command": str(f.get("command"))[:160],
+                                    "container": f.get("container"),
+                                    "time": f.get("time"),
+                                }
+                                for f in execs[:5]
+                            ],
+                        }
+                    ),
+                )
+            )
+        enforced = write_enforced or exec_enforced
+        if write_enforced:
             impact = "The host wrote into a rented pod (Inspector verdict); node failed"
+        elif exec_enforced:
+            impact = "The host entered a rented pod (docker exec / attach / nsenter); node failed"
         elif verdict.affected_pod_ids:
             impact = "Provider-origin access to a rented pod recorded; score unchanged"
         else:
