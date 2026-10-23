@@ -132,6 +132,7 @@ def test_parse_disk_and_busy():
     assert rx == pytest.approx(200.0) and io == pytest.approx(512.0)
     assert parse_busy(snaps(rx_bytes=1, tx_bytes=50_000_000))[0] == pytest.approx(200.0)
     assert parse_busy(snaps(counters=False, sectors=2_000_000)) == (None, pytest.approx(512.0))
+    assert parse_busy(snaps().replace("lium_tp_device name=nvme0n1\n", ""))[1] is None
     assert parse_busy("") == (None, None)
 
 
@@ -142,13 +143,14 @@ async def test_good_reading_passes():
     assert res.passed and res.event.reason_code == Msg.OK.reason and len(runner.commands) == 1
 
 
+@pytest.mark.parametrize("resolved", [True, False])
 @pytest.mark.parametrize("seconds", [0.5, 30])
 @pytest.mark.parametrize("relevant", [0, 2_000_000])
 @pytest.mark.parametrize("unrelated", [0, 2_000_000])
-async def test_only_the_docker_root_disk_excuses_the_disk(seconds, relevant, unrelated):
+async def test_only_the_docker_root_disk_excuses_the_disk(resolved, seconds, relevant, unrelated):
     output = (
-        "lium_tp_device name=sda\n"
-        "lium_tp t=100 rx=1000 tx=1000 io=sda:7,nvme0n1:500,\n"
+        ("lium_tp_device name=sda\n" if resolved else "")
+        + "lium_tp t=100 rx=1000 tx=1000 io=sda:7,nvme0n1:500,\n"
         f"lium_tp t=102 rx=1000 tx=1000 io=sda:{7 + relevant},nvme0n1:{500 + unrelated},\n"
         + disk(secs=seconds)
         + FAST
@@ -157,7 +159,10 @@ async def test_only_the_docker_root_disk_excuses_the_disk(seconds, relevant, unr
         ctx, _ = make_ctx(output)
         _, net, disk_side = await RentedThroughputCheck()._measure_and_judge(ctx)
     assert net == "pass"
-    assert disk_side == ("none" if relevant else "fail" if seconds == 30 else "pass")
+    # an unresolved docker root is never judged on another disk's traffic
+    assert disk_side == (
+        "none" if relevant or not resolved else "fail" if seconds == 30 else "pass"
+    )
 
 
 @pytest.mark.parametrize(
@@ -180,6 +185,7 @@ async def test_two_slow_readings_zero_the_score_until_that_side_passes(answer, r
         second = await check.run(ctx)
         assert not second.passed and second.event.reason_code == Msg.SLOW.reason
         assert second.updates == {"rented_throughput_passed": False}
+        assert "on that resource stayed under its busy threshold" in second.event.remediation
         clock.now += 60  # the finding stands between readings
         assert (await check.run(ctx)).passed is False and len(runner.commands) == 2
         clock.now += 31 * 60

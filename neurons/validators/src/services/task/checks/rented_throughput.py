@@ -103,7 +103,7 @@ def parse_disk(stdout: str) -> DiskReading:
 
 def parse_busy(stdout: str) -> tuple[float | None, float | None]:
     """Other traffic in the window before the probe: (Mbps on the host NICs, the busier direction; MB/s on the busiest
-    disk under the docker root). None = not measured."""
+    disk under the docker root). None = not measured; the disk side then has no verdict."""
     snaps, devices = [], set()
     for line in (stdout or "").splitlines():
         if line.startswith(f"{SNAP_MARKER}_device name="):
@@ -124,9 +124,9 @@ def parse_busy(stdout: str) -> tuple[float | None, float | None]:
     (t0, net0, io0), (t1, net1, io1) = snaps[0], snaps[1]
     dt = max(t1 - t0, 0.01)
     moved = {d: io1[d] - io0[d] for d in io1 if d in io0}
-    # shortcut: docker root devices unresolved (btrfs/zfs, no host view) = any busy disk excuses; resolve those to tighten
-    relevant = [moved[d] for d in devices if d in moved] or list(moved.values())
-    disk = max(relevant, default=0) * 512 / dt / 1e6
+    # docker root devices unresolved (btrfs/zfs, no host view): another disk's traffic says nothing, so not measured
+    relevant = [moved[d] for d in devices if d in moved]
+    disk = max(relevant) * 512 / dt / 1e6 if relevant else None
     if net0 is None or net1 is None:
         return None, disk
     return max(net1[0] - net0[0], net1[1] - net0[1]) * 8 / dt / 1e6, disk
@@ -261,7 +261,7 @@ class RentedThroughputCheck:
         # no host counters: a slow download may be the renter's, so the network side is no verdict
         net_busy = net_mbps is None or net_mbps >= settings.RENTED_THROUGHPUT_BUSY_MBPS
         disk_is_busy = (
-            disk_busy is not None and disk_busy >= settings.RENTED_THROUGHPUT_DISK_BUSY_MB_PER_S
+            disk_busy is None or disk_busy >= settings.RENTED_THROUGHPUT_DISK_BUSY_MB_PER_S
         )
 
         judged = await ContainerDownloadSpeedCheck()._judge(endpoints)
