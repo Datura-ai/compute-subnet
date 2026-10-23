@@ -635,15 +635,6 @@ class Settings(BaseSettings):
     # (shadow mode) so prod impact can be observed before enforcing.
     ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT: bool = Field(env="ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT", default=False)
 
-    # DAH-2715 — GPU power cap capability gate. When True, an unrented executor whose
-    # container provably cannot apply a GPU power cap (no CAP_SYS_ADMIN, or /dev/nvidiactl
-    # not owned by root - see DAH-2705) loses the unrented rental incentive while staying
-    # active. A node whose probe is missing or unreadable is never penalized.
-    # Unlike the gates above this one ships ENFORCED: the fix is one compose flag on the
-    # provider's side, and the shadow window would only delay it. Set to False to fall back
-    # to logging the breach without withholding anything.
-    ENABLE_UNRENTED_POWER_CAP_LIMIT: bool = Field(env="ENABLE_UNRENTED_POWER_CAP_LIMIT", default=True)
-
     # DAH-3698 — True withholds the unrented incentive from a split remainder below the
     # marketplace port floor (the rented GPUs keep earning); False only logs it (shadow mode).
     ENABLE_UNRENTED_PORT_FLOOR_FOR_SPLIT_REMAINDER: bool = Field(

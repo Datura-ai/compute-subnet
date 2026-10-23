@@ -139,7 +139,7 @@ GATE_LOG_CASES = [
         None,
         "insufficient_disk_unmeasured",
     ),
-    ("ENABLE_UNRENTED_POWER_CAP_LIMIT", {"gpu_count": 4}, None, "power_cap_capability_unmeasured"),
+    (None, {"gpu_count": 4}, None, "power_cap_capability_unmeasured"),  # power cap gate: no flag
 ]
 
 
@@ -151,7 +151,8 @@ async def test_a_gate_logs_only_while_the_node_is_still_eligible(
 ):
     # the gate lines count eligible nodes only, as before every reason was recorded; an enforced
     # gate still records its reason on the blocked node
-    monkeypatch.setattr(settings, flag, enforced)
+    if flag:
+        monkeypatch.setattr(settings, flag, enforced)
 
     with caplog.at_level(logging.INFO):
         blocked = await _incentive().calculate_executor_score(
