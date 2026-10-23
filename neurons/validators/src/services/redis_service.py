@@ -29,6 +29,9 @@ PENDING_PODS_PREFIX = "pending_pods_prefix"
 GPU_RESET_PENDING_KIND = "gpu_reset"
 # DAH-4658: the pod of a renter GPU reset that ended a moment ago, per node, for a short TTL
 GPU_RESET_RECENT_PREFIX = "gpu_reset_recent"
+# DAH-4658: a rented node's last scored result, carried into a cycle where the renter's own GPU reset hides the cards
+LAST_SCORED_RESULT_PREFIX = "last_scored_result"
+LAST_SCORED_RESULT_TTL_SECONDS = 60 * 60
 # DAH-4698: creates the backend sent that are running in this connector right now, by pod id; what is left when a
 # connector starts was cut off by the restart (a redeploy recreates the connector mid-create)
 INFLIGHT_BACKEND_CREATES_KEY = "inflight_backend_creates"
@@ -182,6 +185,10 @@ class RedisWrites:
 
     def __len__(self) -> int:
         return len(self.ops)
+
+
+def last_scored_result_key(miner_hotkey: str, executor_id: str) -> str:
+    return f"{LAST_SCORED_RESULT_PREFIX}:{miner_hotkey}:{executor_id}"
 
 
 def _verified_job_field(miner_hotkey: str, executor_id: str) -> str:

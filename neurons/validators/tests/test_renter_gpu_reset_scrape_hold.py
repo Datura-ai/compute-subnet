@@ -6,15 +6,28 @@ pipeline before the checks that skip on it. The mark was also gone by the time a
 reset was judged.
 """
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from payload_models.payloads import ResetPodGpuRequest
 from services.docker_service import DockerService
-from services.executor_rollout import ExecutorRolloutTracker
+from core.validator import specs_to_publish
+from services.executor_rollout import (
+    ExecutorRolloutTracker,
+    carry_renter_gpu_reset_results,
+    remember_rented_scored_results,
+)
 from services.gpu_reset import RECENT_RENTER_GPU_RESET_SECONDS, GpuResetReport, renter_gpu_reset_recent
-from services.redis_service import GPU_RESET_PENDING_KIND
+from services.redis_service import (
+    GPU_RESET_PENDING_KIND,
+    LAST_SCORED_RESULT_TTL_SECONDS,
+    RESET_VERIFIED_JOB_CHANNEL,
+    last_scored_result_key,
+)
+from protocol.vc_protocol.validator_requests import ContainerState, PodContainerState
 from services.ssh_service import SSHService
+from services.task.models import build_msg
 from test_executor_rollout_grace import _failed, _scored, _validator_process
 from test_rented_host_gpu_fault_reset import (
     ENCRYPT_KEY,
@@ -158,6 +171,100 @@ async def test_the_held_result_gets_no_verdict_this_cycle():
 
     assert kept == {"5Miner": [failed, healthy]}
     assert [(w.miner_hotkey, w.result.executor_info.uuid) for w in withheld] == [("5Miner", "node-1")]
+
+
+def _rented_scored(uuid: str):
+    """A rented result with the nested models a real run carries, so the Redis round trip is the real one."""
+    result = _scored(uuid)
+    result.is_rented = True
+    result.spec = {"gpu": {"count": 8, "details": [{"name": "H100"}]}}
+    result.validation_event = build_msg(event="Validation completed", reason="VALIDATION_COMPLETED", severity="info", impact="")
+    result.pod_states = [
+        PodContainerState(pod_id=POD_ID, container_state=ContainerState.RUNNING, observed_at=datetime.now(UTC))
+    ]
+    return result
+
+
+async def _carry_then_withhold(service, results):
+    """The cycle's order: carry before the duplicate pass and the GPU count, withhold after."""
+    job_results = {"5Miner": results}
+    await carry_renter_gpu_reset_results(job_results, service)
+    validator_process = _validator_process(ExecutorRolloutTracker(redis_service=MagicMock(), grace_cycles=0))
+    validator_process.fetch_executor_digest_or_none = AsyncMock(return_value=None)
+    validator_process.observe_executor_rollout = AsyncMock(return_value=MagicMock(covers=lambda _: False))
+    return await validator_process.withhold_verdicts_for_rollout(job_results, 7500, "batch-2", MagicMock())
+
+
+@pytest.mark.asyncio
+async def test_a_held_scrape_carries_the_previous_score_into_the_cycle():
+    service = _redis_service()
+    await remember_rented_scored_results({"5Miner": [_rented_scored("node-1")]}, service)
+    held = _failed("node-1", Msg.SCRAPE_GPU_RESET_IN_PROGRESS.reason)
+
+    kept, withheld = await _carry_then_withhold(service, [held])
+
+    [carried] = kept["5Miner"]
+    assert (carried.score, carried.gpu_model, carried.gpu_count) == (1.0, "H100", 8)
+    assert carried.is_successful
+    assert carried.validation_event.reason_code == "VALIDATION_COMPLETED"
+    assert carried.job_batch_id == held.job_batch_id
+    assert carried.carried_for_renter_gpu_reset is True
+    assert withheld == []
+    assert specs_to_publish(kept["5Miner"]) == []
+    assert RESET_VERIFIED_JOB_CHANNEL not in [call.args[0] for call in service.publish.await_args_list]
+    assert 0 < await service.redis.ttl(last_scored_result_key("5Miner", "node-1")) <= LAST_SCORED_RESULT_TTL_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_a_held_scrape_without_a_previous_score_is_withheld():
+    service = _redis_service()
+    held = _failed("node-1", Msg.SCRAPE_GPU_RESET_IN_PROGRESS.reason)
+
+    kept, withheld = await _carry_then_withhold(service, [held])
+
+    assert kept == {"5Miner": []}
+    assert [w.result.executor_info.uuid for w in withheld] == ["node-1"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_scrape_without_the_mark_keeps_its_zero_score():
+    service = _redis_service()
+    await remember_rented_scored_results({"5Miner": [_rented_scored("node-1")]}, service)
+    failed = _failed("node-1", Msg.SCRAPE_FAILED_NO_GPU.reason)
+
+    kept, withheld = await _carry_then_withhold(service, [failed])
+
+    assert kept == {"5Miner": [failed]}
+    assert failed.score == 0
+    assert withheld == []
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_previous_score_withholds_the_held_scrape():
+    broken = MagicMock(get=AsyncMock(side_effect=ConnectionError("down")))
+    held = _failed("node-1", Msg.SCRAPE_GPU_RESET_IN_PROGRESS.reason)
+
+    kept, withheld = await _carry_then_withhold(broken, [held])
+
+    assert kept == {"5Miner": []}
+    assert [w.result.executor_info.uuid for w in withheld] == ["node-1"]
+
+
+@pytest.mark.asyncio
+async def test_only_scored_rented_results_are_remembered_and_a_redis_error_is_logged_only():
+    service = _redis_service()
+    idle = _scored("node-idle")
+    failed = _failed("node-failed", Msg.SCRAPE_FAILED_NO_GPU.reason)
+    failed.is_rented = True
+
+    await remember_rented_scored_results({"5Miner": [_rented_scored("node-1"), idle, failed]}, service)
+    await remember_rented_scored_results(
+        {"5Miner": [_rented_scored("node-1")]}, MagicMock(write_atomically=AsyncMock(side_effect=ConnectionError))
+    )
+
+    assert await service.get(last_scored_result_key("5Miner", "node-1"))
+    assert await service.get(last_scored_result_key("5Miner", "node-idle")) is None
+    assert await service.get(last_scored_result_key("5Miner", "node-failed")) is None
 
 
 def _reset_service(service) -> DockerService:

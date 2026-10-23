@@ -28,7 +28,12 @@ from datetime import UTC, datetime
 from core.config import settings
 from core.utils import _m
 from services.executor_image_policy import ImageVerdict, normalize_sha256_digest
-from services.redis_service import RedisService
+from services.redis_service import (
+    LAST_SCORED_RESULT_TTL_SECONDS,
+    RedisService,
+    RedisWrites,
+    last_scored_result_key,
+)
 from services.task.availability import AvailabilityErrorCode
 from services.task.checks.executor_image import observed_executor_digest
 from services.task.messages import (
@@ -477,3 +482,81 @@ def withhold_renter_gpu_reset_verdicts(
                 )
             )
     return standing_by_miner, withheld
+
+
+async def carry_renter_gpu_reset_results(
+    job_results: dict[str, list[JobResult]], redis_service: RedisService
+) -> None:
+    """DAH-4658: a scrape held for the renter's own GPU reset takes the node's last scored result, in place.
+
+    The provider loses nothing: the carried result is scored as in the cycle it came from. A node without
+    a readable last result keeps the held one, and `withhold_renter_gpu_reset_verdicts` takes it out.
+    """
+    for miner_hotkey, results in job_results.items():
+        for index, held in enumerate(results):
+            if held.failure_reason_code != MachineSpecMessages.SCRAPE_GPU_RESET_IN_PROGRESS.reason:
+                continue
+            previous = await _last_scored_result(redis_service, miner_hotkey, held)
+            if previous is None:
+                continue
+            results[index] = previous.model_copy(
+                update={
+                    "executor_info": held.executor_info,
+                    "job_batch_id": held.job_batch_id,
+                    "carried_for_renter_gpu_reset": True,
+                }
+            )
+            logger.info(
+                _m(
+                    "Score carried: the renter is resetting the node's GPUs, the last scored result stands",
+                    extra={
+                        "miner_hotkey": miner_hotkey,
+                        "executor_uuid": held.executor_info.uuid,
+                        "job_batch_id": held.job_batch_id,
+                        "carried_from_job_batch_id": previous.job_batch_id,
+                        "carried_score": previous.score,
+                        "gpu_model": previous.gpu_model,
+                        "gpu_count": previous.gpu_count,
+                    },
+                )
+            )
+
+
+async def _last_scored_result(
+    redis_service: RedisService, miner_hotkey: str, held: JobResult
+) -> JobResult | None:
+    """None when there is none or it cannot be read: the held result is then withheld, as before."""
+    try:
+        raw = await redis_service.get(last_scored_result_key(miner_hotkey, held.executor_info.uuid))
+        return JobResult.model_validate_json(raw) if raw else None
+    except Exception as exc:
+        logger.warning(
+            _m(
+                "Last scored result unreadable; the held verdict is withheld",
+                extra={"miner_hotkey": miner_hotkey, "executor_uuid": held.executor_info.uuid, "error": str(exc)},
+            )
+        )
+        return None
+
+
+async def remember_rented_scored_results(
+    job_results: dict[str, list[JobResult]], redis_service: RedisService
+) -> None:
+    """DAH-4658: keep each rented node's scored result of this cycle for `carry_renter_gpu_reset_results`.
+
+    A carried result is not kept again, so the TTL bounds how long one result can stand in. A Redis
+    error only logs: the next cycle writes again.
+    """
+    writes = RedisWrites()
+    for miner_hotkey, results in job_results.items():
+        for result in results:
+            if result.is_rented and result.is_successful and not result.carried_for_renter_gpu_reset:
+                writes.set(
+                    last_scored_result_key(miner_hotkey, result.executor_info.uuid),
+                    result.model_dump_json(),
+                    ex=LAST_SCORED_RESULT_TTL_SECONDS,
+                )
+    try:
+        await redis_service.write_atomically(writes)
+    except Exception as exc:
+        logger.error(_m("Could not keep the cycle's scored results", extra={"error": str(exc)}))
