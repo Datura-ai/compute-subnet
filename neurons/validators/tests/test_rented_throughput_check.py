@@ -119,7 +119,11 @@ def test_command_samples_the_host_then_probes_disk_and_network_in_the_renter_run
     assert cmd.index("/proc/1/net/dev") < cmd.index("/usr/bin/docker run")
     assert cmd.index("DockerRootDir") < cmd.index("/proc/1/mountinfo") < cmd.index("lium_tp_device")
     assert "--runtime=sysbox-runc" in cmd and '--network "$net"' in cmd
-    assert "oflag=direct" in cmd and "conv=fsync" in cmd and "files.pythonhosted.org" in cmd
+    assert (
+        "oflag=direct" in cmd
+        and "conv=fsync" in cmd
+        and "https://files.pythonhosted.org/packages/" in cmd
+    )
 
 
 def test_parse_disk_and_busy():
