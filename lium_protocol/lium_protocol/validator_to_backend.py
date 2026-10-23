@@ -436,6 +436,8 @@ class ContainerDeleted(PodContainerResponse):
 class SshPubKeyAdded(PodContainerResponse):
     message_type: ValidatorMessageType = ValidatorMessageType.SshPubKeyAdded
     user_public_keys: list[str] = []
+    # the AddSshPublicKeyRequest's command_id, echoed so the backend can tell which send this confirms
+    command_id: str = ""
 
 
 @VALIDATOR_MESSAGES.register
@@ -447,6 +449,8 @@ class SshPubKeyRemoved(PodContainerResponse):
 @VALIDATOR_MESSAGES.register
 class FailedContainerRequest(PodContainerResponse):
     message_type: ValidatorMessageType = ValidatorMessageType.FailedRequest
+    # the failed request's command_id; echoed for an AddSshPublicKeyRequest, empty otherwise
+    command_id: str = ""
     error_type: FailedContainerErrorTypes = FailedContainerErrorTypes.ContainerCreationFailed
     error_code: FailedContainerErrorCodes | None = None
     # renter-safe headline: customer-facing events may show it, so never executor host details
