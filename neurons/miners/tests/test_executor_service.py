@@ -6,11 +6,13 @@ body sent to the executor when registering or removing SSH public keys.
 """
 
 import asyncio
+import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import bittensor
+import aiohttp
 import pytest
 
 from models.executor import Executor
@@ -133,14 +135,31 @@ async def test_send_pubkey_to_executor_relays_the_miner_bound_signature(executor
         assert "miner_hotkey" not in sent and "validator_miner_signature" not in sent
 
 
+@pytest.mark.parametrize(
+    "status, body_error, expected_posts, accepted",
+    [
+        (None, None, 2, True),  # the request timed out before any answer
+        (200, aiohttp.ClientPayloadError("Response payload is not completed"), 2, True),
+        (200, json.JSONDecodeError("invalid JSON", "{", 1), 1, False),
+        (503, None, 1, False),
+    ],
+)
 @pytest.mark.asyncio
-async def test_send_pubkey_to_executor_retries_an_executor_that_did_not_answer(executor_service, test_executor):
-    """A timed-out upload is asked again, so one dropped request does not leave the node out of the answer;
-    a node that never answers gives up inside the deadline."""
+async def test_send_pubkey_to_executor_retries_an_executor_that_did_not_answer(
+    executor_service, test_executor, status, body_error, expected_posts, accepted
+):
+    """A timed-out or cut-off upload is asked again, so one dropped request does not leave the node out of
+    the answer; a complete bad answer is not; a node that never answers gives up inside the deadline."""
     answered = MagicMock(status=200)
     answered.json = AsyncMock(return_value={"ssh_username": "root", "ssh_port": 22, "python_path": "/p", "root_dir": "/r"})
+    if status is None:
+        first = asyncio.TimeoutError()
+    else:
+        first = MagicMock(status=status)
+        first.json = AsyncMock(side_effect=body_error)
+        first.text = AsyncMock(return_value="unavailable")
     post_ctx = MagicMock()
-    post_ctx.__aenter__ = AsyncMock(side_effect=[asyncio.TimeoutError(), answered])
+    post_ctx.__aenter__ = AsyncMock(side_effect=[first, answered])
     post_ctx.__aexit__ = AsyncMock(return_value=None)
     session = _make_mock_session()
     session.post = MagicMock(return_value=post_ctx)
@@ -148,8 +167,8 @@ async def test_send_pubkey_to_executor_retries_an_executor_that_did_not_answer(e
     with patch("services.executor_service.aiohttp.ClientSession", return_value=session), \
             patch("services.executor_service.asyncio.sleep", AsyncMock()):
         info = await executor_service.send_pubkey_to_executor(test_executor, _SSH_KEY, "0xaa")
-        assert info is not None and info.uuid == str(test_executor.uuid)
-        assert session.post.call_count == 2
+        assert (info is not None and info.uuid == str(test_executor.uuid)) is accepted
+        assert session.post.call_count == expected_posts
 
         post_ctx.__aenter__ = AsyncMock(side_effect=asyncio.TimeoutError())
         session.post.reset_mock()
@@ -162,6 +181,9 @@ async def test_send_pubkey_to_executor_retries_an_executor_that_did_not_answer(e
             test_executor, _SSH_KEY, "0xaa", deadline=time.monotonic() + 1
         ) is None
         assert session.post.call_count == 1
+
+    # the uploads leave the rental hook and the reply its time inside the validator's wait
+    assert es.UPLOAD_SSH_KEY_BUDGET_SECONDS + es.RENTAL_REQUEST_HOOK_TIMEOUT_SECONDS < es.VALIDATOR_SSH_SUBMIT_TIMEOUT_SECONDS
 
 
 # ---------------------------------------------------------------------------

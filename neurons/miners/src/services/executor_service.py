@@ -46,6 +46,8 @@ _UNREACHABLE_ERRORS: tuple[type[BaseException], ...] = (
     aiohttp.ClientConnectionError,
     OSError,
 )
+# an upload whose 200 body was cut off mid-transfer was interrupted, not answered: ask again
+_UPLOAD_RETRY_ERRORS = (*_UNREACHABLE_ERRORS, aiohttp.ClientPayloadError)
 
 
 def _describe_error(error: BaseException) -> str:
@@ -94,10 +96,16 @@ _unreachable_executor_log = _UnreachableExecutorLog()
 # One upload that timed out or had its socket reset left a rented node out of the miner's answer
 # for the whole cycle: the validator wrote RENTED_EXECUTOR_NOT_LISTED and the backend hid the node.
 # An executor that did not answer is asked again, inside a budget counted from the validator's
-# request: the validator waits 30 s (REST_SSH_SUBMIT_TIMEOUT) for the whole answer.
+# request: the validator waits 30 s (REST_SSH_SUBMIT_TIMEOUT) for the whole answer, which on a
+# rental also includes the RENTAL_REQUEST_HOOK call, so the uploads leave the hook its time.
+VALIDATOR_SSH_SUBMIT_TIMEOUT_SECONDS = 30.0
+RENTAL_REQUEST_HOOK_TIMEOUT_SECONDS = 5.0
+UPLOAD_SSH_KEY_RESPONSE_MARGIN_SECONDS = 2.0
 UPLOAD_SSH_KEY_ATTEMPTS = 3
 UPLOAD_SSH_KEY_ATTEMPT_TIMEOUT_SECONDS = 10.0
-UPLOAD_SSH_KEY_BUDGET_SECONDS = 25.0
+UPLOAD_SSH_KEY_BUDGET_SECONDS = (
+    VALIDATOR_SSH_SUBMIT_TIMEOUT_SECONDS - RENTAL_REQUEST_HOOK_TIMEOUT_SECONDS - UPLOAD_SSH_KEY_RESPONSE_MARGIN_SECONDS
+)
 UPLOAD_SSH_KEY_RETRY_DELAY_SECONDS = 1.0
 # a retry with less time than this left cannot get the executor's answer (it collects attestation)
 UPLOAD_SSH_KEY_MIN_ATTEMPT_SECONDS = 3.0
@@ -405,7 +413,7 @@ class ExecutorService:
                             **executor.model_dump(mode="json"),
                         }
                         return ExecutorSSHInfo.parse_obj(response_obj)
-                except _UNREACHABLE_ERRORS as e:
+                except _UPLOAD_RETRY_ERRORS as e:
                     time_left = deadline - time.monotonic() - UPLOAD_SSH_KEY_RETRY_DELAY_SECONDS
                     if attempt < UPLOAD_SSH_KEY_ATTEMPTS and time_left >= UPLOAD_SSH_KEY_MIN_ATTEMPT_SECONDS:
                         await asyncio.sleep(UPLOAD_SSH_KEY_RETRY_DELAY_SECONDS)
