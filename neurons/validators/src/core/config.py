@@ -351,10 +351,6 @@ class Settings(BaseSettings):
     # reaped ids; on a node with more than 224 rented pods the last rented pods' states are cut
     # until the queue drains.
     POD_STATES_REPORT_ENABLED: bool = Field(env="POD_STATES_REPORT_ENABLED", default=False)
-    # ISSUE-050 filler liveness. CHECK_ENABLED is the master switch: the SSH probe + backend
-    # re-check fail the fatal check — no unrented incentive — when a host killed the Lium filler
-    # container; switching it off disables the probe entirely.
-    FILLER_LIVENESS_CHECK_ENABLED: bool = Field(env="FILLER_LIVENESS_CHECK_ENABLED", default=True)
     # DAH-2671 spec-truth checks. Each pair follows the shadow-first pattern:
     # CHECK_ENABLED is the master switch — shadow mode computes the signal and emits the event/log
     # but returns passed=True and never changes score; ENFORCEMENT (only effective while
@@ -364,7 +360,6 @@ class Settings(BaseSettings):
     #
     # Item 1 — surface the kernel (procfs) GPU verdict the validator already computes and throws
     # away, and refuse the spoofable nvidia-smi XML fallback when it disagrees with the kernel map.
-    KERNEL_GPU_VERDICT_ENFORCEMENT_ENABLED: bool = Field(env="KERNEL_GPU_VERDICT_ENFORCEMENT_ENABLED", default=False)
     # DAH-2662 — match provider/GPU bans against the kernel's GPU UUIDs (/proc/driver/nvidia) as well
     # as the host-reported ones. Shadow by default: the kernel list is read, recorded on specs and
     # `kernel_view_would_ban` is emitted on every banned_provider/banned event; the ban itself is
@@ -382,9 +377,6 @@ class Settings(BaseSettings):
     # present and shorter than the reported GPU count fails the validation
     # (GPU_KERNEL_COUNT_MISMATCH). A missing kernel list never fails.
     GPU_KERNEL_COUNT_CHECK_ENABLED: bool = Field(env="GPU_KERNEL_COUNT_CHECK_ENABLED", default=True)
-    # Item 2a — corroborate the advertised CPU(s) count against sources the lscpu wrapper does not
-    # author (/proc/cpuinfo, /sys present population, docker NCPU).
-    CPU_TRUTH_ENFORCEMENT_ENABLED: bool = Field(env="CPU_TRUTH_ENFORCEMENT_ENABLED", default=False)
     # The scrape mounts a size-limited vloopback volume the way a rental does and reports the verdict in
     # its SCRAPE_OK event. Kill switch: off, the scrape skips the test (baked in by FileEncryptService).
     VLOOPBACK_SCRAPE_CHECK_ENABLED: bool = Field(env="VLOOPBACK_SCRAPE_CHECK_ENABLED", default=True)
@@ -440,17 +432,10 @@ class Settings(BaseSettings):
     # verified job is cleared, so the backend marks the executor inactive and billing stops. A transport
     # error or timeout decides nothing. Off by default: the pod keeps the plain POD_NOT_RUNNING verdict.
     REBOOT_FAILED_HOST_CHECK_ENABLED: bool = Field(env="REBOOT_FAILED_HOST_CHECK_ENABLED", default=False)
-    # Report a rented node that lost a GPU to the backend from the first cycle that sees it (a possible
-    # glitch waits one more); observation only, no score change. Off by default.
-    RENTED_GPU_DROP_CHECK_ENABLED: bool = Field(env="RENTED_GPU_DROP_CHECK_ENABLED", default=False)
     # DAH-4564 — read a rented pod's cpuset, CPU quota and init oom_score_adj and flag a host that
-    # pinned or throttled the renter below 95% of its advertised cores. CHECK_ENABLED observes and
-    # reports (on); ENFORCEMENT additionally zeroes the score (off: penalty owners decide). A raised
+    # pinned or throttled the renter below 95% of its advertised cores, and zero its score. A raised
     # oom_score_adj is recorded only, never scored.
     RENTED_POD_RESOURCES_CHECK_ENABLED: bool = Field(env="RENTED_POD_RESOURCES_CHECK_ENABLED", default=True)
-    RENTED_POD_RESOURCES_ENFORCEMENT_ENABLED: bool = Field(
-        env="RENTED_POD_RESOURCES_ENFORCEMENT_ENABLED", default=False
-    )
     # The per-pod incident mark expires this long after the last cycle that saw the fault.
     RENTED_GPU_DROP_STATE_TTL_SECONDS: int = Field(env="RENTED_GPU_DROP_STATE_TTL_SECONDS", default=86400, gt=0)
     # DAH-4457: a node whose GPU dropped out stays hidden (GPU_LOST availability entry, no new rentals) until its
@@ -494,11 +479,8 @@ class Settings(BaseSettings):
     # chase and a pinned-memory copy round-trip over a ~2 GB working set, plus NVML before/after: a rise in
     # uncorrected ECC or remapped rows, a pending or failed remap, or a required recovery action is a fault.
     # A card that faults under indexed access (Blender "Illegal address in CUDA queue", 6 Sep) passes the
-    # sequential matmul. CHECK runs it and logs the verdict; ENFORCEMENT lets a fault zero the score.
-    # DAH-4257: CHECK defaults on (shadow). GPU faults mid-rental are the largest renter-reported class
-    # (30 days to 14 Oct), and the probe sat dark in prod. ENFORCEMENT stays off until the shadow counts
-    # are read and the owner decides.
-    GPU_FAULT_PROBE_CHECK_ENABLED: bool = Field(env="GPU_FAULT_PROBE_CHECK_ENABLED", default=True)
+    # sequential matmul. It always runs and logs the verdict (DAH-4257 shadow, flag removed);
+    # ENFORCEMENT lets a fault zero the score and stays off until the owner decides.
     GPU_FAULT_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="GPU_FAULT_PROBE_ENFORCEMENT_ENABLED", default=False)
     # DAH-3110 — a card NVML reports broken (uncorrected ECC since the driver loaded, a pending or failed
     # row remap, a required recovery action) fails the node like a GPU ban until the host resets or
@@ -636,11 +618,6 @@ class Settings(BaseSettings):
     # and the per-executor job-result dump after scoring; asyncssh and sqlalchemy keep their own levels.
     LOG_LEVEL: str = Field(env="LOG_LEVEL", default="INFO", description="Root log level (DEBUG, INFO, WARNING, ...)")
 
-    # DAH-2250 — unrented incentive soft price limit. When True, an unrented executor
-    # whose price_per_gpu exceeds market p90 * soft_limit_price_rate loses the unrented
-    # rental incentive while staying active. When False, the breach is only logged
-    # (shadow mode) so prod impact can be observed before enforcing.
-    ENABLE_UNRENTED_SOFT_PRICE_LIMIT: bool = Field(env="ENABLE_UNRENTED_SOFT_PRICE_LIMIT", default=False)
     # DAH-2520 — unrented VRAM/disk sanity gate. When True, an unrented executor whose
     # total GPU VRAM exceeds the machine's total disk loses the unrented rental incentive
     # while staying active. When False, the breach is only logged (shadow mode) so prod
@@ -662,11 +639,6 @@ class Settings(BaseSettings):
     # provider's side, and the shadow window would only delay it. Set to False to fall back
     # to logging the breach without withholding anything.
     ENABLE_UNRENTED_POWER_CAP_LIMIT: bool = Field(env="ENABLE_UNRENTED_POWER_CAP_LIMIT", default=True)
-
-    # DAH-2467 — mixed scoring for a partially rented GPU-split node: the rented GPUs earn in
-    # the mining pool and the free GPUs in the unrented pool. Set to False to fall back to
-    # scoring the whole box as rented.
-    ENABLE_SPLIT_PARTIAL_RENTAL_SCORING: bool = Field(env="ENABLE_SPLIT_PARTIAL_RENTAL_SCORING", default=True)
 
     # DAH-3698 — True withholds the unrented incentive from a split remainder below the
     # marketplace port floor (the rented GPUs keep earning); False only logs it (shadow mode).
