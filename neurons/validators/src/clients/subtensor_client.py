@@ -227,6 +227,7 @@ class SubtensorClient:
     miners: list[bittensor.NeuronInfo] = []
     uid_to_evm_address: dict[int, str] = {}
     hotkey_to_evm_address: dict[str, str] = {}
+    hotkeys_routed_via_central_miner: frozenset[str] = frozenset()
 
     @classmethod
     def get_instance(cls) -> Self:
@@ -656,6 +657,7 @@ class SubtensorClient:
         opted_in_by_hotkey = {
             opted_in.miner_hotkey: opted_in for opted_in in opted_in_miners
         }
+        self.hotkeys_routed_via_central_miner = frozenset(opted_in_by_hotkey)
         for neuron in metagraph.neurons:
             opted_in = opted_in_by_hotkey.get(neuron.hotkey)
             if opted_in is not None:
@@ -723,7 +725,10 @@ class SubtensorClient:
         return self.miners
     
     async def send_weights_to_lium(self, payload: dict):
-        """Send weights to lium."""
+        """Send weights to lium. Without a chain block the backend refuses the report (422), so it is not sent."""
+        if payload.get("current_block") is None:
+            logger.warning(_m("[send_weights_to_lium] No current block; latest-set-weights not sent", extra=get_extra_info({})))
+            return
         try:
             keypair = settings.get_bittensor_wallet().get_hotkey()
             validator_hotkey = keypair.ss58_address
@@ -738,7 +743,14 @@ class SubtensorClient:
             )
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
                 url = f"{api_url}"
-                await session.post(url, json=payload, headers={"Authorization": f"{signature}"})
+                async with session.post(url, json=payload, headers={"Authorization": f"{signature}"}) as response:
+                    if response.status >= 400:
+                        logger.error(
+                            _m(
+                                "[send_weights_to_lium] latest-set-weights refused",
+                                extra=get_extra_info({"status": response.status, "body": (await response.text())[:500]}),
+                            ),
+                        )
         except Exception as e:
             logger.error(_m("[send_weights_to_lium] Failed to post latest-set-weights", extra=get_extra_info({"error": str(e)})))
 

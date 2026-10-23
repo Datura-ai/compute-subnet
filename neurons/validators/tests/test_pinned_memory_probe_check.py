@@ -1,6 +1,5 @@
 import ast
 import json
-import logging
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -9,6 +8,8 @@ from unittest.mock import patch
 
 import pytest
 from neurons.validators.src.core.config import settings
+from neurons.validators.src.protocol.vc_protocol.compute_requests import RentedExecutorsResponse
+from neurons.validators.src.services.const import FILLER_CONTAINER_PREFIX
 from neurons.validators.src.services.task import pipeline_factory
 from neurons.validators.src.services.task.checks import pinned_memory_probe as module
 from neurons.validators.src.services.task.checks.pinned_memory_probe import (
@@ -24,10 +25,9 @@ from tests.helpers import build_context_config, build_services, build_state, def
 
 
 @contextmanager
-def probe_gate(*, check_enabled: bool = True, enforce: bool = True):
+def probe_gate(*, check_enabled: bool = True):
     with patch("neurons.validators.src.services.task.checks.pinned_memory_probe.settings") as s:
         s.PINNED_MEMORY_PROBE_CHECK_ENABLED = check_enabled
-        s.PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED = enforce
         yield s
 
 
@@ -98,10 +98,9 @@ def make_ctx(context_factory, runner):
     )
 
 
-def test_on_and_in_shadow_by_default():
-    # a fault is logged from the first cycle; failing the node waits for a clean shadow window on real GPUs
+def test_on_and_enforcing_by_default():
     assert type(settings).model_fields["PINNED_MEMORY_PROBE_CHECK_ENABLED"].default is True
-    assert type(settings).model_fields["PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED"].default is False
+    assert "PINNED_MEMORY_PROBE_ENFORCEMENT_ENABLED" not in type(settings).model_fields
     assert PinnedMemoryProbeCheck.fatal is True
 
 
@@ -159,20 +158,25 @@ async def test_a_tdx_guest_whose_gpu_cannot_see_pinned_memory_fails_the_node(con
 
 
 @pytest.mark.asyncio
-async def test_without_enforcement_a_fault_warns_and_passes(context_factory, caplog):
-    stdout = probe_stdout(
-        "fault", faults=["gpu 0: cuStreamSynchronize -> CUDA_ERROR_ILLEGAL_ADDRESS (700)"]
-    )
-    with probe_gate(enforce=False), caplog.at_level(logging.WARNING):
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "gpu 0: cuStreamSynchronize -> CUDA_ERROR_ILLEGAL_ADDRESS (700)",
+        "cuInit -> CUDA_ERROR_UNKNOWN (999)",  # a broken-GPU code is a fault too
+    ],
+    ids=["copy-fault", "cuda-broken"],
+)
+async def test_a_fault_fails_the_node(context_factory, fault):
+    stdout = probe_stdout("fault", faults=[fault])
+    with probe_gate():
         result = await PinnedMemoryProbeCheck().run(
             make_ctx(context_factory, FakeRunner(stdout, exit_code=1))
         )
 
-    assert result.passed is True
+    assert result.passed is False
     assert result.event.reason_code == "PINNED_MEMORY_PROBE_FAILED"
-    assert result.event.severity == "warning"
-    assert "NOT changed" in result.event.impact
-    assert any("PINNED_MEMORY_PROBE_FAILED" in record.getMessage() for record in caplog.records)
+    assert result.event.severity == "error"
+    assert result.event.what_we_saw["error"] == fault
 
 
 @pytest.mark.parametrize(
@@ -222,6 +226,86 @@ async def test_executor_controlled_report_fields_are_capped(context_factory):
     assert probe["tee"] == {"gpu_cc_mode": "w" * module.MAX_FAULT_CHARS}
 
 
+@pytest.mark.asyncio
+async def test_active_filler_skips_the_probe(context_factory):
+    filler = f"{FILLER_CONTAINER_PREFIX}ac0f616e-9d3e-4605-9c42-df2adc9f4b55"
+    rented_data = RentedExecutorsResponse(
+        executors={}, filler_containers_by_executor={default_executor().uuid: filler}
+    )
+    runner = FakeRunner(probe_stdout("fault", faults=["gpu 4: worker hung during copy"]))
+    state = build_state(specs={"gpu": {"count": 8}}, rented_data=rented_data)
+    ctx = context_factory(services=build_services(), state=state, runner=runner)
+
+    with probe_gate():
+        result = await PinnedMemoryProbeCheck().run(ctx)
+
+    assert result.passed is True
+    assert result.event.reason_code == Msg.FILLER_SKIPPED.reason
+    assert result.event.what_we_saw["filler_container"] == filler
+    assert runner.calls == []
+
+
+def hung_copy_ctx(context_factory, *, faults: list[str], fresh: RentedExecutorsResponse | None):
+    # the cycle snapshot knows no workload on this node: the filler started after it was taken
+    services = build_services()
+    services.backend.get_rented_executors_now.return_value = fresh
+    state = build_state(specs={"gpu": {"count": 8}}, rented_data=RentedExecutorsResponse(executors={}))
+    runner = FakeRunner(probe_stdout("fault", faults=faults), exit_code=1)
+    return context_factory(services=services, state=state, runner=runner), services.backend
+
+
+def backend_with_filler() -> RentedExecutorsResponse:
+    return RentedExecutorsResponse(
+        executors={},
+        all_filler_containers_by_executor={default_executor().uuid: ["filler_run-1"]},
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_hung_copy_beside_a_filler_started_mid_cycle_is_not_a_fault(context_factory):
+    fresh = backend_with_filler()
+    ctx, backend = hung_copy_ctx(
+        context_factory, faults=["gpu 4: worker hung during copy"], fresh=fresh
+    )
+
+    with probe_gate():
+        result = await PinnedMemoryProbeCheck().run(ctx)
+
+    assert result.passed is True
+    assert result.event.reason_code == Msg.WORKLOAD_SKIPPED.reason
+    assert result.event.what_we_saw["workload"] == "filler"
+    assert result.event.what_we_saw["containers"] == ["filler_run-1"]
+    backend.get_rented_executors_now.assert_awaited_once()
+    assert result.updates["state"].rented_data is fresh
+
+
+@pytest.mark.asyncio
+async def test_a_hung_copy_with_no_lium_workload_still_fails_the_node(context_factory):
+    ctx, backend = hung_copy_ctx(
+        context_factory, faults=["gpu 4: worker hung during copy"], fresh=None
+    )
+
+    with probe_gate():
+        result = await PinnedMemoryProbeCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.event.reason_code == Msg.PROBE_FAILED.reason
+    backend.get_rented_executors_now.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_wrong_data_is_a_fault_even_beside_a_live_filler(context_factory):
+    faults = ["gpu 4: worker hung during copy", "gpu 0: 1 of 64 MB chunks differ"]
+    ctx, backend = hung_copy_ctx(context_factory, faults=faults, fresh=backend_with_filler())
+
+    with probe_gate():
+        result = await PinnedMemoryProbeCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.event.reason_code == Msg.PROBE_FAILED.reason
+    backend.get_rented_executors_now.assert_not_awaited()
+
+
 def test_probe_runs_beside_the_kernel_fault_probe_in_every_pipeline():
     for build in (
         pipeline_factory.PipelineFactory.build_checks,
@@ -266,6 +350,72 @@ def test_the_probe_on_a_host_without_libcuda_reports_an_error_not_a_fault():
     assert report["status"] == "error"
     assert report["faults"] == []
     assert "dev_tdx_guest" in report["tee"]
+
+
+def _load_probe_symbols(*names: str) -> dict[str, object]:
+    namespace: dict = {"ctypes": __import__("ctypes")}
+    kept = [
+        node
+        for node in ast.parse(PROBE_SOURCE).body
+        if (isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names)
+        or (isinstance(node, ast.Assign) and node.targets[0].id in names)
+    ]
+    exec(compile(ast.Module(body=kept, type_ignores=[]), "probe", "exec"), namespace)
+    return namespace
+
+
+def test_a_driver_error_naming_a_broken_gpu_is_a_fault_even_in_setup():
+    # a listed card whose cuInit answers CUDA_ERROR_UNKNOWN cannot run any renter's CUDA
+    probe = _load_probe_symbols("Cuda", "ProbeError", "CopyFault", "BROKEN_GPU_CODES")
+    cuda = object.__new__(probe["Cuda"])
+    codes = iter([999, 2])
+    cuda.lib = type("Lib", (), {"cuInit": staticmethod(lambda flags: next(codes))})()
+    cuda.error_name = lambda code: f"CUDA_ERROR_{code}"
+
+    with pytest.raises(probe["CopyFault"], match="cuInit -> CUDA_ERROR_999"):
+        cuda.call("cuInit", 0, raise_as_fault=False, broken_gpu_is_fault=True)
+    # out of memory in setup is still "could not measure"
+    with pytest.raises(probe["ProbeError"]):
+        cuda.call("cuInit", 0, raise_as_fault=False, broken_gpu_is_fault=True)
+    # an allocation answering a broken-GPU code is not a driver-start fault
+    codes = iter([999])
+    with pytest.raises(probe["ProbeError"]):
+        cuda.call("cuInit", 0, raise_as_fault=False)
+
+
+def test_device_enumeration_that_reports_a_broken_gpu_raises_a_fault():
+    probe = _load_probe_symbols(
+        "_device_count", "_reap", "CopyFault", "ProbeError", "COUNT_BUDGET_SECONDS"
+    )
+    probe["_count_worker"] = None  # the fake process never runs its target
+
+    class Conn:
+        def poll(self, timeout):
+            return True
+
+        def recv(self):
+            return {"fault": "cuInit -> CUDA_ERROR_UNKNOWN (999)"}
+
+        def close(self):
+            pass
+
+    class Process:
+        def __init__(self, target, args):
+            pass
+
+        def start(self):
+            pass
+
+        def join(self, timeout):
+            pass
+
+        def is_alive(self):
+            return False
+
+    mp = type("Mp", (), {"Pipe": staticmethod(lambda duplex: (Conn(), Conn())), "Process": Process})
+
+    with pytest.raises(probe["CopyFault"], match="CUDA_ERROR_UNKNOWN"):
+        probe["_device_count"](mp)
 
 
 def test_mismatches_counts_chunks_and_finds_the_first_wrong_byte():

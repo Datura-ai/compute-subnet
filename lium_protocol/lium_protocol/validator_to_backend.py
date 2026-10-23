@@ -102,6 +102,8 @@ class FailedContainerErrorTypes(enum.Enum):
 
 class ContainerWarningCode(enum.Enum):
     ExternalVolumeFailed = "ExternalVolumeFailed"
+    # the external volume is attached, nested Docker is turned off for it on this node
+    DockerInDockerDisabled = "DockerInDockerDisabled"
 
 
 class ValidatorMessage(Message, DeliveryStamps):
@@ -434,6 +436,8 @@ class ContainerDeleted(PodContainerResponse):
 class SshPubKeyAdded(PodContainerResponse):
     message_type: ValidatorMessageType = ValidatorMessageType.SshPubKeyAdded
     user_public_keys: list[str] = []
+    # the AddSshPublicKeyRequest's command_id, echoed so the backend can tell which send this confirms
+    command_id: str = ""
 
 
 @VALIDATOR_MESSAGES.register
@@ -445,6 +449,8 @@ class SshPubKeyRemoved(PodContainerResponse):
 @VALIDATOR_MESSAGES.register
 class FailedContainerRequest(PodContainerResponse):
     message_type: ValidatorMessageType = ValidatorMessageType.FailedRequest
+    # the failed request's command_id; echoed for an AddSshPublicKeyRequest, empty otherwise
+    command_id: str = ""
     error_type: FailedContainerErrorTypes = FailedContainerErrorTypes.ContainerCreationFailed
     error_code: FailedContainerErrorCodes | None = None
     # renter-safe headline: customer-facing events may show it, so never executor host details

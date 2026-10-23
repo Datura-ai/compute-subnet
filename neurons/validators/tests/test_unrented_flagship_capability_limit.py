@@ -3,9 +3,7 @@
 An unrented 8x H200/B200/B300 executor that has none of NCU profiling counters
 open on the host (ncu_profiling_access == "unrestricted"), real GPU splitting
 enabled (min_gpu_count below the full node size), or a verified TDX quote
-forfeits the unrented rental incentive while staying active. Enforcement is gated by
-ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT; while the flag is off the breach is
-only logged (shadow mode) and the payout is unchanged.
+forfeits the unrented rental incentive while staying active. Always enforced (the flag was removed).
 """
 
 import logging
@@ -16,7 +14,6 @@ from datura.requests.miner_requests import ExecutorSSHInfo
 from incentive.config import IncentiveConfig
 from incentive.rental_price import RentalPriceIncentive
 
-from core.config import settings
 from services.task_service import JobResult
 
 H200 = "NVIDIA H200"
@@ -116,66 +113,11 @@ def test_missing_flagship_capability(job_kwargs, is_missing):
     assert (missing is not None) is is_missing
 
 
-def test_enforcement_defaults_to_shadow_mode():
-    # Arrange / Act — rollout contract: first deploy must be shadow-only, so the
-    # flag default (not the env-resolved value) must stay False.
-    default = type(settings).model_fields["ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT"].default
-
-    # Assert
-    assert default is False
-
-
-@pytest.mark.asyncio
-async def test_shadow_mode_keeps_rental_eligibility(monkeypatch):
-    # Arrange — neither capability but flag off → shadow only
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT", False)
-    incentive = _build_incentive()
-
-    # Act
-    result = await incentive.calculate_executor_score(_make_job())
-
-    # Assert — still eligible for the unrented rental pool, nothing told to the miner
-    assert result.eligible_for_rental_share is True
-    assert "flagship_without_ncu_or_split" not in "\n".join(result.incentive_logs)
-
-
-@pytest.mark.asyncio
-async def test_shadow_mode_emits_the_capability_log(monkeypatch, caplog):
-    # The shadow log is the whole deliverable of the first deploy: the rollout decision is
-    # made from these fields, and the scrape error is what separates a failed probe from a
-    # provider who deliberately left the counters closed.
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT", False)
-    incentive = _build_incentive()
-
-    with caplog.at_level(logging.INFO):
-        await incentive.calculate_executor_score(
-            _make_job(
-                spec={
-                    "ncu_profiling_access": "unknown",
-                    "ncu_profiling_scrape_error": "Cannot read /proc/driver/nvidia/params",
-                }
-            )
-        )
-
-    breach = next(
-        record.msg
-        for record in caplog.records
-        if record.msg.extra.get("reason") == "flagship_without_ncu_or_split"
-    )
-    assert "shadow only - flag off" in breach.message
-    assert breach.extra["ncu_profiling_access"] == "unknown"
-    assert breach.extra["ncu_profiling_scrape_error"] == "Cannot read /proc/driver/nvidia/params"
-    assert breach.extra["enforced"] is False
-    assert breach.extra["pool"] == "rental_kept_shadow"
-    assert breach.extra["tdx_quote_present"] is False
-
-
 @pytest.mark.asyncio
 async def test_self_declared_cvm_is_still_excluded(monkeypatch, caplog):
     # A machine that submitted a quote the validator did not verify still fails the gate; the
     # log has to separate it from an ordinary host, since attestation_digest is None on every
     # line this gate emits.
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT", True)
     incentive = _build_incentive()
 
     with caplog.at_level(logging.INFO):
@@ -195,7 +137,6 @@ async def test_self_declared_cvm_is_still_excluded(monkeypatch, caplog):
 @pytest.mark.asyncio
 async def test_enforced_drops_rental_eligibility(monkeypatch):
     # Arrange — neither capability and flag on
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT", True)
     incentive = _build_incentive()
 
     # Act
@@ -210,7 +151,6 @@ async def test_enforced_drops_rental_eligibility(monkeypatch):
 async def test_enforced_appends_customer_facing_incentive_log(monkeypatch):
     # The zero-incentive reason must reach the miner-facing incentive log with
     # both remediation paths spelled out.
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT", True)
     incentive = _build_incentive()
 
     result = await incentive.calculate_executor_score(_make_job())
@@ -241,7 +181,6 @@ async def test_enforced_appends_customer_facing_incentive_log(monkeypatch):
 @pytest.mark.asyncio
 async def test_enforced_eligibility_by_capability(monkeypatch, job_kwargs, expect_eligible):
     # Arrange
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT", True)
     incentive = _build_incentive()
 
     # Act
@@ -255,7 +194,6 @@ async def test_enforced_eligibility_by_capability(monkeypatch, job_kwargs, expec
 async def test_rented_flagship_without_capabilities_untouched(monkeypatch):
     # The gate governs only the unrented pool: a rented machine keeps normal scoring
     # and is never told about the missing capabilities.
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT", True)
     incentive = _build_incentive()
 
     result = await incentive.calculate_executor_score(_make_job(is_rented=True))

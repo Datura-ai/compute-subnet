@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import bz2
+import hashlib
 import io
 import json
+import os
+import shutil
+import signal
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import UUID
 
 import pytest
 import requests
+import storage_runner
 from storage.models import (
     OperationResultQuality,
     OperationSpecError,
@@ -26,7 +33,7 @@ from storage.reporting import (
     _newest_within_bytes,
 )
 from storage.restic import (
-    ENCRYPTED_BACKUP_SCRIPT,
+    BACKUP_SOURCE_SCRIPT,
     JsonEventWriter,
     ResticOperationError,
     ResticStorageRunner,
@@ -375,9 +382,14 @@ def test_plain_backup_uses_read_only_volume_and_keeps_secrets_out_of_arguments()
 
     assert cwd is None
     assert "customer-volume:/workspace:ro" in command
-    assert command[command.index("--workdir") + 1] == "/workspace/checkpoints"
+    script = command.index(BACKUP_SOURCE_SCRIPT)
+    assert command[script + 2 : script + 4] == ["/workspace/checkpoints", runner._restic_binary]
     assert command[command.index("--log-driver") + 1] == "none"
     assert command[command.index("--tmpfs") + 1] == "/tmp:rw,nosuid,nodev,size=536870912"
+    assert command[command.index("--memory") + 1] == "4g"
+    assert command[command.index("--oom-score-adj") + 1] == "1000"
+    assert "GOGC=50" in command
+    assert command[command.index("--label") + 1] == f"lium.backup-helper={OPERATION_ID}"
     assert "AWS_ACCESS_KEY_ID" in command
     assert "AWS_SESSION_TOKEN" in command
     assert "access-key" not in command
@@ -607,6 +619,33 @@ def test_encrypted_workspace_fails_closed_when_pid_cgroup_does_not_match(
         ).resolve(operation)
 
 
+def test_encrypted_workspace_without_host_pid_namespace_names_the_host_fault(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    operation = StorageOperationSpec.from_mapping(_operation_payload(mode="encrypted_running"))
+    inspection = json.dumps(
+        [
+            {
+                "Id": CONTAINER_ID,
+                "State": {"Running": True, "Pid": 4321},
+                "Mounts": [{"Name": "customer-volume", "Destination": "/lium-cipher"}],
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        "storage.workspace.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=inspection, stderr=""),
+    )
+
+    with pytest.raises(WorkspaceResolutionError, match=r"host PID namespace \(pid: host\)"):
+        WorkspaceResolver(
+            docker_binary="docker",
+            proc_root=tmp_path,
+            environ={"LIUM_STORAGE_HELPER_IMAGE": "executor:test"},
+        ).resolve(operation)
+
+
 def test_encrypted_workspace_fails_closed_when_container_restarts_during_resolution(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -682,6 +721,7 @@ def test_exit_code_three_with_snapshot_is_completed_partial(
     operation = StorageOperationSpec.from_mapping(_operation_payload())
     output = io.StringIO()
     events = JsonEventWriter(str(OPERATION_ID), 0, output=output)
+    (tmp_path / "file").write_text("x")
     workspace = LocalWorkspace(tmp_path)
     runner = ResticStorageRunner(operation, workspace, event_writer=events)
 
@@ -697,6 +737,94 @@ def test_exit_code_three_with_snapshot_is_completed_partial(
     assert result.result_quality is OperationResultQuality.PARTIAL
     assert result.snapshot_id == SNAPSHOT_ID
     assert '"result_quality":"PARTIAL"' in output.getvalue()
+
+
+class _KilledPopen(_FakePopen):
+    def wait(self) -> int:
+        return 137
+
+
+@pytest.mark.parametrize(
+    ("oom_killed", "message"),
+    [("true", "^backup ran out of memory$"), ("false", r"^backup helper was killed \(often out of memory\)$")],
+)
+def test_killed_helper_reports_oom_only_when_docker_says_so(
+    monkeypatch: pytest.MonkeyPatch, oom_killed: str, message: str
+) -> None:
+    operation = StorageOperationSpec.from_mapping(_operation_payload())
+    workspace = WorkspaceResolver(environ={"LIUM_STORAGE_HELPER_IMAGE": "executor:test"}).resolve(operation)
+    runner = ResticStorageRunner(operation, workspace)
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], *args: object, **kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        stdout = f"{oom_killed}\n" if "inspect" in command else "[]"
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr("storage.restic.subprocess.run", fake_run)
+    monkeypatch.setattr("storage.restic.subprocess.Popen", _KilledPopen)
+
+    with pytest.raises(ResticOperationError, match=message):
+        runner.run()
+    assert calls[-1][1:3] == ["rm", "--force"]
+
+
+class _TerminatedRunnerPopen(_FakePopen):
+    pid = 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        os.kill(os.getpid(), signal.SIGTERM)
+        return 0
+
+    def poll(self) -> int:
+        return 0
+
+
+def test_sigterm_to_runner_removes_the_helper_container(monkeypatch: pytest.MonkeyPatch) -> None:
+    operation = StorageOperationSpec.from_mapping(_operation_payload())
+    workspace = WorkspaceResolver(environ={"LIUM_STORAGE_HELPER_IMAGE": "executor:test"}).resolve(operation)
+    runner = ResticStorageRunner(operation, workspace)
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], *args: object, **kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+    monkeypatch.setattr("storage.restic.subprocess.run", fake_run)
+    monkeypatch.setattr("storage.restic.subprocess.Popen", _TerminatedRunnerPopen)
+    previous = signal.signal(signal.SIGTERM, storage_runner._cancel_on_sigterm)
+    try:
+        with pytest.raises(StorageOperationCancelled, match="SIGTERM"):
+            runner.run()
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+    assert calls[-1][1:3] == ["rm", "--force"]
+
+
+def test_stale_helper_cleanup_removes_only_long_exited_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    operation = StorageOperationSpec.from_mapping(_operation_payload())
+    workspace = WorkspaceResolver(environ={"LIUM_STORAGE_HELPER_IMAGE": "executor:test"}).resolve(operation)
+    runner = ResticStorageRunner(operation, workspace)
+    old = (datetime.now(timezone.utc) - timedelta(minutes=11)).strftime("%Y-%m-%dT%H:%M:%S.123456789Z")
+    fresh = (datetime.now(timezone.utc) - timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S.123456789Z")
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], *args: object, **kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        stdout = ""
+        if command[1] == "ps":
+            stdout = "old\nfresh\nrestarted\n"
+        elif command[1] == "inspect":
+            stdout = f"old exited {old}\nfresh exited {fresh}\nrestarted running {old}\n"
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr("storage.restic.subprocess.run", fake_run)
+
+    runner._remove_stopped_helpers()
+
+    assert "status=exited" in calls[0] and "label=lium.backup-helper" in calls[0]
+    assert [c[1:] for c in calls if c[1] == "rm"] == [["rm", "--force", "old"]]
 
 
 def test_docker_restore_uses_native_json_restore_to_requested_directory() -> None:
@@ -1246,7 +1374,7 @@ def test_encrypted_backup_script_stops_when_the_backup_path_is_missing(tmp_path:
     marker = tmp_path / "ran"
 
     completed = subprocess.run(
-        ["/bin/sh", "-c", ENCRYPTED_BACKUP_SCRIPT, "sh", str(tmp_path / "missing"), "touch", str(marker)],
+        ["/bin/sh", "-c", BACKUP_SOURCE_SCRIPT, "sh", str(tmp_path / "missing"), "touch", str(marker)],
         capture_output=True,
     )
 
@@ -1254,6 +1382,42 @@ def test_encrypted_backup_script_stops_when_the_backup_path_is_missing(tmp_path:
     assert not marker.exists()
     # the reporter keeps the first diagnostic, so sh's own cd error must not reach it ahead of ours
     assert completed.stderr == b""
+
+
+def test_backup_source_script_stops_when_the_backup_path_is_empty(tmp_path: Path) -> None:
+    marker = tmp_path / "ran"
+    (tmp_path / "backup").mkdir()
+
+    completed = subprocess.run(
+        ["/bin/sh", "-c", BACKUP_SOURCE_SCRIPT, "sh", str(tmp_path / "backup"), "touch", str(marker)],
+        capture_output=True,
+    )
+
+    assert completed.returncode == 66
+    assert not marker.exists()
+
+
+def test_backup_source_script_fails_when_the_backup_path_is_a_file(tmp_path: Path) -> None:
+    marker = tmp_path / "ran"
+    (tmp_path / "backup").write_text("x")
+
+    completed = subprocess.run(
+        ["/bin/sh", "-c", BACKUP_SOURCE_SCRIPT, "sh", str(tmp_path / "backup"), "touch", str(marker)],
+        capture_output=True,
+    )
+
+    assert completed.returncode == 1
+    assert not marker.exists()
+
+
+def test_local_backup_of_a_file_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    path = tmp_path / "backup"
+    path.write_text("x")
+    runner = ResticStorageRunner(StorageOperationSpec.from_mapping(_operation_payload()), LocalWorkspace(path))
+    monkeypatch.setattr("storage.restic.subprocess.Popen", lambda *a, **k: pytest.fail("restic ran"))
+
+    with pytest.raises(ResticOperationError, match="not a directory"):
+        runner._backup()
 
 
 class _MissingSourcePopen(_FakePopen):
@@ -1265,8 +1429,9 @@ class _MissingSourcePopen(_FakePopen):
         return 66
 
 
-def test_backup_of_a_missing_path_fails_with_a_clear_message(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_backup_of_a_missing_path_is_an_empty_no_op(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     operation = StorageOperationSpec.from_mapping(_operation_payload())
+    (tmp_path / "file").write_text("x")  # past the local pre-check: restic itself reports the missing source
     runner = ResticStorageRunner(operation, LocalWorkspace(tmp_path))
     monkeypatch.setattr(
         "storage.restic.subprocess.run",
@@ -1274,16 +1439,141 @@ def test_backup_of_a_missing_path_fails_with_a_clear_message(monkeypatch: pytest
     )
     monkeypatch.setattr("storage.restic.subprocess.Popen", _MissingSourcePopen)
 
-    with pytest.raises(ResticOperationError, match="backup path does not exist"):
-        runner._backup()
+    result = runner._backup()
+
+    assert (result.status, result.result_quality, result.snapshot_id) == ("COMPLETED", OperationResultQuality.EMPTY, None)
 
 
-def test_local_backup_of_a_missing_directory_fails_before_restic_runs(tmp_path: Path) -> None:
-    operation = StorageOperationSpec.from_mapping(_operation_payload())
-    runner = ResticStorageRunner(operation, LocalWorkspace(tmp_path / "missing"))
+_EMPTY_JSON = '{"message_type":"exit_error","code":1,"message":"Fatal: unable to save snapshot: snapshot is empty"}\n'
+_EMPTY_TEXT = "Fatal: unable to save snapshot: snapshot is empty\n"
+_EMPTY_IN_FILENAME = '{"message_type":"status","current_files":["/data/snapshot is empty.txt"]}\n'
 
-    with pytest.raises(ResticOperationError, match="backup path does not exist"):
-        runner._backup()
+
+def _run_backup_with_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, lines: list[str], exclude_patterns: list[str]
+) -> object:
+    class _Popen(_FakePopen):
+        def __init__(self, command: list[str], *args: object, **kwargs: object) -> None:
+            super().__init__(command, *args, **kwargs)
+            self.stdout = iter(lines)
+
+        def wait(self) -> int:
+            return 1
+
+    (tmp_path / "file").write_text("x")
+    payload = _operation_payload()
+    payload["workspace"]["exclude_patterns"] = exclude_patterns
+    runner = ResticStorageRunner(StorageOperationSpec.from_mapping(payload), LocalWorkspace(tmp_path))
+    monkeypatch.setattr(
+        "storage.restic.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="[]", stderr=""),
+    )
+    monkeypatch.setattr("storage.restic.subprocess.Popen", _Popen)
+    return runner._backup()
+
+
+@pytest.mark.parametrize("line", [_EMPTY_JSON, _EMPTY_TEXT], ids=["json", "text"])
+def test_backup_with_every_file_excluded_is_an_empty_no_op(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, line: str
+) -> None:
+    result = _run_backup_with_output(monkeypatch, tmp_path, [line], [".cache"])
+
+    assert (result.status, result.result_quality, result.snapshot_id) == ("COMPLETED", OperationResultQuality.EMPTY, None)
+
+
+@pytest.mark.parametrize(
+    ("lines", "exclude_patterns"),
+    [([_EMPTY_JSON], []), ([_EMPTY_IN_FILENAME], [".cache"])],
+    ids=["no-excludes", "filename-contains-text"],
+)
+def test_backup_empty_snapshot_without_excludes_or_real_error_still_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, lines: list[str], exclude_patterns: list[str]
+) -> None:
+    with pytest.raises(ResticOperationError):
+        _run_backup_with_output(monkeypatch, tmp_path, lines, exclude_patterns)
+
+
+@pytest.mark.parametrize("make_dir", [False, True], ids=["missing", "empty"])
+def test_local_backup_of_a_missing_or_empty_directory_skips_restic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_dir: bool
+) -> None:
+    path = tmp_path / "backup"
+    if make_dir:
+        path.mkdir()
+    runner = ResticStorageRunner(StorageOperationSpec.from_mapping(_operation_payload()), LocalWorkspace(path))
+    monkeypatch.setattr("storage.restic.subprocess.Popen", lambda *a, **k: pytest.fail("restic ran"))
+
+    result = runner._backup()
+
+    assert (result.status, result.result_quality, result.snapshot_id) == ("COMPLETED", OperationResultQuality.EMPTY, None)
+
+
+def test_backup_passes_the_exclude_patterns_to_restic(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    payload = _operation_payload()
+    payload["workspace"]["exclude_patterns"] = [".cache", ".ssh"]
+    (tmp_path / "file").write_text("x")
+    runner = ResticStorageRunner(StorageOperationSpec.from_mapping(payload), LocalWorkspace(tmp_path))
+    commands = []
+    monkeypatch.setattr(runner, "_stream", lambda command, **kwargs: commands.append(command) or (0, {"snapshot_id": SNAPSHOT_ID}))
+
+    runner._backup()
+
+    assert commands[0][-3:] == ["--exclude=.cache", "--exclude=.ssh", "."]
+
+
+# As neurons/executor/Dockerfile pins it.
+RESTIC_URL = "https://github.com/restic/restic/releases/download/v0.19.1/restic_0.19.1_linux_amd64.bz2"
+RESTIC_SHA256 = "f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c"
+
+
+@pytest.fixture(scope="session")
+def restic_binary(tmp_path_factory: pytest.TempPathFactory) -> str:
+    """restic on PATH, else the pinned release, checksum-verified (CI has no restic)."""
+    if found := shutil.which("restic"):
+        return found
+    archive = requests.get(RESTIC_URL, timeout=60).content
+    assert hashlib.sha256(archive).hexdigest() == RESTIC_SHA256
+    binary = tmp_path_factory.mktemp("restic") / "restic"
+    binary.write_bytes(bz2.decompress(archive))
+    binary.chmod(0o755)
+    return str(binary)
+
+
+def test_real_restic_skips_nested_excludes_and_keeps_neighbours(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, restic_binary: str
+) -> None:
+    """The runner's own backup arguments, run by the real restic binary against a local repository."""
+    workspace = tmp_path / "workspace"
+    for name in ("proj/.config/gcloud/credentials.db", "proj/.config/gcloud_notes", "proj/.config/other/x", ".env",
+                 ".env.local", "proj/model.bin"):
+        (workspace / name).parent.mkdir(parents=True, exist_ok=True)
+        (workspace / name).write_text("x")
+    payload = _operation_payload()
+    payload["workspace"]["exclude_patterns"] = [".config/gcloud", ".env"]
+    runner = ResticStorageRunner(StorageOperationSpec.from_mapping(payload), LocalWorkspace(workspace))
+    commands = []
+    monkeypatch.setattr(runner, "_stream", lambda command, **kwargs: commands.append(command) or (0, {"snapshot_id": SNAPSHOT_ID}))
+    runner._backup()
+    env = {**os.environ, "RESTIC_REPOSITORY": str(tmp_path / "repo"), "RESTIC_PASSWORD": "test"}
+
+    restic = restic_binary
+    subprocess.run([restic, "init"], env=env, check=True, capture_output=True)
+    subprocess.run([restic, *commands[0]], cwd=workspace, env=env, check=True, capture_output=True)
+    listing = subprocess.run([restic, "ls", "latest", "--json"], env=env, check=True, capture_output=True, text=True)
+    paths = {entry["path"] for entry in map(json.loads, listing.stdout.splitlines()) if entry.get("path")}
+
+    assert {"/proj/.config/gcloud_notes", "/proj/.config/other/x", "/.env.local", "/proj/model.bin"} <= paths
+    assert not {path for path in paths if "/.config/gcloud/" in path or path.endswith("/.config/gcloud")}
+    assert "/.env" not in paths
+
+
+@pytest.mark.parametrize("patterns", [".cache", [""], [1]])
+def test_operation_spec_rejects_malformed_exclude_patterns(patterns: object) -> None:
+    payload = _operation_payload()
+    payload["workspace"]["exclude_patterns"] = patterns
+
+    with pytest.raises(OperationSpecError):
+        StorageOperationSpec.from_mapping(payload)
 
 
 def test_queued_diagnostic_logs_stay_under_the_waf_body_limit() -> None:
@@ -1294,3 +1584,166 @@ def test_queued_diagnostic_logs_stay_under_the_waf_body_limit() -> None:
     assert kept == lines[-len(kept) :]
     assert len(json.dumps(kept)) <= PENDING_LOGS_MAX_BYTES + len(kept) * 2
     assert len(json.dumps({"logs": kept})) < 64_000
+
+
+@pytest.mark.parametrize(("kind", "passes"), [("absent", True), ("dir", True), ("file", False)])
+def test_encrypted_backup_preflight_lets_an_absent_path_through(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str, passes: bool
+) -> None:
+    target = tmp_path / "backup"
+    if kind == "dir":
+        target.mkdir()
+    elif kind == "file":
+        target.write_text("x")
+
+    real_run = subprocess.run
+
+    def run_locally(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        script = command[command.index("-c") + 1]
+        return real_run(["/bin/sh", "-c", script, "sh", str(target)], capture_output=True, text=True)
+
+    monkeypatch.setattr("storage.workspace.subprocess.run", run_locally)
+    validate = lambda: WorkspaceResolver(docker_binary="docker")._validate_encrypted_path(  # noqa: E731
+        image="executor:test",
+        pid=1,
+        visible_path=PurePosixPath(str(target)),
+        requested_path=PurePosixPath("/root/backup"),
+        action=StorageAction.BACKUP,
+    )
+
+    if passes:
+        validate()
+    else:
+        with pytest.raises(WorkspaceResolutionError):
+            validate()
+
+
+EXPIRED_LINE = "Save(<data/1234>) returned error, retrying after 1s: ExpiredToken: The provided token has expired.\n"
+
+
+class _RenewalSession:
+    """DAH-4945: the backend's progress and credentials routes"""
+
+    def __init__(self, status_code: int = 200) -> None:
+        self.status_code = status_code
+        self.posts: list[dict[str, object]] = []
+
+    def put(self, url: str, **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(status_code=200, raise_for_status=lambda: None, json=lambda: {})
+
+    def post(self, url: str, **kwargs: object) -> SimpleNamespace:
+        self.posts.append({"url": url, **kwargs})
+        n = len(self.posts)
+        body = {"access_key_id": f"key-{n}", "secret_access_key": f"secret-{n}", "session_token": f"token-{n}"}
+        return SimpleNamespace(status_code=self.status_code, raise_for_status=lambda: None, json=lambda: body)
+
+
+def _renewing_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    session: _RenewalSession,
+    expired_runs: int,
+    first_line: str | None = None,
+) -> tuple[ResticStorageRunner, list[dict[str, str]]]:
+    spec = ReporterSpec(api_url="https://api.test", auth_token="op-token", resource=ReporterResource.BACKUP)
+    reporter = StorageEventReporter(
+        OPERATION_ID, StorageAction.BACKUP, spec, session=session, sleeper=lambda _: None
+    )
+    events = JsonEventWriter(str(OPERATION_ID), 0, output=io.StringIO(), reporter=reporter)
+    (tmp_path / "file").write_text("x")
+    runner = ResticStorageRunner(
+        StorageOperationSpec.from_mapping(_operation_payload()), LocalWorkspace(tmp_path), event_writer=events
+    )
+    environments: list[dict[str, str]] = []
+
+    class _Popen(_FakePopen):
+        def __init__(self, command: list[str], *args: object, **kwargs: object) -> None:
+            super().__init__(command, *args, **kwargs)
+            environments.append(dict(kwargs["env"]))
+            if len(environments) <= expired_runs:
+                self.stdout = iter(['{"message_type":"status","percent_done":0.5}\n', EXPIRED_LINE])
+            elif first_line and len(environments) == 1:
+                summary = json.dumps({"message_type": "summary", "snapshot_id": SNAPSHOT_ID})
+                self.stdout = iter([*first_line.splitlines(keepends=True), summary + "\n"])
+
+    monkeypatch.setattr("storage.restic.subprocess.Popen", _Popen)
+    monkeypatch.setattr(runner, "_terminate_process", MagicMock())
+    monkeypatch.setattr(
+        "storage.restic.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="[]", stderr=""),
+    )
+    return runner, environments
+
+
+@pytest.mark.parametrize(
+    ("line", "renewals"),
+    [
+        (EXPIRED_LINE, 1),
+        ("client.PutObject: The provided token has expired.\n", 1),
+        ('{"message_type":"error","error":{"message":"The provided token has expired."}}\n', 1),
+        ('{"message_type":"exit_error","message":"The provided token has expired."}\n', 1),
+        ('{"message_type":"status","current_files":["/workspace/ExpiredToken.java"]}\n', 0),
+        (
+            '{"message_type":"error","error":{"message":"permission denied"},'
+            '"item":"/workspace/ExpiredToken.java"}\n',
+            0,
+        ),
+        (
+            '{"message_type":"error","error":{"message":"open /workspace/ExpiredToken.java: permission denied"},'
+            '"during":"archival","item":"/workspace/ExpiredToken.java"}\n',
+            0,
+        ),
+        # restic keeps relative source paths: removing the absolute item leaves "open ExpiredToken.java: ..."
+        (
+            json.dumps(
+                {
+                    "message_type": "error",
+                    "during": "archival",
+                    "item": "/workspace/ExpiredToken.java",
+                    "error": {"message": "/workspace/ExpiredToken.java: open ExpiredToken.java: permission denied"},
+                }
+            )
+            + "\n",
+            0,
+        ),
+        # expiry while restic removes its lock after the snapshot was saved
+        (json.dumps({"message_type": "summary", "snapshot_id": SNAPSHOT_ID}) + "\n" + EXPIRED_LINE, 0),
+    ],
+)
+def test_backup_renews_expired_credentials_and_reruns(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, line: str, renewals: int
+) -> None:
+    session = _RenewalSession()
+    runner, environments = _renewing_runner(
+        monkeypatch, tmp_path, session, expired_runs=0, first_line=line
+    )
+
+    result = runner.run()
+
+    assert (result.status, result.snapshot_id) == ("COMPLETED", SNAPSHOT_ID)
+    assert (len(environments), len(session.posts)) == (renewals + 1, renewals)
+    if renewals:
+        assert [env["AWS_SESSION_TOKEN"] for env in environments] == ["session-token", "token-1"]
+        assert environments[1]["AWS_ACCESS_KEY_ID"] == "key-1"
+        (post,) = session.posts
+        assert post["url"] == f"https://api.test/backup-logs/{OPERATION_ID}/credentials"
+        assert post["headers"] == {"Authorization": "Bearer op-token"}
+
+
+def test_backup_fails_when_the_backend_refuses_renewal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runner, environments = _renewing_runner(
+        monkeypatch, tmp_path, _RenewalSession(410), expired_runs=1
+    )
+
+    with pytest.raises(ResticOperationError, match="could not be renewed"):
+        runner.run()
+    assert len(environments) == 1
+
+
+def test_backup_renews_at_most_three_times(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    session = _RenewalSession()
+    runner, environments = _renewing_runner(monkeypatch, tmp_path, session, expired_runs=99)
+
+    with pytest.raises(ResticOperationError, match="credentials expired"):
+        runner.run()
+    assert (len(environments), len(session.posts)) == (4, 3)

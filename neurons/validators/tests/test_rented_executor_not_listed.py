@@ -10,7 +10,7 @@ synthesis next to it); the last tests drive the REST path end to end, so the emp
 and the result list are checked where the cycle reads them.
 """
 
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
@@ -30,7 +30,6 @@ from services.task.availability import (
     silence_availability_errors_on_our_own_outage,
 )
 from tests.test_express_lane import _cycle_inputs, _executor_info, _job_result
-from tests.test_verification_started_report import _accepted, _FakeMinerClient
 
 MINER_HOTKEY = "5MinerHotkeyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 OTHER_MINER_HOTKEY = "5OtherMinerHotkeyBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
@@ -142,6 +141,28 @@ def test_probe_agrees_with_the_builder():
     assert service._has_not_listed_rented_executors(make_payload(), None, [], None) is False
 
 
+def test_one_cycle_grace_reports_a_rented_node_from_its_second_consecutive_miss(monkeypatch):
+    """5GN5FgYk/aad247c2, 19 Oct 14:16Z: left out of one answer, back in the next. 86 of 347 rows that day."""
+    monkeypatch.setattr("services.miner_service.settings.RENTED_NOT_LISTED_ONE_CYCLE_GRACE", True)
+    service = make_service()
+    rented_data = RentedExecutorsResponse(executors={MISSING: rented(), LISTED: rented()})
+
+    first = build(service, rented_data)
+    back = build(service, rented_data, listed_ids=(LISTED, MISSING))
+    missed_again = build(service, rented_data)
+    second = build(service, rented_data)
+
+    assert first == [] and back == [] and missed_again == []
+    assert [r.executor_info.uuid for r in second] == [MISSING]
+
+
+def test_one_cycle_grace_off_reports_the_first_miss(monkeypatch):
+    monkeypatch.setattr("services.miner_service.settings.RENTED_NOT_LISTED_ONE_CYCLE_GRACE", False)
+    rented_data = RentedExecutorsResponse(executors={MISSING: rented(), LISTED: rented()})
+
+    assert [r.executor_info.uuid for r in build(make_service(), rented_data)] == [MISSING]
+
+
 # --- the DAH-2748 outage silencer ------------------------------------------------------------
 
 
@@ -198,11 +219,9 @@ def test_not_listed_rows_are_not_silenced_and_do_not_pad_the_checked_count():
 @pytest.fixture
 def rest_service(mocker, monkeypatch, tmp_path):
     import services.file_encrypt_service as file_encrypt_service
-    from core.config import settings
 
     # the cycle inputs name a job-files directory that must exist; keep it under pytest's tmp_path
     monkeypatch.setattr(file_encrypt_service, "JOB_FILES_ROOT", tmp_path)
-    monkeypatch.setattr(settings, "USE_REST_API", True)
     my_key = Mock(ss58_address="validator-hotkey")
     my_key.sign.return_value = b"\x01\x02\x03"
     mocker.patch(
@@ -263,6 +282,20 @@ async def test_cycle_result_carries_the_listed_verdict_and_the_missing_rented_no
 
 
 @pytest.mark.asyncio
+async def test_one_cycle_grace_a_miner_answering_zero_executors_twice_gets_the_row_on_the_second(rest_service, monkeypatch):
+    monkeypatch.setattr("services.miner_service.settings.RENTED_NOT_LISTED_ONE_CYCLE_GRACE", True)
+    rest_service.miner_returns()
+    rented_data = RentedExecutorsResponse(executors={MISSING: rented()})
+
+    first = await request(rest_service, rented_data)
+    second = await request(rest_service, rented_data)
+
+    assert MISSING not in [r.executor_info.uuid for r in first["results"]]
+    assert [r.executor_info.uuid for r in second["results"]] == [MISSING]
+    assert second["results"][0].failure_reason_code == "RENTED_EXECUTOR_NOT_LISTED"
+
+
+@pytest.mark.asyncio
 async def test_a_miner_whose_only_rented_node_is_down_gets_a_row_for_the_node_not_a_miner_failure(rest_service):
     """Zero executors used to end as one miner-level failure row (uuid 1111-…) and nothing about
     the node; now the node gets its own row."""
@@ -270,23 +303,6 @@ async def test_a_miner_whose_only_rented_node_is_down_gets_a_row_for_the_node_no
     rented_data = RentedExecutorsResponse(executors={MISSING: rented()})
 
     out = await request(rest_service, rented_data)
-
-    assert [r.executor_info.uuid for r in out["results"]] == [MISSING]
-    assert out["results"][0].failure_reason_code == "RENTED_EXECUTOR_NOT_LISTED"
-
-
-@pytest.mark.asyncio
-async def test_websocket_path_zero_executors_falls_through_to_the_rented_node_row(
-    rest_service, monkeypatch
-):
-    """The same fall-through on the WebSocket path, the default transport."""
-    from core.config import settings
-
-    monkeypatch.setattr(settings, "USE_REST_API", False)
-    rented_data = RentedExecutorsResponse(executors={MISSING: rented()})
-
-    with patch("services.miner_service.MinerClient", return_value=_FakeMinerClient(_accepted())):
-        out = await request(rest_service, rented_data)
 
     assert [r.executor_info.uuid for r in out["results"]] == [MISSING]
     assert out["results"][0].failure_reason_code == "RENTED_EXECUTOR_NOT_LISTED"

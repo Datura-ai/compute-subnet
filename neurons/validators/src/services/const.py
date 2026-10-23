@@ -18,6 +18,8 @@ GPU_MODEL_RATES = {
     "NVIDIA GeForce RTX 5060 Ti": 0.0,
     "NVIDIA GeForce RTX 5060": 0.0,
     "NVIDIA GeForce RTX 5090": 0.025,
+    # DAH-3289: the China SKU; supported, but excluded from the unrented pool by default.
+    "NVIDIA GeForce RTX 5090 D": 0.0,
     # Supported operationally, but excluded from the unrented pool by default.
     "NVIDIA GeForce RTX 4080 SUPER": 0.0,
     "NVIDIA GeForce RTX 4080": 0.0,
@@ -51,6 +53,7 @@ GPU_MODEL_RATES = {
     "NVIDIA RTX A6000": 0.009,
     "NVIDIA RTX PRO 6000 Blackwell Server Edition": 0.025, # 2.5x 6000 ada
     "NVIDIA RTX PRO 6000 Blackwell Workstation Edition": 0.027, # 2.7x 6000 ada
+    "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition": 0.024, # 2.4x 6000 ada: proposed, Workstation 0.027 scaled to Max-Q 300 W throughput (~88%); DAH-3453, Mikhail to confirm
     "NVIDIA RTX PRO 6000D Blackwell Workstation Edition": 0.0,
     "NVIDIA RTX 6000D": 0.0,
     "NVIDIA RTX A5000": 0.002,
@@ -246,6 +249,8 @@ NETWORK_MIN_DOWNLOAD_SPEED_MBPS = 50.0
 PREFERRED_POD_PORTS = [20000, 20001, 20002, 20003, 20004, 20005, 20006, 20007, 20008, 20009]
 
 POD_CONTAINER_PREFIX = "pod_"
+# DAH-4564: the --cpus a rental container was created with; `docker update` cannot change a label.
+RENTAL_CPU_COUNT_LABEL = "io.lium.cpu_count"
 FILLER_CONTAINER_PREFIX = "filler_"
 # DAH-2740: the name a pod's current container is parked under while an edit builds its replacement.
 # Still a pod_* name, so both sweepers protect it while the pod is rented (they add this suffix to
@@ -267,6 +272,10 @@ FILLER_CACHE_VOLUME_PREFIXES = (DPHN_CACHE_VOLUME_PREFIX, ENGY_CACHE_VOLUME_PREF
 DPHN_CACHE_SIZE_GB = 40
 DPHN_CACHE_LISTING_FLOOR_GB = 100
 DPHN_CACHE_FREE_MARGIN_GB = 50
+# DAH-5014: an Engy checkpoint (up to ~1.6 TB) is downloaded into a persistent cache only when it is at
+# most this share of the node's real free disk. The backend puts its size in the name
+# (engy_cache_hf_<N>gb_...): the wire CacheVolume has no size field.
+FILLER_CACHE_MAX_FREE_DISK_SHARE = 0.3
 FILLER_CONTAINER_GRACE_MINUTES = 15
 # DAH-2757: how long after a rental closes a BROKEN pod's container still counts as ours. The
 # container lives until the sweep above collects it, so the bound follows that grace with one cycle
@@ -274,8 +283,8 @@ FILLER_CONTAINER_GRACE_MINUTES = 15
 # let a provider reuse the name of their own broken pod for a foreign workload.
 BROKEN_POD_CONTAINER_GRACE_MINUTES = 2 * FILLER_CONTAINER_GRACE_MINUTES
 # How long after a rental closes its pod container still counts as the unrent flow's teardown rather
-# than an orphan: with RENTAL_TEARDOWN_DEFERRAL_ENABLED on, the GPU usage check defers instead of
-# scoring 0 until this long after the close, which covers one run and occasionally two. A run is
+# than an orphan: the GPU usage check counts it as the renter's load, not ORPHANED_RENTAL_CONTAINER,
+# until this long after the close, which covers one run and occasionally two. A run is
 # shorter than this, so a rental that ends while the run is inside it always lands here. It must stay
 # short for the same reason as the grace above: the pod's name must not shield a workload for long.
 RENTAL_TEARDOWN_GRACE_MINUTES = 15
@@ -371,8 +380,11 @@ TDX_WHITELIST = {
             # DAH-2834, three settings added to init_script.sh; executor-v1.128 to v1.130 and main).
             # Missing here from 2026-09-14 to this entry, so every CVM created from those releases
             # would score zero with the whitelist on. Version 5; DAH-2780's pre_launch_script.sh
-            # rewrite (lium-io#1266) takes 6.
+            # rewrite (lium-io#1266) takes the next free version.
             "87d3430000bb7046a19eeaa6efe074fd8b5f7856bbfe2906addab238174c542d": 5,
+            # DAH-4631 — the same runner digest with EXECUTOR_SSH_SOURCE_PIN added to init_script.sh
+            # (lium-io#1677). Version 6.
+            "ae7ff74c04eb0626f7cd16822693298f2202650eba9e59b9daebe77a4e018c52": 6,
             # Version 3 (ab4d1433…, July runner sha256:f85b948b…) is gone and its number burned:
             # that runner bakes the STAGING validator hotkey via config_override.py and answers every
             # prod validator with 401. Removed, not demoted: TDX_MINIMUM_COMPOSE_VERSION defaults to 0.

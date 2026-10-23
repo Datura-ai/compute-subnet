@@ -12,7 +12,7 @@ from core.utils import _m, get_extra_info
 from ..messages import GpuFaultProbeMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
-from .capability import _get_filler_only_container
+from .capability import get_filler_only_container
 
 # The probe runs on the executor's own interpreter, standard library only, and ships over stdin the way
 # the scrape source does (DAH-2794): nothing to upload, nothing the miner has to update.
@@ -59,7 +59,7 @@ class GpuFaultProbeCheck:
     round-trips pinned memory through the copy engines, verifies every result on the device, and reads
     uncorrected ECC / remapped rows / recovery action from NVML before and after.
 
-    Shadow-first like every score-zeroing gate: GPU_FAULT_PROBE_CHECK_ENABLED runs it and emits the verdict,
+    Shadow-first like every score-zeroing gate: it always runs and emits the verdict;
     GPU_FAULT_PROBE_ENFORCEMENT_ENABLED lets a fault fail the (fatal) check. A probe that could not run
     (no libcuda, cuInit, JIT) passes with GPU_FAULT_PROBE_UNKNOWN: inability to measure is not a fault.
     """
@@ -67,21 +67,24 @@ class GpuFaultProbeCheck:
     check_id = "gpu.validate.fault_probe"
     fatal = True
 
-    async def run(self, ctx: Context) -> CheckResult:
-        if not settings.GPU_FAULT_PROBE_CHECK_ENABLED:
-            return CheckResult(
-                passed=True, event=render_message(Msg.DISABLED, ctx=ctx, check_id=self.check_id)
-            )
+    def __init__(self, enforce: bool = False):
+        # enforce: run and judge a fault as a failure whatever the GPU_FAULT_PROBE_* flags say
+        # (the post-rental recheck, DAH-4482)
+        self.enforce = enforce
 
-        if ctx.config.first_pass and not settings.GPU_FAULT_PROBE_ENFORCEMENT_ENABLED:
+    async def run(self, ctx: Context) -> CheckResult:
+        if ctx.config.first_pass and not (
+            self.enforce or settings.GPU_FAULT_PROBE_ENFORCEMENT_ENABLED
+        ):
             # a shadow verdict cannot fail the node, so it does not delay a new node's first verification
             return CheckResult(
                 passed=True,
                 event=render_message(Msg.FIRST_PASS_SKIPPED, ctx=ctx, check_id=self.check_id),
             )
 
-        filler_container = _get_filler_only_container(ctx)
-        if filler_container:
+        filler_container = get_filler_only_container(ctx)
+        # enforce: the recheck only probes beside a filler after it removed the node's Lium fillers
+        if filler_container and not self.enforce:
             event = render_message(
                 Msg.FILLER_SKIPPED,
                 ctx=ctx,
@@ -142,7 +145,13 @@ class GpuFaultProbeCheck:
 
     def _no_verdict(self, ctx: Context, what: dict[str, Any]) -> CheckResult:
         """UNKNOWN, counted. From UNKNOWN_STREAK_LIMIT cycles in a row it is logged, and under
-        GPU_FAULT_PROBE_UNKNOWN_STREAK_ENFORCEMENT_ENABLED it is judged like a fault."""
+        GPU_FAULT_PROBE_UNKNOWN_STREAK_ENFORCEMENT_ENABLED it is judged like a fault. An enforce run is a
+        second probe in the same cycle, so it does not count."""
+        if self.enforce:
+            return CheckResult(
+                passed=True,
+                event=render_message(Msg.UNKNOWN, ctx=ctx, check_id=self.check_id, what=what),
+            )
         key = (ctx.miner_hotkey, ctx.executor.uuid)
         streak = _unknown_streak.get(key, 0) + 1
         _unknown_streak[key] = streak
@@ -168,7 +177,7 @@ class GpuFaultProbeCheck:
     def _fault_verdict(
         self, ctx: Context, what: dict[str, Any], *, error: str, report: dict[str, Any] | None
     ) -> CheckResult:
-        enforce = settings.GPU_FAULT_PROBE_ENFORCEMENT_ENABLED
+        enforce = self.enforce or settings.GPU_FAULT_PROBE_ENFORCEMENT_ENABLED
         what["error"] = error[: MAX_FAULT_LINES * MAX_FAULT_CHARS]
         if report is not None:
             what["xid"] = _capped_xid(report.get("xid"))

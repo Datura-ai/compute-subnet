@@ -7,7 +7,6 @@ and converting the validation context into a JobResult for reporting.
 import logging
 from datetime import datetime
 from typing import Any, Optional
-from uuid import UUID
 
 from datura.requests.miner_requests import ExecutorSSHInfo
 from payload_models.payloads import MinerJobRequestPayload
@@ -46,15 +45,6 @@ def _canonicalize_published_gpu_names(specs: dict) -> dict:
 
     return {**specs, "gpu": {**gpu, "details": canonical_details}}
 
-
-
-def _executor_key(executor_uuid: str) -> str:
-    """The backend's form of an executor id. A miner can send it without dashes or in braces, and
-    the backend still reads it as the same id."""
-    try:
-        return str(UUID(executor_uuid))
-    except ValueError:
-        return executor_uuid.lower()
 
 class ResultHandler:
     """Handles post-pipeline result processing and persistence."""
@@ -273,7 +263,7 @@ class ResultHandler:
         specs: dict[str, Any],
         validation_event: ValidationEvent | None,
     ) -> dict[str, Any]:
-        """``specs`` with the VerifyX EMA held when this cycle must not move it and the flag is on."""
+        """``specs`` with the VerifyX EMA held when this cycle must not move it."""
         # The pipeline names the fatal check that ended the run in the last event's summary.
         failed_check_id = (
             validation_event.what_we_saw.get("steps_failed") if validation_event else None
@@ -282,13 +272,10 @@ class ResultHandler:
         if not ema_hold_reason:
             return specs
         held_specs = hold_verifyx_ema(context, specs)
-        hold_enabled = settings.VERIFYX_EMA_HOLD_ENABLED
         if held_specs.get("network") != specs.get("network"):
             logger.info(
                 _m(
-                    "VerifyX EMA held: this cycle's sample does not move it"
-                    if hold_enabled
-                    else "VerifyX EMA hold is off: this cycle's sample would not have moved it",
+                    "VerifyX EMA held: this cycle's sample does not move it",
                     extra=get_extra_info(
                         {
                             "executor_id": context.executor.uuid,
@@ -299,7 +286,7 @@ class ResultHandler:
                     ),
                 )
             )
-        return held_specs if hold_enabled else specs
+        return held_specs
 
     @staticmethod
     def _get_rented_gpu_count(context: Context) -> int | None:
@@ -342,26 +329,6 @@ class ResultHandler:
 
         return str(context.executor.uuid) in connected_executor_ids
 
-    @staticmethod
-    def _get_record_owner(context: Context) -> str | None:
-        """The backend's owner of this executor (the hotkey its node is listed under: the pool hotkey
-        for a custodied account, else its miner hotkey), or None.
-
-        None lets every write to the verified record through. An executor missing from a map the
-        backend does send is logged: the backend creates the row on the node's first report, so
-        a new node has none for a cycle or so."""
-        rented_data = context.state.rented_data
-        owners = rented_data.executor_owner_hotkeys if rented_data else {}
-        owner = owners.get(_executor_key(str(context.executor.uuid)))
-        if owners and not owner:
-            logger.info(
-                _m(
-                    "VERIFIED_RECORD_OWNER_UNKNOWN",
-                    extra={"executor_uuid": str(context.executor.uuid)},
-                )
-            )
-        return owner or None
-
     async def _persist_verification_data(
         self,
         miner_hotkey: str,
@@ -379,7 +346,6 @@ class ResultHandler:
             context: Pipeline context with verification state
             success: Whether validation succeeded
         """
-        record_owner = self._get_record_owner(context)
         if success:
             # On success, update verification data if we have GPU info
             gpu_model_count = context.state.gpu_model_count or ""
@@ -393,20 +359,25 @@ class ResultHandler:
                     success=True,
                     spec=gpu_model_count,
                     uuids=gpu_uuids,
-                    record_owner=record_owner,
                 )
         else:
             # On failure, either clear or mark as failed
             if context.clear_verified_job_info:
                 reason = self._resolve_clear_reason(context.clear_verified_job_reason)
+                # DAH-2865: the address this cycle checked, so the backend can drop a reset that arrives after the
+                # provider moved the node to another address under the same id
+                evidence = {
+                    **(context.clear_verified_job_evidence or {}),
+                    "executor_ip": context.executor.address,
+                    "executor_port": context.executor.port,
+                }
                 await self.redis_service.clear_verified_job_info(
                     miner_hotkey=miner_hotkey,
                     executor_id=executor_id,
                     prev_info=verified_job_info,
                     reason=reason,
-                    evidence=context.clear_verified_job_evidence,
+                    evidence=evidence,
                     anchor_broken=context.gpu_anchor_broken,
-                    record_owner=record_owner,
                 )
             else:
                 await self.redis_service.set_verified_job_info(
@@ -414,7 +385,6 @@ class ResultHandler:
                     executor_id=executor_id,
                     prev_info=verified_job_info,
                     success=False,
-                    record_owner=record_owner,
                 )
 
     @staticmethod

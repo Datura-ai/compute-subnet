@@ -17,6 +17,7 @@ from typing import TypeVar
 
 from core.utils import _m, get_extra_info
 from datura.requests.miner_requests import ExecutorSSHInfo
+from services.const import RENTAL_CPU_COUNT_LABEL
 from services.node_host import NodeHostError, dial_validated, resolve_node_host
 
 
@@ -406,11 +407,9 @@ class RentalDockerSdkClient:
         api_client,
         *,
         pull_timeout_seconds: int | float | None = DEFAULT_DOCKER_PULL_TIMEOUT_SECONDS,
-        transport_retry_enabled: bool = False,
     ):
         self._api_client = api_client
         self._pull_timeout_seconds = pull_timeout_seconds
-        self._transport_retry_enabled = transport_retry_enabled
 
     async def login(self, *, username: str, password: str, image: str) -> None:
         # docker-py stores the credential under docker.io unless the registry
@@ -620,8 +619,10 @@ class RentalDockerSdkClient:
             exit_code = None
         return f"exit_code={exit_code}"
 
-    async def start(self, *, container_name: str) -> None:
+    async def start(self, *, container_name: str, network: str | None = None) -> None:
         # starting a running container answers 304, so a second start after a drop is safe
+        if network:
+            await _in_docker_thread(self._move_stopped_container_to_network_sync, container_name, network)
         await self._retry_once_on_transport_drop(
             operation="start",
             attempt=lambda: self._call_api(
@@ -672,6 +673,16 @@ class RentalDockerSdkClient:
             raise RentalDockerOperationError(
                 _wrap_error_message("Docker SDK inspect container failed", exc)
             ) from exc
+
+    async def container_image_id(self, *, container: str) -> str:
+        """The image ID (`sha256:…`) the container was created from; a later tag move does not change it."""
+        try:
+            info = await _in_docker_thread(self._api_client.inspect_container, container)
+        except Exception as exc:
+            raise RentalDockerOperationError(
+                _wrap_error_message("Docker SDK inspect container failed", exc)
+            ) from exc
+        return str(info.get("Image") or "")
 
     async def container_status(self, *, container_name: str) -> str | None:
         """Return the container's ``State.Status`` (``running``, ``exited``, ``removing``, …), or
@@ -790,14 +801,14 @@ class RentalDockerSdkClient:
 
         Budget per call: the first attempt with its own timeout, one re-open bounded by
         `_DOCKER_SSH_REOPEN_TIMEOUT_SECONDS`, one more attempt with the same timeout — never a
-        third. Any other failure, and every failure while the flag is off, propagates unchanged;
+        third. Any other failure propagates unchanged;
         `rental_docker_error_class` still names it for the failure event.
         """
         started = time.monotonic()
         try:
             return await attempt()
         except Exception as exc:
-            if not self._transport_retry_enabled or not is_rental_docker_transport_error(exc):
+            if not is_rental_docker_transport_error(exc):
                 raise
             first_error = exc
 
@@ -1015,6 +1026,7 @@ class RentalDockerSdkClient:
                 name=spec.name,
                 entrypoint=spec.entrypoint or None,
                 host_config=host_config,
+                labels={RENTAL_CPU_COUNT_LABEL: str(spec.cpu_count)} if spec.cpu_count else None,
             )
         if spec.before_start is not None:
             spec.before_start(
@@ -1086,6 +1098,29 @@ class RentalDockerSdkClient:
                         f"Docker network {name} was created but cannot be inspected"
                     )
         _require_icc_off(name, network)
+
+    def _move_stopped_container_to_network_sync(self, container_name: str, network: str) -> bool:
+        """Move a stopped container that predates `network` from docker0 onto it; True when it moved.
+
+        A container keeps the network it was created with across `docker start`, so a pod created
+        before rentals ran on `network` would stay on the shared default bridge for its whole life.
+        Published ports are host config and survive the move. A running container is left alone (a
+        move would cut its live connections), and so is one on host, none or another container's
+        namespace: only the default bridge is the old setup this replaces.
+        """
+        info = self._api_client.inspect_container(container_name)
+        state = info.get("State") or {}
+        if state.get("Running") or state.get("Restarting"):
+            return False
+        attached = set(((info.get("NetworkSettings") or {}).get("Networks") or {}).keys())
+        mode = (info.get("HostConfig") or {}).get("NetworkMode") or "default"
+        if network in attached or mode not in ("default", "bridge"):
+            return False
+        self._ensure_rental_network_sync(network)
+        for name in sorted(attached):
+            self._api_client.disconnect_container_from_network(container_name, name)
+        self._api_client.connect_container_to_network(container_name, network)
+        return True
 
     def _inspect_network_or_none(self, name: str) -> dict | None:
         try:
@@ -1205,8 +1240,6 @@ class RentalDockerSdkClientFactory:
     api_client_factory: Callable[..., object] | None = None
     timeout: int = 60
     pull_timeout_seconds: int = DEFAULT_DOCKER_PULL_TIMEOUT_SECONDS
-    # DOCKER_TRANSPORT_RETRY_ENABLED: a bool, or a callable read once per connect (the settings flag)
-    transport_retry_enabled: bool | Callable[[], bool] = False
 
     @asynccontextmanager
     async def connect(
@@ -1237,12 +1270,6 @@ class RentalDockerSdkClientFactory:
             raise RentalDockerConnectionError(
                 _wrap_error_message("Docker SDK client construction failed", exc)
             ) from exc
-        transport_retry_enabled = (
-            bool(self.transport_retry_enabled())
-            if callable(self.transport_retry_enabled)
-            else bool(self.transport_retry_enabled)
-        )
-
         with tempfile.TemporaryDirectory(prefix="lium-rental-docker-ssh-") as temp_dir:
             ssh_home = Path(temp_dir)
             ssh_dir = ssh_home / ".ssh"
@@ -1277,7 +1304,7 @@ class RentalDockerSdkClientFactory:
                 except Exception as exc:
                     # the client asks the daemon for its version: a drop there costs one more
                     # connect (nothing on the host has changed yet), never a third
-                    if not transport_retry_enabled or not is_rental_docker_transport_error(exc):
+                    if not is_rental_docker_transport_error(exc):
                         raise
                     logger.warning(
                         _m(
@@ -1300,7 +1327,6 @@ class RentalDockerSdkClientFactory:
             client = RentalDockerSdkClient(
                 api_client,
                 pull_timeout_seconds=self.pull_timeout_seconds,
-                transport_retry_enabled=transport_retry_enabled,
             )
             try:
                 yield client
@@ -1339,6 +1365,8 @@ _INTERACTIVE_SHELLS = frozenset(
     {"sh", "bash", "zsh", "/bin/sh", "/bin/bash", "/bin/zsh", "/usr/bin/bash", "/usr/bin/zsh"}
 )
 KEEP_ALIVE_COMMAND: tuple[str, ...] = ("sleep", "infinity")
+# entrypoints that end in `exec "$@"`: with no Cmd they exit at start (the backend's image_startup_check lists the same)
+_PASS_THROUGH_ENTRYPOINTS = frozenset({"nvidia_entrypoint.sh"})
 
 
 def keep_alive_command_for(entrypoint: tuple[str, ...], cmd: tuple[str, ...]) -> tuple[str, ...]:
@@ -1350,6 +1378,12 @@ def keep_alive_command_for(entrypoint: tuple[str, ...], cmd: tuple[str, ...]) ->
     if len(cmd) == 1 and cmd[0] in _INTERACTIVE_SHELLS:
         return KEEP_ALIVE_COMMAND
     if not cmd and not entrypoint:
+        return KEEP_ALIVE_COMMAND
+    if (
+        not cmd
+        and len(entrypoint) == 1
+        and entrypoint[0].rsplit("/", 1)[-1] in _PASS_THROUGH_ENTRYPOINTS
+    ):
         return KEEP_ALIVE_COMMAND
     return ()
 

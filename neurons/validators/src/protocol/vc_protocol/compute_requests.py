@@ -20,6 +20,10 @@ GPU_RUNTIME_DEVICE_FAULT_REASON = "GPU_RUNTIME_DEVICE_FAULT"
 CPU_QUOTA_EXCEEDS_HOST_REASON = "CPU_QUOTA_EXCEEDS_HOST"
 
 
+def _executor_key(executor_id: Any) -> str:
+    return str(executor_id).strip().lower()
+
+
 class Error(BaseModel, extra="allow"):
     msg: str
     type: str
@@ -177,10 +181,14 @@ class RentedExecutorsResponse(BaseModel):
     # probe has nothing to check. Additive with an empty default: an older backend penalizes nobody.
     filler_create_kill_executor_ids: list[str] = []
     provider_discord_connected_executor_ids: list[str] | None = None  # executor_ids whose provider has connected Discord
-    # executor_ids the backend keeps unlisted until the provider confirms an e-mail address. Such a node has
-    # no listing, so it is also absent from the Discord list above; the validator reports both reasons.
+    # executor_ids that earn nothing from either pool until the provider confirms an e-mail address: a new
+    # node the backend keeps unlisted, and a listed node once the provider's e-mail grace is over. Listing
+    # and rentals are untouched. A held new node is also absent from the Discord list above.
     # Additive with an empty default: an older backend names nobody.
     provider_email_held_executor_ids: list[str] = []
+    # executor_ids whose rentals drew hardware-fault reports from at least two distinct renters in the
+    # backend's report window (DAH-4482): each owes a post-rental GPU recheck. Additive with an empty default.
+    renter_hardware_fault_executor_ids: list[str] = []
     # executor_id → "miner" | "lium"; absent = no default job. Parsed leniently as str for
     # forward-compatibility (a future owner value must not break parsing of the whole response).
     default_job_owner_by_executor: dict[str, str] = {}
@@ -191,11 +199,12 @@ class RentedExecutorsResponse(BaseModel):
     # Average filler revenue per GPU configuration: what the spot-node pay and the secure floor are
     # measured against. Defaults to empty so an older backend pays spot nodes nothing, as before.
     filler_revenue_by_gpu_config: list[FillerRevenueByGpuConfig] = []
-    # executor_id → the miner hotkey of the executor's MinerExecutor row (the portal's record of who
-    # owns it), for every listed executor. A write to the verified-job record by another hotkey is
-    # foreign (ResultHandler). Defaults to empty: an older backend names no owner and every write
-    # is let through.
+    # executor_id → the hotkey the backend lists the executor under. Only that hotkey may take over a
+    # verified record stored under the bare executor id (RedisService.get_verified_job_info).
     executor_owner_hotkeys: dict[str, str] = {}
+    # executor_ids of the nodes of banned pool accounts, listed as soon as a node is added, so a node
+    # added after an account ban fails the ban check in its first cycle. An older backend bans none.
+    banned_executor_ids: list[str] = []
 
     def get_filler_revenue_per_gpu_hour(
         self, base_model: str | None, gpu_count: int, min_gpu_hours: float
@@ -220,8 +229,11 @@ class RentedExecutorsResponse(BaseModel):
         miner_hotkey: str,
         miner_coldkey: str | None = None,
         gpu_uuids: list[str] | None = None,
+        executor_uuid: str | None = None,
     ) -> bool:
         if miner_hotkey in self.banned_hotkeys:
+            return True
+        if executor_uuid and _executor_key(executor_uuid) in {_executor_key(i) for i in self.banned_executor_ids}:
             return True
         if miner_coldkey and miner_coldkey in self.banned_coldkeys:
             return True

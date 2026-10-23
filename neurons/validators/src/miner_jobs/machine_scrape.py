@@ -680,6 +680,9 @@ DOCKER_SOCKET_PATH = "/var/run/docker.sock"
 # let a scrape round hang on it.
 DOCKER_API_TIMEOUT_SECONDS = 20
 VLOOPBACK_DRIVER_PREFIX = "vloopback"
+# DAH-5014: the persistent filler model caches (services/const.py FILLER_CACHE_VOLUME_PREFIXES). The
+# validator evicts them before a rental or the listing floor needs the room, so they read as free disk.
+FILLER_CACHE_VOLUME_PREFIXES = ("dphn_cache_", "engy_cache_")
 
 
 class UnixSocketHTTPConnection(http.client.HTTPConnection):
@@ -788,6 +791,12 @@ def get_docker_disk_usage():
         max(int((volume.get("UsageData") or {}).get("Size") or 0), 0)
         for volume in df.get("Volumes") or []
     )
+    filler_cache = sum(
+        max(int((volume.get("UsageData") or {}).get("Size") or 0), 0)
+        for volume in df.get("Volumes") or []
+        if str(volume.get("Name") or "").startswith(FILLER_CACHE_VOLUME_PREFIXES)
+    )
+    volumes -= filler_cache
     docker_root_dir = (docker_api_get("/info") or {}).get("DockerRootDir") or "/var/lib/docker"
     volumes += get_vloopback_volume_bytes(docker_root_dir)
     containers += get_container_log_bytes(docker_root_dir)
@@ -802,7 +811,21 @@ def get_docker_disk_usage():
         "hard_disk_images": (int(df.get("LayersSize") or 0) + build_cache) // 1024,
         "hard_disk_containers": containers // 1024,
         "hard_disk_volumes": volumes // 1024,
+        "filler_cache_kb": filler_cache // 1024,
     }
+
+
+def release_filler_cache(hard_disk):
+    # DAH-5014: report the filler model cache as free disk, so the listing floor, the disk a renter is
+    # offered and the filler fit checks all see it as the reclaimable space it is. The key is dropped:
+    # it is not part of the reported hard_disk block.
+    cache_kb = hard_disk.pop("filler_cache_kb", 0)
+    if not cache_kb or not hard_disk.get("hard_disk_total"):
+        return
+    used_kb = max(hard_disk["hard_disk_used"] - cache_kb, 0)
+    hard_disk["hard_disk_free"] += hard_disk["hard_disk_used"] - used_kb
+    hard_disk["hard_disk_used"] = used_kb
+    hard_disk["hard_disk_utilization"] = used_kb / hard_disk["hard_disk_total"] * 100
 
 
 def get_container_cpu_percents(docker_path: str) -> tuple[float, dict[str, float]]:
@@ -810,7 +833,7 @@ def get_container_cpu_percents(docker_path: str) -> tuple[float, dict[str, float
     # two-sample delta, one call for all containers. Keyed by the 12-char id stats prints.
     # The host CPU is sampled over the SAME window (reset counter -> stats -> read), because the
     # host-minus-containers attribution is only valid when both sides cover the same seconds —
-    # data_cpu's own sample runs ~10s later, after two `docker run` capability tests.
+    # data_cpu's own sample runs seconds later, after the two `docker run` capability tests.
     # `timeout 30` bounds a wedged docker daemon: the signal degrades instead of hanging the
     # whole (fatal) machine scrape.
     psutil.cpu_percent(interval=None)
@@ -1211,6 +1234,25 @@ def check_storage_limit_ability() -> tuple[bool, str]:
         return False, f"An unexpected error occurred: {e}"
 
 
+def run_checks_concurrently(checks):
+    # Each capability test is a `docker run --gpus all` that takes seconds and shares nothing with
+    # the other, so they run side by side instead of one after the other; each keeps its own timeout.
+    results = [None] * len(checks)
+    threads = [
+        threading.Thread(target=store_check_result, args=(check, results, index))
+        for index, check in enumerate(checks)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    return results
+
+
+def store_check_result(check, results, index):
+    results[index] = check()
+
+
 NVIDIA_PARAMS_PATH = "/proc/driver/nvidia/params"
 BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
 PROC_SELF_STATUS_PATH = "/proc/self/status"
@@ -1304,6 +1346,30 @@ def get_host_boot_id() -> str:
             return boot_id_file.read().strip()
     except Exception:
         return ""
+
+
+# The node is listed at the geo of the address the validator connects to; behind a reverse proxy
+# that is the proxy's. The backend geolocates the host's own egress address instead (Cloudflare's
+# trace echoes the caller's IP). "" when the fetch fails: the backend then keeps the connect address.
+EGRESS_TRACE_HOST = "www.cloudflare.com"
+EGRESS_TRACE_PATH = "/cdn-cgi/trace"
+EGRESS_TRACE_TIMEOUT_SECONDS = 5
+
+
+def get_egress_ip() -> str:
+    try:
+        conn = http.client.HTTPSConnection(EGRESS_TRACE_HOST, timeout=EGRESS_TRACE_TIMEOUT_SECONDS)
+        try:
+            conn.request("GET", EGRESS_TRACE_PATH)
+            body = conn.getresponse().read(4096).decode(errors="replace")
+        finally:
+            conn.close()
+    except Exception:
+        return ""
+    for line in body.splitlines():
+        if line.startswith("ip="):
+            return line[3:].strip()[:64]
+    return ""
 
 
 def read_sysfs_value(path: str) -> str:
@@ -2089,13 +2155,16 @@ def get_machine_specs():
 
     data["data_cpu"] = {"cpu_count": 0, "cpu_model": "", "cpu_clocks": []}
     
-    is_supported, log_text = check_sysbox_gpu_compatibility()
+    sysbox_check, storage_limit_check = run_checks_concurrently(
+        [check_sysbox_gpu_compatibility, check_storage_limit_ability]
+    )
+    is_supported, log_text = sysbox_check
     data["data_sysbox_runtime"] = is_supported
     if not is_supported:
         data["data_sysbox_runtime_scrape_error"] = log_text
     data["data_sysbox_version"] = get_sysbox_version()
         
-    is_supported, log_text = check_storage_limit_ability()
+    is_supported, log_text = storage_limit_check
     data["data_storage_limit_supported"] = is_supported
     if not is_supported:
         data["data_storage_limit_scrape_error"] = log_text
@@ -2106,6 +2175,7 @@ def get_machine_specs():
     if ncu_profiling.scrape_error:
         data["data_ncu_profiling_scrape_error"] = ncu_profiling.scrape_error
     data["data_boot_id"] = get_host_boot_id()
+    data["data_egress_ip"] = get_egress_ip()
 
     power_cap_probe = probe_gpu_power_cap_ability()
     data["data_container_cap_eff"] = power_cap_probe.cap_eff
@@ -2173,6 +2243,7 @@ def get_machine_specs():
 
     try:
         data["data_hard_disk"].update(get_docker_disk_usage())
+        release_filler_cache(data["data_hard_disk"])
     except Exception as exc:
         # kept apart from hard_disk_scrape_error: the docker socket is the fragile half, and a
         # node that loses only the breakdown must keep reporting total/used/free.

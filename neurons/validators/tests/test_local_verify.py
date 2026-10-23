@@ -125,7 +125,7 @@ def verifyx_service(monkeypatch):
     monkeypatch.setattr(
         vvs,
         "_perform_verification_checks",
-        lambda payload: {
+        lambda payload, **_: {
             "success": True,
             "ram": {},
             "network": {"download_speed": 900.0, "upload_speed": 500.0, "success": True},
@@ -1147,7 +1147,7 @@ async def test_intent_carries_the_shortened_deadline(
 async def test_all_cards_check_keeps_the_matmul_on_ssh(
     keypair, monkeypatch, local_verify_on, verifyx_service
 ):
-    """DAH-2671 item 3: `_probe_all_claimed_cards` runs inside the SSH matmul path only. With the
+    """DAH-2671 item 3: `probe_all_claimed_cards` runs inside the SSH matmul path only. With the
     check on, the intent carries no matmul, CapabilityCheck runs the SSH path (probe included) and
     VerifyX is still consumed locally."""
     monkeypatch.setattr(settings, "MATMUL_ALLCARDS_CHECK_ENABLED", True)
@@ -1225,7 +1225,7 @@ async def test_filler_only_node_is_skipped_without_a_call(
     keypair, monkeypatch, local_verify_on, verifyx_service
 ):
     """A node running only Lium's own filler (no customer pod) is not probed — the same rule as
-    `CapabilityCheck` (`_get_filler_only_container`); a filler beside a customer pod is a rental
+    `CapabilityCheck` (`get_filler_only_container`); a filler beside a customer pod is a rental
     and is handled by the rented branch, not here."""
     validation = matmul_service(monkeypatch)
     factory = MagicMock(side_effect=AssertionError("no client for a filler-only node"))
@@ -1461,7 +1461,6 @@ async def test_transport_names_the_sample_the_cold_retry_kept(
     """DAH-2959's cold-sample retry always runs over SSH. When it wins, the event's `transport`
     must say so; a consumed local answer that lost to it is not what the event describes.
     First pass, so the kept-first case ends in the DAH-3011 deferred-gate success event too."""
-    monkeypatch.setattr(settings, "VERIFYX_COLD_SAMPLE_RETRY_ENABLED", True)
     local_answer = vvs.VerifyXResponse(
         data={"success": True, "network": {"download_speed": 59.9, "upload_speed": 20.0}}
     )
