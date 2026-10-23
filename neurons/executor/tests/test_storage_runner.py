@@ -39,6 +39,7 @@ from storage.restic import (
     ResticStorageRunner,
     RestoreStats,
     StorageOperationCancelled,
+    helper_memory_limit_bytes,
 )
 from storage.workspace import (
     DockerUserNamespaceWorkspace,
@@ -386,7 +387,8 @@ def test_plain_backup_uses_read_only_volume_and_keeps_secrets_out_of_arguments()
     assert command[script + 2 : script + 4] == ["/workspace/checkpoints", runner._restic_binary]
     assert command[command.index("--log-driver") + 1] == "none"
     assert command[command.index("--tmpfs") + 1] == "/tmp:rw,nosuid,nodev,size=536870912"
-    assert command[command.index("--memory") + 1] == "4g"
+    assert int(command[command.index("--memory") + 1]) >= 4 * 1024**3
+    assert "GOMAXPROCS=8" in command
     assert command[command.index("--oom-score-adj") + 1] == "1000"
     assert "GOGC=50" in command
     assert command[command.index("--label") + 1] == f"lium.backup-helper={OPERATION_ID}"
@@ -397,6 +399,13 @@ def test_plain_backup_uses_read_only_volume_and_keeps_secrets_out_of_arguments()
     assert "repository-password" not in command
     assert "session-token" not in command
     assert runner._environment["AWS_SESSION_TOKEN"] == "session-token"
+
+
+@pytest.mark.parametrize(
+    ("host_gib", "limit_gib"), [(8, 4), (16, 4), (32, 8), (48, 12), (64, 16), (2048, 16)]
+)
+def test_helper_memory_limit_is_a_quarter_of_host_ram_within_4_to_16_gib(host_gib: int, limit_gib: int) -> None:
+    assert helper_memory_limit_bytes(host_gib * 1024**3) == limit_gib * 1024**3
 
 
 def test_plain_restore_rejects_nonempty_target(monkeypatch: pytest.MonkeyPatch) -> None:

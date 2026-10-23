@@ -31,9 +31,17 @@ TAR_RECORD_SIZE_BYTES = 20 * 512
 TAR_CHECKPOINT_RECORDS = 1024
 MEBIBYTE = 1024 * 1024
 RESTIC_TMPFS_BYTES = 512 * MEBIBYTE
-# DAH-2002: bound the helper so a backup cannot OOM the rental. Measured restic 0.19.1 peak RSS: 0.41 GiB at
-# 2M files, ~125 B per extra file; bytes barely matter (20 GiB file: 0.17 GiB). 4g covers ~30M files.
-RESTIC_HELPER_MEMORY = "4g"
+# DAH-2002: bound the helper so a backup cannot OOM the rental. restic sizes its worker pools from GOMAXPROCS
+# (~7.5 MiB per CPU measured on 0.19.1), so on 256+ CPU hosts it hit 4g within seconds; pin it.
+RESTIC_HELPER_GOMAXPROCS = "8"
+GIBIBYTE = 1024 * MEBIBYTE
+
+
+def helper_memory_limit_bytes(host_memory_bytes: int) -> int:
+    """25% of host RAM, at least 4 GiB and at most 16 GiB."""
+    return min(max(4 * GIBIBYTE, host_memory_bytes // 4), 16 * GIBIBYTE)
+
+
 # Highest OOM score: the kernel kills the helper before the rental.
 RESTIC_HELPER_OOM_SCORE_ADJ = "1000"
 RESTIC_HELPER_GOGC = "50"
@@ -794,11 +802,13 @@ class ResticStorageRunner:
             "--log-driver",
             "none",
             "--memory",
-            RESTIC_HELPER_MEMORY,
+            str(helper_memory_limit_bytes(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))),
             "--oom-score-adj",
             RESTIC_HELPER_OOM_SCORE_ADJ,
             "-e",
             f"GOGC={RESTIC_HELPER_GOGC}",
+            "-e",
+            f"GOMAXPROCS={RESTIC_HELPER_GOMAXPROCS}",
             "--read-only",
             "--tmpfs",
             f"/tmp:rw,nosuid,nodev,size={RESTIC_TMPFS_BYTES}",
