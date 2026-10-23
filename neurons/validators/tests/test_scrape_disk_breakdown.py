@@ -33,6 +33,7 @@ DISK_HELPERS = {
     "get_container_log_bytes",
     "get_host_disk_usage",
     "get_docker_disk_usage",
+    "ENGY_CACHE_VOLUME_PREFIX",
     "FILLER_CACHE_VOLUME_PREFIXES",
     "release_filler_cache",
 }
@@ -78,6 +79,7 @@ def test_docker_disk_usage_splits_df_by_kind(scrape: dict) -> None:
         "hard_disk_containers": (282628096 + 1024) // 1024,
         "hard_disk_volumes": 5454000000 // 1024,
         "filler_cache_kb": 0,
+        "hard_disk_engy_cache_used_gb": 0,
     }
 
 
@@ -105,6 +107,7 @@ def test_docker_disk_usage_ignores_unknown_sizes(scrape: dict) -> None:
         "hard_disk_containers": 0,
         "hard_disk_volumes": 0,
         "filler_cache_kb": 0,
+        "hard_disk_engy_cache_used_gb": 0,
     }
 
 
@@ -450,6 +453,8 @@ def test_filler_cache_volumes_are_reported_as_free_disk(scrape: dict) -> None:
         "hard_disk_images": 0,
         "hard_disk_containers": 0,
         "hard_disk_volumes": 10 * 1024**2,
+        # DAH-5045: the engy checkpoint's real used size, without the dolphin cache or the renter's volume
+        "hard_disk_engy_cache_used_gb": 1500 * 1024**3 // 10**9,
     }
 
 
