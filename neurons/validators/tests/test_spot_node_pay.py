@@ -469,7 +469,6 @@ async def test_spot_rental_flag_does_not_pay_an_idle_spot_node(spot_rental_on):
 
 @pytest.mark.asyncio
 async def test_the_free_remainder_of_a_partially_rented_spot_node_keeps_spot_tier(monkeypatch):
-    monkeypatch.setattr(settings, "ENABLE_SPLIT_PARTIAL_RENTAL_SCORING", True)
     config = IncentiveConfig(
         rental_incentive_gpu_types=["H100"],
         max_unrented_gpus={"H100": {8: BUCKET_CAP, 1: BUCKET_CAP}},
@@ -675,7 +674,6 @@ async def test_a_floored_node_below_the_minimum_driver_adds_no_floor_cost(floor_
 async def test_floor_skips_the_free_remainder_of_a_partially_rented_split_node(
     floor_on, monkeypatch
 ):
-    monkeypatch.setattr(settings, "ENABLE_SPLIT_PARTIAL_RENTAL_SCORING", True)
     config = IncentiveConfig(
         rental_incentive_gpu_types=["H100"],
         max_unrented_gpus={"H100": {8: BUCKET_CAP, 1: 1}},
