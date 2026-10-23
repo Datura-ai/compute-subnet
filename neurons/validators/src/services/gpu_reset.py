@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from payload_models.payloads import GpuResetErrorCode, GpuResetOutcome
 from protocol.vc_protocol.validator_requests import ResetVerifiedJobEvidence
 from services.gpu_wedge import cure_wedged_gpus
+from services.redis_service import RecentGpuReset
 
 if TYPE_CHECKING:
     # Type-only, as in gpu_wedge: services.task at runtime reaches back into the checks.
@@ -457,17 +458,17 @@ async def renter_gpu_reset_in_progress(redis, miner_hotkey: str, executor_id: st
     return any(pod_id is None or mark.get("pod_id") == pod_id for mark in marks)
 
 
-async def renter_gpu_reset_recent(redis, miner_hotkey: str, executor_id: str, pod_id: str | None = None) -> bool:
-    """True on a readable mark of a renter reset on the node (or that pod) that ended within
-    RECENT_RENTER_GPU_RESET_SECONDS; a Redis error (or anything but a pod id) is none, so the checks run."""
+async def renter_gpu_reset_recent_mark(redis, miner_hotkey: str, executor_id: str) -> RecentGpuReset | None:
+    """The node's mark of a renter reset that ended within RECENT_RENTER_GPU_RESET_SECONDS; a Redis error (or
+    anything but a mark) is none, so the checks run."""
     try:
-        reset_pod_id = await redis.gpu_reset_recent(miner_hotkey, executor_id)
+        mark = await redis.gpu_reset_recent(miner_hotkey, executor_id)
     except Exception:
-        return False
-    return isinstance(reset_pod_id, str) and pod_id in (None, reset_pod_id)
+        return None
+    return mark if isinstance(mark, RecentGpuReset) else None
 
 
-async def renter_gpu_reset_in_progress_or_recent(redis, miner_hotkey: str, executor_id: str) -> bool:
-    return await renter_gpu_reset_in_progress(redis, miner_hotkey, executor_id) or await renter_gpu_reset_recent(
-        redis, miner_hotkey, executor_id
-    )
+async def renter_gpu_reset_recent(redis, miner_hotkey: str, executor_id: str, pod_id: str | None = None) -> bool:
+    """True on a readable recent-reset mark on the node, or on that pod when pod_id is given."""
+    mark = await renter_gpu_reset_recent_mark(redis, miner_hotkey, executor_id)
+    return mark is not None and pod_id in (None, mark.pod_id)

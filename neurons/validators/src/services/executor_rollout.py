@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 
 from core.config import settings
 from core.utils import _m
+from incentive.config import BASE_GPU_MAP
 from protocol.vc_protocol.compute_requests import RentedExecutorsResponse
 from services.executor_image_policy import ImageVerdict, normalize_sha256_digest
 from services.redis_service import (
@@ -500,6 +501,9 @@ _FRESH_PAY_FIELDS = (
     "is_provider_email_held",
     "provider_discord_connected",
     "rented_gpu_count",
+    "is_new_rentals_paused",
+    "default_job_owner",
+    "has_lium_filler",
 )
 
 
@@ -535,6 +539,7 @@ async def carry_renter_gpu_reset_results(
                     "is_provider_banned": _banned_now(
                         rented_data, miner_hotkey, miner_coldkeys.get(miner_hotkey), previous, held
                     ),
+                    "filler_revenue_per_gpu_hour": _filler_revenue_now(rented_data, previous),
                 }
             )
             logger.info(
@@ -569,6 +574,15 @@ def _banned_now(
         miner_coldkey=miner_coldkey,
         gpu_uuids=[detail["uuid"] for detail in gpu_details if detail.get("uuid")],
         executor_uuid=str(held.executor_info.uuid),
+    )
+
+
+def _filler_revenue_now(rented_data: RentedExecutorsResponse | None, previous: JobResult) -> float | None:
+    """This cycle's filler average for the carried GPU configuration (the held scrape may list none)."""
+    if rented_data is None:
+        return previous.filler_revenue_per_gpu_hour
+    return rented_data.get_filler_revenue_per_gpu_hour(
+        BASE_GPU_MAP.get(previous.gpu_model or ""), previous.gpu_count, settings.FILLER_REVENUE_MIN_GPU_HOURS
     )
 
 

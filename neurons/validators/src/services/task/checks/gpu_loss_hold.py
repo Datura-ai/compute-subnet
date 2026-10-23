@@ -29,7 +29,6 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from services.gpu_reset import renter_gpu_reset_recent
 from services.redis_service import GPU_ANCHOR_KEY
 
 from core.config import settings
@@ -81,13 +80,6 @@ class DropMark:
         return json.dumps({"held": self.is_held, "since": self.since, "last_seen": self.last_seen})
 
 
-async def _missing_by_renter_reset(ctx: Context, gpu_details: list[dict]) -> bool:
-    """The in-progress mark must name the missing cards; the recent mark (a pod id only) covers the node."""
-    if await missing_gpus_under_reset(ctx, gpu_details):
-        return True
-    return not settings.DRY_RUN and await renter_gpu_reset_recent(ctx.services.redis, ctx.miner_hotkey, ctx.executor.uuid)
-
-
 def rented_pods(ctx: Context) -> list:
     """This miner's pods on the executor; a rental under another hotkey is not this node's."""
     rented_data = ctx.state.rented_data
@@ -130,7 +122,11 @@ class GpuLossHoldCheck:
         # DAH-4658: the cards leave nvidia-smi while the renter resets them; that cycle neither starts nor clears a hold.
         # Cards missing then are held as a zero-GPU scrape is (the score carries); GpuFingerprintCheck would zero it.
         anchored_missing = set(split_uuids((ctx.verified or {}).get(GPU_ANCHOR_KEY) or "")) - set(_listed_uuids(gpu_details))
-        if anchored_missing and await _missing_by_renter_reset(ctx, gpu_details):
+        if await missing_gpus_under_reset(ctx, gpu_details):
+            if not anchored_missing:
+                return CheckResult(
+                    passed=True, event=render_message(Msg.GPU_RESET_IN_PROGRESS, ctx=ctx, check_id=self.check_id)
+                )
             event = render_message(
                 Msg.MISSING_GPUS_UNDER_RESET,
                 ctx=ctx,
@@ -138,10 +134,6 @@ class GpuLossHoldCheck:
                 what={"missing_uuids": sorted(anchored_missing)},
             )
             return CheckResult(passed=False, event=event)
-        if await missing_gpus_under_reset(ctx, gpu_details):
-            return CheckResult(
-                passed=True, event=render_message(Msg.GPU_RESET_IN_PROGRESS, ctx=ctx, check_id=self.check_id)
-            )
         drop = judge_scrape(ctx, pods)
         key = _key(ctx)
         mark: DropMark | None = None

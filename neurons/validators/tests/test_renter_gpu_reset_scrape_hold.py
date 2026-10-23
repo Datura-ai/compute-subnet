@@ -26,7 +26,7 @@ from services.redis_service import (
     RESET_VERIFIED_JOB_CHANNEL,
     last_scored_result_key,
 )
-from protocol.vc_protocol.compute_requests import RentedExecutor, RentedExecutorsResponse
+from protocol.vc_protocol.compute_requests import FillerRevenueByGpuConfig, RentedExecutor, RentedExecutorsResponse
 from protocol.vc_protocol.validator_requests import ContainerState, PodContainerState
 from services.ssh_service import SSHService
 from services.task.models import build_msg
@@ -104,12 +104,25 @@ async def _cycle(context_factory, service, *, scrape):
     return ok, events[-1], ctx, backend
 
 
-async def _reset_in_progress(service) -> None:
-    await service.add_pending_pod(RENTAL_OWNER, EXECUTOR, POD_ID, kind=GPU_RESET_PENDING_KIND)
+H200_UUIDS = [f"GPU-h200-{i}" for i in range(8)]
 
 
-async def _reset_just_ended(service) -> None:
-    await service.mark_gpu_reset_recent(RENTAL_OWNER, EXECUTOR, POD_ID, RECENT_RENTER_GPU_RESET_SECONDS)
+def _gpus_listed(uuids: list[str]):
+    specs = {"gpu": {"count": len(uuids), "details": [{"name": "NVIDIA H200", "uuid": u} for u in uuids]}, "gpu_processes": []}
+    return _scrape_result(stdout=SSHService()._encrypt(ENCRYPT_KEY, json.dumps(specs)), exit_code=0)
+
+
+async def _reset_in_progress(service, gpu_uuids=H200_UUIDS) -> None:
+    await service.add_pending_pod(RENTAL_OWNER, EXECUTOR, POD_ID, kind=GPU_RESET_PENDING_KIND, gpu_uuids=gpu_uuids)
+
+
+async def _reset_just_ended(service, gpu_uuids=H200_UUIDS) -> None:
+    await service.mark_gpu_reset_recent(RENTAL_OWNER, EXECUTOR, POD_ID, gpu_uuids, RECENT_RENTER_GPU_RESET_SECONDS)
+
+
+async def _scored_on_all_eight(context_factory, service) -> None:
+    """The anchor the holds compare against: a scored cycle that saw all 8 cards."""
+    assert (await _cycle(context_factory, service, scrape=_gpus_listed(H200_UUIDS)))[0] is True
 
 
 @pytest.mark.parametrize("scrape", [ZERO_GPUS, RESET_REQUIRED], ids=["zero-gpus", "reset-required"])
@@ -117,6 +130,7 @@ async def _reset_just_ended(service) -> None:
 @pytest.mark.asyncio
 async def test_a_scrape_without_gpus_during_a_renter_reset_is_held(context_factory, mark, scrape):
     service = _redis_service()
+    await _scored_on_all_eight(context_factory, service)
     await mark(service)
 
     ok, event, ctx, backend = await _cycle(context_factory, service, scrape=scrape)
@@ -127,6 +141,21 @@ async def test_a_scrape_without_gpus_during_a_renter_reset_is_held(context_facto
     assert ctx.clear_verified_job_info is False
     assert _resets(service) == []
     backend.report_rented_gpu_drop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("mark", [_reset_in_progress, _reset_just_ended], ids=["in-progress", "just-ended"])
+@pytest.mark.asyncio
+async def test_a_scrape_without_gpus_on_a_split_node_is_not_held_by_a_reset_of_four(context_factory, mark):
+    """The other pod's 4 cards are missing too: not the renter's doing, judged as before."""
+    service = _redis_service()
+    await _scored_on_all_eight(context_factory, service)
+    await mark(service, H200_UUIDS[:4])
+
+    ok, event, ctx, _ = await _cycle(context_factory, service, scrape=ZERO_GPUS)
+
+    assert ok is False
+    assert event.reason_code == Msg.SCRAPE_FAILED_NO_GPU.reason
+    assert ctx.clear_verified_job_info is True
 
 
 @pytest.mark.asyncio
@@ -141,27 +170,15 @@ async def test_a_scrape_without_gpus_and_no_renter_reset_still_fails_as_before(c
     assert len(_resets(service)) == 1
 
 
-H200_UUIDS = [f"GPU-h200-{i}" for i in range(8)]
-
-
-def _gpus_listed(uuids: list[str]):
-    specs = {"gpu": {"count": len(uuids), "details": [{"name": "NVIDIA H200", "uuid": u} for u in uuids]}, "gpu_processes": []}
-    return _scrape_result(stdout=SSHService()._encrypt(ENCRYPT_KEY, json.dumps(specs)), exit_code=0)
-
-
-async def _reset_of_the_first_four(service) -> None:
-    await service.add_pending_pod(RENTAL_OWNER, EXECUTOR, POD_ID, kind=GPU_RESET_PENDING_KIND, gpu_uuids=H200_UUIDS[:4])
-
-
-@pytest.mark.parametrize("mark", [_reset_of_the_first_four, _reset_just_ended], ids=["in-progress", "just-ended"])
+@pytest.mark.parametrize("mark", [_reset_in_progress, _reset_just_ended], ids=["in-progress", "just-ended"])
 @pytest.mark.asyncio
 async def test_a_split_node_whose_renter_resets_its_four_gpus_is_held_not_zeroed(context_factory, mark):
     """8x H200 split 4+4: the renter resets their 4; the scrape lists only the other 4, so the zero-GPU hold
     never fires. The loss hold must hold the cycle, or GpuFingerprintCheck fails it with GPU_MISSING."""
     service = _redis_service()
     with patch.object(gpu_fingerprint.settings, "GPU_ANCHOR_HARD_ENABLED", True):
-        assert (await _cycle(context_factory, service, scrape=_gpus_listed(H200_UUIDS)))[0] is True
-        await mark(service)
+        await _scored_on_all_eight(context_factory, service)
+        await mark(service, H200_UUIDS[:4])
 
         ok, event, ctx, _ = await _cycle(context_factory, service, scrape=_gpus_listed(H200_UUIDS[4:]))
 
@@ -170,6 +187,44 @@ async def test_a_split_node_whose_renter_resets_its_four_gpus_is_held_not_zeroed
     assert event.reason_code == Msg.SCRAPE_GPU_RESET_IN_PROGRESS.reason
     assert ctx.clear_verified_job_info is False
     assert _resets(service) == []
+
+
+async def _old_recent_mark_without_gpus(service, gpu_uuids) -> None:
+    """A recent mark written before it named the reset GPUs: the bare pod id."""
+    await service.set(f"gpu_reset_recent:{RENTAL_OWNER}:{EXECUTOR}", POD_ID, ex=RECENT_RENTER_GPU_RESET_SECONDS)
+
+
+@pytest.mark.parametrize(
+    ("mark", "listed"),
+    [
+        (_reset_in_progress, H200_UUIDS[4:7]),
+        (_reset_just_ended, H200_UUIDS[4:7]),
+        (_reset_just_ended, H200_UUIDS[:7]),
+        (_old_recent_mark_without_gpus, H200_UUIDS[4:]),
+    ],
+    ids=["in-progress-other-pods-card-too", "just-ended-other-pods-card-too", "just-ended-only-other-pods-card", "old-mark-without-gpus"],
+)
+@pytest.mark.asyncio
+async def test_a_missing_card_outside_the_reset_gpus_still_fails_the_fingerprint(context_factory, mark, listed):
+    service = _redis_service()
+    with patch.object(gpu_fingerprint.settings, "GPU_ANCHOR_HARD_ENABLED", True):
+        await _scored_on_all_eight(context_factory, service)
+        await mark(service, H200_UUIDS[:4])
+
+        ok, event, ctx, _ = await _cycle(context_factory, service, scrape=_gpus_listed(listed))
+
+    assert ok is False
+    assert event.reason_code == FingerprintMsg.GPU_MISSING.reason
+    assert ctx.clear_verified_job_info is True
+
+
+@pytest.mark.asyncio
+async def test_an_old_recent_mark_without_gpus_still_names_its_pod():
+    service = _redis_service()
+    await _old_recent_mark_without_gpus(service, [])
+
+    assert await renter_gpu_reset_recent(service, RENTAL_OWNER, EXECUTOR, POD_ID) is True
+    assert await renter_gpu_reset_recent(service, RENTAL_OWNER, EXECUTOR, "pod-other") is False
 
 
 @pytest.mark.asyncio
@@ -272,22 +327,32 @@ async def test_a_carried_score_takes_the_pay_flags_of_this_cycle_and_a_fresh_ban
     previous.spec["gpu"]["details"][0]["uuid"] = "GPU-banned"
     previous.is_spot = previous.is_on_spot_pay_list = previous.provider_discord_connected = True
     previous.rented_gpu_count = 8
+    previous.gpu_model = "NVIDIA H100 80GB HBM3"
+    previous.default_job_owner, previous.has_lium_filler, previous.filler_revenue_per_gpu_hour = "miner", False, 9.0
     await remember_rented_scored_results({"5Miner": [previous]}, service)
     held = _failed("node-1", Msg.SCRAPE_GPU_RESET_IN_PROGRESS.reason)
     held.is_spot = held.is_on_spot_pay_list = held.provider_discord_connected = False
-    held.is_provider_email_held = True
+    held.is_provider_email_held = held.is_new_rentals_paused = True
     held.rented_gpu_count = 4
+    held.default_job_owner, held.has_lium_filler = "lium", True
     job_results = {"5Miner": [held]}
-
-    await carry_renter_gpu_reset_results(
-        job_results, service, {"node-1"}, _rented_executors(banned_provider_guids=["GPU-banned"]), {}
+    rented_data = _rented_executors(
+        banned_provider_guids=["GPU-banned"],
+        filler_revenue_by_gpu_config=[
+            FillerRevenueByGpuConfig(base_model="H100", gpu_count=8, usd_per_gpu_hour=2.5, gpu_hours=10_000)
+        ],
     )
+
+    await carry_renter_gpu_reset_results(job_results, service, {"node-1"}, rented_data, {})
 
     [carried] = job_results["5Miner"]
     assert carried.carried_for_renter_gpu_reset is True
     assert (carried.is_spot, carried.is_on_spot_pay_list, carried.provider_discord_connected) == (False, False, False)
     assert (carried.is_provider_email_held, carried.rented_gpu_count) == (True, 4)
     assert carried.is_provider_banned is True
+    assert (carried.is_new_rentals_paused, carried.default_job_owner, carried.has_lium_filler) == (True, "lium", True)
+    # this cycle's filler average for the carried configuration (8x H100), not the held scrape's
+    assert carried.filler_revenue_per_gpu_hour == 2.5
 
 
 @pytest.mark.asyncio
