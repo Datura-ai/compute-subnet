@@ -217,6 +217,40 @@ async def test_register_pubkey_reserves_the_hook_time_only_when_the_hook_runs(
     assert lookup_seconds + expected_left + hook_time + overhead <= es.VALIDATOR_SSH_SUBMIT_TIMEOUT_SECONDS
 
 
+@pytest.mark.parametrize("is_rental_request", [False, True])
+@pytest.mark.parametrize("hook", [None, "http://hook"])
+@pytest.mark.parametrize("lookup_seconds", [0, 15, 30])
+@pytest.mark.asyncio
+async def test_register_pubkey_first_upload_keeps_mains_full_timeout(
+    executor_service, test_executor, is_rental_request, hook, lookup_seconds
+):
+    """Retries must not cost a first-attempt success main accepted: attempt 1 always gets the full 10 s."""
+    clock = [100.0]
+
+    async def slow_lookup(*_args):
+        clock[0] += lookup_seconds
+        return [test_executor]
+
+    answered = MagicMock(status=200)
+    answered.json = AsyncMock(return_value={"ssh_username": "root", "ssh_port": 22, "python_path": "/p", "root_dir": "/r"})
+    post_ctx = MagicMock()
+    post_ctx.__aenter__ = AsyncMock(return_value=answered)
+    post_ctx.__aexit__ = AsyncMock(return_value=None)
+    session = _make_mock_session()
+    session.post = MagicMock(return_value=post_ctx)
+    es.settings.RENTAL_REQUEST_HOOK = hook
+    executor_service.get_executors_for_validator = slow_lookup
+
+    with patch("services.executor_service.aiohttp.ClientSession", return_value=session), \
+            patch("services.executor_service.time.monotonic", side_effect=lambda: clock[0]):
+        registration = await executor_service.register_pubkey(
+            "v", "m", _SSH_KEY.encode(), "0xaa", is_rental_request=is_rental_request
+        )
+
+    assert len(registration.accepted) == 1
+    assert session.post.call_args.kwargs["timeout"].total == es.UPLOAD_SSH_KEY_ATTEMPT_TIMEOUT_SECONDS
+
+
 # ---------------------------------------------------------------------------
 # A failed write rolls the shared session back
 # ---------------------------------------------------------------------------

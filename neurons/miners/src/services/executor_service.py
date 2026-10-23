@@ -383,9 +383,12 @@ class ExecutorService:
         )
         async with aiohttp.ClientSession() as session:
             for attempt in range(1, UPLOAD_SSH_KEY_ATTEMPTS + 1):
-                # the first attempt always gets the floor, even when the portal lookup ate the budget
-                time_left = max(UPLOAD_SSH_KEY_MIN_ATTEMPT_SECONDS, deadline - time.monotonic())
-                timeout = aiohttp.ClientTimeout(total=min(UPLOAD_SSH_KEY_ATTEMPT_TIMEOUT_SECONDS, time_left))
+                # the first attempt keeps main's full timeout, so a slow portal lookup never fails an upload main
+                # accepted; only the retries are clipped to the deadline
+                total = UPLOAD_SSH_KEY_ATTEMPT_TIMEOUT_SECONDS
+                if attempt > 1:
+                    total = min(total, deadline - time.monotonic())
+                timeout = aiohttp.ClientTimeout(total=total)
                 try:
                     async with session.post(url, json=payload, timeout=timeout) as response:
                         if response.status != 200:
