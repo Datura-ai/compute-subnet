@@ -533,8 +533,11 @@ class ComputeClient:
                     try:
                         await self.send_model(log_to_send)
                         if getattr(log_to_send, "failure_step", None) == CREATE_CUT_OFF_BY_RESTART_STEP:
-                            # kept until now so a second restart before the send reports it again
-                            await self._untrack_backend_create_for_restart_report(log_to_send.pod_id)
+                            # kept until now so a second restart before the send reports it again;
+                            # only the interrupted create's own record, never a retry's newer one
+                            await self._retire_backend_create_record(
+                                log_to_send.pod_id, self._restart_reported_create_ids.pop(log_to_send.pod_id, "")
+                            )
                     except Exception as exc:
                         async with self.lock:
                             self.message_queue.insert(0, log_to_send)
@@ -986,12 +989,18 @@ class ComputeClient:
                 if retrying is not None:
                     retrying.cancel()
                     await asyncio.wait({retrying})
-                # only this create's own record: a later removal must not erase a newer create's
-                remove = functools.partial(redis_service.remove_inflight_backend_create, pod_id, create_id)
-                if not await self._write_backend_create_record(pod_id, remove):
-                    retiring = asyncio.ensure_future(self._retry_backend_create_record(pod_id, remove))
-                    _retiring_backend_create_records.add(retiring)
-                    retiring.add_done_callback(_retiring_backend_create_records.discard)
+                await self._retire_backend_create_record(pod_id, create_id)
+
+    async def _retire_backend_create_record(self, pod_id: str, create_id: str) -> None:
+        # only that create's own record, so a late removal never erases a newer create's; a failed
+        # removal is retried in the background once Redis answers
+        remove = functools.partial(
+            self.miner_service.redis_service.remove_inflight_backend_create, pod_id, create_id
+        )
+        if not await self._write_backend_create_record(pod_id, remove):
+            retiring = asyncio.ensure_future(self._retry_backend_create_record(pod_id, remove))
+            _retiring_backend_create_records.add(retiring)
+            retiring.add_done_callback(_retiring_backend_create_records.discard)
 
     async def _write_backend_create_record(self, pod_id: str, write: Callable[[], Awaitable[None]]) -> bool:
         try:
@@ -1008,12 +1017,6 @@ class ComputeClient:
         while not await self._write_backend_create_record(pod_id, write):
             await asyncio.sleep(BACKEND_CREATE_TRACKING_RETRY_SECONDS)
 
-    async def _untrack_backend_create_for_restart_report(self, pod_id: str) -> None:
-        try:
-            await self.miner_service.redis_service.remove_inflight_backend_create(pod_id)
-        except Exception as exc:
-            self._log_backend_create_tracking_error(pod_id, exc)
-
     def _log_backend_create_tracking_error(self, pod_id: str, exc: Exception) -> None:
         logger.error(
             _m(
@@ -1028,6 +1031,8 @@ class ComputeClient:
         delete for 30 min. Each one is reported failed now, which frees the node, and its flag is cleared."""
         redis_service = self.miner_service.redis_service
         creates = await redis_service.inflight_backend_creates()
+        # pod id -> the interrupted create's id, retired once its report is sent
+        self._restart_reported_create_ids = {pod_id: create.create_id for pod_id, create in creates.items()}
         for pod_id, create in creates.items():
             # the validator wipes these flags on its own start; this covers a connector that restarted alone
             await redis_service.remove_pending_pod(create.miner_hotkey, create.executor_id, pod_id)

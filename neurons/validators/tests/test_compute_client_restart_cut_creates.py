@@ -221,3 +221,55 @@ async def _no_retirements() -> bool:
     from clients.compute_client import _retiring_backend_create_records
 
     return not _retiring_backend_create_records
+
+
+@pytest.mark.parametrize(
+    "removal_fails, newer_create",
+    [
+        pytest.param(True, False, id="failed_removal_after_the_report_is_retried"),
+        pytest.param(False, True, id="report_never_erases_a_newer_creates_record"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_restart_report_retires_only_its_own_create_record(monkeypatch, removal_fails, newer_create) -> None:
+    monkeypatch.setattr("clients.compute_client.BACKEND_CREATE_TRACKING_RETRY_SECONDS", 0)
+    redis_service = _redis_service()
+    await redis_service.add_inflight_backend_create("pod-4", "miner-hk", "exec-4", WorkloadKind.CUSTOMER_RENTAL, "old")
+    real_remove = redis_service.remove_inflight_backend_create
+    failures = [ConnectionError("redis blip")] if removal_fails else []
+
+    async def remove_once_broken(pod_id: str, create_id: str | None = None) -> None:
+        if failures:
+            raise failures.pop()
+        await real_remove(pod_id, create_id)
+
+    redis_service.remove_inflight_backend_create = remove_once_broken
+    client = _client(redis_service)
+    client.message_queue = OutgoingMessages()
+    client.lock = asyncio.Lock()
+    client.ws = object()
+
+    async def send(_msg) -> None:
+        if newer_create:  # the backend retried the pod and its create wrote a record meanwhile
+            await redis_service.add_inflight_backend_create(
+                "pod-4", "miner-hk", "exec-4", WorkloadKind.CUSTOMER_RENTAL, "newer"
+            )
+
+    client.send_model = AsyncMock(side_effect=send)
+    await client.fail_creates_cut_off_by_restart()
+
+    sender = asyncio.create_task(client.handle_send_messages())
+    try:
+        assert await _settle(lambda: _sent_and_settled(client))
+    finally:
+        sender.cancel()
+        await asyncio.gather(sender, return_exceptions=True)
+
+    if newer_create:
+        assert (await redis_service.inflight_backend_creates())["pod-4"].create_id == "newer"
+    else:
+        assert await _no_record(redis_service, "pod-4")
+
+
+async def _sent_and_settled(client: ComputeClient) -> bool:
+    return client.send_model.await_count > 0 and await _no_retirements()

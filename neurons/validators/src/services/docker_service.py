@@ -10118,15 +10118,18 @@ class DockerService:
     async def _mark_and_stop_unmounted_pod(
         self, ssh_client: asyncssh.SSHClientConnection, container_name: str, pod_id: str
     ) -> bool:
-        # stopped first, never delayed by Redis; then marked, since no later cycle restarts an unmarked
-        # pod stopped under its own name. When the mark cannot be written the pod is parked instead,
-        # which the next cycle's rename-back finds without any mark.
+        # marked before the stop (at most the mark's 5 s bound), since no later cycle restarts an
+        # unmarked pod stopped under its own name, and a stop whose reply is lost may still have
+        # applied. When the mark cannot be written the pod is parked instead, which the next
+        # cycle's rename-back finds without any mark.
+        try:
+            await self._mark_stopped_by_recovery(pod_id)
+            marked = True
+        except Exception:
+            marked = False
         stopped = await self._stop_half_recovered_container(ssh_client, container_name)
-        if stopped:
-            try:
-                await self._mark_stopped_by_recovery(pod_id)
-            except Exception:
-                await self._park_by_id(ssh_client, container_name, f"{container_name}{EDIT_PARKED_SUFFIX}")
+        if not marked:
+            await self._park_by_id(ssh_client, container_name, f"{container_name}{EDIT_PARKED_SUFFIX}")
         return stopped
 
     async def _local_volume_encryption_state(
