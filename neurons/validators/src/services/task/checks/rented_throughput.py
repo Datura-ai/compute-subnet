@@ -50,8 +50,10 @@ _SNAPSHOT = (
     f'echo "{SNAP_MARKER}_device name=$d"; '
     '[ -e /sys/class/block/$d/partition ] && p=$(readlink -f /sys/class/block/$d) && p=${p%/*} && n="$n ${p##*/}"; '
     'n="$n $(ls /sys/class/block/$d/slaves 2>/dev/null)"; done; ds=$n; done; '
-    # a bond's or bridge's member NICs (they have a master) and VLAN sub-interfaces repeat the parent's traffic
-    'sl=$(for i in /sys/class/net/*; do [ -e $i/master ] && printf " %s" "${i##*/}"; done); '
+    # a bond's or bridge's member NICs (they have a master) and VLAN sub-interfaces repeat the parent's traffic. Read in
+    # the host's view: this shell's own /sys/class/net is the executor container's network namespace
+    'sl=$(for i in /proc/1/root/sys/class/net/*; do [ -e $i/master ] && printf " %s" "${i##*/}"; done; '
+    "awk '/^Slave Interface:/{printf \" %s\", $3}' /proc/1/net/bonding/* 2>/dev/null); "
     f'snap() {{ echo "{SNAP_MARKER} t=$(cut -d" " -f1 /proc/uptime) '
     "$([ /proc/1/root/ -ef / ] || sed 's/:/ /' /proc/1/net/dev 2>/dev/null | awk -v sl=\"$sl \" "
     '\'NR>2 && $1!="lo" && $1!~/[.@]/ && !index(sl, " " $1 " ") && '

@@ -219,13 +219,22 @@ async def test_idle_foreign_or_stopped_rentals_are_left_alone():
         assert res.passed and not runner.commands and res.event.reason_code == Msg.SKIPPED.reason
 
 
-def test_bond_members_and_vlans_are_not_counted_twice(tmp_path):
-    # bond0 carries eth0+eth1's traffic, eth0.100 is a VLAN on it: only bond0 and the unrelated eth2 count
+@pytest.mark.parametrize("sysfs", [True, False])
+def test_bond_members_and_vlans_are_not_counted_twice(tmp_path, sysfs):
+    # bond0 carries eth0+eth1's traffic, eth0.100 is a VLAN on it: only bond0 and the unrelated eth2 count, whether the
+    # members are read from the host's sysfs or from its bonding status
     net = tmp_path / "net"
     for name in ("bond0", "eth0", "eth1", "eth2"):
         (net / name).mkdir(parents=True)
-    for member in ("eth0", "eth1"):
-        (net / member / "master").write_text("")
+    bonding = tmp_path / "bonding"
+    bonding.mkdir()
+    if sysfs:
+        for member in ("eth0", "eth1"):
+            (net / member / "master").write_text("")
+    else:  # the host's sysfs not readable from the executor container: /proc/1/net/bonding still names the members
+        (bonding / "bond0").write_text(
+            "Bonding Mode: IEEE 802.3ad\nSlave Interface: eth0\nMII Status: up\nSlave Interface: eth1\n"
+        )
     dev = tmp_path / "dev"
     dev.write_text(
         "Inter-|   Receive\n face |bytes\n"
@@ -242,7 +251,8 @@ def test_bond_members_and_vlans_are_not_counted_twice(tmp_path):
         )
     )
     script = (
-        module._SNAPSHOT.replace("/sys/class/net/*", f"{net}/*")
+        module._SNAPSHOT.replace("/proc/1/root/sys/class/net/*", f"{net}/*")
+        .replace("/proc/1/net/bonding/*", f"{bonding}/*")
         .replace("/proc/1/net/dev", str(dev))
         .replace("[ /proc/1/root/ -ef / ] ||", "")
         .replace(f"sleep {module.BUSY_WINDOW_SECONDS}; ", "")
