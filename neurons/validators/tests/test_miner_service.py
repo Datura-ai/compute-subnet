@@ -340,6 +340,79 @@ def test_missing_executor_failure_reads_known_executor_ids():
     assert str(_missing_executor_failure(old_miner, executor_id, extra)[0]) == "Error: no executor accepted the SSH key"
 
 
+def _storage_payload(kind, engine="restic", **extra):
+    from payload_models.payloads import BackupContainerRequest, ExternalVolumeInfo, RestoreContainerRequest
+
+    common = dict(
+        miner_hotkey="miner", executor_id="executor", pod_id="pod", auth_token="token", backup_engine=engine,
+        backup_volume_info=ExternalVolumeInfo(name="b", plugin="s3", iam_user_access_key="a", iam_user_secret_key="s"),
+    )
+    if kind == "backup":
+        return BackupContainerRequest(
+            **common, source_volume="v", backup_path="/root", source_volume_path="/root", backup_target_path="",
+            backup_log_id=str(uuid4()), **extra,
+        )
+    return RestoreContainerRequest(
+        **common, target_volume="v", backup_source_path="b", target_volume_path="/root", restore_path="/root",
+        restore_log_id=str(uuid4()), **extra,
+    )
+
+
+@pytest.mark.parametrize(
+    "kind,engine,extra,reported",
+    [
+        ("backup", "restic", {}, True),
+        ("backup", "tar_aws_cli", {}, False),
+        ("restore", "restic", {}, True),
+        # a reconnect re-dispatch may find the executor down while the first runner still works; never fail it
+        ("restore", "restic", {"recovery": True}, False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_storage_op_that_fails_before_its_runner_starts_is_reported_at_once(
+    mocker, miner_service, kind, engine, extra, reported
+):
+    """An unreachable executor used to leave the operation IN_PROGRESS until the 20-min heartbeat sweep."""
+    payload = _storage_payload(kind, engine, **extra)
+    failed = FailedContainerRequest(
+        miner_hotkey="miner", executor_id="executor", pod_id="pod", msg="Error: Executor unreachable",
+        error_code=FailedContainerErrorCodes.ExecutorUnreachable,
+    )
+    mocker.patch.object(miner_service, "_route_container", AsyncMock(return_value=failed))
+    report = mocker.patch("services.miner_service.report_launch_failure", AsyncMock())
+
+    assert await miner_service.handle_container(payload) is failed
+
+    if not reported:
+        report.assert_not_awaited()
+        return
+    operation_id, spec, error = report.await_args.args
+    assert str(operation_id) == (payload.backup_log_id if kind == "backup" else payload.restore_log_id)
+    assert spec["reporter"]["auth_token"] == "token" and spec["reporter"]["resource"] == kind
+    assert str(error) == "Error: Executor unreachable"
+
+
+@pytest.mark.asyncio
+async def test_an_old_executor_image_reports_its_specific_reason(mocker, miner_service):
+    payload = _storage_payload("backup", exclude_patterns=["*.cache"])
+    ssh = MagicMock()
+    ssh.__aenter__ = AsyncMock(return_value=Mock())
+    ssh.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch("services.miner_service.asyncssh.connect", return_value=ssh)
+    mocker.patch("services.miner_service.public_host_sock", AsyncMock(return_value={}))
+    mocker.patch("services.miner_service.supports_workspace_field", AsyncMock(return_value=False))
+    start = mocker.patch("services.miner_service.start_storage_operation", AsyncMock())
+    report = mocker.patch("services.miner_service.report_launch_failure", AsyncMock())
+    executor = Mock(address="h", ssh_port=22, ssh_username="root", python_path="python3")
+
+    with pytest.raises(RuntimeError, match="exclude_patterns"):
+        await miner_service.handle_backup_container_req(
+            executor, payload, Mock(), Mock(_prepare_known_hosts_policy=AsyncMock(return_value=None))
+        )
+
+    start.assert_not_awaited()
+    assert "update the executor image" in str(report.await_args.args[2])
+
 def _refused():
     return aiohttp.ClientConnectorError(Mock(host="10.0.0.1", port=8000, ssl=None), OSError(111, "Connect call failed"))
 

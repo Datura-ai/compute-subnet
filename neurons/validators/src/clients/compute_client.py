@@ -2,7 +2,10 @@ import asyncio
 import json
 import logging
 import time
+from contextlib import suppress
+from contextvars import ContextVar
 from typing import NoReturn
+from uuid import uuid4
 
 import aiohttp
 import bittensor
@@ -15,6 +18,7 @@ from payload_models.payloads import (
     CancelStorageOperationRequest,
     RestoreContainerRequest,
     BaseServerRequest,
+    BaseValidatorResponse,
     ContainerCreateRequest,
     ContainerDeleteRequest,
     ContainerStartRequest,
@@ -75,6 +79,7 @@ from services.docker_service import create_steps_after_reply, inflight_creates
 from services.miner_service import MinerService
 from incentive.rental_price import ExecutorEstimateParams, RentalPriceSnapshot, estimate_executor
 from services.redis_service import (
+    BackendCommand,
     DUPLICATED_MACHINE_SET,
     EXECUTORS_UPTIME_PREFIX,
     GPU_ESTIMATES_CHANNEL,
@@ -99,6 +104,9 @@ WS_PING_TIMEOUT = 40
 CREATE_CUT_OFF_BY_RESTART_STEP = "validator_restarted"
 
 
+command_responses: ContextVar[list[str] | None] = ContextVar("command_responses", default=None)
+
+
 class OutgoingMessages(list[DeliveryStamps]):
     # every append wakes the send loop, so a reply leaves at once instead of on the next 1 s poll
     def __init__(self) -> None:
@@ -106,6 +114,8 @@ class OutgoingMessages(list[DeliveryStamps]):
         self.appended = asyncio.Event()
 
     def append(self, message: DeliveryStamps) -> None:
+        if (responses := command_responses.get()) is not None:
+            responses.append(message.model_dump_json())
         super().append(message)
         self.appended.set()
 
@@ -206,6 +216,10 @@ class ComputeClient:
                     extra=get_extra_info({**self.logging_extra, "error": str(exc)}),
                 )
             )
+        try:
+            await self.miner_service.redis_service.clear_running_backend_commands()
+        except Exception:
+            logger.exception("Failed to clear running backend commands on connector start")
         asyncio.create_task(self.handle_send_messages())
         asyncio.create_task(self.subscribe_mesages_from_redis())
         asyncio.create_task(self.poll_rented_machines())
@@ -844,7 +858,91 @@ class ComputeClient:
         miner = await self.subtensor_client.get_miner(hotkey)
         return miner.axon_info
 
-    async def miner_driver(
+    async def miner_driver(self, job_request: BaseServerRequest):
+        if not job_request.command_id:
+            return await self._run_miner_job(job_request)
+        command_id = job_request.command_id
+        redis_service = self.miner_service.redis_service
+        claim = BackendCommand(state="running", owner=uuid4().hex).model_dump_json()
+        try:
+            existing = await redis_service.claim_backend_command(command_id, claim)
+        except Exception:
+            logger.exception(_m(
+                "Backend command dedup failed open",
+                extra=get_extra_info({**self.logging_extra, "command_id": command_id}),
+            ))
+            return await self._run_miner_job(job_request)
+        if existing is not None:
+            return await self._handle_backend_command_duplicate(job_request, existing)
+
+        responses: list[str] = []
+        token = command_responses.set(responses)
+        heartbeat = asyncio.create_task(self._refresh_backend_command(command_id, claim))
+        succeeded = False
+        try:
+            result = await self._run_miner_job(job_request)
+            succeeded = True
+            return result
+        finally:
+            command_responses.reset(token)
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
+            # A failure without any answer releases the claim so a retry can run.
+            value = (
+                BackendCommand(state="finished", responses=responses).model_dump_json()
+                if succeeded or responses
+                else ""
+            )
+            try:
+                await redis_service.update_backend_command(
+                    command_id, claim, value, settings.BACKEND_COMMAND_ANSWER_TTL_SECONDS
+                )
+            except Exception:
+                logger.exception("Failed to finish backend command: %s", command_id)
+
+    async def _handle_backend_command_duplicate(
+        self, job_request: BaseServerRequest, existing: BackendCommand
+    ) -> None:
+        command_id = job_request.command_id
+        if existing.state == "finished":
+            try:
+                replies = [BaseValidatorResponse.parse(raw) for raw in existing.responses]
+            except Exception:
+                logger.exception(_m(
+                    "Backend command reply replay failed open",
+                    extra=get_extra_info({**self.logging_extra, "command_id": command_id}),
+                ))
+                await self._run_miner_job(job_request)
+                return
+            async with self.lock:
+                for reply in replies:
+                    self.message_queue.append(reply)
+        else:
+            logger.info(
+                _m(
+                    "Ignoring running backend command duplicate",
+                    extra=get_extra_info({
+                        **self.logging_extra,
+                        "command_id": command_id,
+                        "request_type": job_request.message_type.value,
+                    }),
+                )
+            )
+
+    async def _refresh_backend_command(self, command_id: str, claim: str) -> None:
+        ttl = settings.BACKEND_COMMAND_CLAIM_TTL_SECONDS
+        interval = min(settings.BACKEND_COMMAND_HEARTBEAT_SECONDS, ttl / 3)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self.miner_service.redis_service.update_backend_command(
+                    command_id, claim, claim, ttl
+                )
+            except Exception:
+                logger.exception("Failed to refresh backend command claim: %s", command_id)
+
+    async def _run_miner_job(
         self,
         job_request: ContainerCreateRequest
         | ContainerDeleteRequest
@@ -857,7 +955,7 @@ class ComputeClient:
         | AddDebugSshKeyRequest
         | BackupContainerRequest
         | RestoreContainerRequest
-        | InstallJupyterServerRequest
+        | InstallJupyterServerRequest,
     ):
         # DAH-2728: track the create from the moment this task picks it up. The axon lookup below
         # fetches the whole miner set on a cold cache, so a delete arriving seconds later can sail
@@ -1040,6 +1138,8 @@ class ComputeClient:
             response: (
                 SshPubKeyAdded | FailedContainerRequest
             ) = await self.miner_service.handle_container(job_request)
+            # the backend matches the answer to its send by this id (a delayed answer must not confirm a later send)
+            response.command_id = job_request.command_id
 
             logger.info(
                 _m(
