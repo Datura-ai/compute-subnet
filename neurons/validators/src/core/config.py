@@ -360,11 +360,6 @@ class Settings(BaseSettings):
     #
     # Item 1 — surface the kernel (procfs) GPU verdict the validator already computes and throws
     # away, and refuse the spoofable nvidia-smi XML fallback when it disagrees with the kernel map.
-    # DAH-2662 — match provider/GPU bans against the kernel's GPU UUIDs (/proc/driver/nvidia) as well
-    # as the host-reported ones. Shadow by default: the kernel list is read, recorded on specs and
-    # `kernel_view_would_ban` is emitted on every banned_provider/banned event; the ban itself is
-    # matched on the reported list until this is flipped from a week of clean fleet data.
-    KERNEL_GPU_BAN_ENFORCEMENT_ENABLED: bool = Field(env="KERNEL_GPU_BAN_ENFORCEMENT_ENABLED", default=False)
     # DAH-4547 - HardwareIdentityCheck: DMI files not served by sysfs (a cloak script's overlay), the
     # kernel and NVML GPU lists disagreeing, or DMI identity changing under an unchanged GPU set.
     # Shadow by default: the finding is logged as a warning event and the node passes.
