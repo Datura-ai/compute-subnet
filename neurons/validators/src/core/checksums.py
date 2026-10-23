@@ -25,19 +25,25 @@ ARM_VERIFIER_NOT_AVAILABLE = "ARM_VERIFIER_NOT_AVAILABLE"
 ARM_VERIFIER_NOT_AVAILABLE_ERROR = (
     f"{ARM_VERIFIER_NOT_AVAILABLE}: executor CPU is aarch64; the ARM verifier library is not available yet"
 )
-_ARM = ("aarch64", "arm64")
+EXECUTOR_ARCH_UNKNOWN = "EXECUTOR_ARCH_UNKNOWN"
+EXECUTOR_ARCH_UNKNOWN_ERROR = (
+    f"{EXECUTOR_ARCH_UNKNOWN}: could not read the executor CPU architecture; its library was not replaced"
+)
+_ARCHES = {"aarch64": "aarch64", "arm64": "aarch64", "x86_64": "x86_64", "amd64": "x86_64"}
 
 
-async def executor_arch(shell) -> str:
-    """Return "aarch64" for an ARM executor (`uname -m`, read once per shell), else "x86_64", the default."""
+async def executor_arch(shell) -> str | None:
+    """"aarch64" or "x86_64" from `uname -m`, read once per shell. None when the read fails or names another CPU:
+    never guessed, so a failed read cannot put the wrong build on a host; only a supported answer is cached."""
     arch = getattr(shell, "executor_arch", None)
-    if not isinstance(arch, str):
-        try:
-            result = await shell.ssh_client.run("uname -m", timeout=15)
-            arch = str(getattr(result, "stdout", "") or "").strip()
-        except Exception:
-            arch = ""
-        arch = "aarch64" if arch in _ARM else "x86_64"
+    if arch in ("aarch64", "x86_64"):
+        return arch
+    try:
+        result = await shell.ssh_client.run("uname -m", timeout=15)
+        arch = _ARCHES.get(str(getattr(result, "stdout", "") or "").strip())
+    except Exception:
+        arch = None
+    if arch is not None:
         shell.executor_arch = arch
     return arch
 

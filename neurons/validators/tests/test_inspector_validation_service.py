@@ -47,21 +47,24 @@ def matching_lib_checksums(monkeypatch):
 class FakeSSHClient:
     """`shell.ssh_client`: records every command; `respond(command)` answers it."""
 
-    def __init__(self, respond=None) -> None:
+    def __init__(self, respond=None, arch: str = "x86_64") -> None:
         self.commands: list[str] = []
+        self.arch = arch
         self.respond = respond or (lambda _command: SimpleNamespace(stdout="", stderr="", exit_status=0))
 
     async def run(self, command: str, timeout: float | None = None):
         self.commands.append(command)
+        if command == "uname -m":
+            return SimpleNamespace(stdout=f"{self.arch}\n", stderr="", exit_status=0)
         return self.respond(command)
 
 
 class FakeShell:
-    def __init__(self, *, sha256: str = VALIDATOR_SHA256, respond=None) -> None:
+    def __init__(self, *, sha256: str = VALIDATOR_SHA256, respond=None, arch: str = "x86_64") -> None:
         self.sha256 = sha256
         self.scp_checksum_calls = 0
         self.remote_checksum_calls = 0
-        self.ssh_client = FakeSSHClient(respond)
+        self.ssh_client = FakeSSHClient(respond, arch)
 
     async def get_checksums_over_scp(self, _path: str) -> str:
         self.scp_checksum_calls += 1
@@ -906,7 +909,7 @@ async def test_attested_host_never_refreshes(refresh_on):
 
 
 def _arm_executor(sha256: str) -> FakeShell:
-    return FakeShell(sha256=sha256, respond=lambda command: _ok("aarch64\n" if command == "uname -m" else ""))
+    return FakeShell(sha256=sha256, arch="aarch64")
 
 
 @pytest.mark.asyncio
@@ -934,3 +937,27 @@ async def test_arm_executor_is_checked_against_the_aarch64_build(refresh_on, mon
     assert result.message.reason == Msg.FAILED_LIB_MISMATCH.reason
     assert "aarch64 build" in result.error
     assert shell.ssh_client.commands == ["uname -m"]  # no in-place refresh of the aarch64 build
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_cpu_never_writes_a_library(refresh_on):
+    # a failed or unsupported `uname -m` is not taken for x86: the stale library is left as it is
+    shell = FakeShell(sha256="stale", arch="unknown")
+    result = await _validate(shell)
+    assert result.message.reason == Msg.FAILED_LIB_MISMATCH.reason
+    assert result.error.startswith("EXECUTOR_ARCH_UNKNOWN")
+    assert shell.ssh_client.commands == ["uname -m"]  # no write check, no curl, no rename
+
+
+@pytest.mark.asyncio
+async def test_an_arm_host_holding_the_x86_build_is_caught(refresh_on, monkeypatch, tmp_path):
+    # the CPU is read before the hashes: the x86 build matches the native digest but is the wrong build here
+    arm_lib = tmp_path / "libinspector-aarch64.so"
+    arm_lib.write_bytes(b"arm")
+    service = "neurons.validators.src.services.inspector_validation_service"
+    monkeypatch.setattr(f"{service}.aarch64_lib_path", lambda _path: str(arm_lib))
+    monkeypatch.setattr(f"{service}.sha256_from_path", lambda path: "arm-build" if path == str(arm_lib) else VALIDATOR_SHA256)
+    shell = _arm_executor(VALIDATOR_SHA256)
+    result = await _validate(shell)
+    assert result.message.reason == Msg.FAILED_LIB_MISMATCH.reason
+    assert "aarch64 build" in result.error

@@ -15,6 +15,8 @@ from core.utils import _m, get_extra_info
 from core.checksums import (
     ARM_VERIFIER_NOT_AVAILABLE,
     ARM_VERIFIER_NOT_AVAILABLE_ERROR,
+    EXECUTOR_ARCH_UNKNOWN,
+    EXECUTOR_ARCH_UNKNOWN_ERROR,
     aarch64_lib_path,
     executor_arch,
     sha256_from_executor,
@@ -389,9 +391,9 @@ class VerifyXValidationService:
             # Verify checksum before proceeding with validation
             lib_name = self.gated_lib_name()
             source = lib_name
-            local_checksum = self.lib_sha256(lib_name)
-            executor_checksum = await sha256_from_executor(shell, lib_name)
-            if local_checksum != executor_checksum and await executor_arch(shell) == "aarch64":
+            # the CPU first: an ARM host holding the x86 build matches the native digest and must not pass as current
+            arch = await executor_arch(shell)
+            if arch == "aarch64":
                 # an ARM executor holds the aarch64 build: check it against (and send) the validator's copy of that
                 source = aarch64_lib_path(lib_name)
                 if source is None:
@@ -400,9 +402,15 @@ class VerifyXValidationService:
                         error=ARM_VERIFIER_NOT_AVAILABLE_ERROR,
                         diagnostics={"event": ARM_VERIFIER_NOT_AVAILABLE, "executor_arch": "aarch64"},
                     )
-                local_checksum = self.lib_sha256(source)
+            local_checksum = self.lib_sha256(source)
+            executor_checksum = await sha256_from_executor(shell, lib_name)
 
             if local_checksum != executor_checksum:
+                if arch is None:
+                    logger.warning(_m(EXECUTOR_ARCH_UNKNOWN, extra=get_extra_info(default_extra)))
+                    return VerifyXResponse(
+                        error=EXECUTOR_ARCH_UNKNOWN_ERROR, diagnostics={"event": EXECUTOR_ARCH_UNKNOWN}
+                    )
                 mismatch_extra = {
                     **default_extra,
                     "local_sha256": local_checksum,

@@ -72,9 +72,9 @@ async def test_interactive_shell_service_rejects_bad_sha256sum_output(result):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("stdout", "arch"),
-    [("aarch64\n", "aarch64"), ("arm64\n", "aarch64"), ("x86_64\n", "x86_64"), ("", "x86_64"), (None, "x86_64")],
+    [("aarch64\n", "aarch64"), ("arm64\n", "aarch64"), ("x86_64\n", "x86_64"), ("amd64\n", "x86_64")],
 )
-async def test_executor_arch_reads_uname_once_and_defaults_to_x86_64(stdout, arch):
+async def test_executor_arch_reads_uname_once(stdout, arch):
     from neurons.validators.src.core.checksums import executor_arch
 
     shell = SimpleNamespace(ssh_client=SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(stdout=stdout))))
@@ -84,11 +84,23 @@ async def test_executor_arch_reads_uname_once_and_defaults_to_x86_64(stdout, arc
 
 
 @pytest.mark.asyncio
-async def test_executor_arch_is_x86_64_when_the_read_fails():
+@pytest.mark.parametrize("stdout", ["", None, "ppc64le\n", "ab" * 32])
+async def test_an_unread_or_unsupported_cpu_is_unknown_and_read_again(stdout):
+    """Never guessed: a failed read must not pick the x86 build for an ARM host, and is not cached."""
+    from neurons.validators.src.core.checksums import executor_arch
+
+    shell = SimpleNamespace(ssh_client=SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(stdout=stdout))))
+    assert await executor_arch(shell) is None
+    assert await executor_arch(shell) is None
+    assert shell.ssh_client.run.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_executor_arch_is_unknown_when_the_read_fails():
     from neurons.validators.src.core.checksums import executor_arch
 
     shell = SimpleNamespace(ssh_client=SimpleNamespace(run=AsyncMock(side_effect=OSError("closed"))))
-    assert await executor_arch(shell) == "x86_64"
+    assert await executor_arch(shell) is None
 
 
 def test_aarch64_lib_path_only_when_the_build_is_on_the_validator(tmp_path):

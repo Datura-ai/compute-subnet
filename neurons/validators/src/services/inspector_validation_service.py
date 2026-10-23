@@ -14,6 +14,8 @@ import asyncssh
 from core.checksums import (
     ARM_VERIFIER_NOT_AVAILABLE,
     ARM_VERIFIER_NOT_AVAILABLE_ERROR,
+    EXECUTOR_ARCH_UNKNOWN,
+    EXECUTOR_ARCH_UNKNOWN_ERROR,
     aarch64_lib_path,
     executor_arch,
     sha256_from_executor,
@@ -252,7 +254,9 @@ class InspectorValidationService:
         try:
             if not sensor_attested:
                 executor_checksum = await sha256_from_executor(shell, self.lib_path)
-                if self.local_checksum != executor_checksum and await executor_arch(shell) == "aarch64":
+                # the CPU first: an ARM host holding the x86 build matches the native digest and must not pass
+                arch = await executor_arch(shell)
+                if arch == "aarch64":
                     # an ARM executor holds the aarch64 build: compare against the validator's copy of that
                     source = aarch64_lib_path(self.lib_path)
                     if source is None:
@@ -271,6 +275,13 @@ class InspectorValidationService:
                             diagnostics={**diagnostics, "executor_sha256": executor_checksum or None},
                             default_extra=default_extra,
                         )
+                elif self.local_checksum != executor_checksum and arch is None:
+                    return self._failure_response(
+                        error=EXECUTOR_ARCH_UNKNOWN_ERROR,
+                        message=Msg.FAILED_LIB_MISMATCH,
+                        diagnostics={**diagnostics, "library_refresh": EXECUTOR_ARCH_UNKNOWN},
+                        default_extra=default_extra,
+                    )
                 elif self.local_checksum != executor_checksum:
                     failure = await self._refresh_on_mismatch(
                         shell,
