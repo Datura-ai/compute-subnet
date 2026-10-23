@@ -8080,6 +8080,47 @@ async def test_restore_volume_mount_of_running_container_remounts_or_stops_the_p
     assert docker_service.redis_service.set.await_count == int(expected != "restored")
 
 
+@pytest.mark.parametrize(
+    "mark_error, expected_name",
+    [
+        pytest.param(None, "pod_pod-1", id="marked_keeps_its_name"),
+        pytest.param(ConnectionError("temporary Redis failure"), "pod_pod-1__prev", id="failed_mark_parks_it"),
+        pytest.param("hang", "pod_pod-1__prev", id="stalled_mark_parks_it"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_mark_and_stop_unmounted_pod_leaves_a_retry_anchor(docker_service, monkeypatch, mark_error, expected_name):
+    # the stop comes first, never delayed by Redis; without a written mark the pod is parked, which
+    # the next cycle's rename-back finds by itself
+    host = {"name": "pod_pod-1", "running": True}
+
+    async def run(command, *_args, **_kwargs):
+        if command == "/usr/bin/docker stop pod_pod-1" and host["name"] == "pod_pod-1":
+            host["running"] = False
+        elif command.startswith("/usr/bin/docker rename pod_pod-1 "):
+            host["name"] = command.rsplit(" ", 1)[1]
+        return _make_ssh_command_result()
+
+    ssh_client = AsyncMock()
+    ssh_client.run = AsyncMock(side_effect=run)
+
+    async def set_mark(key, value, ex=None):
+        assert not host["running"]  # written after the stop
+        assert ex is None  # no expiry: the only evidence the stop was ours
+        if mark_error == "hang":
+            await asyncio.Event().wait()
+        if mark_error:
+            raise mark_error
+
+    docker_service.redis_service.set = AsyncMock(side_effect=set_mark)
+    monkeypatch.setattr(docker_service_module, "_STOPPED_BY_RECOVERY_MARK_TIMEOUT_SEC", 0.01)
+
+    assert await docker_service._mark_and_stop_unmounted_pod(ssh_client, "pod_pod-1", "pod-1") is True
+
+    assert host["running"] is False
+    assert host["name"] == expected_name
+
+
 _GOCRYPTFS_MOUNT = "/lium-cipher /workspace fuse.gocryptfs rw,nosuid,nodev 0 0\n"
 
 

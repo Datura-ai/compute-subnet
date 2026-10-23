@@ -118,7 +118,6 @@ from services.redis_service import (
     SSHD_BOOTSTRAP_FAILED_TTL_SECONDS,
     SSHD_VERIFY_FAILED_MARKER,
     STOPPED_BY_RECOVERY_PREFIX,
-    STOPPED_BY_RECOVERY_TTL_SECONDS,
     STREAMING_LOG_CHANNEL,
     RedisService,
 )
@@ -1881,6 +1880,10 @@ async def _cleanup_to_completion(cleanup: Awaitable[Any]) -> Any:
     if cancelled:
         raise asyncio.CancelledError
     return task.result()
+
+
+# the recovery mark's write; past it, the stopped pod is parked instead
+_STOPPED_BY_RECOVERY_MARK_TIMEOUT_SEC = 5
 
 
 def _is_safe_docker_volume_name(volume_name: str) -> bool:
@@ -9995,8 +9998,11 @@ class DockerService:
         return True
 
     async def _mark_stopped_by_recovery(self, pod_id: str) -> None:
-        await self.redis_service.set(
-            f"{STOPPED_BY_RECOVERY_PREFIX}{pod_id}", "1", ex=STOPPED_BY_RECOVERY_TTL_SECONDS
+        # bounded: RedisService.set waits on a process-wide lock, and the recovery must end inside
+        # the create lock
+        await asyncio.wait_for(
+            self.redis_service.set(f"{STOPPED_BY_RECOVERY_PREFIX}{pod_id}", "1"),
+            timeout=_STOPPED_BY_RECOVERY_MARK_TIMEOUT_SEC,
         )
 
     async def _put_back_parked_container(
@@ -10064,8 +10070,9 @@ class DockerService:
         ``start_existing_container`` adds after a start. True once remounted. Anything else stops the
         container, a cancellation (the recovery deadline) included: left up without its mount, the
         pod takes the renter's writes unencrypted onto the host disk. The stop is marked first
-        (STOPPED_BY_RECOVERY), so the next cycle's ``recover_parked_pod_container`` starts the pod
-        with its mount once the plaintext path is known."""
+        (STOPPED_BY_RECOVERY, or parked as ``<name>__prev`` when the mark cannot be written), so the
+        next cycle's ``recover_parked_pod_container`` starts the pod with its mount once the
+        plaintext path is known."""
         try:
             # never at a guessed path, and only with the secret the volume was made with
             if not private_key or not _can_remount_encrypted_volume(local_volume_path):
@@ -10111,11 +10118,16 @@ class DockerService:
     async def _mark_and_stop_unmounted_pod(
         self, ssh_client: asyncssh.SSHClientConnection, container_name: str, pod_id: str
     ) -> bool:
-        # an unmarked stop would leave the pod down for good: no later cycle restarts a pod stopped
-        # under its own name. A failed mark still stops it; unencrypted writes are worse.
-        with contextlib.suppress(Exception):
-            await self._mark_stopped_by_recovery(pod_id)
-        return await self._stop_half_recovered_container(ssh_client, container_name)
+        # stopped first, never delayed by Redis; then marked, since no later cycle restarts an unmarked
+        # pod stopped under its own name. When the mark cannot be written the pod is parked instead,
+        # which the next cycle's rename-back finds without any mark.
+        stopped = await self._stop_half_recovered_container(ssh_client, container_name)
+        if stopped:
+            try:
+                await self._mark_stopped_by_recovery(pod_id)
+            except Exception:
+                await self._park_by_id(ssh_client, container_name, f"{container_name}{EDIT_PARKED_SUFFIX}")
+        return stopped
 
     async def _local_volume_encryption_state(
         self,
