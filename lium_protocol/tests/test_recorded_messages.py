@@ -92,3 +92,26 @@ def test_failed_request_codes_the_backend_copy_lacks_are_on_the_wire() -> None:
     types = {e["message"]["error_type"] for e in entries}
     assert "AttestationError" in codes and "ContainerStopFailed" in types
     assert ValidatorMessageType.FailedRequest.value == "FailedRequest"
+
+
+@pytest.mark.parametrize("entry", recorded("backend_to_validator"), ids=_ids("backend_to_validator"))
+def test_command_id_is_optional_and_ignored_by_old_message_model(entry: dict) -> None:
+    from lium_protocol.backend_to_validator import ServerRequest
+    from lium_protocol.base import Message
+
+    model = BACKEND_MESSAGES.parse_obj(entry["message"])
+    if isinstance(model, ServerRequest):
+        assert model.command_id == ""
+        payload = {**entry["message"], "command_id": "retry"}
+        assert BACKEND_MESSAGES.parse_obj(payload).command_id == "retry"
+        assert "command_id" not in Message.model_validate(model.model_dump()).model_dump()
+    else:
+        assert "command_id" not in type(model).model_fields
+
+
+@pytest.mark.parametrize("message_type", ["SshPubKeyAdded", "FailedRequest"])
+def test_ssh_key_answer_command_id_is_optional(message_type: str) -> None:
+    message = {"message_type": message_type, "miner_hotkey": "m", "executor_id": "e", "pod_id": "p", "msg": "x"}
+
+    assert VALIDATOR_MESSAGES.parse_obj(message).command_id == ""
+    assert VALIDATOR_MESSAGES.parse_obj({**message, "command_id": "restore:1"}).command_id == "restore:1"

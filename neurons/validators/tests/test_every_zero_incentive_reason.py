@@ -91,7 +91,6 @@ async def test_every_hard_exclusion_and_every_enforced_gate_is_recorded_in_order
 ):
     for flag in (
         "ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT",
-        "ENABLE_UNRENTED_SOFT_PRICE_LIMIT",
     ):
         monkeypatch.setattr(settings, flag, True)
     new_cfg = shared_client.config.model_copy(update={"machine_prices_p90": {H200: 0.5}})
@@ -117,7 +116,6 @@ async def test_every_hard_exclusion_and_every_enforced_gate_is_recorded_in_order
 @pytest.mark.asyncio
 async def test_two_idle_pool_gates_are_both_recorded(monkeypatch):
     # price used to stop the chain: a node over the price limit never heard about its disk
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_SOFT_PRICE_LIMIT", True)
     new_cfg = shared_client.config.model_copy(update={"machine_prices_p90": {H200: 0.5}})
     monkeypatch.setattr(shared_client, "_config", new_cfg)
 
