@@ -2,8 +2,7 @@
 
 An unrented executor whose total disk is below its total GPU VRAM times
 MIN_DISK_TO_VRAM_RATE forfeits the unrented rental incentive while staying active.
-Enforcement is gated by ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT; while the flag is
-off the breach is only logged (shadow mode) and the payout is unchanged.
+Always enforced (the flag was removed).
 """
 
 import logging
@@ -13,7 +12,6 @@ from unittest.mock import AsyncMock
 import pytest
 from datura.requests.miner_requests import ExecutorSSHInfo
 
-from core.config import settings
 from incentive.config import IncentiveConfig
 from incentive.rental_price import RentalPriceIncentive
 from neurons.validators.tests.helpers import build_scrape_namespace
@@ -23,6 +21,12 @@ H200 = "NVIDIA H200"  # base model H200 is rental-eligible by default
 
 MB_PER_GB = 1024
 KB_PER_GB = 1024 ** 2
+
+
+@pytest.fixture(autouse=True)
+def _no_flagship_gate(monkeypatch):
+    # the 8x H200 jobs here are flagships; the always-on flagship gate has its own tests
+    monkeypatch.setattr(RentalPriceIncentive, "_missing_flagship_capability", lambda *_args: None)
 
 
 def _build_incentive() -> RentalPriceIncentive:
@@ -189,7 +193,6 @@ def test_insufficient_disk_survives_a_malformed_scrape(spec):
 @pytest.mark.parametrize("spec", MALFORMED_SPECS)
 async def test_malformed_scrape_never_breaks_scoring(monkeypatch, spec):
     # Raising out of calculate_executor_score would cost EVERY miner this cycle's weights.
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT", True)
     incentive = _build_incentive()
 
     result = await incentive.calculate_executor_score(_make_job(spec=spec))
@@ -209,50 +212,9 @@ def test_insufficient_disk_reports_the_numbers_it_compared():
     assert measured is None
 
 
-def test_enforcement_defaults_to_shadow_mode():
-    # Rollout contract: first deploy must be shadow-only, so the flag default
-    # (not the env-resolved value) must stay False.
-    default = type(settings).model_fields["ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT"].default
-
-    assert default is False
-
-
-@pytest.mark.asyncio
-async def test_shadow_mode_keeps_rental_eligibility(monkeypatch):
-    # Arrange — VRAM over disk but flag off → shadow only
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT", False)
-    incentive = _build_incentive()
-
-    # Act
-    result = await incentive.calculate_executor_score(_make_job())
-
-    # Assert — still eligible for the unrented rental pool, nothing told to the miner
-    assert result.eligible_for_rental_share is True
-    assert "insufficient_disk_for_vram" not in "\n".join(result.incentive_logs)
-
-
-@pytest.mark.asyncio
-async def test_shadow_mode_emits_the_measurement_log(monkeypatch, caplog):
-    # The shadow log is the whole deliverable of the first deploy: the rollout decision
-    # is made from these fields, so they are a dashboard contract.
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT", False)
-    incentive = _build_incentive()
-
-    with caplog.at_level(logging.INFO):
-        await incentive.calculate_executor_score(_make_job())
-
-    breach = next(r.msg for r in caplog.records if r.msg.extra.get("reason") == "insufficient_disk_for_vram")
-    assert "shadow only - flag off" in breach.message
-    assert breach.extra["total_vram_gb"] == 1128.0
-    assert breach.extra["total_disk_gb"] == 500.0
-    assert breach.extra["enforced"] is False
-    assert breach.extra["pool"] == "rental_kept_shadow"
-
-
 @pytest.mark.asyncio
 async def test_enforced_drops_rental_eligibility(monkeypatch):
     # Arrange — VRAM over disk and flag on
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT", True)
     incentive = _build_incentive()
 
     # Act
@@ -267,7 +229,6 @@ async def test_enforced_drops_rental_eligibility(monkeypatch):
 async def test_enforced_appends_customer_facing_incentive_log(monkeypatch):
     # DAH-2327: the zero-incentive reason must reach the customer-facing incentive log
     # with both numbers, so the miner knows how much disk to add.
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT", True)
     incentive = _build_incentive()
 
     result = await incentive.calculate_executor_score(_make_job())
@@ -282,7 +243,6 @@ async def test_enforced_appends_customer_facing_incentive_log(monkeypatch):
 @pytest.mark.asyncio
 async def test_enough_disk_keeps_eligibility_when_enforced(monkeypatch):
     # Arrange — flag on but the machine has more disk than VRAM
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT", True)
     incentive = _build_incentive()
 
     # Act
@@ -295,7 +255,6 @@ async def test_enough_disk_keeps_eligibility_when_enforced(monkeypatch):
 @pytest.mark.asyncio
 async def test_rented_executor_is_not_gated(monkeypatch):
     # A rented machine earns from the rented path and must not be touched by this gate.
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT", True)
     incentive = _build_incentive()
 
     result = await incentive.calculate_executor_score(_make_job(is_rented=True))
