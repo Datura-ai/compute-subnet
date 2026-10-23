@@ -7267,25 +7267,24 @@ class DockerService:
         # the create's steps a renter's first login does not need; closes the create's sessions
         try:
             async with connections:
-                if settings.ENABLE_INSPECTOR:
-                    started_ms = now_ms()
-                    # logs its own failure as "Inspector collector start failed"
-                    await self._run_inspector_collector_lifecycle(
-                        ssh_client=ssh_client,
-                        executor_info=executor_info,
-                        action="start",
-                        default_extra=log_extra,
+                started_ms = now_ms()
+                # logs its own failure as "Inspector collector start failed"
+                await self._run_inspector_collector_lifecycle(
+                    ssh_client=ssh_client,
+                    executor_info=executor_info,
+                    action="start",
+                    default_extra=log_extra,
+                )
+                logger.info(
+                    _m(
+                        "Create step after reply finished",
+                        extra=get_extra_info({
+                            **log_extra,
+                            "step": ProfilerStepName.INSPECTOR_START.value,
+                            "duration_ms": now_ms() - started_ms,
+                        }),
                     )
-                    logger.info(
-                        _m(
-                            "Create step after reply finished",
-                            extra=get_extra_info({
-                                **log_extra,
-                                "step": ProfilerStepName.INSPECTOR_START.value,
-                                "duration_ms": now_ms() - started_ms,
-                            }),
-                        )
-                    )
+                )
         except Exception as exc:
             logger.error(
                 _m(
@@ -8947,7 +8946,6 @@ class DockerService:
                     profilers.append(
                         ProfilerStep(
                             name=ProfilerStepName.INSPECTOR_START_AFTER_REPLY,
-                            skipped=not settings.ENABLE_INSPECTOR,
                         )
                     )
                 except Exception as post_run_exc:
@@ -10438,10 +10436,7 @@ class DockerService:
 
                 # Stop inspector only after the last rented pod leaves this executor.
                 with _best_effort_delete_step(log, "inspector_stop"):
-                    if (
-                        settings.ENABLE_INSPECTOR
-                        and not await self._has_rented_containers(executor_info)
-                    ):
+                    if not await self._has_rented_containers(executor_info):
                         await self._run_inspector_collector_lifecycle(
                             ssh_client=ssh_client,
                             executor_info=executor_info,
