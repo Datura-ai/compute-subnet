@@ -191,6 +191,14 @@ class MachineSpecMessages:
             " reboot or reinstall the driver."
         ),
     )
+    # DAH-4658: the renter's own reset takes the cards out of NVML; the cycle withholds the verdict
+    SCRAPE_GPU_RESET_IN_PROGRESS = MessageTemplate(
+        event="Machine specs scrape found no GPU: the renter is resetting the pod's GPUs",
+        reason="SCRAPE_GPU_RESET_IN_PROGRESS",
+        severity="info",
+        category="env",
+        impact="Validation halted — no verdict this cycle, the previous result stands",
+    )
     SCRAPE_FAILED_ON_HOST = MessageTemplate(
         event="Machine specs scrape failed on the executor",
         reason="SCRAPE_FAILED_ON_HOST",
@@ -489,6 +497,13 @@ class RentedGpuDropMessages:
         category="env",
         impact="Proceed",
     )
+    GPU_RESET_IN_PROGRESS = MessageTemplate(
+        event="Rented GPU drop check skipped: the renter is resetting the pod's GPUs",
+        reason="RENTED_GPU_DROP_GPU_RESET_IN_PROGRESS",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
 
 
 class GpuLossHoldMessages:
@@ -518,6 +533,21 @@ class GpuLossHoldMessages:
         severity="info",
         category="env",
         impact="Proceed",
+    )
+    GPU_RESET_IN_PROGRESS = MessageTemplate(
+        event="GPU loss hold skipped: the renter is resetting the pod's GPUs",
+        reason="GPU_LOST_GPU_RESET_IN_PROGRESS",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+    # DAH-4658: the reason of the zero-GPU scrape hold, so the cycle carries the last score the same way
+    MISSING_GPUS_UNDER_RESET = MessageTemplate(
+        event="GPUs missing from the scrape: the renter is resetting them",
+        reason=MachineSpecMessages.SCRAPE_GPU_RESET_IN_PROGRESS.reason,
+        severity="info",
+        category="env",
+        impact="Validation halted — no verdict this cycle, the previous result stands",
     )
 
 
@@ -1203,6 +1233,13 @@ class GpuUsageMessages:
     USAGE_OK = MessageTemplate(
         event="GPU usage within limits",
         reason="GPU_USAGE_OK",
+        severity="info",
+        category="runtime",
+        impact="Proceed",
+    )
+    GPU_RESET_IN_PROGRESS = MessageTemplate(
+        event="GPU usage check skipped: the renter is resetting the pod's GPUs",
+        reason="GPU_USAGE_GPU_RESET_IN_PROGRESS",
         severity="info",
         category="runtime",
         impact="Proceed",
