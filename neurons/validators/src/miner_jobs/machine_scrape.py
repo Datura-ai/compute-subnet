@@ -12,6 +12,7 @@ import threading
 import psutil
 from functools import wraps
 import hashlib
+import platform
 from base64 import b64encode
 from cryptography.fernet import Fernet
 import tempfile
@@ -2275,6 +2276,9 @@ def get_machine_specs():
         data["kernel_scrape_error"] = repr(exc)
 
     
+    # aarch64 (GB300 Grace) ships a different libnvidia-ml; the validator picks its digest list by this
+    data["data_machine_arch"] = platform.machine()
+
     data["data_network"] = {}
 
     data["data_md5_checksums"] = {
