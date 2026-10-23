@@ -100,7 +100,8 @@ _unreachable_executor_log = _UnreachableExecutorLog()
 # rental with a RENTAL_REQUEST_HOOK also includes the hook call, so only then the uploads leave it its time.
 VALIDATOR_SSH_SUBMIT_TIMEOUT_SECONDS = 30.0
 RENTAL_REQUEST_HOOK_TIMEOUT_SECONDS = 5.0
-UPLOAD_SSH_KEY_RESPONSE_MARGIN_SECONDS = 2.0
+# the validator's 30 s also covers its connect, auth and request upload before registration starts, and the reply
+UPLOAD_SSH_KEY_RESPONSE_MARGIN_SECONDS = 5.0
 UPLOAD_SSH_KEY_ATTEMPTS = 3
 UPLOAD_SSH_KEY_ATTEMPT_TIMEOUT_SECONDS = 10.0
 UPLOAD_SSH_KEY_BUDGET_SECONDS = VALIDATOR_SSH_SUBMIT_TIMEOUT_SECONDS - UPLOAD_SSH_KEY_RESPONSE_MARGIN_SECONDS

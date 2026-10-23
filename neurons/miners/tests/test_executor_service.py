@@ -187,9 +187,9 @@ async def test_send_pubkey_to_executor_retries_an_executor_that_did_not_answer(
 @pytest.mark.parametrize(
     "is_rental_request, hook, lookup_seconds, expected_left",
     [
-        (False, None, 0, 28), (False, None, 15, 13),
-        (False, "http://hook", 15, 13), (True, None, 15, 13),
-        (True, "http://hook", 0, 23), (True, "http://hook", 15, 8),
+        (False, None, 0, 25), (False, None, 15, 10),
+        (False, "http://hook", 15, 10), (True, None, 15, 10),
+        (True, "http://hook", 0, 20), (True, "http://hook", 15, 5),
     ],
 )
 @pytest.mark.asyncio
@@ -211,9 +211,10 @@ async def test_register_pubkey_reserves_the_hook_time_only_when_the_hook_runs(
 
     deadline = executor_service.send_pubkey_to_executor.call_args.kwargs["deadline"]
     assert deadline - clock[0] == expected_left
-    # uploads plus a stalled hook still end inside the validator's 30 s wait
+    # uploads plus a stalled hook still end inside the validator's 30 s wait, leaving its connect/auth and reply time
     hook_time = es.RENTAL_REQUEST_HOOK_TIMEOUT_SECONDS if is_rental_request and hook else 0
-    assert lookup_seconds + expected_left + hook_time < es.VALIDATOR_SSH_SUBMIT_TIMEOUT_SECONDS
+    overhead = es.UPLOAD_SSH_KEY_RESPONSE_MARGIN_SECONDS
+    assert lookup_seconds + expected_left + hook_time + overhead <= es.VALIDATOR_SSH_SUBMIT_TIMEOUT_SECONDS
 
 
 # ---------------------------------------------------------------------------
