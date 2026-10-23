@@ -6,6 +6,7 @@ import ipaddress
 import json
 import logging
 import math
+import posixpath
 import random
 import re
 import secrets
@@ -2831,10 +2832,17 @@ class DockerService:
                     DriverVolumeMount(
                         target=_DEFAULT_DOCKER_ROOT_DIR,
                         driver=_LOOPBACK_PLUGIN_ALIAS,
-                        driver_opts={"size": f"{docker_data_volume_gb}g", "sparse": "true"},
+                        # the backing sparse file is held under the ext4 16 TiB file limit
+                        driver_opts={
+                            "size": f"{min(docker_data_volume_gb, _FRESH_SIZING_MAX_VOLUME_GB)}g",
+                            "sparse": "true",
+                        },
                     ),
                 )
+                # a template whose workspace is /var/lib/docker already caps inner Docker; a second
+                # mount there is a duplicate mount point Docker refuses at create
                 if docker_data_volume_gb
+                and posixpath.normpath(local_volume_path) != _DEFAULT_DOCKER_ROOT_DIR
                 else ()
             ),
             restart_policy="unless-stopped",
@@ -10182,15 +10190,18 @@ class DockerService:
         if getattr(inspect_result, "exit_status", 0) != 0:
             return None
 
-        for candidate_volume in (inspect_result.stdout or "").split():
-            repaired = await self.repair_stale_vloopback_mountpoint(
+        # every candidate is visited: a sysbox pod has two vloopback volumes (workspace and DinD
+        # /var/lib/docker) and a reboot can leave both stale; an absent dir also counts as repaired
+        repaired = [
+            candidate_volume
+            for candidate_volume in (inspect_result.stdout or "").split()
+            if await self.repair_stale_vloopback_mountpoint(
                 ssh_client,
                 candidate_volume,
                 {**log_extra, "local_volume": candidate_volume},
             )
-            if repaired:
-                return candidate_volume
-        return None
+        ]
+        return repaired[0] if repaired else None
 
     async def _stop_half_recovered_container(
         self,
