@@ -134,7 +134,7 @@ def _no_change(host: FakeHost, start) -> None:
 async def test_resets_the_pods_gpus_and_starts_the_container_again():
     host = FakeHost(apps=[(4242, U[1])])
     report, start = await _reset(host)
-    assert report.ok and report.container_restarted and report.error_code is None
+    assert report.ok and report.container_restarted and report.error_code is None and report.pod_stopped
     # pod index by host bus id: U[1] (0A) is pod GPU 0, U[0] (1B) pod GPU 1
     assert [(g.index, g.uuid, g.result) for g in report.gpus] == [(0, U[1], "reset"), (1, U[0], "reset")]
     assert f"nvidia-smi -r -i {U[1]},{U[0]}" in host.commands
@@ -182,7 +182,7 @@ async def test_a_whole_host_rental_resolves_gpus_all_on_the_host():
 @pytest.mark.asyncio
 async def test_every_precheck_refusal_changes_nothing(host, kwargs, code):
     report, start = await _reset(host, **kwargs)
-    assert not report.ok and report.error_code == code and report.gpus == []
+    assert not report.ok and report.error_code == code and report.gpus == [] and not report.pod_stopped
     _no_change(host, start)
 
 
@@ -309,15 +309,14 @@ async def test_the_rented_gpu_checks_skip_a_node_whose_renter_is_resetting(conte
     from services.task.checks.rented_gpu_drop import RentedGpuDropCheck
     from services.task.messages import GpuUsageMessages, RentedGpuDropMessages
 
-    from tests.test_rented_gpu_drop_check import _ctx, rented_gpu_drop
+    from tests.test_rented_gpu_drop_check import _ctx
 
     redis = PendingRedis()
     services = build_services(redis=redis)
     ctx = _ctx(context_factory, services, listed=[], count=0, scrape_error="NVMLError(999)")
     await redis.add_pending_pod(ctx.miner_hotkey, ctx.executor.uuid, "pod1", kind="gpu_reset")
 
-    with patch.object(rented_gpu_drop.settings, "RENTED_GPU_DROP_CHECK_ENABLED", True):
-        drop = await RentedGpuDropCheck().run(ctx)
+    drop = await RentedGpuDropCheck().run(ctx)
     usage = await GpuUsageCheck().run(ctx)
 
     assert drop.passed and drop.event.reason_code == RentedGpuDropMessages.GPU_RESET_IN_PROGRESS.reason
@@ -330,15 +329,14 @@ async def test_the_drop_check_skips_only_when_every_missing_gpu_is_under_reset(c
     from services.task.checks.rented_gpu_drop import RentedGpuDropCheck
     from services.task.messages import RentedGpuDropMessages
 
-    from tests.test_rented_gpu_drop_check import UUIDS, _ctx, rented_gpu_drop
+    from tests.test_rented_gpu_drop_check import UUIDS, _ctx
 
     redis = PendingRedis()
     ctx = _ctx(context_factory, build_services(redis=redis), listed=UUIDS[1:], count=7)
     await redis.add_pending_pod(ctx.miner_hotkey, ctx.executor.uuid, "pod1", kind="gpu_reset", gpu_uuids=UUIDS[1:2])
-    with patch.object(rented_gpu_drop.settings, "RENTED_GPU_DROP_CHECK_ENABLED", True):
-        other_tenant = await RentedGpuDropCheck().run(ctx)  # UUIDS[0] is missing and not under reset
-        await redis.add_pending_pod(ctx.miner_hotkey, ctx.executor.uuid, "pod2", kind="gpu_reset", gpu_uuids=UUIDS[:1])
-        skipped = await RentedGpuDropCheck().run(ctx)
+    other_tenant = await RentedGpuDropCheck().run(ctx)  # UUIDS[0] is missing and not under reset
+    await redis.add_pending_pod(ctx.miner_hotkey, ctx.executor.uuid, "pod2", kind="gpu_reset", gpu_uuids=UUIDS[:1])
+    skipped = await RentedGpuDropCheck().run(ctx)
 
     assert other_tenant.event.reason_code != RentedGpuDropMessages.GPU_RESET_IN_PROGRESS.reason
     assert skipped.passed and skipped.event.reason_code == RentedGpuDropMessages.GPU_RESET_IN_PROGRESS.reason

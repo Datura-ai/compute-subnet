@@ -473,8 +473,8 @@ def _parse_gpu_memory_used_mb(gpu_query_csv: str) -> dict[str, float]:
 
 
 async def _fillers_off_their_image(ctx: Context, names: set[str]) -> list[str]:
-    """The fillers running another image than the one the validator started them from; empty
-    while enforcement is off. A filler with no readable record or missing from the scrape is not
+    """The fillers running another image than the one the validator started them from (judged as
+    foreign GPU work). A filler with no readable record or missing from the scrape is not
     judged; a scraped empty digest (a locally built image has no RepoDigests) is a mismatch."""
     scraped = {
         str(entry.get("name") or ""): str(entry.get("digest") or "")
@@ -499,13 +499,12 @@ async def _fillers_off_their_image(ctx: Context, names: set[str]) -> list[str]:
             off_image.append(name)
     if off_image:
         logger.warning(
-            "FILLER_IMAGE_MISMATCH executor=%s miner=%s containers=%s enforced=%s",
+            "FILLER_IMAGE_MISMATCH executor=%s miner=%s containers=%s enforced=True",
             ctx.executor.uuid,
             ctx.miner_hotkey,
             off_image,
-            settings.FILLER_IMAGE_IDENTITY_ENFORCEMENT_ENABLED,
         )
-    return off_image if settings.FILLER_IMAGE_IDENTITY_ENFORCEMENT_ENABLED else []
+    return off_image
 
 
 def carries_a_rental_prefix(container_name: str) -> bool:

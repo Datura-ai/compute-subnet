@@ -217,6 +217,7 @@ class WorkloadKind(enum.Enum):
 
 
 class BaseServerRequest(BaseRequest):
+    command_id: str = ""
     message_type: ContainerRequestType
     miner_hotkey: str
     miner_address: str | None = None
@@ -426,7 +427,7 @@ class InstallJupyterServerRequest(ContainerBaseRequest):
 
 
 class ResetPodGpuRequest(ContainerBaseRequest):
-    """DAH-4658: reset the GPUs of a running pod; answered by PodGpuResetResult (lium_protocol 1.13.0)."""
+    """DAH-4658: reset the GPUs of a running pod; answered by PodGpuResetResult (lium_protocol 1.16.0)."""
 
     message_type: ContainerRequestType = ContainerRequestType.ResetPodGpuRequest
     container_name: str
@@ -440,7 +441,7 @@ class ResetPodGpuRequest(ContainerBaseRequest):
 
 class LockPodGpuClocksRequest(ContainerBaseRequest):
     """DAH-4663: lock (or with reset, release) a running pod's GPU clocks; answered by PodGpuClocksResult
-    (lium_protocol 1.14.0)."""
+    (lium_protocol 1.17.0)."""
 
     message_type: ContainerRequestType = ContainerRequestType.LockPodGpuClocksRequest
     container_name: str
@@ -504,6 +505,7 @@ class RestoreContainerRequest(ContainerBaseRequest):
     snapshot_id: str | None = None
     legacy_object_size_bytes: int | None = None
     failure_timeout_seconds: int = Field(default=600, gt=0)
+    recovery: bool = False  # reconnect re-dispatch: the restore may already be running, so never report it failed
 
 
 class CancelStorageOperationRequest(ContainerBaseRequest):
@@ -724,6 +726,7 @@ class ContainerDeleted(ContainerBaseResponse):
 class SshPubKeyAdded(ContainerBaseResponse):
     message_type: ContainerResponseType = ContainerResponseType.SshPubKeyAdded
     user_public_keys: list[str] = []
+    command_id: str = ""
 
 
 class SshPubKeyRemoved(ContainerBaseResponse):
@@ -770,6 +773,7 @@ class FailedContainerErrorTypes(enum.Enum):
 
 class FailedContainerRequest(ContainerBaseResponse):
     message_type: ContainerResponseType = ContainerResponseType.FailedRequest
+    command_id: str = ""
     error_type: FailedContainerErrorTypes = FailedContainerErrorTypes.ContainerCreationFailed
     # Renter-safe HEADLINE only. The backend surfaces this in customer-facing events, so it must never
     # carry executor host details (IP, SSH port/username, hotkey) — those go in `detail`.

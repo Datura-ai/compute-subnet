@@ -40,7 +40,7 @@ never answered posts `state=recovered` and deletes the mark once the backend ans
 that needs no retry; a fault after a posted recovery starts a new incident that still owes the recovery
 the backend did not acknowledge. A mark nothing was posted
 for is deleted without a post. A backend that is down or older (404) is no answer: the next cycle asks
-again. A dry run, or a run with RENTED_GPU_DROP_CHECK_ENABLED off (log mode), judges and logs only: it
+again. A dry run judges and logs only: it
 posts nothing and reads and writes no mark. Every mark is also kept in this process and preferred to
 the Redis copy (a failed write or delete leaves Redis behind), so an
 incident that spans a Redis outage is still posted once and recovered; the check's verdict never depends
@@ -388,10 +388,9 @@ class RentedGpuDropCheck:
         )
 
         now_iso = datetime.now(UTC).isoformat()
-        # A dry run shares Redis with the live validator, so it leaves the live incidents alone; with the
-        # check off the drop is only logged (log mode), so prod logs show what it would report.
+        # A dry run shares Redis with the live validator, so it leaves the live incidents alone.
         outcomes: list[dict[str, Any]] = []
-        if not settings.DRY_RUN and settings.RENTED_GPU_DROP_CHECK_ENABLED:
+        if not settings.DRY_RUN:
             for pod in pods:
                 outcome = await self._track_pod(
                     ctx, pod, drop, rented_total, nvml_count, now_iso, broken_uuids is None
