@@ -542,6 +542,59 @@ async def test_an_existing_engy_cache_is_mounted_without_charging_for_it_again(d
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("free_gb", "granted"), [(5000, False), (5300, True)])
+async def test_an_engy_checkpoint_is_cached_only_when_it_is_at_most_30pct_of_free_disk(
+    docker_service, free_gb, granted
+):
+    # DAH-5014: the size comes from the name, not DPHN's 40 GB. 1561 GB is 31% of 5000 GB, 29% of 5300 GB.
+    ssh_client = HostSshClient(["volume_pod"], free_gb=free_gb)
+    payload = _make_payload(
+        workload_kind=WorkloadKind.FILLER,
+        cache_volumes=[
+            CacheVolume(name="engy_cache_hf_1561gb_kimi-k3-1a2b3c4d", target="/root/.cache/huggingface")
+        ],
+    )
+
+    affordable = await docker_service.select_affordable_cache_volumes(ssh_client, payload, {})
+
+    assert bool(affordable) is granted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("free_gb", "granted"), [(220, False), (230, True)])
+async def test_an_engy_checkpoint_and_the_pod_volume_must_leave_the_listing_floor_and_margin(
+    docker_service, free_gb, granted
+):
+    # DAH-5014: real free disk minus the 31 GB checkpoint and the 40 GB pod volume created after this
+    # check must stay over the 100 GB floor + 50 GB margin: 220 leaves 149, 230 leaves 159.
+    ssh_client = HostSshClient(["volume_pod"], free_gb=free_gb)
+    payload = _make_payload(
+        workload_kind=WorkloadKind.FILLER,
+        cache_volumes=[
+            CacheVolume(name="engy_cache_hf_31gb_qwen3-8-27b-1a2b3c4d", target="/root/.cache/huggingface")
+        ],
+    )
+    payload.volume_limit_gb = 40
+
+    affordable = await docker_service.select_affordable_cache_volumes(ssh_client, payload, {})
+
+    assert bool(affordable) is granted
+
+
+@pytest.mark.asyncio
+async def test_an_engy_checkpoint_of_unknown_size_is_never_downloaded_into_a_cache(docker_service):
+    ssh_client = HostSshClient(["volume_pod"], free_gb=100_000)
+    payload = _make_payload(
+        workload_kind=WorkloadKind.FILLER,
+        cache_volumes=[
+            CacheVolume(name="engy_cache_hf_kimi-k3-1a2b3c4d", target="/root/.cache/huggingface")
+        ],
+    )
+
+    assert await docker_service.select_affordable_cache_volumes(ssh_client, payload, {}) == []
+
+
+@pytest.mark.asyncio
 async def test_rental_evicts_the_oldest_cache_first_and_keeps_the_rest_once_it_fits(docker_service, monkeypatch):
     # DAH-5014: the Engy checkpoint (~1.5 TB) gives way to a renter too, but only as far as the rental
     # needs: the older cache goes first and the free-disk re-check stops the eviction there.
