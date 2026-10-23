@@ -993,3 +993,151 @@ async def test_failed_late_filler_power_restore_fails_and_cleans_customer(svc, m
     assert result.failure_step == ("gpu_power_restore_state" if platform_state_failure else "container_cleanup")
     assert restore.await_args.kwargs["require_complete"] is True
     assert f"/usr/bin/docker rm -fv {_CUSTOMER_CONTAINER_ID} 2>/dev/null || true" in _commands(ssh_client)
+
+
+# DAH-5012: a customer create's rm of our filler times out (ENGY_TEE fillers on 8x B300, 22 Oct: dockerd
+# finished one removal 62 s after the rm, the other was still "in progress" at 66 s). The filler processes
+# are killed directly and read; exiting ones no longer fail the create, a live one fails it at its own step.
+_STUCK_ID = "a" * 64
+
+
+def _stuck_filler_host(probe_stdout: str, *, listing_after: str = f"filler_stuck {_STUCK_ID}\n"):
+    async def run(cmd, *args, timeout=None, **kwargs):
+        if cmd.startswith("pgrep -x dockerd"):
+            return _listing(probe_stdout)
+        if cmd == ds_module.DOCKER_PS_ALL_NAMES_IDS_CMD:
+            return _listing(listing_after)
+        if "docker rm -fv" in cmd:
+            await asyncio.Event().wait()  # the killed filler never exits within the bound
+        raise AssertionError(cmd)
+
+    ssh_client = AsyncMock()
+    ssh_client.run = AsyncMock(side_effect=run)
+    return ssh_client
+
+
+@pytest.fixture
+def _short_removal_bound(monkeypatch):
+    monkeypatch.setattr(ds_module, "_CUSTOMER_CONTAINER_REMOVAL_TIMEOUT_SECONDS", 0.1)
+    ds_module.fillers_exiting_after_kill.clear()
+    yield
+    ds_module.fillers_exiting_after_kill.clear()
+
+
+def test_a_process_is_exiting_once_killed_or_a_zombie():
+    host_pid_view, processes = ds_module._parse_stuck_filler_processes(
+        "HOSTPID\nPROC\tid\t10\tD\t4194564\tuvm_va_space_destroy\nPROC\tid\t11\tZ\t0\t0\n"
+        "PROC\tid\t12\tS\t4194304\tep_poll\ngarbage\n"
+    )
+    assert host_pid_view
+    assert [process.exiting for process in processes] == [True, True, False]
+    assert processes[0].wchan == "uvm_va_space_destroy"
+
+
+@pytest.mark.asyncio
+async def test_a_killed_filler_still_exiting_does_not_fail_the_customer_create(
+    docker_service, retry_ssh_mock, _short_removal_bound, caplog
+):
+    ssh_client = _stuck_filler_host(
+        f"HOSTPID\nPROC\t{_STUCK_ID}\t4242\tD\t4194564\tnv_teardown\n"
+        "STACK\t4242\t[<0>] wb_wait_for_completion|[<0>] sync_filesystem|\n"
+        "Dirty:          812345678 kB\nWriteback:          1024 kB\n"
+    )
+
+    with caplog.at_level(logging.INFO):
+        removed = await docker_service.remove_fillers_at_ssh_connect(
+            ssh_client, {"executor_uuid": "exec-1"}, "pod_target", []
+        )
+
+    assert removed.listed_id_by_filler_name == {"filler_stuck": _STUCK_ID}
+    assert _STUCK_ID in ds_module.fillers_exiting_after_kill
+    probe = [cmd for cmd in _commands(ssh_client) if cmd.startswith("pgrep -x dockerd")]
+    assert len(probe) == 1 and shlex.quote(_STUCK_ID) in probe[0] and "kill -KILL" in probe[0]
+    [stuck_log] = [
+        record.msg for record in _events(caplog) if record.msg.extra.get("reason") == "rm_timed_out"
+    ]
+    assert stuck_log.extra["exiting"] is True
+    assert stuck_log.extra["processes"][0]["wchan"] == "nv_teardown"
+    assert stuck_log.extra["stacks"] == [["4242", "[<0>] wb_wait_for_completion|[<0>] sync_filesystem|"]]
+    assert stuck_log.extra["dirty_writeback"] == ["Dirty:          812345678 kB", "Writeback:          1024 kB"]
+
+
+@pytest.mark.parametrize("exiting", [True, False])
+@pytest.mark.asyncio
+async def test_a_filler_whose_rm_failed_and_retry_hung_is_settled_the_same_way(
+    docker_service, retry_ssh_mock, _short_removal_bound, exiting
+):
+    """DAH-5012 (22 Oct 22:32Z): the rm of our filler exited 1 after 12 s, its retry hung, and the create
+    failed at container_cleanup ("the steps after a failed docker rm -fv did not finish")."""
+    state = "D\t4194564\tnv_teardown" if exiting else "S\t4194304\tep_poll"
+    ssh_client = _stuck_filler_host(f"HOSTPID\nPROC\t{_STUCK_ID}\t4242\t{state}\n")
+    hang = ssh_client.run.side_effect
+
+    async def run(cmd, *args, **kwargs):
+        if "docker rm -fv" in cmd:
+            return _listing(f"RM\t1\nNAME\tfiller_stuck {_STUCK_ID}\nPS\t0\n")
+        return await hang(cmd, *args, **kwargs)
+
+    async def retry_hangs(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    ssh_client.run.side_effect = run
+    retry_ssh_mock.side_effect = retry_hangs
+
+    if exiting:
+        await docker_service.remove_fillers_at_ssh_connect(ssh_client, {"executor_uuid": "exec-1"}, "pod_target", [])
+        assert _STUCK_ID in ds_module.fillers_exiting_after_kill
+    else:
+        with pytest.raises(ds_module._FillerRemovalStuck, match="did not finish"):
+            await docker_service.remove_fillers_at_ssh_connect(
+                ssh_client, {"executor_uuid": "exec-1"}, "pod_target", []
+            )
+    assert retry_ssh_mock.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "probe_stdout",
+    [
+        f"HOSTPID\nPROC\t{_STUCK_ID}\t4242\tS\t4194304\tep_poll\n",  # alive after SIGKILL
+        f"PROC\t{_STUCK_ID}\t4242\tD\t4194564\tnv_teardown\n",  # dockerd not visible: proves nothing
+    ],
+    ids=["not_exiting", "no_host_pid_view"],
+)
+@pytest.mark.asyncio
+async def test_a_filler_that_is_not_exiting_fails_at_its_own_step(
+    docker_service, retry_ssh_mock, _short_removal_bound, probe_stdout
+):
+    ssh_client = _stuck_filler_host(probe_stdout)
+
+    with pytest.raises(ds_module._FillerRemovalStuck, match="did not finish"):
+        await docker_service.remove_fillers_at_ssh_connect(ssh_client, {"executor_uuid": "exec-1"}, "pod_target", [])
+    assert not ds_module.fillers_exiting_after_kill
+
+
+@pytest.mark.asyncio
+async def test_a_stuck_filler_fails_the_create_at_filler_removal_stuck_not_container_cleanup(svc, monkeypatch):
+    _customer_create_host(svc, monkeypatch, listing_at_running_check="PS\t0\n", listing_after_rm="")
+    monkeypatch.setattr(
+        svc, "clean_existing_containers", AsyncMock(side_effect=ds_module._FillerRemovalStuck("stuck"))
+    )
+
+    result = await _run(svc, _payload(workload_kind=WorkloadKind.CUSTOMER_RENTAL))
+
+    assert isinstance(result, FailedContainerRequest)
+    assert result.failure_step == ds_module.FILLER_REMOVAL_STUCK_STEP == "filler_removal_stuck"
+
+
+@pytest.mark.asyncio
+async def test_the_running_check_leaves_a_killed_exiting_filler_to_dockerd(svc, monkeypatch, _short_removal_bound):
+    ds_module.fillers_exiting_after_kill.add(_FILLER_ID)
+    ssh_client = _customer_create_host(
+        svc,
+        monkeypatch,
+        listing_at_running_check=f"NAME\tpod_x {_CUSTOMER_CONTAINER_ID}\nNAME\tfiller_exiting {_FILLER_ID}\nPS\t0\n",
+        listing_after_rm="",
+    )
+
+    result = await _run(svc, _payload(workload_kind=WorkloadKind.CUSTOMER_RENTAL))
+
+    assert isinstance(result, ContainerCreated)
+    assert not [cmd for cmd in _commands(ssh_client) if _FILLER_ID in cmd and "docker rm" in cmd]

@@ -1110,8 +1110,8 @@ async def test_create_local_volume_rejects_unsafe_volume_name_before_shell(
     assert docker_client.created_volumes == []
 
 
-def _pod_host_key_specs(docker_client):
-    return [spec for spec in docker_client.exec_specs if "pod_ssh_host_key" in spec.argv]
+def _pod_host_key_commands(ssh_client):
+    return [shlex.split(cmd) for cmd in ssh_client.commands if "pod_ssh_host_key" in cmd]
 
 
 @pytest.mark.asyncio
@@ -1122,6 +1122,7 @@ async def test_create_container_installs_the_same_ssh_host_key_each_time_a_pod_i
     monkeypatch,
 ):
     ssh_client = RecordingSSHClient()
+    ssh_client.run = AsyncMock(wraps=ssh_client.run)
     _patch_create_harness(monkeypatch, docker_service, ssh_client)
 
     for _ in range(2):
@@ -1132,13 +1133,14 @@ async def test_create_container_installs_the_same_ssh_host_key_each_time_a_pod_i
             private_key="encrypted-private-key",
         )
 
-    specs = _pod_host_key_specs(docker_service.rental_docker_client_factory.client)
+    specs = _pod_host_key_commands(ssh_client)
     assert len(specs) == 2
-    public_keys = {spec.argv[-1] for spec in specs}
+    public_keys = {spec[-1] for spec in specs}
     assert len(public_keys) == 1
     assert next(iter(public_keys)).startswith("ssh-ed25519 ")
-    assert all("OPENSSH PRIVATE KEY" in spec.stdin for spec in specs)
-    assert all("OPENSSH PRIVATE KEY" not in " ".join(spec.argv) for spec in specs)
+    calls = [c for c in ssh_client.run.call_args_list if "pod_ssh_host_key" in c.args[0]]
+    assert all("OPENSSH PRIVATE KEY" in c.kwargs["input"] for c in calls)
+    assert all("OPENSSH PRIVATE KEY" not in " ".join(spec) for spec in specs)
 
 
 @pytest.mark.asyncio
@@ -1159,7 +1161,7 @@ async def test_create_container_skips_the_pod_ssh_host_key_without_a_master_secr
         private_key="encrypted-private-key",
     )
 
-    assert _pod_host_key_specs(docker_service.rental_docker_client_factory.client) == []
+    assert _pod_host_key_commands(ssh_client) == []
 
 
 @pytest.mark.asyncio
