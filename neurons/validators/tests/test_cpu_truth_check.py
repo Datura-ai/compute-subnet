@@ -122,8 +122,7 @@ async def test_mismatch_zeroes_the_final_score(context_factory):
         services=build_services(score_calculator=calculate_scores),
         executor=default_executor().model_copy(update={"price_per_gpu": None}),
     )
-    with patch("neurons.validators.src.services.task.score_calculator.settings") as score_s:
-        score_s.ENABLE_TCB_ENFORCEMENT = False
+    with patch("neurons.validators.src.services.task.score_calculator.settings"):
         pipeline = Pipeline([CpuTruthCheck(), ScoreCheck()], _NullSink())
         _, _, final_ctx = await pipeline.run(ctx)
 
