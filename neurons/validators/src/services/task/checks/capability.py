@@ -4,6 +4,7 @@ import logging
 import time
 import zlib
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import TYPE_CHECKING, Literal
 
 from core.config import settings
@@ -46,7 +47,7 @@ class CapabilityCheck:
         filler_container = get_filler_only_container(ctx)
         if filler_container:
             what_filler: dict = {"filler_container": filler_container}
-            cycle = _filler_cycle_index()
+            cycle = _filler_cycle_index(ctx)
             if _filler_matmul_sample_due(ctx, cycle):
                 what_filler["matmul_sample"] = await _filler_matmul_sample(ctx, specs, cycle)
             event = render_message(
@@ -293,9 +294,14 @@ def _failure_template(result: ValidationResult | None) -> MessageTemplate:
     return Msg.VERIFY_FAILED
 
 
-def _filler_cycle_index() -> int:
-    """The job cycle (BLOCKS_FOR_JOB blocks) the wall clock is in."""
-    return int(time.time()) // (settings.BLOCKS_FOR_JOB * SECONDS_PER_BLOCK)
+def _filler_cycle_index(ctx: Context) -> int:
+    """The job cycle (BLOCKS_FOR_JOB blocks), from the cycle's job_batch_id (its job block time) so
+    every check of one cycle agrees; the wall clock when the id is unset or does not parse."""
+    try:
+        at = datetime.strptime(ctx.config.job_batch_id, "%Y-%m-%d %H:%M:%S").timestamp()
+    except (TypeError, ValueError):
+        at = time.time()
+    return int(at) // (settings.BLOCKS_FOR_JOB * SECONDS_PER_BLOCK)
 
 
 def _filler_sample_offset(ctx: Context) -> int:
@@ -324,10 +330,9 @@ async def _filler_matmul_sample(ctx: Context, specs: dict, cycle: int) -> dict:
     details = (specs.get("gpu") or {}).get("details") or []
     gpu_uuid = None
     if details:
-        # samples of this node so far, from the clock too
         every = max(settings.FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES, 1)
-        taken = (cycle + _filler_sample_offset(ctx)) // every
-        card_index = taken % len(details)
+        sample_index = (cycle + _filler_sample_offset(ctx)) // every
+        card_index = sample_index % len(details)
         gpu_uuid = details[card_index].get("uuid") or ""
         sample.update(card_index=card_index, card_count=len(details), gpu_uuid=gpu_uuid)
     try:

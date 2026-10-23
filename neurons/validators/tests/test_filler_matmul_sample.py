@@ -1,5 +1,6 @@
 import json
 import zlib
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -44,7 +45,7 @@ _real_cycle_index = capability._filler_cycle_index
 def clock_cycle(monkeypatch):
     """The wall-clock cycle, starting where this node's offset makes cycle+offset == 0."""
     cycle = {"now": 0}
-    monkeypatch.setattr(capability, "_filler_cycle_index", lambda: cycle["now"])
+    monkeypatch.setattr(capability, "_filler_cycle_index", lambda ctx: cycle["now"])
     return cycle
 
 
@@ -128,11 +129,14 @@ def test_each_node_is_sampled_once_every_n_cycles_from_the_clock(monkeypatch):
     assert len({next(c for c in range(96) if _due(u, start + c)) for u in uuids}) > 10
 
 
-def test_the_cycle_comes_from_the_wall_clock(monkeypatch):
+def test_the_cycle_comes_from_the_job_batch_id_then_the_wall_clock(monkeypatch):
     cycle_s = capability.settings.BLOCKS_FOR_JOB * capability.SECONDS_PER_BLOCK
     monkeypatch.setattr(capability.time, "time", lambda: 10 * cycle_s + 1)
+    batch = datetime.fromtimestamp(7 * cycle_s + 5).strftime("%Y-%m-%d %H:%M:%S")
 
-    assert _real_cycle_index() == 10
+    assert _real_cycle_index(SimpleNamespace(config=SimpleNamespace(job_batch_id=batch))) == 7
+    for unset in (None, "Unknown"):
+        assert _real_cycle_index(SimpleNamespace(config=SimpleNamespace(job_batch_id=unset))) == 10
 
 
 @pytest.mark.asyncio
