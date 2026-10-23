@@ -55,6 +55,7 @@ from .checks import (
     InspectorRentedCheck,
     LocalVerifyCheck,
     MachineSpecScrapeCheck,
+    NvlinkFaultCheck,
     NvmlDigestCheck,
     PinnedMemoryProbeCheck,
     PortConnectivityCheck,
@@ -265,7 +266,6 @@ class PipelineFactory:
                 port_public_key=public_key,
                 job_batch_id=miner_info.job_batch_id,
                 first_pass=first_pass,
-                express_first_pass=first_pass,
             ),
             state=ContextState(
                 upload_local_dir=encrypted_files.tmp_directory,
@@ -330,10 +330,10 @@ class PipelineFactory:
                 # the node like a GPU ban (not fatal under a live pod), so it sits before the rented
                 # short-circuit
                 GpuMemoryHealthCheck(),
-                # DAH-2671 item 2a: non-fatal, observe-only CPU-count corroboration. Placed right
+                # DAH-2671 item 2a: non-fatal CPU-count corroboration. Placed right
                 # after the GPU spec-check group (and before the rented short-circuit) so it reads
                 # advertised specs already populated by the scrape; it only reads over SSH, mutates
-                # no executor state, and never zeroes score outside CPU_TRUTH_ENFORCEMENT_ENABLED.
+                # no executor state; a mismatch zeroes the score via cpu_truth_passed.
                 CpuTruthCheck(),
                 GpuPowerLimitCheck(),
                 NvmlDigestCheck(),
@@ -410,6 +410,8 @@ class PipelineFactory:
                 # DAH-4482: a node the rented health read flagged proves every card before it re-lists.
                 # Rented nodes halted above, so this only runs unrented. Off by default: logs only.
                 PostRentalGpuRecheckCheck(),
+                # a sticky NVLink fault leaves every single-GPU check passing; NVLS cannot bind (23 Oct)
+                NvlinkFaultCheck(),
                 # DAH-2265 Plan 2: advisory, non-fatal — observes whether the executor has
                 # the recommended default image pre-pulled (DOCKER_PULL no-op). Runs here,
                 # after specs/gpu_model/driver are populated and the GPU is validated, on the
@@ -528,6 +530,7 @@ class PipelineFactory:
                             GpuFaultProbeCheck(),
                             PinnedMemoryProbeCheck(),
                             PostRentalGpuRecheckCheck(),
+                            NvlinkFaultCheck(),
                             CachedTemplateVerificationCheck(),
                         ],
                     ]
@@ -619,6 +622,7 @@ class PipelineFactory:
                 GpuFaultProbeCheck(),
                 PinnedMemoryProbeCheck(),
                 PostRentalGpuRecheckCheck(),
+                NvlinkFaultCheck(),
                 RentalVerificationCheck(),
                 # RentalProbeCheck(),  # SKIP: creates and removes a container on the executor
                 ScoreCheck(),
