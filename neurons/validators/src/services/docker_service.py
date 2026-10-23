@@ -441,6 +441,10 @@ def _cache_download_gb(volume_name: str) -> float:
     return int(match.group(1)) if match else math.inf
 
 
+# An existing Engy cache this full counts as complete; the name's GB and the du GiB differ by ~7%.
+ENGY_CACHE_COMPLETE_SHARE = 0.9
+
+
 _VLOOPBACK_MOUNT_ERROR_PHRASES = (
     "VolumeDriver.Mount",
     "cannot create mount point dir",
@@ -4691,7 +4695,22 @@ class DockerService:
                 host_probe=host_probe,
             )
         )
-        present: list[CacheVolume] = [volume for volume in payload.cache_volumes if volume.name in existing]
+        # A volume that exists but is far from its sized download (e.g. mounted at the wrong target) still
+        # costs the rest of that download, so only its remaining bytes skip the check.
+        used_gb: dict[str, float] = await self._cache_volume_used_gb(
+            ssh_client,
+            [name for name in existing if _ENGY_CACHE_SIZE_IN_NAME.match(name) and name in requested_names],
+        )
+        missing_gb: dict[str, float] = {}
+        for volume in payload.cache_volumes:
+            expected_gb: float = _cache_download_gb(volume.name)
+            if volume.name not in existing:
+                missing_gb[volume.name] = expected_gb
+            elif _ENGY_CACHE_SIZE_IN_NAME.match(volume.name):
+                held_gb: float = used_gb.get(volume.name, 0.0)
+                if held_gb < expected_gb * ENGY_CACHE_COMPLETE_SHARE:
+                    missing_gb[volume.name] = expected_gb - held_gb
+        present: list[CacheVolume] = [volume for volume in payload.cache_volumes if volume.name not in missing_gb]
         if len(present) == len(payload.cache_volumes):
             return list(payload.cache_volumes)
 
@@ -4713,9 +4732,7 @@ class DockerService:
 
         floor_gb: int = DPHN_CACHE_LISTING_FLOOR_GB + DPHN_CACHE_FREE_MARGIN_GB
         # One family per launch: DPHN's whole set is DPHN_CACHE_SIZE_GB, an Engy launch asks for one volume.
-        download_gb: float = max(
-            _cache_download_gb(volume.name) for volume in payload.cache_volumes if volume.name not in existing
-        )
+        download_gb: float = max(missing_gb.values())
         # DAH-5014: free_gb is real disk, every cache on it counted as used. The pod's own volume is
         # created (preallocated) after this check, so the floor must hold with both on disk.
         free_after_gb: float = free_gb - download_gb - (payload.volume_limit_gb or 0)
@@ -4733,6 +4750,30 @@ class DockerService:
             )
             return present
         return list(payload.cache_volumes)
+
+    async def _cache_volume_used_gb(
+        self, ssh_client: asyncssh.SSHClientConnection, volume_names: list[str]
+    ) -> dict[str, float]:
+        # GiB each volume holds, measured by mounting it by name in the helper (the SSH session is inside
+        # the executor container). A volume missing from the result counts as empty: charge the full download.
+        if not volume_names:
+            return {}
+        roots: dict[str, str] = {f"/cache{index}": name for index, name in enumerate(volume_names)}
+        mounts: str = " ".join(f"-v {shlex.quote(name)}:{root}:ro" for root, name in roots.items())
+        try:
+            result = await ssh_client.run(
+                f"timeout 60 /usr/bin/docker run --rm {mounts} {ALPINE_HELPER_IMAGE} du -sk {' '.join(roots)}"
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return {}
+        used_gb: dict[str, float] = {}
+        for line in (result.stdout or "").splitlines():
+            size_kb, _, root = line.strip().partition("\t")
+            if size_kb.isdigit() and root in roots:
+                used_gb[roots[root]] = int(size_kb) / (1024**2)
+        return used_gb
 
     @staticmethod
     def _cache_volume_families(volume_names: list[str]) -> tuple[str, ...]:
