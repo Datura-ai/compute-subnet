@@ -618,6 +618,14 @@ class Settings(BaseSettings):
     # and the per-executor job-result dump after scoring; asyncssh and sqlalchemy keep their own levels.
     LOG_LEVEL: str = Field(env="LOG_LEVEL", default="INFO", description="Root log level (DEBUG, INFO, WARNING, ...)")
 
+    # support:node-1690fde2 — True: a power cap this validator recorded for a GPU uuid counts as ours
+    # under any executor id (a box re-registered while our filler ran keeps our cap under its new id).
+    # Off by default: the uuid comes from the miner's machine, so a miner could replay a capped GPU's
+    # uuid on another node to dodge the power-limit penalty. Turning it on is the penalty owners' call.
+    ENABLE_POWER_CAP_RESCUE_ACROSS_EXECUTOR_IDS: bool = Field(
+        env="ENABLE_POWER_CAP_RESCUE_ACROSS_EXECUTOR_IDS", default=False
+    )
+
     # DAH-3698 — True withholds the unrented incentive from a split remainder below the
     # marketplace port floor (the rented GPUs keep earning); False only logs it (shadow mode).
     ENABLE_UNRENTED_PORT_FLOOR_FOR_SPLIT_REMAINDER: bool = Field(
