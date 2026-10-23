@@ -534,9 +534,8 @@ def _filler_context(
     return make_context(services=services, state=state, ssh=ssh_client)
 
 
-async def _run_filler_check(ctx: Context, *, check_enabled: bool = True, enforcement: bool = False) -> CheckResult:
+async def _run_filler_check(ctx: Context, *, enforcement: bool = False) -> CheckResult:
     with patch("neurons.validators.src.services.task.checks.rental_verification.settings") as mock_settings:
-        mock_settings.FILLER_LIVENESS_CHECK_ENABLED = check_enabled
         mock_settings.FILLER_LIVENESS_ENFORCEMENT_ENABLED = enforcement
         return await RentalVerificationCheck().run(ctx)
 
@@ -550,24 +549,6 @@ def _killed_filler_backend() -> DummyBackendClient:
             started_at=datetime.utcnow() - timedelta(minutes=30),
         ),
     )
-
-
-@pytest.mark.parametrize("enforcement", [False, True])
-@pytest.mark.asyncio
-async def test_rental_verification_filler_liveness_disabled_keeps_legacy_skip(enforcement: bool):
-    """CHECK_ENABLED is the master kill switch: off means no probe, even with enforcement on."""
-    backend_client = DummyBackendClient(
-        response=ExecutorHealthCheckResponse(success=True, error=None, details={})
-    )
-    ssh_client = FillerSSHClient(running=False)
-    ctx = _filler_context(backend_client=backend_client, ssh_client=ssh_client)
-
-    result = await _run_filler_check(ctx, check_enabled=False, enforcement=enforcement)
-
-    assert result.passed is True
-    assert result.event.reason_code == Msg.SKIPPED.reason
-    assert ssh_client.commands == []
-    assert backend_client.filler_run_active_calls == []
 
 
 @pytest.mark.asyncio
@@ -1172,25 +1153,6 @@ async def test_rental_verification_filler_create_kill_enforcement_fails():
     assert result.event.what_we_saw["enforced"] is True
     # The node is never contacted for a health check once the streak decides the verdict.
     assert backend_client.called_with is None
-
-
-@pytest.mark.asyncio
-async def test_rental_verification_filler_create_kill_ignored_when_check_disabled():
-    """CHECK_ENABLED off is the master kill switch here too: normal verification runs."""
-    backend_client = DummyBackendClient(
-        response=ExecutorHealthCheckResponse(success=True, error=None, details={})
-    )
-    ctx = _filler_context(
-        backend_client=backend_client,
-        ssh_client=FillerSSHClient(),
-        running_fillers=False,
-        create_killed=True,
-    )
-
-    result = await _run_filler_check(ctx, check_enabled=False, enforcement=True)
-
-    assert result.passed is True
-    assert result.event.reason_code == Msg.VERIFIED.reason
 
 
 @pytest.mark.asyncio

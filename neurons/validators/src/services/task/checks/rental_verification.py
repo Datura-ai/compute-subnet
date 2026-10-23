@@ -130,7 +130,7 @@ class RentalVerificationCheck:
         create_killed: bool = bool(
             rented_data and ctx.executor.uuid in rented_data.filler_create_kill_executor_ids
         )
-        if create_killed and not has_customer_rental and settings.FILLER_LIVENESS_CHECK_ENABLED:
+        if create_killed and not has_customer_rental:
             if settings.FILLER_LIVENESS_ENFORCEMENT_ENABLED:
                 event = render_message(
                     Msg.FILLER_KILLED_AT_CREATE,
@@ -160,21 +160,7 @@ class RentalVerificationCheck:
             # remove Lium filler containers while the run stays RUNNING and keep earning
             # unrented incentive. Verify the container on the host, mirroring the customer-pod
             # flow in RentedMachineCheck (SSH liveness probe + live backend re-check on miss).
-            # Rollout is gated: CHECK_ENABLED is the master switch (shadow: observe and log only),
-            # ENFORCEMENT additionally withholds incentive.
-            if not settings.FILLER_LIVENESS_CHECK_ENABLED:
-                event = render_message(
-                    Msg.SKIPPED,
-                    ctx=ctx,
-                    check_id=self.check_id,
-                    what={
-                        "skipped": True,
-                        "reason": "active filler runtime",
-                        "filler_containers": filler_containers,
-                    },
-                )
-                return CheckResult(passed=True, event=event, updates={})
-
+            # Without ENFORCEMENT (shadow) the verdict is observed and logged only.
             return await self._verify_every_filler_alive(
                 ctx, filler_containers, enforce=settings.FILLER_LIVENESS_ENFORCEMENT_ENABLED
             )
