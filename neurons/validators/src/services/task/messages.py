@@ -2337,7 +2337,8 @@ class GpuAttestationIdentityMessages:
     )
     # The fallback for cards that cannot attest: the same card under a new UUID (serial or slots kept).
     SWAPPED = MessageTemplate(
-        event="GPU UUIDs were swapped: the same cards are reported under new UUIDs",
+        # Neutral on purpose: "every UUID new in the same slots" is also what replacing every card looks like.
+        event="GPU UUIDs changed: new UUIDs in the same slots, or a known card under a new UUID",
         reason="GPU_UUID_SWAPPED",
         severity="warning",
         category="policy",
