@@ -10107,6 +10107,12 @@ class DockerService:
             if isinstance(exc, asyncio.CancelledError):
                 raise
             return False
+        # a mark left by an earlier stop that did not take would later restart a pod the provider stopped
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(
+                self.redis_service.delete(f"{STOPPED_BY_RECOVERY_PREFIX}{pod_id}"),
+                timeout=_STOPPED_BY_RECOVERY_MARK_TIMEOUT_SEC,
+            )
         logger.warning(
             _m(
                 "POD_VOLUME_MOUNT_RESTORED",

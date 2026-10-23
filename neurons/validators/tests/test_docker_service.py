@@ -7,7 +7,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
-from unittest.mock import AsyncMock, Mock, MagicMock, patch
+from unittest.mock import AsyncMock, Mock, MagicMock, call, patch
 from uuid import uuid4, UUID
 
 import asyncssh
@@ -8060,6 +8060,7 @@ async def test_restore_volume_mount_of_running_container_remounts_or_stops_the_p
     stop = AsyncMock(return_value=True)
     monkeypatch.setattr(docker_service, "_stop_half_recovered_container", stop)
     docker_service.redis_service.set = AsyncMock()
+    docker_service.redis_service.delete = AsyncMock()
     restore = docker_service.restore_volume_mount_of_running_container(
         ssh_client=AsyncMock(),
         executor_info=_executor_without_host_key("executor-1"),
@@ -8078,6 +8079,10 @@ async def test_restore_volume_mount_of_running_container_remounts_or_stops_the_p
     assert stop.await_count == int(expected != "restored")
     # marked before the stop, so the next cycle starts it with its mount
     assert docker_service.redis_service.set.await_count == int(expected != "restored")
+    # remounted: a mark from an earlier stop that did not take is cleared, so it never restarts a later provider stop
+    assert docker_service.redis_service.delete.await_args_list == (
+        [call("stopped_by_recovery:pod-1")] if expected == "restored" else []
+    )
 
 
 @pytest.mark.parametrize(
