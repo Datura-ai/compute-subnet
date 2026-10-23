@@ -35,6 +35,8 @@ DISK_MARKER = "lium_disk"
 SNAP_MARKER = "lium_tp"
 _REDIS_PREFIX = "rented_throughput"
 _REDIS_TTL_SECONDS = 7 * 24 * 3600
+# executor uuid -> a reading Redis refused to record; keeps the cadence (no probe per cycle) until a save succeeds
+_UNSAVED: dict[str, _State] = {}
 
 # The executor shares the host PID namespace but not its network (bridge, `pid: host`), so the NIC counters are
 # init's (/proc/1/net/dev), read only when /proc/1 is the host's; else no rx/tx and the network side is no verdict.
@@ -50,19 +52,21 @@ _SNAPSHOT = (
     f'echo "{SNAP_MARKER}_device name=$d"; '
     '[ -e /sys/class/block/$d/partition ] && p=$(readlink -f /sys/class/block/$d) && p=${p%/*} && n="$n ${p##*/}"; '
     'n="$n $(ls /sys/class/block/$d/slaves 2>/dev/null)"; done; ds=$n; done; '
-    # a bond's or bridge's member NICs (they have a master) and VLAN sub-interfaces repeat the parent's traffic. A member
-    # is dropped only while its master is counted: an uplink in docker's or an OVS bridge is the host's traffic. Read in
-    # the host's view: this shell's own /sys/class/net is the executor container's network namespace
+    # Only physical NICs (a sysfs `device` link) are counted: disjoint, so a bond, bridge, VLAN or OVS port can neither
+    # repeat nor hide an uplink. Without a host sysfs (this shell's own is the container's), names and bond members.
+    'ph=$(for i in /proc/1/root/sys/class/net/*; do [ -e $i/device ] && [ "${i##*/}" != lo ] && '
+    'printf " %s" "${i##*/}"; done); '
     "sl=$(for i in /proc/1/root/sys/class/net/*; do [ -e $i/master ] && m=$(readlink $i/master) && "
     'printf " %s:%s" "${i##*/}" "${m##*/}"; done; '
     'for f in /proc/1/net/bonding/*; do [ -f "$f" ] && '
     'awk -v b="${f##*/}" \'/^Slave Interface:/{printf " %s:%s", $3, b}\' "$f"; done 2>/dev/null); '
     f'snap() {{ echo "{SNAP_MARKER} t=$(cut -d" " -f1 /proc/uptime) '
-    "$([ /proc/1/root/ -ef / ] || sed 's/:/ /' /proc/1/net/dev 2>/dev/null | awk -v sl=\"$sl\" "
+    '$([ /proc/1/root/ -ef / ] || sed \'s/:/ /\' /proc/1/net/dev 2>/dev/null | awk -v sl="$sl" -v ph="$ph" '
     '\'function keep(x) {return x!="lo" && x!~/[.@]/ && '
     "x!~/^(docker|veth|br-|virbr|cni|flannel|cali|tun|wg|lxc|vxlan|kube)/} "
-    'BEGIN{n=split(sl, a, " "); for (i=1; i<=n; i++) {split(a[i], p, ":"); mst[p[1]]=p[2]}} '
-    "NR>2 && keep($1) && !(($1 in mst) && keep(mst[$1])){r+=$2; t+=$10; k++} "
+    'BEGIN{n=split(sl, a, " "); for (i=1; i<=n; i++) {split(a[i], p, ":"); mst[p[1]]=p[2]}; '
+    'np=split(ph, q, " "); for (i=1; i<=np; i++) phy[q[i]]=1} '
+    "NR>2 && (np ? ($1 in phy) : keep($1) && !(($1 in mst) && keep(mst[$1]))){r+=$2; t+=$10; k++} "
     'END{if (k) printf "rx=%.0f tx=%.0f", r, t}\') '
     "io=$(awk '$3~/^(sd[a-z]+|nvme[0-9]+n[0-9]+|vd[a-z]+|xvd[a-z]+|md[0-9]+)$/{printf \"%s:%.0f,\", $3, $6+$10}' "
     '/proc/diskstats)"; }; '
@@ -220,6 +224,9 @@ class RentedThroughputCheck:
             )
             return self._skipped(ctx, "last reading unreadable in Redis")
         state = _State.from_raw(raw) if raw is not None else None
+        unsaved = _UNSAVED.get(ctx.executor.uuid)
+        if unsaved is not None and (state is None or unsaved.at > state.at):
+            state = unsaved
         now = time.time()
         if state is None:
             state = _State(at=now - phase_offset_seconds(ctx.executor.uuid))
@@ -254,7 +261,12 @@ class RentedThroughputCheck:
                 ),
             )
         )
-        await self._save(ctx, key, state)
+        if await self._save(ctx, key, state):
+            _UNSAVED.pop(ctx.executor.uuid, None)
+        else:
+            for uuid in [u for u, s in _UNSAVED.items() if s.next_due_at() <= now]:
+                del _UNSAVED[uuid]  # bounded: only nodes read within their own interval stay
+            _UNSAVED[ctx.executor.uuid] = state
         return self._verdict(ctx, state, probed=True)
 
     async def _measure_and_judge(self, ctx: Context) -> tuple[dict[str, Any], str, str]:
@@ -324,7 +336,7 @@ class RentedThroughputCheck:
             passed=True, event=render_message(template, ctx=ctx, check_id=self.check_id, what=what)
         )
 
-    async def _save(self, ctx: Context, key: str, state: _State) -> None:
+    async def _save(self, ctx: Context, key: str, state: _State) -> bool:
         payload = {
             "at": state.at,
             "failures_in_a_row": state.failures_in_a_row,
@@ -335,6 +347,7 @@ class RentedThroughputCheck:
         }
         try:
             await ctx.services.redis.set(key, json.dumps(payload), ex=_REDIS_TTL_SECONDS)
+            return True
         except Exception:
             logger.warning(
                 _m(
@@ -342,6 +355,7 @@ class RentedThroughputCheck:
                     extra=get_extra_info(ctx.default_extra),
                 )
             )
+            return False
 
     def _skipped(
         self, ctx: Context, reason: str, *, last: dict[str, Any] | None = None

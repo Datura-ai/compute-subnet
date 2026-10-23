@@ -219,44 +219,51 @@ async def test_idle_foreign_or_stopped_rentals_are_left_alone():
         assert res.passed and not runner.commands and res.event.reason_code == Msg.SKIPPED.reason
 
 
-# bond0 carries eth0+eth1's traffic and eth0.100 is a VLAN on it: only bond0 and the unrelated eth2 count, whether the
-# members are read from the host's sysfs or its bonding status. Members of a bridge the sum leaves out (docker's, OVS)
-# are the host's uplink and count.
+# bond0 carries eth0+eth1's traffic, br-ex (OVS, uplinks enslaved to ovs-system) the same, and eth0.100 is a VLAN on
+# eth0. Each case sums to eth0+eth1+eth2 = rx 1005 tx 101: a counted bond0/br-ex/VLAN or a dropped uplink shows.
+# With the host's sysfs only physical NICs (a device link) count; without it, names and the host's bonding status.
+_BOND = {"bond0": None, "br-ex": None, "eth0": "bond0", "eth1": "bond0", "eth2": ""}
+_OVS = {"ovs-system": None, "br-ex": None, "eth0": "ovs-system", "eth1": "ovs-system", "eth2": ""}
+
+
 @pytest.mark.parametrize(
-    "members, expected",
-    [
-        ("sysfs", "rx=1005 tx=101"),
-        ("bonding", "rx=1005 tx=101"),
-        ("excluded_bridge", "rx=2005 tx=201"),
-    ],
+    "sysfs, bonded",
+    [(_BOND, False), (_OVS, False), ({}, True)],
+    ids=["bond", "ovs", "no_host_sysfs"],
 )
-def test_bond_members_and_vlans_are_not_counted_twice(tmp_path, members, expected):
+def test_bond_members_and_vlans_are_not_counted_twice(tmp_path, sysfs, bonded):
     net = tmp_path / "net"
-    for name in ("bond0", "br-ex", "eth0", "eth1", "eth2"):
-        (net / name).mkdir(parents=True)
+    net.mkdir()
+    for name, master in sysfs.items():  # None: virtual; else physical, enslaved to master when set
+        (net / name).mkdir()
+        if master is not None:
+            (net / name / "device").mkdir()
+        if master:
+            (net / name / "master").symlink_to(net / master)
     bonding = tmp_path / "bonding"
     bonding.mkdir()
-    if members == "bonding":  # the host's sysfs not readable from the executor container
+    if bonded:
         (bonding / "bond0").write_text(
             "Bonding Mode: IEEE 802.3ad\nSlave Interface: eth0\nMII Status: up\nSlave Interface: eth1\n"
         )
-    else:
-        for member in ("eth0", "eth1"):
-            (net / member / "master").symlink_to(net / ("bond0" if members == "sysfs" else "br-ex"))
+    rows = [
+        ("lo", 9, 9),
+        ("bond0", 1000, 100),
+        ("br-ex", 1000, 100),
+        ("ovs-system", 0, 0),
+        ("eth0", 600, 60),
+        ("eth1", 400, 40),
+        ("eth0.100", 300, 30),
+        ("eth2", 5, 1),
+    ]
     dev = tmp_path / "dev"
     dev.write_text(
         "Inter-|   Receive\n face |bytes\n"
         + "".join(
             f"{n}: {rx} 0 0 0 0 0 0 0 {tx} 0 0 0 0 0 0 0\n"
-            for n, rx, tx in [
-                ("lo", 9, 9),
-                ("bond0", 1000, 100),
-                ("br-ex", 1000, 100),
-                ("eth0", 600, 60),
-                ("eth1", 400, 40),
-                ("eth0.100", 300, 30),
-                ("eth2", 5, 1),
-            ]
+            # no bond on the OVS host, else the old rule's bond0 would stand in for the dropped uplinks
+            for n, rx, tx in rows
+            if not (sysfs is _OVS and n == "bond0")
         )
     )
     script = (
@@ -267,4 +274,28 @@ def test_bond_members_and_vlans_are_not_counted_twice(tmp_path, members, expecte
         .replace(f"sleep {module.BUSY_WINDOW_SECONDS}; ", "")
     )
     out = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30).stdout
-    assert expected in out, out
+    assert out.count("rx=1005 tx=101") == 2, out
+
+
+# Redis reads but refuses writes: the reading taken is kept in memory, so the next cycle in the interval runs no probe
+async def test_unrecorded_reading_still_holds_the_cadence():
+    class ReadOnlyRedis(FakeRedis):
+        async def set(self, key, value, ex=None):
+            raise ConnectionError("READONLY")
+
+    redis = ReadOnlyRedis()
+    redis.store[f"rented_throughput:{EXECUTOR.uuid}"] = '{"at": 0}'
+    with flags() as clock, patch.dict(module._UNSAVED, clear=True):
+        runner = FakeRunner(GOOD, GOOD)
+        ctx = make_context(
+            state=build_state(rented_data=rented(), sysbox_runtime=True),
+            runner=runner,
+            services=build_services(redis=redis),
+        )
+        check = RentedThroughputCheck()
+        assert (await check.run(ctx)).passed and len(runner.commands) == 1
+        clock.now += 60
+        assert (await check.run(ctx)).passed and len(runner.commands) == 1
+        clock.now += 3 * 3600
+        await check.run(ctx)
+        assert len(runner.commands) == 2
