@@ -16,6 +16,7 @@ import pytest
 from payload_models.payloads import ContainerCreated, FailedContainerRequest
 from test_deploy_optimizations import _executor_info, _patch_happy, _payload, _ssh_result
 
+from core.docker_utils import DockerCommand
 from core.utils import retry_ssh_command
 from services.docker_service import EDIT_PARKED_SUFFIX, DockerService, create_steps_after_reply, inflight_creates
 from services.prerun_host_probe import prerun_host_probe_command
@@ -313,6 +314,42 @@ async def test_a_failed_stop_that_docker_kill_ends_still_parks_and_edits(svc, mo
     assert isinstance(result, ContainerCreated)
     assert _docker(ssh.commands, "kill") == [f"/usr/bin/docker kill {parked}"]
     assert _docker(ssh.commands, "rename") == [f"/usr/bin/docker rename {_pod_name(payload)} {parked}"]
+
+
+@pytest.mark.parametrize("direct_kill_stops", [True, False], ids=["direct_kill_works", "host_fault"])
+@pytest.mark.asyncio
+async def test_a_kill_without_an_exit_event_falls_back_to_killing_the_processes(svc, monkeypatch, direct_kill_stops):
+    # F-1633: `docker kill` got no exit event; kill init + shim like the delete path, else report the host's fault
+    monkeypatch.setattr("services.docker_service._PARK_KILL_SETTLE_SECONDS", 0)
+    monkeypatch.setattr("services.docker_service._PARK_KILL_WAIT_SECONDS", 1)
+    payload = _edit_payload()
+    ssh = _ssh_recording(stop_exit=1)
+    inner = ssh.run
+    killed_directly = []
+
+    async def unkillable(cmd, *args, **kwargs):
+        if cmd.startswith("/usr/bin/docker kill"):
+            ssh.commands.append(cmd)
+            return _ssh_result(exit_status=1, stderr="cannot kill container: tried to kill container, but did not receive an exit event")
+        if "{{.State.Pid}}" in cmd:
+            killed_directly.append(cmd)
+        if "docker inspect -f '{{.State.Running}}'" in cmd and killed_directly:
+            return _ssh_result(stdout="false\n" if direct_kill_stops else "true\n")
+        return await inner(cmd, *args, **kwargs)
+
+    ssh.run = unkillable
+    _patch_happy(svc, monkeypatch, ssh)
+    parked = _pod_name(payload) + EDIT_PARKED_SUFFIX
+
+    result = await _run(svc, payload)
+
+    assert killed_directly == [DockerCommand.kill_container_processes(parked)]
+    if direct_kill_stops:
+        assert isinstance(result, ContainerCreated)
+    else:
+        assert isinstance(result, FailedContainerRequest)
+        assert result.failure_step == "container_cleanup"
+        svc._run_rental_docker_create_with_port_retry.assert_not_awaited()
 
 
 @pytest.mark.asyncio
