@@ -191,6 +191,14 @@ class MachineSpecMessages:
             " reboot or reinstall the driver."
         ),
     )
+    # DAH-4658: the renter's own reset takes the cards out of NVML; the cycle withholds the verdict
+    SCRAPE_GPU_RESET_IN_PROGRESS = MessageTemplate(
+        event="Machine specs scrape found no GPU: the renter is resetting the pod's GPUs",
+        reason="SCRAPE_GPU_RESET_IN_PROGRESS",
+        severity="info",
+        category="env",
+        impact="Validation halted — no verdict this cycle, the previous result stands",
+    )
     SCRAPE_FAILED_ON_HOST = MessageTemplate(
         event="Machine specs scrape failed on the executor",
         reason="SCRAPE_FAILED_ON_HOST",

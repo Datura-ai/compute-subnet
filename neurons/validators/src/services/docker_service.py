@@ -108,7 +108,7 @@ from services.prerun_host_probe import (
     port_check_containers_command,
     prerun_host_probe_command,
 )
-from services.gpu_reset import GpuResetReport, reset_pod_gpus
+from services.gpu_reset import RECENT_RENTER_GPU_RESET_SECONDS, GpuResetReport, reset_pod_gpus
 from services.gpu_wedge import cure_wedged_gpus, query_wedged_gpu_uuids
 from services.nvidia_devices import build_gpu_docker_config_for_executor
 from services.cluster_fabric import WIREGUARD_LISTEN_PORT, cluster_pod_networking
@@ -10553,7 +10553,8 @@ class DockerService:
     ) -> PodGpuResetResult:
         """DAH-4658: a renter's reset of their pod's GPUs (services/gpu_reset.py does the work). The
         pending-pod mark (kind gpu_reset) is held throughout, so the rented GPU checks skip the node
-        and no verified-job reset is sent for it: a renter's reset is never a provider fault."""
+        and no verified-job reset is sent for it: a renter's reset is never a provider fault. A short
+        recent-reset mark then covers the scrape that ends just after it."""
         default_extra = {
             "miner_hotkey": payload.miner_hotkey,
             "executor_uuid": payload.executor_id,
@@ -10631,6 +10632,15 @@ class DockerService:
             logger.error(_m("Reset pod GPUs failed", extra=get_extra_info({**default_extra, "error": str(exc)})), exc_info=True)
             report = GpuResetReport(ok=False, error_code=GpuResetErrorCode.ExecutorUnreachable, detail=str(exc))
         finally:
+            # a scrape that ends just after the reset can still miss cards: keep a short mark past the pending one
+            try:
+                await self.redis_service.mark_gpu_reset_recent(
+                    payload.miner_hotkey, payload.executor_id, payload.pod_id, RECENT_RENTER_GPU_RESET_SECONDS
+                )
+            except Exception as exc:
+                logger.warning(
+                    _m("Reset pod GPUs: recent reset mark not written", extra=get_extra_info({**default_extra, "error": str(exc)}))
+                )
             await self.redis_service.remove_pending_pod(payload.miner_hotkey, payload.executor_id, payload.pod_id)
 
         logger.info(

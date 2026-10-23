@@ -451,3 +451,29 @@ def withhold_rollout_verdicts(
             )
         standing_by_miner[miner_hotkey] = standing_results
     return standing_by_miner, withheld
+
+
+def withhold_renter_gpu_reset_verdicts(
+    job_results: dict[str, list[JobResult]],
+) -> tuple[dict[str, list[JobResult]], list[WithheldVerdict]]:
+    """DAH-4658: a scrape held for the renter's own GPU reset gets no verdict, as a rollout failure gets none."""
+    standing_by_miner: dict[str, list[JobResult]] = {}
+    withheld: list[WithheldVerdict] = []
+    for miner_hotkey, results in job_results.items():
+        standing_by_miner[miner_hotkey] = []
+        for result in results:
+            if result.failure_reason_code != MachineSpecMessages.SCRAPE_GPU_RESET_IN_PROGRESS.reason:
+                standing_by_miner[miner_hotkey].append(result)
+                continue
+            withheld.append(WithheldVerdict(miner_hotkey=miner_hotkey, result=result))
+            logger.info(
+                _m(
+                    "Verdict withheld: the renter is resetting the node's GPUs",
+                    extra={
+                        "miner_hotkey": miner_hotkey,
+                        "executor_uuid": result.executor_info.uuid,
+                        "job_batch_id": result.job_batch_id,
+                    },
+                )
+            )
+    return standing_by_miner, withheld

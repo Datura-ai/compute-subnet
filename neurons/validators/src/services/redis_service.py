@@ -27,6 +27,8 @@ POD_STATES_CHANNEL = "POD_STATES_CHANNEL"
 RENTED_MACHINE_PREFIX = "rented_machines_prefix"
 PENDING_PODS_PREFIX = "pending_pods_prefix"
 GPU_RESET_PENDING_KIND = "gpu_reset"
+# DAH-4658: the pod of a renter GPU reset that ended a moment ago, per node, for a short TTL
+GPU_RESET_RECENT_PREFIX = "gpu_reset_recent"
 # DAH-4698: creates the backend sent that are running in this connector right now, by pod id; what is left when a
 # connector starts was cut off by the restart (a redeploy recreates the connector mid-create)
 INFLIGHT_BACKEND_CREATES_KEY = "inflight_backend_creates"
@@ -685,6 +687,15 @@ class RedisService:
     async def gpu_reset_marks(self, miner_hotkey: str, executor_id: str) -> list[dict]:
         pending_pods: list[dict] = await self.get_pending_pods(miner_hotkey, executor_id)
         return [item for item in pending_pods if item.get("kind") == GPU_RESET_PENDING_KIND]
+
+    async def mark_gpu_reset_recent(self, miner_hotkey: str, executor_id: str, pod_id: str, seconds: int) -> None:
+        # ponytail: one pod per node; a second pod's reset in the same window replaces the first
+        await self.set(f"{GPU_RESET_RECENT_PREFIX}:{miner_hotkey}:{executor_id}", pod_id, ex=seconds)
+
+    async def gpu_reset_recent(self, miner_hotkey: str, executor_id: str) -> str | None:
+        """The pod of the node's renter GPU reset that ended within the mark's TTL, if any."""
+        pod_id = await self.get(f"{GPU_RESET_RECENT_PREFIX}:{miner_hotkey}:{executor_id}")
+        return pod_id.decode() if isinstance(pod_id, bytes) else pod_id
 
     async def renting_in_progress(self, miner_hotkey: str, executor_id: str, pod_id: str | None = None) -> bool:
         pending_pods: list[dict] = await self.get_pending_pods(miner_hotkey, executor_id)

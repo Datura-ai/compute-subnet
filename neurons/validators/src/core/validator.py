@@ -24,6 +24,7 @@ from services.executor_rollout import (
     ExecutorRolloutTracker,
     RolloutWindow,
     WithheldVerdict,
+    withhold_renter_gpu_reset_verdicts,
     withhold_rollout_verdicts,
 )
 from services.executor_connectivity.container_runner import ContainerRunner
@@ -1492,7 +1493,8 @@ class Validator:
         )
         standing, withheld_results = withhold_rollout_verdicts(all_job_results, window, job_block)
         await self.record_withheld_verdicts(window, withheld_results, job_batch_id, job_block)
-        return standing, withheld_results
+        standing, held_for_gpu_reset = withhold_renter_gpu_reset_verdicts(standing)
+        return standing, withheld_results + held_for_gpu_reset
 
     async def record_withheld_verdicts(
         self,

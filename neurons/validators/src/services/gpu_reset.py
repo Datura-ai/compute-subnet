@@ -409,6 +409,9 @@ async def reset_pod_gpus(
     return report
 
 
+# a scrape this soon after a renter's reset can still miss the cards the driver is bringing back
+RECENT_RENTER_GPU_RESET_SECONDS = 5 * 60
+
 # the checks a renter's own reset can trip (the pod is stopped, its GPUs drop out for a moment); a reset of
 # the verified job by any other check (a GPU swap, a duplicate node) is still sent during the reset
 RESET_CAUSED_CHECK_IDS = frozenset({
@@ -448,3 +451,19 @@ async def renter_gpu_reset_in_progress(redis, miner_hotkey: str, executor_id: st
     """True on a readable gpu_reset mark on the node, or on that pod when pod_id is given."""
     marks = await renter_gpu_resets(redis, miner_hotkey, executor_id)
     return any(pod_id is None or mark.get("pod_id") == pod_id for mark in marks)
+
+
+async def renter_gpu_reset_recent(redis, miner_hotkey: str, executor_id: str, pod_id: str | None = None) -> bool:
+    """True on a readable mark of a renter reset on the node (or that pod) that ended within
+    RECENT_RENTER_GPU_RESET_SECONDS; a Redis error (or anything but a pod id) is none, so the checks run."""
+    try:
+        reset_pod_id = await redis.gpu_reset_recent(miner_hotkey, executor_id)
+    except Exception:
+        return False
+    return isinstance(reset_pod_id, str) and pod_id in (None, reset_pod_id)
+
+
+async def renter_gpu_reset_in_progress_or_recent(redis, miner_hotkey: str, executor_id: str) -> bool:
+    return await renter_gpu_reset_in_progress(redis, miner_hotkey, executor_id) or await renter_gpu_reset_recent(
+        redis, miner_hotkey, executor_id
+    )
