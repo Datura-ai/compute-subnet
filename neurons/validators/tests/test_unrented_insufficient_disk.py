@@ -23,6 +23,12 @@ MB_PER_GB = 1024
 KB_PER_GB = 1024 ** 2
 
 
+@pytest.fixture(autouse=True)
+def _no_flagship_gate(monkeypatch):
+    # the 8x H200 jobs here are flagships; the always-on flagship gate has its own tests
+    monkeypatch.setattr(RentalPriceIncentive, "_missing_flagship_capability", lambda *_args: None)
+
+
 def _build_incentive() -> RentalPriceIncentive:
     return RentalPriceIncentive(IncentiveConfig(), AsyncMock(), {}, {})
 

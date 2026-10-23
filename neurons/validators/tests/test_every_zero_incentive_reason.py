@@ -75,7 +75,6 @@ def discord_cutoff_passed(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_flagship_gate_is_recorded_even_when_discord_blocks(monkeypatch, discord_cutoff_passed):
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT", True)
 
     result = await _incentive().calculate_executor_score(_idle_flagship(provider_discord_connected=False))
 
@@ -89,10 +88,6 @@ async def test_flagship_gate_is_recorded_even_when_discord_blocks(monkeypatch, d
 async def test_every_hard_exclusion_and_every_enforced_gate_is_recorded_in_order(
     monkeypatch, discord_cutoff_passed
 ):
-    for flag in (
-        "ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT",
-    ):
-        monkeypatch.setattr(settings, flag, True)
     new_cfg = shared_client.config.model_copy(update={"machine_prices_p90": {H200: 0.5}})
     monkeypatch.setattr(shared_client, "_config", new_cfg)
 
@@ -133,7 +128,7 @@ def _logged(caplog, reason: str) -> int:
 # The last two are the probes' "cannot measure ...; unrented incentive kept" lines: no reason, and
 # the sentence is false for a node that is already excluded.
 GATE_LOG_CASES = [
-    ("ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT", {}, "flagship_without_ncu_or_split", "flagship_without_ncu_or_split"),
+    (None, {}, "flagship_without_ncu_or_split", "flagship_without_ncu_or_split"),
     (None, {"gpu_count": 4, "spec": SHORT_DISK_SPEC}, "insufficient_disk_for_vram", "insufficient_disk_for_vram"),
     (
         None,
