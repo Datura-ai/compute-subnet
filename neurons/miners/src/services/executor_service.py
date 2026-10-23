@@ -91,6 +91,17 @@ class _UnreachableExecutorLog:
 
 _unreachable_executor_log = _UnreachableExecutorLog()
 
+# One upload that timed out or had its socket reset left a rented node out of the miner's answer
+# for the whole cycle: the validator wrote RENTED_EXECUTOR_NOT_LISTED and the backend hid the node.
+# An executor that did not answer is asked again, inside a budget counted from the validator's
+# request: the validator waits 30 s (REST_SSH_SUBMIT_TIMEOUT) for the whole answer.
+UPLOAD_SSH_KEY_ATTEMPTS = 3
+UPLOAD_SSH_KEY_ATTEMPT_TIMEOUT_SECONDS = 10.0
+UPLOAD_SSH_KEY_BUDGET_SECONDS = 25.0
+UPLOAD_SSH_KEY_RETRY_DELAY_SECONDS = 1.0
+# a retry with less time than this left cannot get the executor's answer (it collects attestation)
+UPLOAD_SSH_KEY_MIN_ATTEMPT_SECONDS = 3.0
+
 
 class PubkeyRegistration(pydantic.BaseModel):
     """DAH-3338: the outcome of register_pubkey, known executors apart from accepting ones.
@@ -319,6 +330,7 @@ class ExecutorService:
         nonce: str | None = None,
         miner_hotkey: str | None = None,
         validator_miner_signature: str | None = None,
+        deadline: float | None = None,
     ) -> ExecutorSSHInfo | None:
         """TODO: Send API request to executor with pubkey
 
@@ -327,11 +339,14 @@ class ExecutorService:
             pubkey (str): SSH public key from validator
             nonce (Optional[str]): Validator attestation challenge, relayed
                 verbatim (it is covered by validator_signature)
+            deadline (Optional[float]): time.monotonic() by which the last attempt must end;
+                default UPLOAD_SSH_KEY_BUDGET_SECONDS from now
 
         Return:
             response (ExecutorSSHInfo | None): Executor SSH connection info.
         """
-        timeout = aiohttp.ClientTimeout(total=10)  # 5 seconds timeout
+        if deadline is None:
+            deadline = time.monotonic() + UPLOAD_SSH_KEY_BUDGET_SECONDS
         url = f"http://{executor.address}:{executor.port}/upload_ssh_key"
         keypair: bittensor.Keypair = settings.get_bittensor_wallet().get_hotkey()
         payload = {
@@ -359,49 +374,58 @@ class ExecutorService:
                 extra=get_extra_info(base_log_extra),
             ),
         )
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            try:
-                async with session.post(url, json=payload) as response:
-                    if response.status != 200:
-                        text = await response.text()
-                        logger.error(
+        async with aiohttp.ClientSession() as session:
+            for attempt in range(1, UPLOAD_SSH_KEY_ATTEMPTS + 1):
+                # the first attempt always gets the floor, even when the portal lookup ate the budget
+                time_left = max(UPLOAD_SSH_KEY_MIN_ATTEMPT_SECONDS, deadline - time.monotonic())
+                timeout = aiohttp.ClientTimeout(total=min(UPLOAD_SSH_KEY_ATTEMPT_TIMEOUT_SECONDS, time_left))
+                try:
+                    async with session.post(url, json=payload, timeout=timeout) as response:
+                        if response.status != 200:
+                            text = await response.text()
+                            logger.error(
+                                _m(
+                                    "API request failed to register SSH key - HTTP error",
+                                    extra=get_extra_info({**base_log_extra, "status": response.status, "error": text}),
+                                ),
+                            )
+                            return None
+                        response_obj: dict = await response.json()
+                        logger.info(
                             _m(
-                                "API request failed to register SSH key - HTTP error",
-                                extra=get_extra_info({**base_log_extra, "status": response.status, "error": text}),
+                                "Received response from executor",
+                                extra=get_extra_info({
+                                    **base_log_extra,
+                                    "response": response_obj,
+                                }),
                             ),
                         )
-                        return None
-                    response_obj: dict = await response.json()
-                    logger.info(
+                        response_obj = {
+                            **response_obj,
+                            **executor.model_dump(mode="json"),
+                        }
+                        return ExecutorSSHInfo.parse_obj(response_obj)
+                except _UNREACHABLE_ERRORS as e:
+                    time_left = deadline - time.monotonic() - UPLOAD_SSH_KEY_RETRY_DELAY_SECONDS
+                    if attempt < UPLOAD_SSH_KEY_ATTEMPTS and time_left >= UPLOAD_SSH_KEY_MIN_ATTEMPT_SECONDS:
+                        await asyncio.sleep(UPLOAD_SSH_KEY_RETRY_DELAY_SECONDS)
+                        continue
+                    _unreachable_executor_log.warn(
+                        str(executor.uuid),
+                        "API request failed to register SSH key - executor did not answer",
+                        {**base_log_extra, "attempts": attempt},
+                        e,
+                    )
+                    return None
+                except Exception as e:
+                    logger.error(
                         _m(
-                            "Received response from executor",
-                            extra=get_extra_info({
-                                **base_log_extra,
-                                "response": response_obj,
-                            }),
+                            "API request failed to register SSH key - request exception",
+                            extra=get_extra_info({**base_log_extra, "error": _describe_error(e)}),
                         ),
                     )
-                    response_obj = {
-                        **response_obj,
-                        **executor.model_dump(mode="json"),
-                    }
-                    return ExecutorSSHInfo.parse_obj(response_obj)
-            except _UNREACHABLE_ERRORS as e:
-                _unreachable_executor_log.warn(
-                    str(executor.uuid),
-                    "API request failed to register SSH key - executor did not answer",
-                    base_log_extra,
-                    e,
-                )
-                return None
-            except Exception as e:
-                logger.error(
-                    _m(
-                        "API request failed to register SSH key - request exception",
-                        extra=get_extra_info({**base_log_extra, "error": _describe_error(e)}),
-                    ),
-                )
-                return None
+                    return None
+        return None
 
     async def remove_pubkey_from_executor(self, executor: Executor, pubkey: str, validator_signature: str):
         """TODO: Send API request to executor to cleanup pubkey
@@ -479,12 +503,15 @@ class ExecutorService:
             PubkeyRegistration: the executors the miner lists for the validator, and the SSH
             connection infos of the ones that accepted the pubkey.
         """
+        # the budget counts the portal lookup too: the validator's wait covers the whole answer
+        deadline = time.monotonic() + UPLOAD_SSH_KEY_BUDGET_SECONDS
         executors = await self.get_executors_for_validator(validator_hotkey, miner_hotkey, executor_id)
         tasks = [
             asyncio.create_task(
                 self.send_pubkey_to_executor(
                     executor, pubkey.decode("utf-8"), validator_signature, nonce=nonce,
                     miner_hotkey=miner_hotkey, validator_miner_signature=validator_miner_signature,
+                    deadline=deadline,
                 ),
                 name=f"{executor}.send_pubkey_to_executor",
             )

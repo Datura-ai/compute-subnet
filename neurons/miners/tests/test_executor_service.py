@@ -5,6 +5,8 @@ Focus: verify that validator_signature is correctly forwarded in the POST
 body sent to the executor when registering or removing SSH public keys.
 """
 
+import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -17,6 +19,7 @@ from protocol.miner_portal_request import (
     ExecutorDeleted,
     SyncExecutorPayload,
 )
+import services.executor_service as es
 from services.executor_service import ExecutorService
 
 
@@ -128,6 +131,37 @@ async def test_send_pubkey_to_executor_relays_the_miner_bound_signature(executor
         await executor_service.send_pubkey_to_executor(test_executor, _SSH_KEY, "0xaa")
         sent = mock_session.post.call_args.kwargs["json"]
         assert "miner_hotkey" not in sent and "validator_miner_signature" not in sent
+
+
+@pytest.mark.asyncio
+async def test_send_pubkey_to_executor_retries_an_executor_that_did_not_answer(executor_service, test_executor):
+    """A timed-out upload is asked again, so one dropped request does not leave the node out of the answer;
+    a node that never answers gives up inside the deadline."""
+    answered = MagicMock(status=200)
+    answered.json = AsyncMock(return_value={"ssh_username": "root", "ssh_port": 22, "python_path": "/p", "root_dir": "/r"})
+    post_ctx = MagicMock()
+    post_ctx.__aenter__ = AsyncMock(side_effect=[asyncio.TimeoutError(), answered])
+    post_ctx.__aexit__ = AsyncMock(return_value=None)
+    session = _make_mock_session()
+    session.post = MagicMock(return_value=post_ctx)
+
+    with patch("services.executor_service.aiohttp.ClientSession", return_value=session), \
+            patch("services.executor_service.asyncio.sleep", AsyncMock()):
+        info = await executor_service.send_pubkey_to_executor(test_executor, _SSH_KEY, "0xaa")
+        assert info is not None and info.uuid == str(test_executor.uuid)
+        assert session.post.call_count == 2
+
+        post_ctx.__aenter__ = AsyncMock(side_effect=asyncio.TimeoutError())
+        session.post.reset_mock()
+        assert await executor_service.send_pubkey_to_executor(test_executor, _SSH_KEY, "0xaa") is None
+        assert session.post.call_count == es.UPLOAD_SSH_KEY_ATTEMPTS
+
+        # no time left for a second attempt: one try, then the miner answers without the node
+        session.post.reset_mock()
+        assert await executor_service.send_pubkey_to_executor(
+            test_executor, _SSH_KEY, "0xaa", deadline=time.monotonic() + 1
+        ) is None
+        assert session.post.call_count == 1
 
 
 # ---------------------------------------------------------------------------
