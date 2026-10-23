@@ -7794,6 +7794,10 @@ def _parked_recovery(docker_service, monkeypatch, listed, *, mounts="/workspace\
     monkeypatch.setattr(docker_service, "_repair_stale_mountpoint_of_container_volume", repair)
     stop = AsyncMock(return_value=True)
     monkeypatch.setattr(docker_service, "_stop_half_recovered_container", stop)
+    marks: dict[str, str] = {}
+    docker_service.redis_service.set = AsyncMock(side_effect=lambda key, value, ex=None: marks.__setitem__(key, value))
+    docker_service.redis_service.delete = AsyncMock(side_effect=lambda key: marks.pop(key, None))
+    docker_service.redis_service.marks = marks
     kwargs = dict(
         ssh_client=ssh_client,
         executor_info=_executor_without_host_key("executor-1"),
@@ -7981,6 +7985,51 @@ async def test_recover_parked_keeps_the_container_parked_when_the_rename_reply_i
     assert host["name"] == "pod_pod-1"
 
 
+@pytest.mark.asyncio
+async def test_recover_parked_starts_next_cycle_a_pod_whose_rename_reply_and_cleanup_were_lost(
+    docker_service, monkeypatch
+):
+    # the rename applied, then the SSH transport died: its reply and the park-again are both lost,
+    # leaving the pod stopped under its own name
+    kwargs, ssh_client, start, _stop, _repair = _parked_recovery(docker_service, monkeypatch, "")
+    marks = docker_service.redis_service.marks
+    host = {"name": "pod_pod-1__prev", "dead": False}
+
+    async def run(command, *_args, **_kwargs):
+        if host["dead"]:
+            raise asyncssh.ConnectionLost("connection lost")
+        if "docker ps" in command:
+            return _make_ssh_command_result(stdout=f"c0ffee {host['name']}\n")
+        if "docker inspect" in command:
+            return _make_ssh_command_result(stdout="/workspace\n")
+        if command.startswith("/usr/bin/docker rename c0ffee "):
+            host["name"] = command.rsplit(" ", 1)[1]
+            host["dead"] = True
+            raise asyncssh.ConnectionLost("connection lost")
+        return _make_ssh_command_result()
+
+    ssh_client.run.side_effect = run
+
+    with pytest.raises(asyncssh.ConnectionLost):
+        await docker_service.recover_parked_pod_container(**kwargs)
+    assert host["name"] == "pod_pod-1"
+    assert marks == {"stopped_by_recovery:pod-1": "1"}  # written before the rename
+    start.assert_not_awaited()
+
+    # next cycle, new connection: the mark makes the stopped pod_<id> ours to start
+    host["dead"] = False
+    renames_before = len(_renames(ssh_client))
+    assert await docker_service.recover_parked_pod_container(**kwargs, stopped_by_recovery=True) is True
+    assert len(_renames(ssh_client)) == renames_before  # already under its name
+    assert host["name"] == "pod_pod-1"
+    start.assert_awaited_once()
+    assert marks == {}
+
+    # unmarked, a stopped pod_<id> is someone else's: never started
+    assert await docker_service.recover_parked_pod_container(**kwargs) is False
+    start.assert_awaited_once()
+
+
 @contextlib.asynccontextmanager
 async def _docker_client(**_kwargs):
     yield Mock()
@@ -8010,6 +8059,7 @@ async def test_restore_volume_mount_of_running_container_remounts_or_stops_the_p
     monkeypatch.setattr(docker_service, "rental_docker_client_factory", Mock(connect=_docker_client))
     stop = AsyncMock(return_value=True)
     monkeypatch.setattr(docker_service, "_stop_half_recovered_container", stop)
+    docker_service.redis_service.set = AsyncMock()
     restore = docker_service.restore_volume_mount_of_running_container(
         ssh_client=AsyncMock(),
         executor_info=_executor_without_host_key("executor-1"),
@@ -8026,6 +8076,8 @@ async def test_restore_volume_mount_of_running_container_remounts_or_stops_the_p
     else:
         assert await restore is (expected == "restored")
     assert stop.await_count == int(expected != "restored")
+    # marked before the stop, so the next cycle starts it with its mount
+    assert docker_service.redis_service.set.await_count == int(expected != "restored")
 
 
 _GOCRYPTFS_MOUNT = "/lium-cipher /workspace fuse.gocryptfs rw,nosuid,nodev 0 0\n"

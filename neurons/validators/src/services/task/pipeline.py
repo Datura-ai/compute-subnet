@@ -83,6 +83,7 @@ class PodRecoverer(Protocol):
         pod_id: str,
         local_volume_path: str | None,
         default_extra: dict[str, Any],
+        stopped_by_recovery: bool = False,
     ) -> bool: ...
 
     async def encrypted_volume_mount_missing(

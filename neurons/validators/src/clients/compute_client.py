@@ -102,6 +102,7 @@ WS_PING_INTERVAL = 20
 WS_PING_TIMEOUT = 40
 # not an executor step, so the backend never counts it against the host
 CREATE_CUT_OFF_BY_RESTART_STEP = "validator_restarted"
+BACKEND_CREATE_TRACKING_RETRY_SECONDS = 5
 
 
 command_responses: ContextVar[list[str] | None] = ContextVar("command_responses", default=None)
@@ -963,20 +964,33 @@ class ComputeClient:
         if not isinstance(job_request, ContainerCreateRequest):
             return await self._drive_miner_job(job_request)
         with inflight_creates.track(job_request.pod_id):
-            await self._track_backend_create_for_restart_report(job_request)
+            retrying = None
+            if not await self._track_backend_create_for_restart_report(job_request):
+                retrying = asyncio.ensure_future(self._retry_tracking_backend_create(job_request))
             try:
                 return await self._drive_miner_job(job_request)
             finally:
+                if retrying is not None:
+                    retrying.cancel()
+                    await asyncio.wait({retrying})
                 await self._untrack_backend_create_for_restart_report(job_request.pod_id)
 
-    async def _track_backend_create_for_restart_report(self, job_request: ContainerCreateRequest) -> None:
-        # best-effort: a Redis error loses only the restart report, never the create itself
+    async def _track_backend_create_for_restart_report(self, job_request: ContainerCreateRequest) -> bool:
         try:
             await self.miner_service.redis_service.add_inflight_backend_create(
                 job_request.pod_id, job_request.miner_hotkey, job_request.executor_id, job_request.workload_kind
             )
+            return True
         except Exception as exc:
             self._log_backend_create_tracking_error(job_request.pod_id, exc)
+            return False
+
+    async def _retry_tracking_backend_create(self, job_request: ContainerCreateRequest) -> None:
+        # a Redis error never holds up the create, but the record must land: besides the restart
+        # report, the rented-pod recovery reads it to stay off a pod whose create still runs after
+        # its pending mark and create lock expired
+        while not await self._track_backend_create_for_restart_report(job_request):
+            await asyncio.sleep(BACKEND_CREATE_TRACKING_RETRY_SECONDS)
 
     async def _untrack_backend_create_for_restart_report(self, pod_id: str) -> None:
         try:

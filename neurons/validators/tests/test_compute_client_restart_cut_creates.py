@@ -145,3 +145,39 @@ async def test_a_create_still_runs_and_returns_when_redis_cannot_track_it() -> N
     )
 
     assert await client.miner_driver(request) == "created"
+
+
+@pytest.mark.asyncio
+async def test_a_create_whose_tracking_write_failed_is_tracked_once_redis_answers(monkeypatch) -> None:
+    # the rented-pod recovery reads this record to stay off a pod whose create still runs after its
+    # pending mark and create lock expired, so a failed first write is retried, not dropped
+    monkeypatch.setattr("clients.compute_client.BACKEND_CREATE_TRACKING_RETRY_SECONDS", 0)
+    redis_service = _redis_service()
+    real_hset = redis_service.redis.hset
+    failures = [ConnectionError("redis blip")]
+
+    async def flaky_hset(key: str, field: str, value: str) -> None:
+        if failures:
+            raise failures.pop()
+        await real_hset(key, field, value)
+
+    redis_service.redis.hset = flaky_hset
+    client = _client(redis_service)
+    seen_while_running: list[bool] = []
+
+    async def fake_drive_miner_job(job_request: ContainerCreateRequest) -> str:
+        for _ in range(50):
+            if await redis_service.backend_create_inflight("pod-4"):
+                break
+            await asyncio.sleep(0)
+        seen_while_running.append(await redis_service.backend_create_inflight("pod-4"))
+        return "created"
+
+    client._drive_miner_job = fake_drive_miner_job
+    request = ContainerCreateRequest.model_construct(
+        pod_id="pod-4", miner_hotkey="miner-hk", executor_id="exec-4", workload_kind=WorkloadKind.CUSTOMER_RENTAL
+    )
+
+    assert await client.miner_driver(request) == "created"
+    assert seen_while_running == [True]
+    assert await redis_service.inflight_backend_creates() == {}

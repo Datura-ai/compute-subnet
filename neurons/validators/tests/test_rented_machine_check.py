@@ -1210,6 +1210,103 @@ async def test_tenant_enforcement_remounts_a_running_pods_missing_encrypted_volu
         docker.restore_volume_mount_of_running_container.assert_not_awaited()
 
 
+def _recovery_redis(lock, marks: dict[str, str]) -> Mock:
+    return Mock(
+        backend_create_inflight=AsyncMock(return_value=False),
+        renting_in_progress=AsyncMock(return_value=False),
+        executor_create_lock=Mock(return_value=lock),
+        get=AsyncMock(side_effect=lambda key: marks.get(key)),
+    )
+
+
+@pytest.mark.parametrize("stopped_by_us", [True, False])
+@pytest.mark.asyncio
+async def test_tenant_enforcement_starts_next_cycle_a_pod_it_stopped_while_the_backend_failed(
+    context_factory, stopped_by_us
+):
+    # a transient backend failure (no plaintext path) stops the unmounted pod; that cycle reports it
+    # down and the next one starts it with its mount. A pod stopped by anyone else is never started.
+    ssh = DummySSHClient(pod_running=stopped_by_us, ssh_keys=["ssh-rsa renter"])
+    marks: dict[str, str] = {}
+    lock = Mock(acquire=AsyncMock(return_value=True), release=AsyncMock())
+    docker = AsyncMock()
+    docker.recover_pod_after_stale_vloopback_mount.return_value = False
+    docker.encrypted_volume_mount_missing.return_value = True
+
+    async def restore(**kwargs):  # as the real one: no path -> marked and stopped
+        if kwargs["local_volume_path"]:
+            return True
+        marks[f"stopped_by_recovery:{kwargs['pod_id']}"] = "1"
+        ssh.pod_running = False
+        return False
+
+    async def start_marked(**kwargs):  # as the real one: starts a marked pod once the path is known
+        if not (kwargs["stopped_by_recovery"] and kwargs["local_volume_path"]):
+            return False
+        marks.clear()
+        ssh.pod_running = True
+        docker.encrypted_volume_mount_missing.return_value = False
+        return True
+
+    docker.restore_volume_mount_of_running_container.side_effect = restore
+    docker.recover_parked_pod_container.side_effect = start_marked
+    backend = DummyBackendClient(active=None)  # the backend client answers None on a failed request
+
+    def cycle():
+        ctx = build_recovery_context(context_factory, ssh, docker, backend=backend, redis=_recovery_redis(lock, marks))
+        return TenantEnforcementCheck().run(ctx)
+
+    first = await cycle()
+    assert not first.passed
+    assert first.event.reason_code == Msg.POD_NOT_RUNNING.reason
+    assert _pod_states(first)["pod-1"] != "running"
+    assert not ssh.pod_running
+
+    backend.active, backend.local_volume_path = True, "/workspace"
+    second = await cycle()
+    if stopped_by_us:
+        assert second.passed, second.event
+        assert ssh.pod_running
+        assert _pod_states(second)["pod-1"] == "running"
+    else:
+        assert not second.passed
+        assert not ssh.pod_running
+        docker.recover_parked_pod_container.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_tenant_enforcement_stops_the_unmounted_pod_when_cancelled_during_the_path_lookup(context_factory):
+    ssh = DummySSHClient(pod_running=True, ssh_keys=["ssh-rsa renter"])
+    docker = AsyncMock()
+    docker.encrypted_volume_mount_missing.return_value = True
+
+    async def restore(**kwargs):
+        if not kwargs["local_volume_path"]:
+            ssh.pod_running = False
+        return False
+
+    docker.restore_volume_mount_of_running_container.side_effect = restore
+    entered = asyncio.Event()
+
+    async def lookup(_pod_id):
+        entered.set()
+        await asyncio.Event().wait()
+
+    backend = DummyBackendClient(active=True, local_volume_path="/workspace")
+    backend.get_pod_rental_active = lookup
+    lock = Mock(acquire=AsyncMock(return_value=True), release=AsyncMock())
+    ctx = build_recovery_context(context_factory, ssh, docker, backend=backend, redis=_recovery_redis(lock, {}))
+
+    task = asyncio.create_task(TenantEnforcementCheck().run(ctx))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not ssh.pod_running
+    lock.release.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_tenant_enforcement_emits_transport_unreachable_when_recheck_loses_ssh(
     context_factory,
