@@ -15,6 +15,7 @@ from payload_models.payloads import (
     FailedContainerRequest,
     ContainerStartRequest,
     ContainerStopRequest,
+    ContainerWarningCode,
     CustomOptions,
     ExternalVolumeInfo,
     PayloadPortMapping,
@@ -118,7 +119,7 @@ class RecordingRentalDockerClient:
             oom_killed=False,
         )
 
-    async def start(self, *, container_name: str) -> None:
+    async def start(self, *, container_name: str, network: str | None = None) -> None:
         self.started_containers.append(container_name)
 
     async def stop(self, *, container_name: str, stop_grace_seconds: int | None = None) -> None:
@@ -497,7 +498,7 @@ async def test_create_container_drops_sysbox_when_subuid_base_is_unusable(
         ),
     )
 
-    await docker_service.create_container(
+    result = await docker_service.create_container(
         payload=payload,
         executor_info=executor_info,
         keypair=keypair,
@@ -506,6 +507,8 @@ async def test_create_container_drops_sysbox_when_subuid_base_is_unusable(
 
     run_spec = docker_service.rental_docker_client_factory.client.run_specs[0]
     assert run_spec.runtime is None
+    # the backend reads this to refuse a rental that asked for nested Docker
+    assert ContainerWarningCode.DockerInDockerDisabled in result.warnings
     streamed_messages = [
         call.args[0] for call in docker_service.stream_log.await_args_list
     ]
@@ -651,8 +654,8 @@ async def test_remove_s3fs_volume_plugin_ignores_unsafe_volume_name(
     [
         # Sysbox cannot ID-shift a FUSE mount, so s3fs must report the objects as
         # owned by the host uid sysbox maps container root to.
-        (231072, "allow_other,uid=231072,gid=231072"),
-        (None, "allow_other"),
+        (231072, "allow_other,umask=0000,uid=231072,gid=231072"),
+        (None, "allow_other,umask=0000"),
     ],
 )
 async def test_create_s3fs_volume_mount_options(
@@ -1104,3 +1107,57 @@ async def test_create_local_volume_rejects_unsafe_volume_name_before_shell(
 
     assert ssh_client.commands == []
     assert docker_client.created_volumes == []
+
+
+def _pod_host_key_commands(ssh_client):
+    return [shlex.split(cmd) for cmd in ssh_client.commands if "pod_ssh_host_key" in cmd]
+
+
+@pytest.mark.asyncio
+async def test_create_container_installs_the_same_ssh_host_key_each_time_a_pod_is_created(
+    docker_service,
+    executor_info,
+    keypair,
+    monkeypatch,
+):
+    ssh_client = RecordingSSHClient()
+    ssh_client.run = AsyncMock(wraps=ssh_client.run)
+    _patch_create_harness(monkeypatch, docker_service, ssh_client)
+
+    for _ in range(2):
+        await docker_service.create_container(
+            payload=_base_create_payload(),
+            executor_info=executor_info,
+            keypair=keypair,
+            private_key="encrypted-private-key",
+        )
+
+    specs = _pod_host_key_commands(ssh_client)
+    assert len(specs) == 2
+    public_keys = {spec[-1] for spec in specs}
+    assert len(public_keys) == 1
+    assert next(iter(public_keys)).startswith("ssh-ed25519 ")
+    calls = [c for c in ssh_client.run.call_args_list if "pod_ssh_host_key" in c.args[0]]
+    assert all("OPENSSH PRIVATE KEY" in c.kwargs["input"] for c in calls)
+    assert all("OPENSSH PRIVATE KEY" not in " ".join(spec) for spec in specs)
+
+
+@pytest.mark.asyncio
+async def test_create_container_skips_the_pod_ssh_host_key_without_a_master_secret(
+    docker_service,
+    executor_info,
+    keypair,
+    monkeypatch,
+):
+    ssh_client = RecordingSSHClient()
+    _patch_create_harness(monkeypatch, docker_service, ssh_client)
+    monkeypatch.setattr("services.docker_service.settings.VOLUME_MASTER_SECRET", None)
+
+    await docker_service.create_container(
+        payload=_base_create_payload(),
+        executor_info=executor_info,
+        keypair=keypair,
+        private_key="encrypted-private-key",
+    )
+
+    assert _pod_host_key_commands(ssh_client) == []

@@ -30,7 +30,8 @@ _EXIT_CODE_RX = re.compile(r"[0-9]{1,3}")
 # _REFRESH_DETAIL_CHARS of it reaches a published fetch_error
 _REFRESH_CAPTURE_MAX_CHARS = 4096
 _REFRESH_DETAIL_CHARS = 400
-INSPECTOR_COMMAND_TIMEOUT_SECONDS = 30
+# the collector's start may wait 75 s for health and 10 s for the container index on a busy host, plus its canary
+INSPECTOR_COMMAND_TIMEOUT_SECONDS = 120
 INSPECTOR_STDERR_CAPTURE_TIMEOUT_SECONDS = 10
 INSPECTOR_STDERR_CAPTURE_MAX_BYTES = 8192
 # One protocol response is one line. asyncssh's readline() hands back a PARTIAL line once a single
@@ -261,11 +262,10 @@ class InspectorValidationService:
             validator.start_session()
             process = await ssh.create_process(command)
 
-            if settings.INSPECTOR_ENSURE_COLLECTOR_ON_RENTED_CHECK:
-                try:
-                    await self._send_message(process, {"cmd": "start-collector"})
-                except Exception as exc:
-                    diagnostics["collector_ensure_error"] = str(exc)
+            try:
+                await self._send_message(process, {"cmd": "start-collector"})
+            except Exception as exc:
+                diagnostics["collector_ensure_error"] = str(exc)
 
             open_json = validator.handshake_start()
             handshake_reply = await self._send_message(

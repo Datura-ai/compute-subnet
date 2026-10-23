@@ -1,3 +1,5 @@
+import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +16,7 @@ import workspace_mount as workspace_mount_module
 from datura.requests.miner_requests import ExecutorSSHInfo
 from payload_models.payloads import (
     BackupContainerRequest,
+    CancelStorageOperationRequest,
     ExternalVolumeInfo,
     RestoreContainerRequest,
 )
@@ -405,9 +408,29 @@ def test_detect_volume_access_raises_when_gocryptfs_conf_probe_fails(monkeypatch
         detect_volume_access("source-volume", "/root")
 
 
+class _FakeRemoteFile:
+    def __init__(self, files, path):
+        self.files, self.path = files, path
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+    async def write(self, data):
+        self.files[self.path] = data
+
+
 class _FakeSftpContext:
     def __init__(self):
         self.put = AsyncMock()
+        self.files: dict[str, str] = {}
+        self.opens: list[tuple] = []
+
+    def open(self, path, mode, attrs=None):
+        self.opens.append((path, mode, attrs))
+        return _FakeRemoteFile(self.files, path)
 
     async def __aenter__(self):
         return self
@@ -441,6 +464,32 @@ def _executor_info() -> ExecutorSSHInfo:
     )
 
 
+ACCESS_KEY = "access-key-value"
+SECRET_KEY = "secret-key-value"
+AUTH_TOKEN = "auth-token-value"
+KNOWN_HOSTS = object()
+
+
+def _docker_service_with_pinned_hosts() -> Mock:
+    docker_service = Mock()
+    docker_service._prepare_known_hosts_policy = AsyncMock(return_value=KNOWN_HOSTS)
+    return docker_service
+
+
+def _assert_secrets_only_in_the_0600_file(ssh_client, sftp_context) -> None:
+    commands = " ".join(str(call.args[0]) for call in ssh_client.run.await_args_list)
+    for value in (ACCESS_KEY, SECRET_KEY, AUTH_TOKEN):
+        assert value not in commands
+    ((path, mode, attrs),) = sftp_context.opens
+    assert mode == "x" and attrs.permissions == 0o600
+    assert f"--secrets-file {path}" in commands
+    assert json.loads(sftp_context.files[path]) == {
+        "auth_token": AUTH_TOKEN,
+        "aws_access_key_id": ACCESS_KEY,
+        "aws_secret_access_key": SECRET_KEY,
+    }
+
+
 def _backup_payload() -> BackupContainerRequest:
     return BackupContainerRequest(
         miner_hotkey="miner",
@@ -450,13 +499,13 @@ def _backup_payload() -> BackupContainerRequest:
         backup_volume_info=ExternalVolumeInfo(
             name="bucket",
             plugin="s3fs",
-            iam_user_access_key="access",
-            iam_user_secret_key="secret",
+            iam_user_access_key=ACCESS_KEY,
+            iam_user_secret_key=SECRET_KEY,
         ),
         backup_path="/root/test",
         source_volume_path="/root",
         backup_target_path="target.tar.gz",
-        auth_token="token",
+        auth_token=AUTH_TOKEN,
         backup_log_id="backup-log",
     )
 
@@ -470,12 +519,12 @@ def _restore_payload() -> RestoreContainerRequest:
         backup_volume_info=ExternalVolumeInfo(
             name="bucket",
             plugin="s3fs",
-            iam_user_access_key="access",
-            iam_user_secret_key="secret",
+            iam_user_access_key=ACCESS_KEY,
+            iam_user_secret_key=SECRET_KEY,
         ),
         backup_source_path="source.tar.gz",
         target_volume_path="/root",
-        auth_token="token",
+        auth_token=AUTH_TOKEN,
         restore_log_id="restore-log",
         restore_path="/root/test",
     )
@@ -487,16 +536,22 @@ async def test_miner_service_backup_argv_excludes_encryption_flags(monkeypatch):
     ssh_client.run = AsyncMock(return_value=SimpleNamespace(exit_status=0, stdout="", stderr=""))
     sftp_context = _FakeSftpContext()
     ssh_client.start_sftp_client = Mock(return_value=sftp_context)
-    monkeypatch.setattr(miner_service_module.asyncssh, "connect", Mock(return_value=_FakeSshContext(ssh_client)))
+
+    connect = Mock(return_value=_FakeSshContext(ssh_client))
+    monkeypatch.setattr(miner_service_module.asyncssh, "connect", connect)
 
     service = MinerService.__new__(MinerService)
-    await service.handle_backup_container_req(_executor_info(), _backup_payload(), Mock())
+    await service.handle_backup_container_req(
+        _executor_info(), _backup_payload(), Mock(), _docker_service_with_pinned_hosts()
+    )
 
     nohup_call = ssh_client.run.await_args_list[-1]
     command = nohup_call.args[0]
     assert "--source-volume-encrypted" not in command
     assert "--container-name" not in command
     assert "--source-volume source-volume" in command
+    _assert_secrets_only_in_the_0600_file(ssh_client, sftp_context)
+    assert connect.call_args.kwargs["known_hosts"] is KNOWN_HOSTS
 
 
 @pytest.mark.asyncio
@@ -505,16 +560,89 @@ async def test_miner_service_restore_argv_excludes_encryption_flags(monkeypatch)
     ssh_client.run = AsyncMock(return_value=SimpleNamespace(exit_status=0, stdout="", stderr=""))
     sftp_context = _FakeSftpContext()
     ssh_client.start_sftp_client = Mock(return_value=sftp_context)
-    monkeypatch.setattr(miner_service_module.asyncssh, "connect", Mock(return_value=_FakeSshContext(ssh_client)))
+
+    connect = Mock(return_value=_FakeSshContext(ssh_client))
+    monkeypatch.setattr(miner_service_module.asyncssh, "connect", connect)
 
     service = MinerService.__new__(MinerService)
-    await service.handle_restore_container_req(_executor_info(), _restore_payload(), Mock())
+    await service.handle_restore_container_req(
+        _executor_info(), _restore_payload(), Mock(), _docker_service_with_pinned_hosts()
+    )
 
     nohup_call = ssh_client.run.await_args_list[-1]
     command = nohup_call.args[0]
     assert "--target-volume-encrypted" not in command
     assert "--container-name" not in command
     assert "--target-volume target-volume" in command
+    _assert_secrets_only_in_the_0600_file(ssh_client, sftp_context)
+    assert connect.call_args.kwargs["known_hosts"] is KNOWN_HOSTS
+
+
+@pytest.mark.asyncio
+async def test_cancel_storage_operation_pins_the_host_key(monkeypatch):
+    connect = Mock(return_value=_FakeSshContext(AsyncMock()))
+    monkeypatch.setattr(miner_service_module.asyncssh, "connect", connect)
+    monkeypatch.setattr(miner_service_module, "cancel_storage_operation", AsyncMock())
+    payload = CancelStorageOperationRequest(
+        miner_hotkey="miner",
+        executor_id="executor",
+        pod_id="pod",
+        operation_id="11111111-1111-4111-8111-111111111111",
+    )
+
+    await MinerService.__new__(MinerService).handle_cancel_storage_operation_req(
+        _executor_info(), payload, Mock(), _docker_service_with_pinned_hosts()
+    )
+
+    assert connect.call_args.kwargs["known_hosts"] is KNOWN_HOSTS
+
+
+@pytest.mark.asyncio
+async def test_legacy_bootstrap_restore_keeps_secrets_off_the_command_line():
+    ssh_client = AsyncMock()
+    sftp_context = _FakeSftpContext()
+    ssh_client.start_sftp_client = Mock(return_value=sftp_context)
+    payload = _restore_payload()
+    restore = SimpleNamespace(
+        restore_path="/root/test",
+        legacy_object_key="source.tar.gz",
+        auth_token=AUTH_TOKEN,
+        restore_log_id="restore-log",
+        backup_volume_info=payload.backup_volume_info,
+    )
+
+    await DockerService.__new__(DockerService)._run_legacy_bootstrap_restore(
+        ssh_client=ssh_client,
+        executor_info=_executor_info(),
+        restore=restore,
+        local_volume="volume",
+        local_volume_path="/root",
+    )
+
+    _assert_secrets_only_in_the_0600_file(ssh_client, sftp_context)
+
+
+def test_scripts_pass_s3_keys_to_docker_by_name_only():
+    for script in (backup_storage, restore_storage):
+        command = script.docker_base_command(SimpleNamespace())
+        assert command[command.index("AWS_SECRET_ACCESS_KEY") - 1] == "-e"
+        assert command[command.index("AWS_ACCESS_KEY_ID") - 1] == "-e"
+        assert not any(item.startswith(("AWS_SECRET_ACCESS_KEY=", "AWS_ACCESS_KEY_ID=")) for item in command)
+
+
+def test_load_secrets_file_exports_keys_and_deletes_the_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+    path = tmp_path / "secrets.json"
+    path.write_text(
+        json.dumps({"auth_token": AUTH_TOKEN, "aws_access_key_id": ACCESS_KEY, "aws_secret_access_key": SECRET_KEY})
+    )
+
+    assert workspace_mount_module.load_secrets_file(str(path)) == AUTH_TOKEN
+
+    assert not path.exists()
+    assert os.environ["AWS_ACCESS_KEY_ID"] == ACCESS_KEY
+    assert os.environ["AWS_SECRET_ACCESS_KEY"] == SECRET_KEY
 
 
 def test_restic_backup_empty_path_targets_the_whole_volume():
@@ -527,6 +655,36 @@ def test_restic_backup_empty_path_targets_the_whole_volume():
 
     assert spec["workspace"]["requested_path"] == payload.source_volume_path
     assert spec["reporter"]["failure_timeout_seconds"] == 600
+
+
+@pytest.mark.asyncio
+async def test_restic_backup_with_excludes_stops_on_an_executor_that_cannot_apply_them(monkeypatch):
+    ssh_client = AsyncMock()
+    monkeypatch.setattr(miner_service_module.asyncssh, "connect", Mock(return_value=_FakeSshContext(ssh_client)))
+    monkeypatch.setattr(miner_service_module, "supports_workspace_field", AsyncMock(return_value=False))
+    start = AsyncMock()
+    monkeypatch.setattr(miner_service_module, "start_storage_operation", start)
+    payload = _backup_payload()
+    payload.backup_engine = "restic"
+    payload.backup_log_id = "11111111-1111-4111-8111-111111111111"
+    payload.exclude_patterns = [".ssh"]
+
+    with pytest.raises(RuntimeError, match="exclude_patterns"):
+        await MinerService.__new__(MinerService).handle_backup_container_req(
+            _executor_info(), payload, Mock(), _docker_service_with_pinned_hosts()
+        )
+    start.assert_not_awaited()
+
+
+def test_restic_backup_spec_carries_the_exclude_patterns():
+    payload = _backup_payload()
+    payload.backup_engine = "restic"
+    payload.repository_password = "repository-password"
+    payload.exclude_patterns = [".cache", ".ssh"]
+
+    spec = MinerService._restic_backup_operation_spec(payload)
+
+    assert spec["workspace"]["exclude_patterns"] == [".cache", ".ssh"]
 
 
 def test_restic_online_restore_empty_path_targets_the_whole_volume():

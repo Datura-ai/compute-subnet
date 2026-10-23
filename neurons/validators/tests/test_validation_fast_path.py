@@ -29,10 +29,12 @@ from neurons.validators.src.protocol.vc_protocol.compute_requests import (
 from neurons.validators.src.services.task.checks import (
     CachedTemplateVerificationCheck,
     CapabilityCheck,
+    ContainerDownloadSpeedCheck,
     GpuFaultProbeCheck,
     PinnedMemoryProbeCheck,
     PortConnectivityCheck,
     PortCountCheck,
+    PostRentalGpuRecheckCheck,
     RegistryPullCheck,
     RentalVerificationCheck,
     SysboxRequiredCheck,
@@ -311,10 +313,17 @@ def test_fast_path_checks_are_the_serial_checks_re_ordered():
             PortConnectivityCheck,
             PortCountCheck,
             RegistryPullCheck,
+            ContainerDownloadSpeedCheck,
             SysboxRequiredCheck,
             RentalVerificationCheck,
         ],
-        [CapabilityCheck, GpuFaultProbeCheck, PinnedMemoryProbeCheck, CachedTemplateVerificationCheck],
+        [
+            CapabilityCheck,
+            GpuFaultProbeCheck,
+            PinnedMemoryProbeCheck,
+            PostRentalGpuRecheckCheck,
+            CachedTemplateVerificationCheck,
+        ],
     ]
 
 

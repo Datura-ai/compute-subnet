@@ -77,7 +77,7 @@ if [[ ${#missing[@]} -gt 0 ]]; then
     echo -e "    ${RED}•  ${var}${RESET}" >&2
   done
   echo -e "\n${YELLOW}  Usage example:${RESET}"
-  echo -e "  ${DIM}TAG=latest [VALIDATOR_HOTKEY_SS58=<hotkey> [VALIDATOR_NEXT_HOTKEY_SS58=<hotkey>]] bash docker_build.sh${RESET}\n"
+  echo -e "  ${DIM}TAG=latest [VALIDATOR_HOTKEY_SS58=<hotkey> [VALIDATOR_NEXT_HOTKEY_SS58=<hotkey>] [VALIDATOR_SSH_SOURCES=<ip,ip>]] bash docker_build.sh${RESET}\n"
   exit 1
 fi
 
@@ -109,6 +109,11 @@ if [[ -n "${VALIDATOR_HOTKEY_SS58:-}" || -n "${VALIDATOR_NEXT_HOTKEY_SS58:-}" ]]
   if [[ -n "${VALIDATOR_NEXT_HOTKEY_SS58:-}" ]]; then
     echo "_VALIDATOR_NEXT_HOTKEY_SS58 = \"${VALIDATOR_NEXT_HOTKEY_SS58}\"" >> "${CONFIG_OVERRIDE_FILE}"
     log_kv "Next validator hotkey:" "${VALIDATOR_NEXT_HOTKEY_SS58}"
+  fi
+  # I-78: the non-prod validator's egress addresses (comma-separated); unset = no ssh source pin
+  if [[ -n "${VALIDATOR_SSH_SOURCES:-}" ]]; then
+    echo "_VALIDATOR_SSH_SOURCES = \"${VALIDATOR_SSH_SOURCES}\"" >> "${CONFIG_OVERRIDE_FILE}"
+    log_kv "Validator ssh sources:" "${VALIDATOR_SSH_SOURCES}"
   fi
   log_success "Generated: ${CONFIG_OVERRIDE_FILE}"
 else

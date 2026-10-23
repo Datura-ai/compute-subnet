@@ -51,6 +51,7 @@ class BackendMessage(Message):
 class ServerRequest(BackendMessage):
     """A request about one executor of one miner."""
 
+    command_id: str = ""
     miner_hotkey: str
     executor_id: str
     # the validator's copy carries where the miner listens; the backend does not send them
@@ -164,6 +165,10 @@ class ContainerCreateRequest(ContainerRequest):
     cluster_membership: ClusterMembership | None = None
     # DAH-2211: build from this Dockerfile on the host instead of pulling `docker_image`
     dockerfile_content: str | None = None
+    # 1.11.0: a gzipped tar of the build context for `dockerfile_content`, fetched by the validator and
+    # checked against `build_context_sha256` (hex) before the build; None builds with the Dockerfile alone
+    build_context_url: str | None = None
+    build_context_sha256: str | None = None
     # DAH-1524: the image ships sshd (and runs Jupyter itself); None keeps the validator's bootstrap
     ships_sshd: bool | None = None
     gpu_power_limits: list[GpuPowerLimit] | None = None
@@ -247,6 +252,8 @@ class BackupContainerRequest(ContainerRequest):
     repository_pod_id: str | None = None
     repository_password: str | None = pydantic.Field(default=None, repr=False)
     failure_timeout_seconds: int = pydantic.Field(default=STORAGE_OPERATION_REPORTING_FAILURE_TIMEOUT_SECONDS, gt=0)
+    # 1.8.0: restic --exclude patterns (the default backup skips caches and keys); an older validator ignores them.
+    exclude_patterns: list[str] = []
 
 
 @BACKEND_MESSAGES.register
@@ -267,6 +274,8 @@ class RestoreContainerRequest(ContainerRequest):
     snapshot_id: str | None = None
     legacy_object_size_bytes: int | None = None
     failure_timeout_seconds: int = pydantic.Field(default=STORAGE_OPERATION_REPORTING_FAILURE_TIMEOUT_SECONDS, gt=0)
+    # a reconnect re-dispatch of a restore that may already be running; its dispatch failure is not reported
+    recovery: bool = False
 
 
 @BACKEND_MESSAGES.register

@@ -215,6 +215,7 @@ class WorkloadKind(enum.Enum):
 
 
 class BaseServerRequest(BaseRequest):
+    command_id: str = ""
     message_type: ContainerRequestType
     miner_hotkey: str
     miner_address: str | None = None
@@ -340,6 +341,10 @@ class ContainerCreateRequest(ContainerBaseRequest):
     # builds the image from this Dockerfile on the executor host instead of pulling
     # `docker_image`. None or "" keeps the normal image-pull path.
     dockerfile_content: str | None = None
+    # a gzipped tar of the build context for `dockerfile_content` and its sha256 (hex); see
+    # services/build_context.py. None builds with the Dockerfile as the only file.
+    build_context_url: str | None = None
+    build_context_sha256: str | None = None
     # DAH-1524 / DAH-2265 (default-image / cached-template deploy): set truthy by the
     # backend when the user selects the default Docker image or default cache template.
     # Such images run their own start.sh, so the validator skips work the image already
@@ -451,6 +456,7 @@ class BackupContainerRequest(ContainerBaseRequest):
     repository_pod_id: str | None = None
     repository_password: str | None = Field(default=None, repr=False)
     failure_timeout_seconds: int = Field(default=600, gt=0)
+    exclude_patterns: list[str] = []
 
 
 class RestoreContainerRequest(ContainerBaseRequest):
@@ -470,6 +476,7 @@ class RestoreContainerRequest(ContainerBaseRequest):
     snapshot_id: str | None = None
     legacy_object_size_bytes: int | None = None
     failure_timeout_seconds: int = Field(default=600, gt=0)
+    recovery: bool = False  # reconnect re-dispatch: the restore may already be running, so never report it failed
 
 
 class CancelStorageOperationRequest(ContainerBaseRequest):
@@ -513,6 +520,7 @@ class BaseValidatorResponse(BaseRequest, DeliveryStamps):
 
 class ContainerWarningCode(enum.Enum):
     ExternalVolumeFailed = "ExternalVolumeFailed"
+    DockerInDockerDisabled = "DockerInDockerDisabled"
 
 
 class VolumeEncryptionStatus(str, enum.Enum):
@@ -687,6 +695,7 @@ class ContainerDeleted(ContainerBaseResponse):
 class SshPubKeyAdded(ContainerBaseResponse):
     message_type: ContainerResponseType = ContainerResponseType.SshPubKeyAdded
     user_public_keys: list[str] = []
+    command_id: str = ""
 
 
 class SshPubKeyRemoved(ContainerBaseResponse):
@@ -733,6 +742,7 @@ class FailedContainerErrorTypes(enum.Enum):
 
 class FailedContainerRequest(ContainerBaseResponse):
     message_type: ContainerResponseType = ContainerResponseType.FailedRequest
+    command_id: str = ""
     error_type: FailedContainerErrorTypes = FailedContainerErrorTypes.ContainerCreationFailed
     # Renter-safe HEADLINE only. The backend surfaces this in customer-facing events, so it must never
     # carry executor host details (IP, SSH port/username, hotkey) — those go in `detail`.

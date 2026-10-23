@@ -265,12 +265,12 @@ class MinerLogLine(BaseModel):
             result,
             reason=ZeroIncentiveReason.PROVIDER_EMAIL_NOT_CONFIRMED,
             message=(
-                "No subnet incentive: this executor is not listed until the provider account "
-                "confirms an e-mail address. Confirm your e-mail under Profile Settings in the "
-                "provider portal to remove this hold. Other listing and incentive requirements "
-                "still apply."
+                "No idle pay or rented extra: the provider account has not confirmed an e-mail "
+                "address. Confirm your e-mail under Profile Settings in the provider portal to "
+                "remove this hold. A listed node stays listed and rented. Other listing and "
+                "incentive requirements still apply."
             ),
-            internal_message="Executor excluded from both pools - provider e-mail not confirmed, node not listed",
+            internal_message="Executor excluded from both pools - provider e-mail not confirmed",
         )
 
     @staticmethod
@@ -599,12 +599,20 @@ class MinerLogLine(BaseModel):
     # ── Calculation reports: the per-cycle lines every scored node gets ───────
 
     @staticmethod
-    def mining_score_calculated(result: JobResult, is_rented_after_cutoff: bool) -> MinerLogLine:
+    def mining_score_calculated(
+        result: JobResult, is_rented_after_cutoff: bool, spot_rental_factor: float = 1.0
+    ) -> MinerLogLine:
+        formula: str = (
+            "score * gpu_portion * gpu_count / total_gpu_count * sysbox_multiplier * uptime_multiplier "
+            "* driver_multiplier"
+        )
+        spot_fields: dict[str, Any] = {}
+        if spot_rental_factor != 1.0:
+            # Only a rented spot node carries the factor, so every other line reads as before.
+            formula += " * spot_rental_factor"
+            spot_fields = {"spot_rental_factor": spot_rental_factor}
         return MinerLogLine(
-            message=(
-                "Mining score is calculated successfully. Formula: score * gpu_portion * gpu_count "
-                "/ total_gpu_count * sysbox_multiplier * uptime_multiplier * driver_multiplier"
-            ),
+            message=f"Mining score is calculated successfully. Formula: {formula}",
             fields={
                 "executor_id": str(result.executor_info.uuid),
                 "gpu_model": result.gpu_model,
@@ -618,6 +626,7 @@ class MinerLogLine(BaseModel):
                 "total_gpu_count": result.total_gpu_count,
                 "rental_created": result.rental_created_at,
                 "is_rented_after_cutoff": is_rented_after_cutoff,
+                **spot_fields,
             },
         )
 

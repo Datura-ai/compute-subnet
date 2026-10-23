@@ -142,6 +142,10 @@ class FakeRedis:
         self._touch()
         return self.store.get(key)
 
+    async def mget(self, keys: list[str]):
+        self._touch()
+        return [self.store.get(key) for key in keys]
+
     def _set_hook(self, key: str):
         if key in self.fail_next_set_of:
             self.fail_next_set_of.discard(key)
@@ -249,7 +253,6 @@ def build_context_config(**overrides) -> ContextConfig:
         max_gpu_count=None,
         gpu_model_rates={},
         nvml_digest_map={},
-        verifyx_enabled=False,
         inspector_enabled=False,
         port_private_key=None,
         port_public_key=None,
