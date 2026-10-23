@@ -1492,7 +1492,8 @@ class RentedThroughputMessages:
         impact="Score set to 0",
         remediation=(
             "a container on this rented node downloads from PyPI or Hugging Face below 10 Mbps, or writes to its "
-            "disk below 50 MB/s, while the renter's own traffic is light. Remove any traffic shaping or I/O "
+            "disk below 50 MB/s, while the node's own traffic stayed under 200 Mbps on the network cards and "
+            "200 MB/s on the disks. Remove any traffic shaping or I/O "
             "throttling on docker traffic and containers, check the docker bridge MTU against the uplink "
             "(`ip link`), and check the disk under the docker root (`docker info -f '{{.DockerRootDir}}'`) "
             "for a failing or full drive"

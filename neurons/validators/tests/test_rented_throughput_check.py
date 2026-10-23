@@ -26,11 +26,15 @@ EXECUTOR = default_executor()
 pytestmark = pytest.mark.asyncio
 
 
-def snaps(rx_bytes: int = 0, sectors: int = 0) -> str:
-    """Two host snapshots 2 s apart: rx_bytes received on the NICs and sectors moved on nvme0n1 in between."""
+def snaps(rx_bytes: int = 0, sectors: int = 0, tx_bytes: int = 0, counters: bool = True) -> str:
+    """The docker root on nvme0n1, then two host snapshots 2 s apart: bytes received and sent on the NICs and sectors
+    moved on nvme0n1 in between. counters=False: the host's NIC counters were not readable."""
+    net0 = "rx=1000 tx=1000 " if counters else ""
+    net1 = f"rx={1000 + rx_bytes} tx={1000 + tx_bytes} " if counters else ""
     return (
-        "lium_tp t=100.0 rx=1000 io=nvme0n1:500,sda:7,\n"
-        f"lium_tp t=102.0 rx={1000 + rx_bytes} io=nvme0n1:{500 + sectors},sda:7,\n"
+        "lium_tp_device name=nvme0n1p2\nlium_tp_device name=nvme0n1\n"
+        f"lium_tp t=100.0 {net0}io=nvme0n1:500,sda:7,\n"
+        f"lium_tp t=102.0 {net1}io=nvme0n1:{500 + sectors},sda:7,\n"
     )
 
 
@@ -43,6 +47,11 @@ SLOW_DISK = snaps() + disk(secs=30.0) + FAST  # 9 MB/s
 SLOW_NET = snaps() + disk() + SLOW
 # the renter is pulling 400 Mbps: a slow probe download is the shared link, not the host
 BUSY_NET = snaps(rx_bytes=100_000_000) + disk() + SLOW
+BUSY_UPLOAD = snaps(tx_bytes=100_000_000) + disk() + SLOW
+NO_COUNTERS = snaps(counters=False) + disk() + SLOW
+# the renter's loader keeps the disk busy; the network is healthy
+BUSY_DISK = snaps(sectors=2_000_000) + disk() + FAST
+NET_UNMEASURED = snaps(counters=False) + disk() + FAST
 
 
 def rented(hotkey: str = "miner-hotkey", status: str | None = None) -> RentedExecutorsResponse:
@@ -104,7 +113,8 @@ def test_defaults_enforce_with_a_kill_switch():
 
 def test_command_samples_the_host_then_probes_disk_and_network_in_the_renter_runtime():
     cmd = throughput_command(True)
-    assert cmd.index("/proc/net/dev") < cmd.index("/usr/bin/docker run")
+    assert cmd.index("/proc/1/net/dev") < cmd.index("/usr/bin/docker run")
+    assert cmd.index("DockerRootDir") < cmd.index("/proc/1/mountinfo") < cmd.index("lium_tp_device")
     assert "--runtime=sysbox-runc" in cmd and '--network "$net"' in cmd
     assert "oflag=direct" in cmd and "conv=fsync" in cmd and "files.pythonhosted.org" in cmd
 
@@ -120,6 +130,8 @@ def test_parse_disk_and_busy():
     assert parse_disk("").error == "no_output"
     rx, io = parse_busy(snaps(rx_bytes=50_000_000, sectors=2_000_000))
     assert rx == pytest.approx(200.0) and io == pytest.approx(512.0)
+    assert parse_busy(snaps(rx_bytes=1, tx_bytes=50_000_000))[0] == pytest.approx(200.0)
+    assert parse_busy(snaps(counters=False, sectors=2_000_000)) == (None, pytest.approx(512.0))
     assert parse_busy("") == (None, None)
 
 
@@ -130,10 +142,37 @@ async def test_good_reading_passes():
     assert res.passed and res.event.reason_code == Msg.OK.reason and len(runner.commands) == 1
 
 
-@pytest.mark.parametrize("answer", [SLOW_DISK, SLOW_NET])
-async def test_two_slow_readings_zero_the_score_until_one_passes(answer):
+@pytest.mark.parametrize("seconds", [0.5, 30])
+@pytest.mark.parametrize("relevant", [0, 2_000_000])
+@pytest.mark.parametrize("unrelated", [0, 2_000_000])
+async def test_only_the_docker_root_disk_excuses_the_disk(seconds, relevant, unrelated):
+    output = (
+        "lium_tp_device name=sda\n"
+        "lium_tp t=100 rx=1000 tx=1000 io=sda:7,nvme0n1:500,\n"
+        f"lium_tp t=102 rx=1000 tx=1000 io=sda:{7 + relevant},nvme0n1:{500 + unrelated},\n"
+        + disk(secs=seconds)
+        + FAST
+    )
+    with flags():
+        ctx, _ = make_ctx(output)
+        _, net, disk_side = await RentedThroughputCheck()._measure_and_judge(ctx)
+    assert net == "pass"
+    assert disk_side == ("none" if relevant else "fail" if seconds == 30 else "pass")
+
+
+@pytest.mark.parametrize(
+    "answer, recovery",
+    [
+        (SLOW_DISK, GOOD),
+        (SLOW_NET, GOOD),
+        # the failed side passes while the other side is no verdict: the streak still ends
+        (SLOW_NET, BUSY_DISK),
+        (SLOW_DISK, NET_UNMEASURED),
+    ],
+)
+async def test_two_slow_readings_zero_the_score_until_that_side_passes(answer, recovery):
     with flags() as clock:
-        ctx, runner = make_ctx(answer, answer, GOOD)
+        ctx, runner = make_ctx(answer, answer, recovery)
         check = RentedThroughputCheck()
         first = await check.run(ctx)
         assert first.passed and first.event.reason_code == Msg.SLOW_ONCE.reason
@@ -147,9 +186,11 @@ async def test_two_slow_readings_zero_the_score_until_one_passes(answer):
         assert (await check.run(ctx)).passed is True
 
 
-async def test_a_busy_renter_is_no_verdict_and_keeps_the_streak():
+# the host's NICs busy either way, or their counters unreadable: a slow download is no verdict
+@pytest.mark.parametrize("busy", [BUSY_NET, BUSY_UPLOAD, NO_COUNTERS])
+async def test_a_busy_renter_is_no_verdict_and_keeps_the_streak(busy):
     with flags() as clock:
-        ctx, runner = make_ctx(SLOW_NET, BUSY_NET, SLOW_NET)
+        ctx, runner = make_ctx(SLOW_NET, busy, SLOW_NET)
         check = RentedThroughputCheck()
         await check.run(ctx)
         clock.now += 31 * 60

@@ -36,13 +36,25 @@ SNAP_MARKER = "lium_tp"
 _REDIS_PREFIX = "rented_throughput"
 _REDIS_TTL_SECONDS = 7 * 24 * 3600
 
-# On the host (the executor runs on the host network; /proc/diskstats is not namespaced): received bytes on
-# the physical NICs and sectors moved per whole disk, twice BUSY_WINDOW_SECONDS apart, before the probe.
+# The executor shares the host PID namespace but not its network (bridge, `pid: host`), so the NIC counters are
+# init's (/proc/1/net/dev), read only when /proc/1 is the host's; else no rx/tx and the network side is no verdict.
+# The devices under the docker root (the probe's writable layer) come from init's mountinfo through sysfs: the
+# device, its dm/md slaves and a partition's disk. Then bytes received and sent on the physical NICs and sectors
+# moved per whole disk (/proc/diskstats is not namespaced), twice BUSY_WINDOW_SECONDS apart, before the probe.
 _SNAPSHOT = (
+    "r=$(/usr/bin/docker info -f '{{.DockerRootDir}}' 2>/dev/null); "
+    'm=$(awk -v r="${r:-/var/lib/docker}" \'r==$5 || $5=="/" || index(r, $5 "/")==1 '
+    "{ if (length($5) >= n) { n=length($5); m=$3 } } END{print m}' /proc/1/mountinfo 2>/dev/null); "
+    'ds=; [ -n "$m" ] && ds=$(readlink -f /sys/dev/block/$m 2>/dev/null) && ds=${ds##*/}; '
+    "for i in 1 2 3 4; do n=; for d in $ds; do [ -e /sys/class/block/$d ] || continue; "
+    f'echo "{SNAP_MARKER}_device name=$d"; '
+    '[ -e /sys/class/block/$d/partition ] && p=$(readlink -f /sys/class/block/$d) && p=${p%/*} && n="$n ${p##*/}"; '
+    'n="$n $(ls /sys/class/block/$d/slaves 2>/dev/null)"; done; ds=$n; done; '
     f'snap() {{ echo "{SNAP_MARKER} t=$(cut -d" " -f1 /proc/uptime) '
-    "rx=$(sed 's/:/ /' /proc/net/dev | awk 'NR>2 && $1!=\"lo\" && "
-    '$1!~/^(docker|veth|br-|virbr|cni|flannel|cali|tun|wg|lxc|vxlan|kube)/{s+=$2} END{printf "%d", s}\') '
-    "io=$(awk '$3~/^(sd[a-z]+|nvme[0-9]+n[0-9]+|vd[a-z]+|xvd[a-z]+|md[0-9]+)$/{printf \"%s:%d,\", $3, $6+$10}' "
+    "$([ /proc/1/root/ -ef / ] || sed 's/:/ /' /proc/1/net/dev 2>/dev/null | awk 'NR>2 && $1!=\"lo\" && "
+    "$1!~/^(docker|veth|br-|virbr|cni|flannel|cali|tun|wg|lxc|vxlan|kube)/{r+=$2; t+=$10; k++} "
+    'END{if (k) printf "rx=%.0f tx=%.0f", r, t}\') '
+    "io=$(awk '$3~/^(sd[a-z]+|nvme[0-9]+n[0-9]+|vd[a-z]+|xvd[a-z]+|md[0-9]+)$/{printf \"%s:%.0f,\", $3, $6+$10}' "
     '/proc/diskstats)"; }; '
     f"snap; sleep {BUSY_WINDOW_SECONDS}; snap; "
 )
@@ -90,25 +102,34 @@ def parse_disk(stdout: str) -> DiskReading:
 
 
 def parse_busy(stdout: str) -> tuple[float | None, float | None]:
-    """Other traffic in the window before the probe: (received Mbps on the NICs, MB/s on the busiest disk)."""
-    snaps = []
+    """Other traffic in the window before the probe: (Mbps on the host NICs, the busier direction; MB/s on the busiest
+    disk under the docker root). None = not measured."""
+    snaps, devices = [], set()
     for line in (stdout or "").splitlines():
-        if line.startswith(f"{SNAP_MARKER} "):
+        if line.startswith(f"{SNAP_MARKER}_device name="):
+            devices.add(line.partition("=")[2].strip())
+        elif line.startswith(f"{SNAP_MARKER} "):
             tokens = dict(t.partition("=")[::2] for t in line[len(SNAP_MARKER) :].split())
             try:
                 io = {
                     d: int(n)
                     for d, _, n in (e.partition(":") for e in tokens.get("io", "").split(",") if e)
                 }
-                snaps.append((float(tokens["t"]), int(tokens["rx"]), io))
+                net = (int(tokens["rx"]), int(tokens["tx"])) if "rx" in tokens else None
+                snaps.append((float(tokens["t"]), net, io))
             except (KeyError, ValueError):
                 return None, None
     if len(snaps) < 2:
         return None, None
-    (t0, rx0, io0), (t1, rx1, io1) = snaps[0], snaps[1]
+    (t0, net0, io0), (t1, net1, io1) = snaps[0], snaps[1]
     dt = max(t1 - t0, 0.01)
-    disk = max((io1[d] - io0[d] for d in io1 if d in io0), default=0) * 512 / dt / 1e6
-    return (rx1 - rx0) * 8 / dt / 1e6, disk
+    moved = {d: io1[d] - io0[d] for d in io1 if d in io0}
+    # shortcut: docker root devices unresolved (btrfs/zfs, no host view) = any busy disk excuses; resolve those to tighten
+    relevant = [moved[d] for d in devices if d in moved] or list(moved.values())
+    disk = max(relevant, default=0) * 512 / dt / 1e6
+    if net0 is None or net1 is None:
+        return None, disk
+    return max(net1[0] - net0[0], net1[1] - net0[1]) * 8 / dt / 1e6, disk
 
 
 def phase_offset_seconds(uuid: str) -> float:
@@ -116,10 +137,17 @@ def phase_offset_seconds(uuid: str) -> float:
     return fraction * settings.RENTED_THROUGHPUT_INTERVAL_HOURS * 3600
 
 
+def _step(failures: int, side: str) -> int:
+    """One streak per side: a side that measures and passes ends its own streak whatever the other side says."""
+    return failures + 1 if side == "fail" else (failures if side == "none" else 0)
+
+
 @dataclass
 class _State:
     at: float
     failures_in_a_row: int = 0
+    net_failures: int = 0
+    disk_failures: int = 0
     reading: dict[str, Any] = field(default_factory=dict)
     measured: bool = False
 
@@ -135,6 +163,8 @@ class _State:
             return cls(
                 at=float(data["at"]),
                 failures_in_a_row=int(data.get("failures_in_a_row", 0)),
+                net_failures=int(data.get("net_failures", 0)),
+                disk_failures=int(data.get("disk_failures", 0)),
                 reading=dict(data.get("reading") or {}),
                 measured=bool(data.get("measured")),
             )
@@ -152,9 +182,10 @@ class RentedThroughputCheck:
     A reading fails when a download fails that check's test (CONTAINER_DOWNLOAD_SPEED_MIN_MBPS, or unreachable while
     the validator reaches it) or the write runs under RENTED_THROUGHPUT_DISK_MIN_MB_PER_S. The renter's own traffic
     is no excuse below the floors: only when the 2 s before the probe already moved RENTED_THROUGHPUT_BUSY_MBPS on the
-    NICs, or RENTED_THROUGHPUT_DISK_BUSY_MB_PER_S on a disk, is that side no verdict (a link or disk doing that much
-    is not the defect). READINGS_BEFORE_VERDICT failing readings in a row (RETRY_SECONDS apart) zero the score
-    (RENTED_THROUGHPUT_SLOW) until a reading passes. Non-fatal: the rental keeps running.
+    host NICs (either direction), or RENTED_THROUGHPUT_DISK_BUSY_MB_PER_S on a disk under the docker root, is that side
+    no verdict (a link or disk doing that much is not the defect); so is the network side without host NIC counters.
+    READINGS_BEFORE_VERDICT failing readings of one side in a row (RETRY_SECONDS apart) zero the score
+    (RENTED_THROUGHPUT_SLOW) until that side passes a reading. Non-fatal: the rental keeps running.
     """
 
     check_id = "host.validate.rented_throughput"
@@ -186,14 +217,20 @@ class RentedThroughputCheck:
         if now < state.next_due_at():
             return self._verdict(ctx, state, probed=False)
 
-        reading, failing, no_verdict = await self._measure_and_judge(ctx)
-        if failing:
-            failures = state.failures_in_a_row + 1
-        elif no_verdict:
-            failures = state.failures_in_a_row
-        else:
-            failures = 0
-        state = _State(at=now, failures_in_a_row=failures, reading=reading, measured=not no_verdict)
+        reading, net, disk = await self._measure_and_judge(ctx)
+        net_failures, disk_failures = (
+            _step(state.net_failures, net),
+            _step(state.disk_failures, disk),
+        )
+        failures = max(net_failures, disk_failures)
+        state = _State(
+            at=now,
+            failures_in_a_row=failures,
+            net_failures=net_failures,
+            disk_failures=disk_failures,
+            reading=reading,
+            measured="none" not in (net, disk),
+        )
         logger.info(
             _m(
                 "RENTED_THROUGHPUT",
@@ -201,7 +238,7 @@ class RentedThroughputCheck:
                     {
                         **ctx.default_extra,
                         **reading,
-                        "failing": failing,
+                        "failing": "fail" in (net, disk),
                         "failures_in_a_row": failures,
                     }
                 ),
@@ -210,7 +247,8 @@ class RentedThroughputCheck:
         await self._save(ctx, key, state)
         return self._verdict(ctx, state, probed=True)
 
-    async def _measure_and_judge(self, ctx: Context) -> tuple[dict[str, Any], bool, bool]:
+    async def _measure_and_judge(self, ctx: Context) -> tuple[dict[str, Any], str, str]:
+        """The reading and each side's verdict: "fail", "pass" or "none" (no verdict)."""
         result = await ctx.runner.run(
             throughput_command(bool(ctx.state.sysbox_runtime)),
             timeout=COMMAND_TIMEOUT_SECONDS,
@@ -219,35 +257,37 @@ class RentedThroughputCheck:
         stdout = result.stdout or ""
         endpoints = parse_download_speed(stdout)
         disk = parse_disk(stdout)
-        rx_mbps, disk_busy = parse_busy(stdout)
-        net_busy = rx_mbps is not None and rx_mbps >= settings.RENTED_THROUGHPUT_BUSY_MBPS
+        net_mbps, disk_busy = parse_busy(stdout)
+        # no host counters: a slow download may be the renter's, so the network side is no verdict
+        net_busy = net_mbps is None or net_mbps >= settings.RENTED_THROUGHPUT_BUSY_MBPS
         disk_is_busy = (
             disk_busy is not None and disk_busy >= settings.RENTED_THROUGHPUT_DISK_BUSY_MB_PER_S
         )
 
-        net = await ContainerDownloadSpeedCheck()._judge(endpoints)
-        net_failing = net.is_failing and not net_busy
-        net_no_verdict = net_busy or net.has_no_verdict
-        disk_failing = (
-            disk.mb_per_s is not None
-            and disk.mb_per_s < settings.RENTED_THROUGHPUT_DISK_MIN_MB_PER_S
-            and not disk_is_busy
-        )
-        disk_no_verdict = disk_is_busy or disk.mb_per_s is None
-        failing = net_failing or disk_failing
+        judged = await ContainerDownloadSpeedCheck()._judge(endpoints)
+        if net_busy or judged.has_no_verdict:
+            net = "none"
+        else:
+            net = "fail" if judged.is_failing else "pass"
+        if disk_is_busy or disk.mb_per_s is None:
+            disk_side = "none"
+        else:
+            disk_side = (
+                "fail" if disk.mb_per_s < settings.RENTED_THROUGHPUT_DISK_MIN_MB_PER_S else "pass"
+            )
         reading = {
             "endpoints": [asdict(r) for r in endpoints],
             "disk": asdict(disk),
-            "other_rx_mbps": rx_mbps,
+            "other_net_mbps": net_mbps,
             "other_disk_mb_per_s": disk_busy,
-            "network_failing": net_failing,
-            "disk_failing": disk_failing,
+            "network_verdict": net,
+            "disk_verdict": disk_side,
             "min_mbps": settings.CONTAINER_DOWNLOAD_SPEED_MIN_MBPS,
             "disk_min_mb_per_s": settings.RENTED_THROUGHPUT_DISK_MIN_MB_PER_S,
         }
         if result.error_type is not None:
             reading["error"] = f"{result.error_type}: {(result.error_message or '')[-200:]}"
-        return reading, failing, not failing and (net_no_verdict or disk_no_verdict)
+        return reading, net, disk_side
 
     def _verdict(self, ctx: Context, state: _State, *, probed: bool) -> CheckResult:
         what: dict[str, Any] = {
@@ -278,6 +318,8 @@ class RentedThroughputCheck:
         payload = {
             "at": state.at,
             "failures_in_a_row": state.failures_in_a_row,
+            "net_failures": state.net_failures,
+            "disk_failures": state.disk_failures,
             "reading": state.reading,
             "measured": state.measured,
         }
