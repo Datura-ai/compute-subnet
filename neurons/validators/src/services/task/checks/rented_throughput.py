@@ -50,14 +50,19 @@ _SNAPSHOT = (
     f'echo "{SNAP_MARKER}_device name=$d"; '
     '[ -e /sys/class/block/$d/partition ] && p=$(readlink -f /sys/class/block/$d) && p=${p%/*} && n="$n ${p##*/}"; '
     'n="$n $(ls /sys/class/block/$d/slaves 2>/dev/null)"; done; ds=$n; done; '
-    # a bond's or bridge's member NICs (they have a master) and VLAN sub-interfaces repeat the parent's traffic. Read in
+    # a bond's or bridge's member NICs (they have a master) and VLAN sub-interfaces repeat the parent's traffic. A member
+    # is dropped only while its master is counted: an uplink in docker's or an OVS bridge is the host's traffic. Read in
     # the host's view: this shell's own /sys/class/net is the executor container's network namespace
-    'sl=$(for i in /proc/1/root/sys/class/net/*; do [ -e $i/master ] && printf " %s" "${i##*/}"; done; '
-    "awk '/^Slave Interface:/{printf \" %s\", $3}' /proc/1/net/bonding/* 2>/dev/null); "
+    "sl=$(for i in /proc/1/root/sys/class/net/*; do [ -e $i/master ] && m=$(readlink $i/master) && "
+    'printf " %s:%s" "${i##*/}" "${m##*/}"; done; '
+    'for f in /proc/1/net/bonding/*; do [ -f "$f" ] && '
+    'awk -v b="${f##*/}" \'/^Slave Interface:/{printf " %s:%s", $3, b}\' "$f"; done 2>/dev/null); '
     f'snap() {{ echo "{SNAP_MARKER} t=$(cut -d" " -f1 /proc/uptime) '
-    "$([ /proc/1/root/ -ef / ] || sed 's/:/ /' /proc/1/net/dev 2>/dev/null | awk -v sl=\"$sl \" "
-    '\'NR>2 && $1!="lo" && $1!~/[.@]/ && !index(sl, " " $1 " ") && '
-    "$1!~/^(docker|veth|br-|virbr|cni|flannel|cali|tun|wg|lxc|vxlan|kube)/{r+=$2; t+=$10; k++} "
+    "$([ /proc/1/root/ -ef / ] || sed 's/:/ /' /proc/1/net/dev 2>/dev/null | awk -v sl=\"$sl\" "
+    '\'function keep(x) {return x!="lo" && x!~/[.@]/ && '
+    "x!~/^(docker|veth|br-|virbr|cni|flannel|cali|tun|wg|lxc|vxlan|kube)/} "
+    'BEGIN{n=split(sl, a, " "); for (i=1; i<=n; i++) {split(a[i], p, ":"); mst[p[1]]=p[2]}} '
+    "NR>2 && keep($1) && !(($1 in mst) && keep(mst[$1])){r+=$2; t+=$10; k++} "
     'END{if (k) printf "rx=%.0f tx=%.0f", r, t}\') '
     "io=$(awk '$3~/^(sd[a-z]+|nvme[0-9]+n[0-9]+|vd[a-z]+|xvd[a-z]+|md[0-9]+)$/{printf \"%s:%.0f,\", $3, $6+$10}' "
     '/proc/diskstats)"; }; '

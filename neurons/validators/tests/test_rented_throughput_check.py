@@ -219,22 +219,30 @@ async def test_idle_foreign_or_stopped_rentals_are_left_alone():
         assert res.passed and not runner.commands and res.event.reason_code == Msg.SKIPPED.reason
 
 
-@pytest.mark.parametrize("sysfs", [True, False])
-def test_bond_members_and_vlans_are_not_counted_twice(tmp_path, sysfs):
-    # bond0 carries eth0+eth1's traffic, eth0.100 is a VLAN on it: only bond0 and the unrelated eth2 count, whether the
-    # members are read from the host's sysfs or from its bonding status
+# bond0 carries eth0+eth1's traffic and eth0.100 is a VLAN on it: only bond0 and the unrelated eth2 count, whether the
+# members are read from the host's sysfs or its bonding status. Members of a bridge the sum leaves out (docker's, OVS)
+# are the host's uplink and count.
+@pytest.mark.parametrize(
+    "members, expected",
+    [
+        ("sysfs", "rx=1005 tx=101"),
+        ("bonding", "rx=1005 tx=101"),
+        ("excluded_bridge", "rx=2005 tx=201"),
+    ],
+)
+def test_bond_members_and_vlans_are_not_counted_twice(tmp_path, members, expected):
     net = tmp_path / "net"
-    for name in ("bond0", "eth0", "eth1", "eth2"):
+    for name in ("bond0", "br-ex", "eth0", "eth1", "eth2"):
         (net / name).mkdir(parents=True)
     bonding = tmp_path / "bonding"
     bonding.mkdir()
-    if sysfs:
-        for member in ("eth0", "eth1"):
-            (net / member / "master").write_text("")
-    else:  # the host's sysfs not readable from the executor container: /proc/1/net/bonding still names the members
+    if members == "bonding":  # the host's sysfs not readable from the executor container
         (bonding / "bond0").write_text(
             "Bonding Mode: IEEE 802.3ad\nSlave Interface: eth0\nMII Status: up\nSlave Interface: eth1\n"
         )
+    else:
+        for member in ("eth0", "eth1"):
+            (net / member / "master").symlink_to(net / ("bond0" if members == "sysfs" else "br-ex"))
     dev = tmp_path / "dev"
     dev.write_text(
         "Inter-|   Receive\n face |bytes\n"
@@ -243,6 +251,7 @@ def test_bond_members_and_vlans_are_not_counted_twice(tmp_path, sysfs):
             for n, rx, tx in [
                 ("lo", 9, 9),
                 ("bond0", 1000, 100),
+                ("br-ex", 1000, 100),
                 ("eth0", 600, 60),
                 ("eth1", 400, 40),
                 ("eth0.100", 300, 30),
@@ -258,4 +267,4 @@ def test_bond_members_and_vlans_are_not_counted_twice(tmp_path, sysfs):
         .replace(f"sleep {module.BUSY_WINDOW_SECONDS}; ", "")
     )
     out = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30).stdout
-    assert "rx=1005 tx=101" in out, out
+    assert expected in out, out
