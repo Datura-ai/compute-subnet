@@ -313,8 +313,16 @@ class VerifyXValidationService:
             cipher_text=cipher_text,
             challenge_input=challenge_input,
             log_extra=log_extra,
-            expected_lib_sha256=self.lib_sha256(lib_name),
+            expected_lib_sha256=self.lib_sha256(self._executor_lib_path(lib_name, machine_spec)),
         )
+
+    @staticmethod
+    def _executor_lib_path(lib_name: str, machine_spec: dict) -> str:
+        """The library the executor holds: the aarch64 build on an ARM host (when this validator has it),
+        so `/verify` and the SSH checksum gate accept the same file for one architecture."""
+        if machine_spec.get("machine_arch") == "aarch64":
+            return aarch64_lib_path(lib_name) or lib_name
+        return lib_name
 
     def evaluate_verifyx_capture(
         self,

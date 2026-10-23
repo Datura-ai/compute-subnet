@@ -39,7 +39,7 @@ RUN apt-get update \
   && docker --version
 
 # TARGETARCH (amd64 or arm64) is set by buildx; a plain `docker build` on an x86 host leaves it empty = amd64.
-# arm64 is for GB300 / Grace hosts (executor_cd_*.yml builds both).
+# arm64 is for GB300 / Grace hosts (docker_build.sh with PLATFORMS builds both).
 ARG TARGETARCH
 ARG RESTIC_VERSION=0.19.1
 ARG RESTIC_LINUX_AMD64_SHA256=f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c

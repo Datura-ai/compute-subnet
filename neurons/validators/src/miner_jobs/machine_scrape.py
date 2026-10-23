@@ -12,7 +12,6 @@ import threading
 import psutil
 from functools import wraps
 import hashlib
-import platform
 from base64 import b64encode
 from cryptography.fernet import Fernet
 import tempfile
@@ -2277,7 +2276,8 @@ def get_machine_specs():
 
     
     # aarch64 (GB300 Grace) ships a different libnvidia-ml; the validator picks its digest list by this
-    data["data_machine_arch"] = platform.machine()
+    # os.uname(), not platform.machine(): the obfuscator renames the bare name `platform` (never its import)
+    data["data_machine_arch"] = os.uname().machine
 
     data["data_network"] = {}
 
