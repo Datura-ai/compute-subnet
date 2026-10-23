@@ -5,6 +5,8 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from core.config import settings
+
 from ..messages import NvlinkFaultMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
@@ -27,6 +29,7 @@ class NvlinkFaultCheck:
     bind. Only boards the scrape reports as NVLink between every GPU pair are probed; a GPU without
     multicast support, a driver without the API, or any error other than the NVLink-fault codes passes
     with NVLINK_UNKNOWN. Runs after the rented halt, so a rented node is never probed or failed here.
+    A fault fails the node only with NVLINK_FAULT_ENFORCEMENT_ENABLED; off, it is logged and the node passes.
     """
 
     check_id = "gpu.validate.nvlink_fault"
@@ -63,10 +66,16 @@ class NvlinkFaultCheck:
         }
         status = report.get("status")
         if status == "fault":
-            return CheckResult(
-                passed=False,
-                event=render_message(Msg.PROBE_FAILED, ctx=ctx, check_id=self.check_id, what=what),
+            enforce = settings.NVLINK_FAULT_ENFORCEMENT_ENABLED
+            event = render_message(
+                Msg.PROBE_FAILED,
+                ctx=ctx,
+                check_id=self.check_id,
+                severity=None if enforce else "warning",
+                impact=None if enforce else "Shadow observation only: score was NOT changed",
+                what=what,
             )
+            return CheckResult(passed=not enforce, event=event)
         template = Msg.PROBE_OK if status == "ok" else Msg.UNKNOWN
         return CheckResult(
             passed=True, event=render_message(template, ctx=ctx, check_id=self.check_id, what=what)

@@ -1854,8 +1854,8 @@ class PinnedMemoryProbeMessages:
 
 
 class NvlinkFaultMessages:
-    """A sticky NVLink fault: NVLink multicast (NVLS) cannot bind on an all-NVLink board. No flag: a listed
-    node renters cannot use for multi-GPU work fails until the host repairs it."""
+    """A sticky NVLink fault: NVLink multicast (NVLS) cannot bind on an all-NVLink board. PROBE_FAILED is the
+    enforced form; with NVLINK_FAULT_ENFORCEMENT_ENABLED off it renders as a warning that changes no score."""
 
     PROBE_OK = MessageTemplate(
         event="NVLink multicast probe passed",

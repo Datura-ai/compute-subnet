@@ -1,8 +1,10 @@
 import json
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 import pytest
 from neurons.validators.src.services.task import pipeline_factory
+from neurons.validators.src.services.task.checks import nvlink_fault
 from neurons.validators.src.services.task.checks.nvlink_fault import (
     PROBE_JSON_MARKER,
     PROBE_SOURCE,
@@ -64,15 +66,35 @@ async def test_a_healthy_nvlink_board_passes(context_factory):
     assert runner.calls[0]["stdin_text"] == PROBE_SOURCE
 
 
+FAULT = report(status="fault", error="gpu 0: cuMulticastBindMem -> CUresult 401")
+
+
 @pytest.mark.asyncio
-async def test_a_board_whose_nvlink_multicast_cannot_bind_fails(context_factory):
-    stdout = report(status="fault", error="gpu 0: cuMulticastBindMem -> CUresult 401")
-    result, _ = await run_check(context_factory, NVLINK_BOARD, stdout)
+async def test_a_board_whose_nvlink_multicast_cannot_bind_fails_when_enforced(context_factory):
+    with patch.object(nvlink_fault.settings, "NVLINK_FAULT_ENFORCEMENT_ENABLED", True):
+        result, _ = await run_check(context_factory, NVLINK_BOARD, FAULT)
 
     assert result.passed is False
     assert NvlinkFaultCheck.fatal is True
     assert result.event.reason_code == "NVLINK_FAULT"
+    assert result.event.severity == "error"
     assert "401" in result.event.what_we_saw["probe"]["error"]
+
+
+@pytest.mark.asyncio
+async def test_shadow_mode_logs_the_fault_and_the_node_passes(context_factory):
+    # shadow first (taiberium, 23 Oct): ~100 all-NVLink nodes, false-fail count unknown until the logs show it
+    assert (
+        type(nvlink_fault.settings).model_fields["NVLINK_FAULT_ENFORCEMENT_ENABLED"].default
+        is False
+    )
+    with patch.object(nvlink_fault.settings, "NVLINK_FAULT_ENFORCEMENT_ENABLED", False):
+        result, _ = await run_check(context_factory, NVLINK_BOARD, FAULT)
+
+    assert result.passed is True
+    assert result.event.reason_code == "NVLINK_FAULT"
+    assert result.event.severity == "warning"
+    assert "NOT changed" in result.event.impact
 
 
 @pytest.mark.asyncio
