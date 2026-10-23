@@ -66,6 +66,7 @@ from .checks import (
     RentalVerificationCheck,
     RentedGpuDropCheck,
     RentedPodResourcesCheck,
+    RentedThroughputCheck,
     ScoreCheck,
     SpecChangeCheck,
     SshdAuthLogCheck,
@@ -387,6 +388,8 @@ class PipelineFactory:
                 ExecutorImageCheck(),
                 InspectorRentedCheck(),
                 RentedPodResourcesCheck(),
+                # RentedThroughputCheck starts a container beside the renter's pod, so never in the dry run.
+                RentedThroughputCheck(),
                 TenantEnforcementCheck(),
                 GpuUsageCheck(),
                 # liumd phase 1 (DAH-2834): one signed `POST /verify` runs the VerifyX and matmul
@@ -502,6 +505,8 @@ class PipelineFactory:
                 ExecutorImageCheck(),
                 InspectorRentedCheck(),
                 RentedPodResourcesCheck(),
+                # RentedThroughputCheck starts a container beside the renter's pod, so never in the dry run.
+                RentedThroughputCheck(),
                 TenantEnforcementCheck(),
                 GpuUsageCheck(),
                 LocalVerifyCheck(),
