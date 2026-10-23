@@ -1481,6 +1481,54 @@ class ContainerDownloadSpeedMessages:
     )
 
 
+class RentedThroughputMessages:
+    """ticket-0739 — a renter on a node listed at ~3 Gbps downloaded at 0.7-2 MB/s and the disk crawled."""
+
+    SLOW = MessageTemplate(
+        event="A rented pod on this node gets far too little network or disk throughput",
+        reason="RENTED_THROUGHPUT_SLOW",
+        severity="error",
+        category="runtime",
+        impact="Score set to 0",
+        remediation=(
+            "a container on this rented node downloads from PyPI or Hugging Face below 10 Mbps, or writes to its "
+            "disk below 50 MB/s, while the renter's own traffic is light. Remove any traffic shaping or I/O "
+            "throttling on docker traffic and containers, check the docker bridge MTU against the uplink "
+            "(`ip link`), and check the disk under the docker root (`docker info -f '{{.DockerRootDir}}'`) "
+            "for a failing or full drive"
+        ),
+    )
+    SLOW_ONCE = MessageTemplate(
+        event="A rented pod's network or disk throughput was slow once; the next reading decides",
+        reason="RENTED_THROUGHPUT_SLOW_ONCE",
+        severity="info",
+        category="runtime",
+        impact="Proceed",
+    )
+    OK = MessageTemplate(
+        event="Rented pod network and disk throughput verified",
+        reason="RENTED_THROUGHPUT_OK",
+        severity="info",
+        category="runtime",
+        impact="Proceed",
+    )
+    # the renter kept the link or the disk busy, an endpoint the validator cannot reach either, or no container
+    UNMEASURED = MessageTemplate(
+        event="Rented pod throughput reached no verdict",
+        reason="RENTED_THROUGHPUT_UNMEASURED",
+        severity="info",
+        category="runtime",
+        impact="Proceed",
+    )
+    SKIPPED = MessageTemplate(
+        event="Rented pod throughput check skipped",
+        reason="RENTED_THROUGHPUT_SKIPPED",
+        severity="info",
+        category="runtime",
+        impact="Proceed",
+    )
+
+
 VERIFYX_DEBUG_DOC_URL = (
     "https://github.com/Datura-ai/lium-io/blob/main/docs/lium-io/verifyx-debug.md"
 )
