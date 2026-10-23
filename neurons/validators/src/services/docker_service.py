@@ -1265,6 +1265,7 @@ async def _explain_add_public_keys_failure(
     image: str,
     cause: Exception,
     log_extra: dict,
+    capture_log_tail: bool = False,
 ) -> Exception:
     """The exception to raise for a failed `add_public_keys` step: the DAH-2624 explanation when the
     container has exited or restarted since `docker run`, otherwise `cause` unchanged.
@@ -1324,13 +1325,45 @@ async def _explain_add_public_keys_failure(
         situation = f"Docker is restarting it ({state.describe()})"
     else:
         situation = f"the container is not running ({state.describe()})"
+    log_tail = ""
+    if capture_log_tail:
+        log_tail = await _container_log_tail_or_empty(
+            docker_client, container_name=container_name, log_extra=log_extra
+        )
     return ImageExitedDuringKeyInjection(
         f"Failed to add SSH public keys: image {image!r} has no long-running command — its default "
         f"command exited right after start (exit_code={state.exit_code!r}) and {situation} while the "
         "SSH keys were being installed; a pod needs a long-running process, for example a start "
-        f"command such as `sleep infinity`. Exec error: {cause}",
+        f"command such as `sleep infinity`. Exec error: {cause}"
+        + (f"{CONTAINER_LOG_TAIL_MARKER}{log_tail}" if log_tail else ""),
         state=state,
     )
+
+
+# DAH-5037: lium-platform's portal shows a default job's own output after this marker, so a
+# provider whose image exits at start sees why. Filler (default-job) containers only: a renter's
+# container output is never copied into failure text.
+CONTAINER_LOG_TAIL_MARKER = " Container log (last lines): "
+CONTAINER_LOG_TAIL_LINES = 20
+CONTAINER_LOG_TAIL_MAX_CHARS = 1500
+
+
+async def _container_log_tail_or_empty(
+    docker_client: RentalDockerSdkClient, *, container_name: str, log_extra: dict
+) -> str:
+    try:
+        tail = await docker_client.container_log_tail(
+            container_name=container_name, lines=CONTAINER_LOG_TAIL_LINES
+        )
+    except Exception as exc:
+        logger.warning(
+            _m(
+                "Could not read the log of a container that exited at start",
+                extra=get_extra_info({**log_extra, "container_name": container_name, "error": str(exc)}),
+            )
+        )
+        return ""
+    return tail.strip()[-CONTAINER_LOG_TAIL_MAX_CHARS:]
 
 
 # after `docker kill`, park() re-reads the container state every _PARK_KILL_SETTLE_SECONDS for up to
@@ -9047,6 +9080,7 @@ class DockerService:
                             image=payload.docker_image,
                             cause=keys_exc,
                             log_extra=default_extra,
+                            capture_log_tail=payload.workload_kind == WorkloadKind.FILLER,
                         )
                         if explained is keys_exc:
                             raise
