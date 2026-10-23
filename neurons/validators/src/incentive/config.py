@@ -49,29 +49,28 @@ RENTAL_PRICES_PER_HOUR["NVIDIA B300 SXM6 PC"] = RENTAL_PRICES_PER_HOUR["NVIDIA B
 # model and idle tier (it never fills the B300 cap), at the B300 rate and caps.
 RENTAL_PRICES_PER_HOUR["NVIDIA GB300"] = RENTAL_PRICES_PER_HOUR["NVIDIA B300 SXM6 AC"]  # mirrors B300; revisit when GB300 market data exists
 
-# Unrented incentive for more GPU types: models with steady rentals elsewhere in the GPU market. The
-# pinned lium-core table has no row for them, so their hourly anchors are set here.
+# Unrented incentive for more GPU types (DAH-4042). Anchors are the backend's MACHINE_PRICES, the listing
+# price renters see; the rows are in lium-core's defaults too, so this override drops on the next lium-core release.
 RENTAL_PRICES_PER_HOUR.update({
-    "NVIDIA GeForce RTX 5080": 0.24,
-    "NVIDIA GeForce RTX 5070 Ti": 0.20,
-    "NVIDIA GeForce RTX 5060 Ti": 0.11,
+    "NVIDIA GeForce RTX 5080": 0.15,
+    "NVIDIA GeForce RTX 5070 Ti": 0.12,
+    "NVIDIA GeForce RTX 5060 Ti": 0.12,
     "NVIDIA GeForce RTX 4060 Ti": 0.11,
     "NVIDIA GeForce RTX 4070 SUPER": 0.09,
-    "NVIDIA GeForce RTX 3080": 0.10,
-    "NVIDIA GeForce RTX 3060": 0.05,
+    "NVIDIA GeForce RTX 3080": 0.09,
+    "NVIDIA GeForce RTX 3060": 0.06,
     "NVIDIA GeForce RTX 2080 Ti": 0.08,
-    "NVIDIA Tesla V100 Tensor Core GPU": 0.10,
-    "NVIDIA RTX PRO 5000 Blackwell": 0.53,
-    # PRO 4500 (32 GB) = PRO 5000 (48 GB) x 32/48 memory ratio; the Server Edition is the same card.
-    "NVIDIA RTX PRO 4500 Blackwell": 0.35,
-    "NVIDIA RTX PRO 4500 Blackwell Server Edition": 0.35,
-    "NVIDIA RTX PRO 6000D Blackwell Workstation Edition": 0.93,
-    "NVIDIA RTX 6000D": 0.93,
-    "NVIDIA GeForce RTX 4080": 0.20,
-    "NVIDIA GeForce RTX 4080 SUPER": 0.17,
-    "NVIDIA GeForce RTX 3070": 0.08,
-    "NVIDIA Quadro RTX 8000": 0.19,
-    "NVIDIA CMP 170HX": 0.10,
+    "NVIDIA Tesla V100 Tensor Core GPU": 0.17,
+    "NVIDIA RTX PRO 5000 Blackwell": 0.67,
+    "NVIDIA RTX PRO 4500 Blackwell": 0.40,
+    "NVIDIA RTX PRO 4500 Blackwell Server Edition": 0.40,
+    "NVIDIA RTX PRO 6000D Blackwell Workstation Edition": 0.82,
+    "NVIDIA RTX 6000D": 0.82,
+    "NVIDIA GeForce RTX 4080": 0.16,
+    "NVIDIA GeForce RTX 4080 SUPER": 0.16,
+    "NVIDIA GeForce RTX 3070": 0.07,
+    "NVIDIA Quadro RTX 8000": 0.21,
+    "NVIDIA CMP 170HX": 0.30,
 })
 
 
