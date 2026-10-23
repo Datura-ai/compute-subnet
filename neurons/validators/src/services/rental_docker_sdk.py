@@ -255,6 +255,14 @@ class VolumeMount:
 
 
 @dataclass(slots=True)
+class DriverVolumeMount:
+    """An anonymous volume Docker creates from ``driver`` at create and removes with the container (`rm -v`)."""
+    target: str
+    driver: str
+    driver_opts: dict[str, str]
+
+
+@dataclass(slots=True)
 class DeviceMount:
     path_on_host: str
     path_in_container: str | None = None
@@ -289,6 +297,7 @@ class ContainerRunSpec:
     environment: dict[str, str] = field(default_factory=dict)
     ports: tuple[PortBinding, ...] = ()
     volumes: tuple[VolumeMount, ...] = ()
+    driver_volumes: tuple[DriverVolumeMount, ...] = ()
     restart_policy: str | None = "unless-stopped"
     runtime: str | None = None
     cap_add: tuple[str, ...] = ()
@@ -1736,6 +1745,7 @@ def _build_host_config_kwargs(spec: ContainerRunSpec) -> dict:
     kwargs = {
         "port_bindings": _port_bindings(spec.ports),
         "binds": _binds(spec.volumes),
+        "mounts": _driver_mounts(spec.driver_volumes),
         "restart_policy": _restart_policy(spec.restart_policy),
         "runtime": spec.runtime,
         "cap_add": list(spec.cap_add) or None,
@@ -1801,6 +1811,17 @@ def _container_volumes(volumes: tuple[VolumeMount, ...]) -> list[str]:
 def _binds(volumes: tuple[VolumeMount, ...]) -> list[str]:
     return [
         f"{volume.source}:{volume.target}:{'ro' if volume.read_only else 'rw'}"
+        for volume in volumes
+    ]
+
+
+def _driver_mounts(volumes: tuple[DriverVolumeMount, ...]) -> list | None:
+    if not volumes:
+        return None
+    from docker.types import DriverConfig, Mount
+
+    return [
+        Mount(target=volume.target, source=None, driver_config=DriverConfig(volume.driver, volume.driver_opts))
         for volume in volumes
     ]
 

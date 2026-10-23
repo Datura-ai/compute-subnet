@@ -6,6 +6,7 @@ import ipaddress
 import json
 import logging
 import math
+import posixpath
 import random
 import re
 import secrets
@@ -144,6 +145,7 @@ from services.rental_docker_sdk import (
     ContainerStateSnapshot,
     ContainerUlimit,
     DeviceMount,
+    DriverVolumeMount,
     PortBinding,
     RENTAL_NETWORK_NAME,
     RentalDockerConnectionError,
@@ -453,6 +455,7 @@ _VLOOPBACK_REPAIR_COMMAND_TIMEOUT_SEC = 30
 # dockerd's default data-root; the repair reads the real one from `docker info` and uses this only
 # when that lookup fails (DAH-3217).
 _DEFAULT_DOCKER_ROOT_DIR = "/var/lib/docker"
+_ANONYMOUS_VOLUME_NAME_RE = re.compile(r"[0-9a-f]{64}")
 _DOCKER_VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 # DAH-2475: slack kept free above a rental's requested volume before we decide the DPHN filler cache
 # has to go. Covers the image layers and scratch the pod needs beyond its own volume.
@@ -823,7 +826,7 @@ def _parse_volume_host_probe(stdout: str, *, with_df: bool) -> VolumeHostProbe:
                 raise Exception(f"volume host probe: unexpected df output in {shown!r}") from exc
         elif tag == "VOL":
             name, _, driver = rest.partition("\t")
-            if _is_vloopback_driver(driver.strip()) and _is_safe_docker_volume_name(name):
+            if _is_reserved_vloopback_volume(name, driver.strip()):
                 volume_names.append(name)
         elif tag == "VOLS":
             volume_ls_status = rest.strip()
@@ -1994,6 +1997,16 @@ def _is_stale_vloopback_mountpoint_error(error_text: str) -> bool:
     return all(phrase in error_text for phrase in _VLOOPBACK_MOUNT_ERROR_PHRASES)
 
 
+def _is_reserved_vloopback_volume(volume_name: str, driver: str) -> bool:
+    # an anonymous (64-hex) vloopback volume is a pod's sparse DinD /var/lib/docker: like the pod's
+    # writable layer it reserves nothing, df already counts what it wrote
+    return (
+        _is_vloopback_driver(driver)
+        and _is_safe_docker_volume_name(volume_name)
+        and not _ANONYMOUS_VOLUME_NAME_RE.fullmatch(volume_name)
+    )
+
+
 def _is_safe_docker_volume_name(volume_name: str) -> bool:
     return bool(_DOCKER_VOLUME_NAME_RE.fullmatch(volume_name))
 
@@ -2762,6 +2775,7 @@ class DockerService:
         gpu_share: float = 1.0,
         quote_socket: bool = False,
         image_command_fallback: tuple[str, ...] = (),
+        docker_data_volume_gb: int | None = None,
     ) -> ContainerRunSpec:
         memory_gb = self._rental_memory_gb(payload.memory_gb, host_ram_kib, gpu_share)
         # Swap off and the renter-first OOM score need a memory limit to hang on (Docker refuses
@@ -2816,6 +2830,26 @@ class DockerService:
             environment=environment,
             ports=_published_ports(port_maps, cluster_udp_ports),
             volumes=tuple(volumes),
+            # A sysbox pod's inner dockerd writes /var/lib/docker; without a mount there it lands in an
+            # uncapped host volume (the image's VOLUME, or sysbox's own) that can fill the host disk.
+            driver_volumes=(
+                (
+                    DriverVolumeMount(
+                        target=_DEFAULT_DOCKER_ROOT_DIR,
+                        driver=_LOOPBACK_PLUGIN_ALIAS,
+                        # the backing sparse file is held under the ext4 16 TiB file limit
+                        driver_opts={
+                            "size": f"{min(docker_data_volume_gb, _FRESH_SIZING_MAX_VOLUME_GB)}g",
+                            "sparse": "true",
+                        },
+                    ),
+                )
+                # a template whose workspace is /var/lib/docker already caps inner Docker; a second
+                # mount there is a duplicate mount point Docker refuses at create
+                if docker_data_volume_gb
+                and posixpath.normpath(local_volume_path) != _DEFAULT_DOCKER_ROOT_DIR
+                else ()
+            ),
             restart_policy="unless-stopped",
             runtime="sysbox-runc" if payload.is_sysbox else None,
             cap_add=self._capabilities_for(devices),
@@ -6259,7 +6293,7 @@ class DockerService:
             if len(parts) != 2:
                 continue
             name, driver = parts
-            if _is_vloopback_driver(driver) and _is_safe_docker_volume_name(name):
+            if _is_reserved_vloopback_volume(name, driver):
                 volume_names.append(name)
         return await self._inspect_vloopback_volumes_bytes(ssh_client, volume_names)
 
@@ -8772,6 +8806,13 @@ class DockerService:
                     gpu_share=rental_gpu_share,
                     quote_socket=quote_socket,
                     image_command_fallback=image_command_fallback,
+                    # capped like the container's own writable layer; needs the loopback plugin the
+                    # capped local volume installed
+                    docker_data_volume_gb=(
+                        effective_storage_limit_gb
+                        if payload.is_sysbox and effective_volume_limit_gb
+                        else None
+                    ),
                 )
 
                 logger.info(
@@ -10154,15 +10195,18 @@ class DockerService:
         if getattr(inspect_result, "exit_status", 0) != 0:
             return None
 
-        for candidate_volume in (inspect_result.stdout or "").split():
-            repaired = await self.repair_stale_vloopback_mountpoint(
+        # every candidate is visited: a sysbox pod has two vloopback volumes (workspace and DinD
+        # /var/lib/docker) and a reboot can leave both stale; an absent dir also counts as repaired
+        repaired = [
+            candidate_volume
+            for candidate_volume in (inspect_result.stdout or "").split()
+            if await self.repair_stale_vloopback_mountpoint(
                 ssh_client,
                 candidate_volume,
                 {**log_extra, "local_volume": candidate_volume},
             )
-            if repaired:
-                return candidate_volume
-        return None
+        ]
+        return repaired[0] if repaired else None
 
     async def _stop_half_recovered_container(
         self,

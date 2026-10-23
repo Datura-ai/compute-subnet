@@ -1,0 +1,92 @@
+"""A sysbox pod's /var/lib/docker is a capped, sparse vloopback volume, not an uncapped host volume."""
+
+from unittest.mock import AsyncMock
+
+import pytest
+from payload_models.payloads import ContainerCreateRequest, CustomOptions
+from services.docker_service import _parse_volume_host_probe
+from services.rental_docker_sdk import GpuDockerConfig, _build_host_config_kwargs
+
+from tests.test_deploy_optimizations import svc  # noqa: F401  (pytest fixture)
+from tests.test_volume_fast_path import _probe_stdout
+
+
+def _run_spec(docker_service, docker_data_volume_gb, local_volume_path="/root"):
+    payload = ContainerCreateRequest(
+        miner_hotkey="hk",
+        executor_id="ex",
+        pod_id="pod",
+        docker_image="img:dind",
+        gpu_uuids=["g0"],
+        is_sysbox=True,
+    )
+    return docker_service._build_rental_container_run_spec(
+        payload=payload,
+        container_name="pod_test",
+        custom_options=CustomOptions(),
+        port_maps=[(22, 30022, 40022)],
+        local_volume="volume_pod",
+        local_volume_path=local_volume_path,
+        encrypted_local_volume=False,
+        external_volume_name=None,
+        gpu_devices=GpuDockerConfig(),
+        effective_storage_limit_gb=40,
+        cpu_count=None,
+        docker_data_volume_gb=docker_data_volume_gb,
+    )
+
+
+def test_sysbox_pod_mounts_a_capped_sparse_loopback_volume_at_var_lib_docker(svc):  # noqa: F811
+    kwargs = _build_host_config_kwargs(_run_spec(svc, 40))
+
+    [mount] = kwargs["mounts"]
+    assert (
+        mount["Target"] == "/var/lib/docker" and mount["Type"] == "volume" and not mount["Source"]
+    )
+    assert mount["VolumeOptions"]["DriverConfig"] == {
+        "Name": "vloopback",
+        "Options": {"size": "40g", "sparse": "true"},
+    }
+
+
+@pytest.mark.parametrize(
+    "path,size,expected",
+    [
+        ("/root", 40, "40g"),
+        ("/root", 16383, "16383g"),
+        ("/root", 20473, "16383g"),  # above the ext4 16 TiB file limit
+        ("/root", None, None),
+        ("/var/lib/docker/", 40, None),  # the workspace already sits there: no duplicate mount
+    ],
+)
+def test_dind_mount(svc, path, size, expected):  # noqa: F811
+    kwargs = _build_host_config_kwargs(_run_spec(svc, size, path))
+    if expected is None:
+        assert "mounts" not in kwargs
+    else:
+        [mount] = kwargs["mounts"]
+        assert mount["VolumeOptions"]["DriverConfig"]["Options"]["size"] == expected
+
+
+_DIND = "a1" * 32
+
+
+@pytest.mark.parametrize("order", [("volume_pod", _DIND), (_DIND, "volume_pod")])
+@pytest.mark.asyncio
+async def test_stale_mount_repair_visits_every_volume_on_every_beat(svc, order):  # noqa: F811
+    ssh = AsyncMock()
+    ssh.run = AsyncMock(return_value=AsyncMock(exit_status=0, stdout="\n".join(order) + "\n"))
+    repair = AsyncMock(return_value=True)
+    svc.repair_stale_vloopback_mountpoint = repair
+    for _ in range(2):
+        repair.reset_mock()
+        assert (
+            await svc._repair_stale_mountpoint_of_container_volume(ssh, "pod_test", {}) == order[0]
+        )
+        assert [call.args[1] for call in repair.await_args_list] == list(order)
+
+
+def test_sizing_ignores_anonymous_vloopback_volumes():
+    stdout = _probe_stdout(volumes=f"VOL\tvolume_abc\tvloopback\nVOL\t{'a1' * 32}\tvloopback\n")
+
+    assert _parse_volume_host_probe(stdout, with_df=True).vloopback_volume_names == ["volume_abc"]
