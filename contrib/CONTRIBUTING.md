@@ -222,7 +222,7 @@ Python 3.11 and [pdm](https://pdm-project.org). Each service is its own pdm proj
 (cd neurons/validators && pdm install && \
  BITTENSOR_WALLET_NAME=test_wallet BITTENSOR_WALLET_HOTKEY_NAME=test_hotkey \
  SQLALCHEMY_DATABASE_URI=sqlite:///test.db ASYNC_SQLALCHEMY_DATABASE_URI=sqlite+aiosqlite:///test.db \
- ENABLE_TDX_ATTESTATION=True TDX_VERIFIER_URL=http://localhost:8000/verify \
+ TDX_VERIFIER_URL=http://localhost:8000/verify \
  pdm run pytest tests/ -v --tb=short --strict-markers)
 
 (cd neurons/executor && pdm install && mkdir -p tmp && pdm run pytest tests/ -v --tb=short)
@@ -252,4 +252,4 @@ Images are built and pushed to Docker Hub by the `*_cd_prod` and `*_cd_dev` work
 | `validator-v*` | `validator_cd_prod.yml` | `daturaai/compute-subnet-validator`, `daturaai/compute-subnet-validator-runner` |
 | `miner-v*` | `miner_cd_prod.yml` | `daturaai/compute-subnet-miner`, `daturaai/compute-subnet-miner-runner` |
 
-The `*_cd_dev.yml` and `*_cd_staging.yml` workflows are started by hand (`workflow_dispatch`); the two `*_cd_staging.yml` use `docker/build-push-action` to publish `ghcr.io/datura-ai/lium-validator:staging` and `ghcr.io/datura-ai/lium-miner:staging`. `packages/lium-core/` has its own CI (`lium-core-ci.yml`) and is released by hand through `lium-core-release.yml`.
+The `*_cd_dev.yml` and `*_cd_staging.yml` workflows are started by hand (`workflow_dispatch`); the two `*_cd_staging.yml` use `docker/build-push-action` to publish `ghcr.io/datura-ai/lium-validator:staging` and `ghcr.io/datura-ai/lium-miner:staging`. `lium_preflight_image.yml` publishes `daturaai/compute-subnet-validator:preflight`, the image `lium mine` runs to check a node's GPUs, on every merge to `main` that changes `neurons/validators/Dockerfile.preflight` or what it copies (also startable by hand). `packages/lium-core/` has its own CI (`lium-core-ci.yml`) and is released by hand through `lium-core-release.yml`.

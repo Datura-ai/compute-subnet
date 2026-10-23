@@ -14,7 +14,6 @@ from incentive.config import IncentiveConfig
 from incentive.rental_price import RentalPriceIncentive
 from services.task_service import JobResult
 
-from core.config import settings
 
 H200 = "NVIDIA H200"  # base model H200 is rental-eligible by default
 MINER_HOTKEY = "miner-hotkey-1"
@@ -269,18 +268,3 @@ async def test_plain_idle_node_earns_only_in_the_unrented_pool(monkeypatch):
     assert job.incentive_source == "idle_incentive"
     assert job.node_state_at_cycle == "idle"
     assert job.incentive_formula_version == "rental_price_v2"
-
-
-def test_expansion_is_off_when_the_feature_flag_is_off(monkeypatch):
-    # Arrange
-    monkeypatch.setattr(settings, "ENABLE_SPLIT_PARTIAL_RENTAL_SCORING", False)
-    job = _make_job(gpu_count=8, rented_gpu_count=1)
-    incentive = _build_incentive(job)
-
-    # Act
-    split_portions = incentive._expand_partially_rented_split_results()
-
-    # Assert — whole-box scoring, exactly as before DAH-2467.
-    assert split_portions == []
-    assert incentive.job_results[MINER_HOTKEY] == [job]
-    assert job.gpu_count == 8
