@@ -225,6 +225,37 @@ async def test_idle_foreign_or_stopped_rentals_are_left_alone():
         assert res.passed and not runner.commands and res.event.reason_code == Msg.SKIPPED.reason
 
 
+# A download over the default bridge (lium-rentals not inspectable) did not measure the renter's path: no network verdict,
+# so it neither strikes nor clears a failure established on lium-rentals; only a fast lium-rentals reading recovers.
+@pytest.mark.parametrize("network", ["lium-rentals", "bridge"])
+@pytest.mark.parametrize("fast", [True, False])
+async def test_only_a_reading_on_the_rentals_network_judges_the_network(network, fast):
+    answer = (GOOD if fast else SLOW_NET).replace(
+        "lium_dl_net name=lium-rentals", f"lium_dl_net name={network}"
+    )
+    on_rentals = network == "lium-rentals"
+    with flags():
+        ctx, _ = make_ctx(answer)
+        _, net, _ = await RentedThroughputCheck()._measure_and_judge(ctx)
+    assert net == (("pass" if fast else "fail") if on_rentals else "none")
+    with flags() as clock:
+        ctx, _ = make_ctx(SLOW_NET, SLOW_NET, answer)
+        check = RentedThroughputCheck()
+        await check.run(ctx)
+        clock.now += 31 * 60
+        assert (await check.run(ctx)).passed is False
+        clock.now += 31 * 60
+        third = await check.run(ctx)
+    assert third.passed is (on_rentals and fast)
+    assert third.updates == ({} if on_rentals and fast else {"rented_throughput_passed": False})
+    with flags() as clock:  # two slow bridge readings never zero the score
+        ctx, _ = make_ctx(answer, answer)
+        check = RentedThroughputCheck()
+        await check.run(ctx)
+        clock.now += 31 * 60
+        assert (await check.run(ctx)).passed is (fast or not on_rentals)
+
+
 # bond0 carries eth0+eth1's traffic, br-ex (OVS, uplinks enslaved to ovs-system) the same, and eth0.100 is a VLAN on
 # eth0. Each case sums to eth0+eth1+eth2 = rx 1005 tx 101: a counted bond0/br-ex/VLAN or a dropped uplink shows.
 # With the host's sysfs only physical NICs (a device link) count; without it, names and the host's bonding status.
@@ -305,6 +336,43 @@ async def test_unrecorded_reading_still_holds_the_cadence():
         clock.now += 3 * 3600
         await check.run(ctx)
         assert len(runner.commands) == 2
+
+
+# No record yet, Redis reads but refuses writes, a real phase below the interval: the initial state is kept in memory
+# (else each cycle recreates it in the future and the node is never probed); once Redis takes writes it is saved
+async def test_a_new_node_is_probed_while_redis_refuses_writes():
+    class FlakyRedis(FakeRedis):
+        down = True
+
+        async def set(self, key, value, ex=None):
+            if self.down:
+                raise ConnectionError("READONLY")
+            await super().set(key, value, ex=ex)
+
+    redis = FlakyRedis()
+    runner = FakeRunner(GOOD, GOOD)
+    ctx = make_context(
+        state=build_state(rented_data=rented(), sysbox_runtime=True),
+        runner=runner,
+        services=build_services(redis=redis),
+    )
+    check = RentedThroughputCheck()
+    with (
+        flags() as clock,
+        patch.object(module, "phase_offset_seconds", lambda uuid: 3600),
+        patch.dict(module._UNSAVED, clear=True),
+    ):
+        for _ in range(2):  # due 2 h after the first cycle
+            await check.run(ctx)
+            assert not runner.commands
+            clock.now += 3600
+        await check.run(ctx)
+        assert len(runner.commands) == 1
+        redis.down = False
+        clock.now += 3 * 3600
+        await check.run(ctx)
+        assert len(runner.commands) == 2 and module._UNSAVED == {}
+        assert f"rented_throughput:{EXECUTOR.uuid}" in redis.store
 
 
 # Redis refuses writes for both nodes: each keeps its own unsaved streak (one node's failed save never drops the

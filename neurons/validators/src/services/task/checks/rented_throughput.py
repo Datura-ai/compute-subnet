@@ -7,6 +7,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from services.rental_docker_sdk import RENTAL_NETWORK_NAME
+
 from core.config import settings
 from core.utils import _m, get_extra_info
 
@@ -230,7 +232,9 @@ class RentedThroughputCheck:
         now = time.time()
         if state is None:
             state = _State(at=now - phase_offset_seconds(ctx.executor.uuid))
-            await self._save(ctx, key, state)
+            if not await self._save(ctx, key, state):
+                # else each cycle recreates it and the first reading never comes due
+                _UNSAVED[ctx.executor.uuid] = state
         if now < state.next_due_at():
             return self._verdict(ctx, state, probed=False)
 
@@ -289,7 +293,9 @@ class RentedThroughputCheck:
         )
 
         judged = await ContainerDownloadSpeedCheck()._judge(endpoints)
-        if net_busy or judged.has_no_verdict:
+        # a bridge fallback (rentals network not inspectable) did not measure the renter's path
+        off_rentals = not endpoints or any(r.network != RENTAL_NETWORK_NAME for r in endpoints)
+        if net_busy or off_rentals or judged.has_no_verdict:
             net = "none"
         else:
             net = "fail" if judged.is_failing else "pass"
