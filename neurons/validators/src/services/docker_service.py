@@ -9903,7 +9903,7 @@ class DockerService:
         A start that fails leaves the container stopped and parked again, so the next cycle retries;
         only a stale-mount start error keeps the name, for the stale-mount recovery to take it.
         ``stopped_by_recovery`` (the pod's STOPPED_BY_RECOVERY mark): a lone stopped ``<name>`` is
-        started as well, since a recovery of ours renamed it back without an answer.
+        started as well, since a recovery of ours stopped it or renamed it back without an answer.
         """
         parked = f"{container_name}{EDIT_PARKED_SUFFIX}"
         q_name, q_parked = shlex.quote(container_name), shlex.quote(parked)
@@ -10110,10 +10110,12 @@ class DockerService:
         default_extra: dict[str, Any],
     ) -> bool:
         """Remount a running pod's encrypted volume (never re-initialised) and its sshd, what
-        ``start_existing_container`` adds after a start. True once remounted. A failure leaves the
-        pod running and is logged, retried next cycle: the remount runs inside the renter's
-        container (its sh, gocryptfs and conf file), so a renter can make it fail, and the
-        validator never stops a running pod on that."""
+        ``start_existing_container`` adds after a start. True once remounted. Anything else stops the
+        container, a cancellation (the recovery deadline) included: left up without its mount, the
+        pod takes the renter's writes unencrypted onto the host disk. The stop is marked first
+        (STOPPED_BY_RECOVERY, or parked as ``<name>__prev`` when the mark cannot be written), so the
+        next cycle's ``recover_parked_pod_container`` starts the pod with its mount once the
+        plaintext path is known."""
         try:
             # never at a guessed path, and only with the secret the volume was made with
             if not private_key or not _can_remount_encrypted_volume(local_volume_path):
@@ -10130,15 +10132,23 @@ class DockerService:
                     pod_id=pod_id,
                     default_extra=default_extra,
                 )
-        except Exception as exc:
+        except (asyncio.CancelledError, Exception) as exc:
+            container_stopped = await _cleanup_to_completion(
+                self._mark_and_stop_unmounted_pod(ssh_client, container_name, pod_id)
+            )
             logger.error(
                 _m(
                     "POD_VOLUME_MOUNT_RESTORE_FAILED",
-                    extra=get_extra_info(
-                        {**default_extra, "container_name": container_name, "error": repr(exc)}
-                    ),
+                    extra=get_extra_info({
+                        **default_extra,
+                        "container_name": container_name,
+                        "error": repr(exc),
+                        "container_stopped": container_stopped,
+                    }),
                 )
             )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             return False
         # a mark left by an earlier stop that did not take would later restart a pod the provider stopped
         await self._clear_stopped_by_recovery(pod_id)
@@ -10149,6 +10159,26 @@ class DockerService:
             )
         )
         return True
+
+    async def _mark_and_stop_unmounted_pod(
+        self, ssh_client: asyncssh.SSHClientConnection, container_name: str, pod_id: str
+    ) -> bool:
+        # marked before the stop (at most the mark's 5 s bound), since no later cycle restarts an
+        # unmarked pod stopped under its own name, and a stop whose reply is lost may still have
+        # applied. When the mark cannot be written the pod is parked instead, which the next
+        # cycle's rename-back finds without any mark.
+        try:
+            await self._mark_stopped_by_recovery(pod_id)
+            marked = True
+        except Exception:
+            marked = False
+        outcome = await self._stop_outcome(ssh_client, container_name)
+        if outcome == "failed" and marked:
+            # docker said it did not stop: the pod still runs, and the mark must not restart a later provider stop
+            await self._clear_stopped_by_recovery(pod_id)
+        elif not marked:
+            await self._park_by_id(ssh_client, container_name, f"{container_name}{EDIT_PARKED_SUFFIX}")
+        return outcome == "stopped"
 
     async def _local_volume_encryption_state(
         self,
