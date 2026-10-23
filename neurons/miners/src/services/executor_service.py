@@ -387,7 +387,8 @@ class ExecutorService:
                 # accepted; only the retries are clipped to the deadline
                 total = UPLOAD_SSH_KEY_ATTEMPT_TIMEOUT_SECONDS
                 if attempt > 1:
-                    total = min(total, deadline - time.monotonic())
+                    # floored: aiohttp reads a total <= 0 (a retry delay that overran the deadline) as no timeout
+                    total = max(UPLOAD_SSH_KEY_MIN_ATTEMPT_SECONDS, min(total, deadline - time.monotonic()))
                 timeout = aiohttp.ClientTimeout(total=total)
                 try:
                     async with session.post(url, json=payload, timeout=timeout) as response:

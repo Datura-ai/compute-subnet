@@ -251,6 +251,31 @@ async def test_register_pubkey_first_upload_keeps_mains_full_timeout(
     assert session.post.call_args.kwargs["timeout"].total == es.UPLOAD_SSH_KEY_ATTEMPT_TIMEOUT_SECONDS
 
 
+@pytest.mark.asyncio
+async def test_send_pubkey_retry_after_an_overrun_delay_keeps_a_positive_timeout(executor_service, test_executor):
+    """A retry whose delay ran past the deadline still gets a bounded timeout, never aiohttp's 'no timeout'."""
+    clock = [100.0]
+
+    async def late_sleep(_seconds):
+        clock[0] += 30  # the event loop was busy: the 1 s retry delay ended well after the deadline
+
+    answered = MagicMock(status=200)
+    answered.json = AsyncMock(return_value={"ssh_username": "root", "ssh_port": 22, "python_path": "/p", "root_dir": "/r"})
+    post_ctx = MagicMock()
+    post_ctx.__aenter__ = AsyncMock(side_effect=[asyncio.TimeoutError(), answered])
+    post_ctx.__aexit__ = AsyncMock(return_value=None)
+    session = _make_mock_session()
+    session.post = MagicMock(return_value=post_ctx)
+
+    with patch("services.executor_service.aiohttp.ClientSession", return_value=session), \
+            patch("services.executor_service.asyncio.sleep", late_sleep), \
+            patch("services.executor_service.time.monotonic", side_effect=lambda: clock[0]):
+        await executor_service.send_pubkey_to_executor(test_executor, _SSH_KEY, "0xaa", deadline=clock[0] + 20)
+
+    totals = [c.kwargs["timeout"].total for c in session.post.call_args_list]
+    assert totals == [es.UPLOAD_SSH_KEY_ATTEMPT_TIMEOUT_SECONDS, es.UPLOAD_SSH_KEY_MIN_ATTEMPT_SECONDS]
+
+
 # ---------------------------------------------------------------------------
 # A failed write rolls the shared session back
 # ---------------------------------------------------------------------------
