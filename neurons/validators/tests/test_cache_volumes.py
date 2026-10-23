@@ -617,3 +617,57 @@ async def test_rental_evicts_the_oldest_cache_first_and_keeps_the_rest_once_it_f
     await docker_service.reclaim_dphn_cache_for_rental(ssh_client, payload, {})
 
     assert _removed_volumes(ssh_client) == ["engy_cache_hf_old"]
+
+
+class MeasuringSshClient(HostSshClient):
+    """HostSshClient that also answers the helper `du -sk` with how many GiB each cache volume holds."""
+
+    def __init__(self, listed_volumes: list[str], free_gb: float, held_gb: float):
+        super().__init__(listed_volumes, free_gb)
+        self._held_kb = int(held_gb * 1024**2)
+
+    async def run(self, command: str, *args, **kwargs):
+        if "du -sk" in command:
+            self.commands.append(command)
+            return SimpleNamespace(exit_status=0, stdout=f"{self._held_kb}\t/cache0\n", stderr="")
+        return await super().run(command, *args, **kwargs)
+
+
+KIMI_CACHE = "engy_cache_hf_1561gb_kimi-k3-1a2b3c4d"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("held_gb", "free_gb", "granted"),
+    [
+        # complete: mounted although 170 GB free could never pay for the download
+        (1500, 170, True),
+        # mounted at the wrong target by an older run, so ~empty: the rest is 1561 GB, over 30% of 3000
+        (1, 3000, False),
+        # half there: the remaining 761 GB is under 30% of 3000 and leaves the floor, so it is mounted
+        (800, 3000, True),
+    ],
+)
+async def test_an_existing_engy_cache_is_charged_for_what_it_still_has_to_download(
+    docker_service, held_gb, free_gb, granted
+):
+    ssh_client = MeasuringSshClient([KIMI_CACHE], free_gb=free_gb, held_gb=held_gb)
+    payload = _make_payload(
+        workload_kind=WorkloadKind.FILLER,
+        cache_volumes=[CacheVolume(name=KIMI_CACHE, target="/root/.cache/huggingface")],
+    )
+
+    affordable = await docker_service.select_affordable_cache_volumes(ssh_client, payload, {})
+
+    assert bool(affordable) is granted
+
+
+@pytest.mark.asyncio
+async def test_an_existing_engy_cache_of_unmeasurable_size_is_charged_the_full_download(docker_service):
+    ssh_client = HostSshClient([KIMI_CACHE], free_gb=3000)  # du answers nothing
+    payload = _make_payload(
+        workload_kind=WorkloadKind.FILLER,
+        cache_volumes=[CacheVolume(name=KIMI_CACHE, target="/root/.cache/huggingface")],
+    )
+
+    assert await docker_service.select_affordable_cache_volumes(ssh_client, payload, {}) == []
