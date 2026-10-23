@@ -99,7 +99,7 @@ def calculate_scores(
         job_score = 0.0
         warning_messages.append("Host pinned or throttled a rented pod below its deployed CPUs")
 
-    # Rented throughput gate (ticket-0739): same mechanics.
+    # Rented throughput gate: same mechanics.
     if not ctx.rented_throughput_passed:
         actual_score = 0.0
         job_score = 0.0

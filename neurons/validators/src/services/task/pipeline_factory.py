@@ -389,7 +389,7 @@ class PipelineFactory:
                 ExecutorImageCheck(),
                 InspectorRentedCheck(),
                 RentedPodResourcesCheck(),
-                # ticket-0739: starts a container beside the renter's pod, so never in the dry run.
+                # RentedThroughputCheck starts a container beside the renter's pod, so never in the dry run.
                 RentedThroughputCheck(),
                 TenantEnforcementCheck(),
                 GpuUsageCheck(),
@@ -506,7 +506,7 @@ class PipelineFactory:
                 ExecutorImageCheck(),
                 InspectorRentedCheck(),
                 RentedPodResourcesCheck(),
-                # ticket-0739: starts a container beside the renter's pod, so never in the dry run.
+                # RentedThroughputCheck starts a container beside the renter's pod, so never in the dry run.
                 RentedThroughputCheck(),
                 TenantEnforcementCheck(),
                 GpuUsageCheck(),

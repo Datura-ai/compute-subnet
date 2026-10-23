@@ -1,8 +1,9 @@
-"""ticket-0739: a renter on a node listed at ~3 Gbps downloaded at 0.7-2 MB/s and the disk crawled, while the idle-node
+"""A renter on a node listed at ~3 Gbps downloaded at 0.7-2 MB/s and the disk crawled, while the idle-node
 download check never looks at a rented node."""
 
 from __future__ import annotations
 
+import subprocess
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -216,3 +217,35 @@ async def test_idle_foreign_or_stopped_rentals_are_left_alone():
             ctx, runner = make_ctx(rented_data=rented_data)
             res = await RentedThroughputCheck().run(ctx)
         assert res.passed and not runner.commands and res.event.reason_code == Msg.SKIPPED.reason
+
+
+def test_bond_members_and_vlans_are_not_counted_twice(tmp_path):
+    # bond0 carries eth0+eth1's traffic, eth0.100 is a VLAN on it: only bond0 and the unrelated eth2 count
+    net = tmp_path / "net"
+    for name in ("bond0", "eth0", "eth1", "eth2"):
+        (net / name).mkdir(parents=True)
+    for member in ("eth0", "eth1"):
+        (net / member / "master").write_text("")
+    dev = tmp_path / "dev"
+    dev.write_text(
+        "Inter-|   Receive\n face |bytes\n"
+        + "".join(
+            f"{n}: {rx} 0 0 0 0 0 0 0 {tx} 0 0 0 0 0 0 0\n"
+            for n, rx, tx in [
+                ("lo", 9, 9),
+                ("bond0", 1000, 100),
+                ("eth0", 600, 60),
+                ("eth1", 400, 40),
+                ("eth0.100", 300, 30),
+                ("eth2", 5, 1),
+            ]
+        )
+    )
+    script = (
+        module._SNAPSHOT.replace("/sys/class/net/*", f"{net}/*")
+        .replace("/proc/1/net/dev", str(dev))
+        .replace("[ /proc/1/root/ -ef / ] ||", "")
+        .replace(f"sleep {module.BUSY_WINDOW_SECONDS}; ", "")
+    )
+    out = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30).stdout
+    assert "rx=1005 tx=101" in out, out

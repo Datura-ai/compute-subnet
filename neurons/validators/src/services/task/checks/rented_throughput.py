@@ -50,8 +50,11 @@ _SNAPSHOT = (
     f'echo "{SNAP_MARKER}_device name=$d"; '
     '[ -e /sys/class/block/$d/partition ] && p=$(readlink -f /sys/class/block/$d) && p=${p%/*} && n="$n ${p##*/}"; '
     'n="$n $(ls /sys/class/block/$d/slaves 2>/dev/null)"; done; ds=$n; done; '
+    # a bond's or bridge's member NICs (they have a master) and VLAN sub-interfaces repeat the parent's traffic
+    'sl=$(for i in /sys/class/net/*; do [ -e $i/master ] && printf " %s" "${i##*/}"; done); '
     f'snap() {{ echo "{SNAP_MARKER} t=$(cut -d" " -f1 /proc/uptime) '
-    "$([ /proc/1/root/ -ef / ] || sed 's/:/ /' /proc/1/net/dev 2>/dev/null | awk 'NR>2 && $1!=\"lo\" && "
+    "$([ /proc/1/root/ -ef / ] || sed 's/:/ /' /proc/1/net/dev 2>/dev/null | awk -v sl=\"$sl \" "
+    '\'NR>2 && $1!="lo" && $1!~/[.@]/ && !index(sl, " " $1 " ") && '
     "$1!~/^(docker|veth|br-|virbr|cni|flannel|cali|tun|wg|lxc|vxlan|kube)/{r+=$2; t+=$10; k++} "
     'END{if (k) printf "rx=%.0f tx=%.0f", r, t}\') '
     "io=$(awk '$3~/^(sd[a-z]+|nvme[0-9]+n[0-9]+|vd[a-z]+|xvd[a-z]+|md[0-9]+)$/{printf \"%s:%.0f,\", $3, $6+$10}' "
@@ -173,7 +176,7 @@ class _State:
 
 
 class RentedThroughputCheck:
-    """What a renter's pod gets from the network and the disk on a rented node (ticket-0739: 0.7-2 MB/s downloads
+    """What a renter's pod gets from the network and the disk on a rented node (a renter saw 0.7-2 MB/s downloads
     and a crawling disk on a node listed at ~3 Gbps). ContainerDownloadSpeedCheck measures idle nodes only, so a
     host that shapes or starves a node once it is rented kept its score.
 

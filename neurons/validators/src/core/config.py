@@ -565,7 +565,7 @@ class Settings(BaseSettings):
     CONTAINER_DOWNLOAD_SPEED_INTERVAL_HOURS: float = Field(
         env="CONTAINER_DOWNLOAD_SPEED_INTERVAL_HOURS", default=6.0, gt=0
     )
-    # ticket-0739: ContainerDownloadSpeedCheck measures idle nodes only; a renter on a node listed at ~3 Gbps got
+    # ContainerDownloadSpeedCheck measures idle nodes only; a renter on a node listed at ~3 Gbps got
     # 0.7-2 MB/s and a crawling disk. RentedThroughputCheck reads the same two files from a throwaway container on a
     # rented node and writes 256 MiB with fsync, once per INTERVAL_HOURS (30 min retry after a failing reading).
     # Two failing readings in a row (a download under CONTAINER_DOWNLOAD_SPEED_MIN_MBPS, or a write under

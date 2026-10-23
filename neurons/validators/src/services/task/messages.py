@@ -1482,7 +1482,7 @@ class ContainerDownloadSpeedMessages:
 
 
 class RentedThroughputMessages:
-    """ticket-0739 — a renter on a node listed at ~3 Gbps downloaded at 0.7-2 MB/s and the disk crawled."""
+    """A renter on a node listed at ~3 Gbps downloaded at 0.7-2 MB/s and the disk crawled."""
 
     SLOW = MessageTemplate(
         event="A rented pod on this node gets far too little network or disk throughput",
