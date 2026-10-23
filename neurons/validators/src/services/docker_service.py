@@ -1889,7 +1889,14 @@ _STOPPED_BY_RECOVERY_MARK_TIMEOUT_SEC = 5
 # check clears a leftover mark on a pod it sees running)
 _STOPPED_BY_RECOVERY_CLEAR_RETRY_SEC = 30
 _STOPPED_BY_RECOVERY_CLEAR_RETRY_MAX_SEC = 300
-_RECOVERY_MARK_CLEANUPS: set[asyncio.Task] = set()
+# pod_id -> its pending retry, cancelled by the pod's next mark write so it never deletes a later recovery's mark
+_RECOVERY_MARK_CLEANUPS: dict[str, asyncio.Task] = {}
+
+
+def _cancel_recovery_mark_cleanup(pod_id: str) -> None:
+    task = _RECOVERY_MARK_CLEANUPS.pop(pod_id, None)
+    if task:
+        task.cancel()
 
 
 def _is_safe_docker_volume_name(volume_name: str) -> bool:
@@ -10025,13 +10032,17 @@ class DockerService:
                 delay = min(delay * 2, _STOPPED_BY_RECOVERY_CLEAR_RETRY_MAX_SEC)
 
         if not await delete():
+            _cancel_recovery_mark_cleanup(pod_id)
             task = asyncio.create_task(retry())
-            _RECOVERY_MARK_CLEANUPS.add(task)
-            task.add_done_callback(_RECOVERY_MARK_CLEANUPS.discard)
+            _RECOVERY_MARK_CLEANUPS[pod_id] = task
+            task.add_done_callback(
+                lambda done: _RECOVERY_MARK_CLEANUPS.get(pod_id) is done and _RECOVERY_MARK_CLEANUPS.pop(pod_id)
+            )
 
     async def _mark_stopped_by_recovery(self, pod_id: str) -> None:
         # bounded: RedisService.set waits on a process-wide lock, and the recovery must end inside
         # the create lock
+        _cancel_recovery_mark_cleanup(pod_id)
         await asyncio.wait_for(
             self.redis_service.set(f"{STOPPED_BY_RECOVERY_PREFIX}{pod_id}", "1"),
             timeout=_STOPPED_BY_RECOVERY_MARK_TIMEOUT_SEC,
@@ -10242,7 +10253,8 @@ class DockerService:
                 f"/usr/bin/docker stop {shlex.quote(container_name)}",
                 timeout=_VLOOPBACK_REPAIR_COMMAND_TIMEOUT_SEC,
             )
-            if getattr(stop_result, "exit_status", 1) == 0:
+            stop_exit = getattr(stop_result, "exit_status", 1)
+            if stop_exit == 0:
                 return "stopped"
             # a non-zero exit is no refusal by itself: a signalled CLI or a killed ssh client reports one after a
             # stop that applied, so the container's own state decides
@@ -10256,7 +10268,14 @@ class DockerService:
             return "unknown"
         if getattr(inspect_result, "exit_status", 1) != 0:
             return "unknown"
-        return {"false": "stopped", "true": "failed"}.get((inspect_result.stdout or "").strip(), "unknown")
+        running = (inspect_result.stdout or "").strip()
+        if running == "false":
+            return "stopped"
+        # only a plain error exit is docker refusing; a signalled or killed CLI (no exit code, -1, 128+n) may have
+        # left a stop still in its shutdown grace, so "running" then is no refusal
+        refused = isinstance(stop_exit, int) and 0 < stop_exit <= 128
+        return "failed" if running == "true" and refused else "unknown"
+
 
     def _container_deleted(self, payload: ContainerDeleteRequest) -> ContainerDeleted:
         return ContainerDeleted(

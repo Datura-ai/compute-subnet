@@ -153,6 +153,8 @@ class DummySSHClient:
             result.stdout = "container_id_123" if self.pod_running else ""
         elif "authorized_keys" in command:
             result.stdout = "\n".join(self.ssh_keys) if self.ssh_keys else ""
+        elif "{{.State.Running}}" in command:
+            result.stdout = f"{str(self.pod_running).lower()}\n"
         elif "docker inspect" in command:
             result.stdout = json.dumps(
                 {
@@ -1220,8 +1222,11 @@ def _recovery_redis(lock, marks: dict[str, str]) -> Mock:
     )
 
 
+@pytest.mark.parametrize("stopped_before_lock", [False, True])
 @pytest.mark.asyncio
-async def test_tenant_enforcement_clears_a_leftover_recovery_mark_on_a_running_pod(context_factory):
+async def test_tenant_enforcement_clears_a_leftover_recovery_mark_on_a_running_pod(
+    context_factory, stopped_before_lock
+):
     # a mark whose delete never landed (Redis down past every retry, then a validator restart) is cleared by the first
     # cycle that sees the pod running once Redis answers, so a later provider stop is not restarted
     ssh = DummySSHClient(pod_running=True, ssh_keys=["ssh-rsa renter"])
@@ -1243,10 +1248,20 @@ async def test_tenant_enforcement_clears_a_leftover_recovery_mark_on_a_running_p
     assert (await cycle()).passed
     assert marks
 
-    lock.acquire.return_value = True
+    async def acquire(*args, **kwargs):  # a competing recovery marks and stops the pod, then releases the lock
+        if stopped_before_lock:
+            ssh.pod_running = False
+            marks["stopped_by_recovery:pod-1"] = "1"
+        return True
+
+    lock.acquire.side_effect = acquire
     assert (await cycle()).passed
-    assert marks == {}
+    # only a pod still running under the lock loses its mark
+    assert bool(marks) is stopped_before_lock
     lock.release.assert_awaited()
+    if stopped_before_lock:
+        return
+    lock.acquire.side_effect = None
 
     ssh.pod_running = False  # the provider stops the pod
     result = await cycle()

@@ -8096,6 +8096,7 @@ async def test_restore_volume_mount_of_running_container_remounts_or_stops_the_p
         pytest.param(None, "nonzero", "pod_pod-1", id="docker_refused_the_stop"),
         pytest.param(None, "signalled", "pod_pod-1", id="nonzero_exit_but_stopped"),
         pytest.param(None, "signalled_inspect_fails", "pod_pod-1", id="nonzero_exit_inspect_fails"),
+        pytest.param(None, "signalled_still_stopping", "pod_pod-1", id="signalled_cli_shutdown_pending"),
     ],
 )
 @pytest.mark.asyncio
@@ -8111,6 +8112,8 @@ async def test_mark_and_stop_unmounted_pod_leaves_a_retry_anchor(
         if command == "/usr/bin/docker stop pod_pod-1" and host["name"] == "pod_pod-1":
             if stop_reply_error == "nonzero":
                 return _make_ssh_command_result(exit_status=1)
+            if stop_reply_error == "signalled_still_stopping":
+                return _make_ssh_command_result(exit_status=-1)
             host["running"] = False
             if stop_reply_error in ("signalled", "signalled_inspect_fails"):
                 return _make_ssh_command_result(exit_status=137)  # the CLI was killed after the stop applied
@@ -8142,6 +8145,8 @@ async def test_mark_and_stop_unmounted_pod_leaves_a_retry_anchor(
     assert await docker_service._mark_and_stop_unmounted_pod(ssh_client, "pod_pod-1", "pod-1") is (
         stop_reply_error in (None, "signalled")
     )
+    if stop_reply_error == "signalled_still_stopping":
+        host["running"] = False  # the shutdown completes after the recovery returned
 
     # only a container verifiably still running is a refused stop
     refused = stop_reply_error == "nonzero"
@@ -8167,8 +8172,36 @@ async def test_a_failed_mark_delete_is_retried_in_the_background(docker_service,
 
     await docker_service._clear_stopped_by_recovery("pod-1")
     assert marks  # the first delete failed; the caller is not held up
-    await asyncio.gather(*docker_service_module._RECOVERY_MARK_CLEANUPS)
+    await asyncio.gather(*docker_service_module._RECOVERY_MARK_CLEANUPS.values())
     assert marks == {} and len(attempts) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_pending_mark_delete_retry_never_deletes_a_later_mark(docker_service, monkeypatch):
+    # a remount's cleanup still retrying when a later recovery marks the same pod must not delete that mark
+    marks = {"stopped_by_recovery:pod-1": "1"}
+    redis_up = asyncio.Event()
+
+    async def delete(key):
+        if not redis_up.is_set():
+            raise ConnectionError("Redis down")
+        marks.pop(key, None)
+
+    async def set_mark(key, value, ex=None):
+        marks[key] = value
+
+    docker_service.redis_service.delete = AsyncMock(side_effect=delete)
+    docker_service.redis_service.set = AsyncMock(side_effect=set_mark)
+    monkeypatch.setattr(docker_service_module, "_STOPPED_BY_RECOVERY_CLEAR_RETRY_SEC", 0)
+
+    await docker_service._clear_stopped_by_recovery("pod-1")
+    task = docker_service_module._RECOVERY_MARK_CLEANUPS["pod-1"]
+    redis_up.set()
+    await docker_service._mark_stopped_by_recovery("pod-1")
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert marks == {"stopped_by_recovery:pod-1": "1"}
+    assert "pod-1" not in docker_service_module._RECOVERY_MARK_CLEANUPS
 
 
 @pytest.mark.asyncio
@@ -8191,7 +8224,7 @@ async def test_a_failed_mark_delete_is_retried_without_a_cap_until_a_restart_dro
 
     await docker_service._clear_stopped_by_recovery("pod-1")
     await twenty_retries.wait()
-    (task,) = docker_service_module._RECOVERY_MARK_CLEANUPS
+    (task,) = docker_service_module._RECOVERY_MARK_CLEANUPS.values()
     task.cancel()  # the validator restarts
     with contextlib.suppress(asyncio.CancelledError):
         await task

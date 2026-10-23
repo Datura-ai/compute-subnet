@@ -263,7 +263,7 @@ class TenantEnforcementCheck:
             if pod_running:
                 state_by_pod_id[pod_id] = ContainerState.RUNNING
                 if self.recover_stale_pods:
-                    await _clear_leftover_recovery_mark(ctx, pod_id, pod.status)
+                    await _clear_leftover_recovery_mark(ctx, pod_container_name, pod_id, pod.status)
             elif pod.container_name_pending and _within_container_name_grace(pod):
                 # DAH-4315: the backend lists a pod before it records the container's name, so
                 # its container may still be being created. Judged next cycle, not penalised.
@@ -864,7 +864,7 @@ async def _recover_parked_pod_container(
             return False
 
 
-async def _clear_leftover_recovery_mark(ctx: Context, pod_id: str, pod_status: str | None) -> None:
+async def _clear_leftover_recovery_mark(ctx: Context, container_name: str, pod_id: str, pod_status: str | None) -> None:
     # the mark means something only while the pod is stopped: one a lost delete left on a running pod would restart a
     # later provider stop. Bounded and best-effort; the next cycle retries.
     key = f"{STOPPED_BY_RECOVERY_PREFIX}{pod_id}"
@@ -874,7 +874,13 @@ async def _clear_leftover_recovery_mark(ctx: Context, pod_id: str, pod_status: s
             return
         # under the create lock every mark write and its stop run under: never between a recovery's mark and its stop
         async with _no_create_in_flight(ctx, pod_id, pod_status) as clear_to_delete:
-            if clear_to_delete:
+            if not clear_to_delete:
+                return
+            # re-read under the lock: a recovery may have marked and stopped the pod since this cycle saw it running
+            inspect_result = await ctx.ssh.run(
+                f"/usr/bin/docker inspect -f '{{{{.State.Running}}}}' {shlex.quote(container_name)}"
+            )
+            if (inspect_result.stdout or "").strip() == "true":
                 await ctx.services.redis.delete(key)
 
     with contextlib.suppress(Exception):
