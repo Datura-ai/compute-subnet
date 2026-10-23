@@ -270,6 +270,10 @@ FILLER_CACHE_VOLUME_PREFIXES = (DPHN_CACHE_VOLUME_PREFIX, ENGY_CACHE_VOLUME_PREF
 DPHN_CACHE_SIZE_GB = 40
 DPHN_CACHE_LISTING_FLOOR_GB = 100
 DPHN_CACHE_FREE_MARGIN_GB = 50
+# DAH-5014: an Engy checkpoint (up to ~1.6 TB) is downloaded into a persistent cache only when it is at
+# most this share of the node's real free disk. The backend puts its size in the name
+# (engy_cache_hf_<N>gb_...): the wire CacheVolume has no size field.
+FILLER_CACHE_MAX_FREE_DISK_SHARE = 0.3
 FILLER_CONTAINER_GRACE_MINUTES = 15
 # DAH-2757: how long after a rental closes a BROKEN pod's container still counts as ours. The
 # container lives until the sweep above collects it, so the bound follows that grace with one cycle

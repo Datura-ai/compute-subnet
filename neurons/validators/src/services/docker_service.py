@@ -73,6 +73,8 @@ from services.const import (
     DPHN_CACHE_FREE_MARGIN_GB,
     DPHN_CACHE_LISTING_FLOOR_GB,
     DPHN_CACHE_SIZE_GB,
+    ENGY_CACHE_VOLUME_PREFIX,
+    FILLER_CACHE_MAX_FREE_DISK_SHARE,
     DPHN_CACHE_VOLUME_PREFIX,
     FILLER_CONTAINER_PREFIX,
     GPU_WEDGE_SWEEP_SETTLE_SECONDS,
@@ -80,6 +82,7 @@ from services.const import (
     POD_CONTAINER_PREFIX,
     PREFERRED_POD_PORTS,
 )
+from services.container_cleanup import evict_cache_volumes_oldest_first
 from services.cvm_quote_broker import ensure_quote_broker, quote_socket_pod_mount
 from services.node_host import node_owner, public_host_sock
 from services.default_docker_image_digest_service import fetch_docker_hub_digest
@@ -419,6 +422,19 @@ def _parse_listening_ports(output: str) -> set[int]:
             if port_text.isdigit() and 0 < int(port_text) <= 65535:
                 ports.add(int(port_text))
     return ports
+
+
+_ENGY_CACHE_SIZE_IN_NAME = re.compile(rf"^{ENGY_CACHE_VOLUME_PREFIX}hf_(\d+)gb_")
+
+
+def _cache_download_gb(volume_name: str) -> float:
+    # DAH-5014: an Engy checkpoint's size is in its name (engy_cache_hf_<N>gb_...); one without it is
+    # never afforded, rather than assumed to be DPHN's 40 GB.
+    if not volume_name.startswith(ENGY_CACHE_VOLUME_PREFIX):
+        return DPHN_CACHE_SIZE_GB
+    match: re.Match[str] | None = _ENGY_CACHE_SIZE_IN_NAME.match(volume_name)
+    return int(match.group(1)) if match else math.inf
+
 
 _VLOOPBACK_MOUNT_ERROR_PHRASES = (
     "VolumeDriver.Mount",
@@ -4583,8 +4599,9 @@ class DockerService:
             return False
         requested_gb: int | None = payload.volume_limit_gb
         try:
+            # DAH-5014: the Engy checkpoint cache gives way to the renter too.
             cache_volumes: list[str] = await self._find_cache_volumes_to_sweep(
-                ssh_client, set(), default_extra, host_probe=host_probe
+                ssh_client, set(), default_extra, FILLER_CACHE_VOLUME_PREFIXES, host_probe=host_probe
             )
             if not cache_volumes:
                 return False
@@ -4603,7 +4620,7 @@ class DockerService:
 
             logger.info(
                 _m(
-                    "Reclaiming DPHN cache volumes for the customer rental",
+                    "Reclaiming filler cache volumes for the customer rental",
                     extra=get_extra_info({
                         **default_extra,
                         "volumes": cache_volumes,
@@ -4612,9 +4629,19 @@ class DockerService:
                     }),
                 )
             )
-            await retry_ssh_command(
-                ssh_client, DockerCommand.volume_remove(*cache_volumes), "reclaim_dphn_cache_for_rental"
-            )
+            async def remove(command: str) -> object:
+                return await retry_ssh_command(ssh_client, command, "reclaim_dphn_cache_for_rental")
+
+            if not requested_gb:
+                await remove(DockerCommand.volume_remove(*cache_volumes))
+                return True
+
+            async def rental_fits() -> bool:
+                free_now_gb = await self._get_fs_available_bytes(ssh_client, docker_root_dir) / (1024**3)
+                return free_now_gb >= requested_gb + RENTAL_DISK_HEADROOM_GB
+
+            # Oldest first, only as much as the rental needs: a kept Engy checkpoint still restarts fast.
+            await evict_cache_volumes_oldest_first(ssh_client, cache_volumes, remove, rental_fits)
             return True
         except asyncio.CancelledError:
             raise
@@ -4680,13 +4707,21 @@ class DockerService:
             return present
 
         floor_gb: int = DPHN_CACHE_LISTING_FLOOR_GB + DPHN_CACHE_FREE_MARGIN_GB
-        if free_gb - DPHN_CACHE_SIZE_GB <= floor_gb:
+        # One family per launch: DPHN's whole set is DPHN_CACHE_SIZE_GB, an Engy launch asks for one volume.
+        download_gb: float = max(
+            _cache_download_gb(volume.name) for volume in payload.cache_volumes if volume.name not in existing
+        )
+        # DAH-5014: free_gb is real disk, every cache on it counted as used. The pod's own volume is
+        # created (preallocated) after this check, so the floor must hold with both on disk.
+        free_after_gb: float = free_gb - download_gb - (payload.volume_limit_gb or 0)
+        if download_gb > free_gb * FILLER_CACHE_MAX_FREE_DISK_SHARE or free_after_gb <= floor_gb:
             logger.info(
                 _m(
-                    "Node cannot afford the DPHN cache download; keeping only the volumes it already has",
+                    "Node cannot afford the filler cache download; keeping only the volumes it already has",
                     extra=get_extra_info({
                         **default_extra,
                         "free_gb": round(free_gb, 1),
+                        "download_gb": download_gb,
                         "kept_volumes": [volume.name for volume in present],
                     }),
                 )
