@@ -7,8 +7,10 @@ renter who fills the container's disk fills the host's ``/var/lib/docker``: the 
 
 Pure data, no SSH. While ``REQUIRE_STORAGE_LIMIT_SUPPORTED`` is off every node without the limit gets the
 non-fatal STORAGE_LIMIT_MISSING warning, score unchanged, so providers see it in their logs before enforcement.
-With the setting on, a node without the limit that is not rented fails (score 0, STORAGE_LIMIT_REQUIRED) until
-the host passes the probe; a rented node only gets the warning, so this check never touches a running rental.
+With the setting on, a node without the limit that is not rented and whose host could build it (the scrape's
+``storage_limit_capable``: docker's root already on xfs, or a blank whole disk of 100 GiB+ that passes `lium gpu-splitting setup`'s target checks; setup needs docker's default
+/var/lib/docker, otherwise the manual steps at docs.lium.io/providers/nodes/docker-storage) fails (score 0,
+STORAGE_LIMIT_REQUIRED) until the host passes the probe; a single-disk host keeps the warning only; a rented node only gets the warning, so this check never touches a running rental.
 It runs right after the scrape, before the rented short-circuit, like GpuThermalThrottleCheck.
 """
 
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 from core.config import settings
 
+from ..availability import ReachSource, ReachTarget
 from ..messages import StorageLimitMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
@@ -40,13 +43,19 @@ class StorageLimitCheck:
             else None
         )
         rented = bool(rented_executor and rented_executor.pods)
+        # DAH-1997: a host the scrape saw no way to build the limit on (one disk, all in use) keeps the
+        # warning; unknown (an older scrape, a failed reading) counts as able
+        capable = specs.get("storage_limit_capable") is not False
         what = {
             "storage_limit_supported": False,
+            "capable": capable,
             "detail": str(specs.get("storage_limit_scrape_error") or "")[:300] or None,
             "enforced": settings.REQUIRE_STORAGE_LIMIT_SUPPORTED,
             "rented": rented,
         }
-        if settings.REQUIRE_STORAGE_LIMIT_SUPPORTED and not rented:
+        if settings.REQUIRE_STORAGE_LIMIT_SUPPORTED and not rented and capable:
+            what["reach_source"] = str(ReachSource.VALIDATOR)
+            what["reach_target"] = str(ReachTarget.DOCKER_STORAGE)
             return CheckResult(
                 passed=False,
                 event=render_message(Msg.REQUIRED, ctx=ctx, check_id=self.check_id, what=what),

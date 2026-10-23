@@ -437,7 +437,8 @@ class StorageLimitMessages:
         reason="STORAGE_LIMIT_MISSING",
         severity="warning",
         category="env",
-        impact="Proceed; score not changed while the requirement is not enforced (see enforced). A renter who "
+        impact="Proceed; score not changed while the requirement is not enforced (see enforced) or when the scrape "
+        "found no usable spare storage to build the limit on (see capable). A renter who "
         "fills their disk fills the host's Docker storage and takes the host and every pod on it down",
         remediation="Set up Docker storage that enforces a per-container limit (overlay2 on xfs mounted with "
         "pquota): https://docs.lium.io/providers/nodes/docker-storage . Check with `sudo docker run --rm "
@@ -447,8 +448,11 @@ class StorageLimitMessages:
         event="Node rejected: Docker cannot limit a container's disk",
         reason="STORAGE_LIMIT_REQUIRED",
         severity="error",
-        category="env",
-        impact="Job skipped; score set to 0 until the host enforces a per-container storage limit",
+        # an availability error: the backend hides the node at once instead of at the hourly staleness sweep, so a
+        # node whose rental just ended is not re-rented on an uncapped disk in between (only unrented nodes get it)
+        category=AVAILABILITY_CATEGORY,
+        impact="Job skipped; score set to 0 and the node hidden from new rentals until the host enforces a "
+        "per-container storage limit",
         remediation="Set up Docker storage that enforces a per-container limit (overlay2 on xfs mounted with "
         "pquota): https://docs.lium.io/providers/nodes/docker-storage . The node passes again on the next "
         "validation once `sudo docker run --rm --storage-opt size=1g --gpus all "

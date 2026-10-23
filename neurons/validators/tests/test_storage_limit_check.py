@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 from neurons.validators.tests.helpers import build_state
 from protocol.vc_protocol.compute_requests import RentedExecutor, RentedExecutorsResponse
+from services.task.availability import availability_errors
 from services.task.checks.rented_machine import TenantEnforcementCheck
 from services.task.checks.storage_limit import StorageLimitCheck
 from services.task.messages import StorageLimitMessages as Msg
@@ -72,6 +73,18 @@ async def test_enforced_an_unrented_node_without_the_limit_scores_zero(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("rented", [False, True])
+async def test_enforced_only_an_unrented_node_is_hidden_from_new_rentals(
+    context_factory, enforced, rented
+):
+    # the backend hides a node whose cycle carried an availability error at once, not at the hourly sweep
+    result = await run(context_factory, {"storage_limit_supported": False}, rented=rented)
+
+    codes = [error.reason_code for error in availability_errors([result.event])]
+    assert codes == ([] if rented else ["STORAGE_LIMIT_REQUIRED"])
+
+
+@pytest.mark.asyncio
 async def test_enforced_a_rented_node_without_the_limit_only_warns(context_factory, enforced):
     result = await run(context_factory, {"storage_limit_supported": False}, rented=True)
 
@@ -91,3 +104,28 @@ def test_the_check_runs_before_the_rented_halt_in_every_pipeline(build):
     ids = [check.check_id for check in build()]
 
     assert ids.index(StorageLimitCheck.check_id) < ids.index(TenantEnforcementCheck.check_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capable", [None, True])
+async def test_enforced_a_capable_or_unknown_host_scores_zero(context_factory, enforced, capable):
+    specs = {"storage_limit_supported": False}
+    if capable is not None:
+        specs["storage_limit_capable"] = capable
+
+    result = await run(context_factory, specs)
+
+    assert result.passed is False
+    assert result.event.reason_code == Msg.REQUIRED.reason
+
+
+@pytest.mark.asyncio
+async def test_enforced_a_single_disk_host_only_warns(context_factory, enforced):
+    """DAH-1997 (Fish 21 Oct): required only of hosts that can build the limit."""
+    result = await run(
+        context_factory, {"storage_limit_supported": False, "storage_limit_capable": False}
+    )
+
+    assert result.passed is True
+    assert result.event.reason_code == Msg.MISSING.reason
+    assert "score" not in result.updates
