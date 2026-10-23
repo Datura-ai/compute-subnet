@@ -262,6 +262,8 @@ class TenantEnforcementCheck:
                     )
             if pod_running:
                 state_by_pod_id[pod_id] = ContainerState.RUNNING
+                if self.recover_stale_pods:
+                    await _clear_leftover_recovery_mark(ctx, pod_id)
             elif pod.container_name_pending and _within_container_name_grace(pod):
                 # DAH-4315: the backend lists a pod before it records the container's name, so
                 # its container may still be being created. Judged next cycle, not penalised.
@@ -771,6 +773,7 @@ _RECOVERY_POD_STATUSES = (None, "RUNNING", REBOOT_FAILED_POD_STATUS)
 # a recovery under the create lock finishes (cleanup included) well before the lock expires, so a
 # create can never take the lock while a recovery is still mutating the pod's containers
 _RECOVERY_DEADLINE_SEC = EXECUTOR_CREATE_LOCK_TIMEOUT - 120
+_RECOVERY_MARK_CLEAR_TIMEOUT_SEC = 5
 
 
 @contextlib.asynccontextmanager
@@ -859,6 +862,15 @@ async def _recover_parked_pod_container(
                 )
             )
             return False
+
+
+async def _clear_leftover_recovery_mark(ctx: Context, pod_id: str) -> None:
+    # the mark means something only while the pod is stopped: one a lost delete left on a running pod would restart a
+    # later provider stop. Bounded and best-effort; the next cycle retries.
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(
+            ctx.services.redis.delete(f"{STOPPED_BY_RECOVERY_PREFIX}{pod_id}"), timeout=_RECOVERY_MARK_CLEAR_TIMEOUT_SEC
+        )
 
 
 def _log_recovery_failed(event: str, ctx: Context, container_name: str, pod_id: str, exc: Exception) -> None:

@@ -8094,6 +8094,8 @@ async def test_restore_volume_mount_of_running_container_remounts_or_stops_the_p
         pytest.param(None, ConnectionError("SSH lost after the stop"), "pod_pod-1", id="stop_applied_reply_lost"),
         pytest.param(None, TimeoutError(), "pod_pod-1", id="stop_applied_reply_timed_out"),
         pytest.param(None, "nonzero", "pod_pod-1", id="docker_refused_the_stop"),
+        pytest.param(None, "signalled", "pod_pod-1", id="nonzero_exit_but_stopped"),
+        pytest.param(None, "signalled_inspect_fails", "pod_pod-1", id="nonzero_exit_inspect_fails"),
     ],
 )
 @pytest.mark.asyncio
@@ -8110,8 +8112,14 @@ async def test_mark_and_stop_unmounted_pod_leaves_a_retry_anchor(
             if stop_reply_error == "nonzero":
                 return _make_ssh_command_result(exit_status=1)
             host["running"] = False
+            if stop_reply_error in ("signalled", "signalled_inspect_fails"):
+                return _make_ssh_command_result(exit_status=137)  # the CLI was killed after the stop applied
             if stop_reply_error:
                 raise stop_reply_error
+        elif command == "/usr/bin/docker inspect -f '{{.State.Running}}' pod_pod-1":
+            if stop_reply_error == "signalled_inspect_fails":
+                raise ConnectionError("SSH lost")
+            return _make_ssh_command_result(stdout=f"{str(host['running']).lower()}\n")
         elif command.startswith("/usr/bin/docker rename pod_pod-1 "):
             host["name"] = command.rsplit(" ", 1)[1]
         return _make_ssh_command_result()
@@ -8132,9 +8140,10 @@ async def test_mark_and_stop_unmounted_pod_leaves_a_retry_anchor(
     monkeypatch.setattr(docker_service_module, "_STOPPED_BY_RECOVERY_MARK_TIMEOUT_SEC", 0.01)
 
     assert await docker_service._mark_and_stop_unmounted_pod(ssh_client, "pod_pod-1", "pod-1") is (
-        stop_reply_error is None
+        stop_reply_error in (None, "signalled")
     )
 
+    # only a container verifiably still running is a refused stop
     refused = stop_reply_error == "nonzero"
     assert host["running"] is refused
     assert host["name"] == expected_name
@@ -8160,6 +8169,34 @@ async def test_a_failed_mark_delete_is_retried_in_the_background(docker_service,
     assert marks  # the first delete failed; the caller is not held up
     await asyncio.gather(*docker_service_module._RECOVERY_MARK_CLEANUPS)
     assert marks == {} and len(attempts) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_failed_mark_delete_is_retried_without_a_cap_until_a_restart_drops_it(docker_service, monkeypatch):
+    # Redis stays down past any fixed attempt count: the retry backs off to its cap and keeps going; only a validator
+    # restart (the task cancelled) leaves the mark, which the rented-machine check clears on a running pod
+    marks = {"stopped_by_recovery:pod-1": "1"}
+    docker_service.redis_service.delete = AsyncMock(side_effect=ConnectionError("Redis down"))
+    delays = []
+    twenty_retries = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def sleep(delay):
+        delays.append(delay)
+        if len(delays) == 20:
+            twenty_retries.set()
+        await real_sleep(0)
+
+    monkeypatch.setattr(docker_service_module.asyncio, "sleep", sleep)
+
+    await docker_service._clear_stopped_by_recovery("pod-1")
+    await twenty_retries.wait()
+    (task,) = docker_service_module._RECOVERY_MARK_CLEANUPS
+    task.cancel()  # the validator restarts
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert delays[:5] == [30, 60, 120, 240, 300] and set(delays[4:]) == {300}
+    assert marks == {"stopped_by_recovery:pod-1": "1"}
 
 
 _GOCRYPTFS_MOUNT = "/lium-cipher /workspace fuse.gocryptfs rw,nosuid,nodev 0 0\n"

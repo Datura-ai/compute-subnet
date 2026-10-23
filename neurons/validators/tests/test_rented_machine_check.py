@@ -1216,7 +1216,36 @@ def _recovery_redis(lock, marks: dict[str, str]) -> Mock:
         renting_in_progress=AsyncMock(return_value=False),
         executor_create_lock=Mock(return_value=lock),
         get=AsyncMock(side_effect=lambda key: marks.get(key)),
+        delete=AsyncMock(side_effect=lambda key: marks.pop(key, None)),
     )
+
+
+@pytest.mark.asyncio
+async def test_tenant_enforcement_clears_a_leftover_recovery_mark_on_a_running_pod(context_factory):
+    # a mark whose delete never landed (Redis down past every retry, then a validator restart) is cleared by the first
+    # cycle that sees the pod running once Redis answers, so a later provider stop is not restarted
+    ssh = DummySSHClient(pod_running=True, ssh_keys=["ssh-rsa renter"])
+    marks = {"stopped_by_recovery:pod-1": "1"}
+    lock = Mock(acquire=AsyncMock(return_value=True), release=AsyncMock())
+    docker = AsyncMock()
+    docker.encrypted_volume_mount_missing.return_value = False
+    redis = _recovery_redis(lock, marks)
+
+    def cycle():
+        return TenantEnforcementCheck().run(build_recovery_context(context_factory, ssh, docker, redis=redis))
+
+    redis.delete.side_effect = ConnectionError("Redis down")
+    assert (await cycle()).passed  # a failed delete is harmless
+    assert marks
+
+    redis.delete.side_effect = lambda key: marks.pop(key, None)
+    assert (await cycle()).passed
+    assert marks == {}
+
+    ssh.pod_running = False  # the provider stops the pod
+    result = await cycle()
+    assert result.event.reason_code == Msg.POD_NOT_RUNNING.reason
+    docker.recover_parked_pod_container.assert_not_awaited()
 
 
 @pytest.mark.parametrize("stopped_by_us", [True, False])

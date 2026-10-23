@@ -1884,10 +1884,11 @@ async def _cleanup_to_completion(cleanup: Awaitable[Any]) -> Any:
 
 # the recovery mark's write; past it, the stopped pod is parked instead
 _STOPPED_BY_RECOVERY_MARK_TIMEOUT_SEC = 5
-# a mark whose delete failed is retried this often, then this long apart: left set, it would later restart a pod the
-# provider stopped on purpose
-_STOPPED_BY_RECOVERY_CLEAR_ATTEMPTS = 6
+# a mark whose delete failed is retried until it lands, backing off from the first interval to the cap: left set, it
+# would later restart a pod the provider stopped on purpose (a validator restart drops the retry; the rented-machine
+# check clears a leftover mark on a pod it sees running)
 _STOPPED_BY_RECOVERY_CLEAR_RETRY_SEC = 30
+_STOPPED_BY_RECOVERY_CLEAR_RETRY_MAX_SEC = 300
 _RECOVERY_MARK_CLEANUPS: set[asyncio.Task] = set()
 
 
@@ -10015,11 +10016,13 @@ class DockerService:
                 return False
 
         async def retry() -> None:
-            for _ in range(_STOPPED_BY_RECOVERY_CLEAR_ATTEMPTS):
-                await asyncio.sleep(_STOPPED_BY_RECOVERY_CLEAR_RETRY_SEC)
+            delay = _STOPPED_BY_RECOVERY_CLEAR_RETRY_SEC
+            while True:
+                await asyncio.sleep(delay)
                 if await delete():
                     return
-            logger.error(_m("POD_RECOVERY_MARK_CLEAR_FAILED", extra=get_extra_info({"pod_id": pod_id})))
+                logger.error(_m("POD_RECOVERY_MARK_CLEAR_FAILED", extra=get_extra_info({"pod_id": pod_id})))
+                delay = min(delay * 2, _STOPPED_BY_RECOVERY_CLEAR_RETRY_MAX_SEC)
 
         if not await delete():
             task = asyncio.create_task(retry())
@@ -10233,17 +10236,27 @@ class DockerService:
         return await self._stop_outcome(ssh_client, container_name) == "stopped"
 
     async def _stop_outcome(self, ssh_client: asyncssh.SSHClientConnection, container_name: str) -> str:
-        """"stopped", "failed" (docker answered non-zero) or "unknown" (no answer: the stop may have applied)."""
+        """"stopped", "failed" (the container verifiably still runs) or "unknown" (the stop may have applied)."""
         try:
             stop_result = await ssh_client.run(
                 f"/usr/bin/docker stop {shlex.quote(container_name)}",
+                timeout=_VLOOPBACK_REPAIR_COMMAND_TIMEOUT_SEC,
+            )
+            if getattr(stop_result, "exit_status", 1) == 0:
+                return "stopped"
+            # a non-zero exit is no refusal by itself: a signalled CLI or a killed ssh client reports one after a
+            # stop that applied, so the container's own state decides
+            inspect_result = await ssh_client.run(
+                f"/usr/bin/docker inspect -f '{{{{.State.Running}}}}' {shlex.quote(container_name)}",
                 timeout=_VLOOPBACK_REPAIR_COMMAND_TIMEOUT_SEC,
             )
         except asyncio.CancelledError:
             raise
         except Exception:
             return "unknown"
-        return "stopped" if getattr(stop_result, "exit_status", 1) == 0 else "failed"
+        if getattr(inspect_result, "exit_status", 1) != 0:
+            return "unknown"
+        return {"false": "stopped", "true": "failed"}.get((inspect_result.stdout or "").strip(), "unknown")
 
     def _container_deleted(self, payload: ContainerDeleteRequest) -> ContainerDeleted:
         return ContainerDeleted(
