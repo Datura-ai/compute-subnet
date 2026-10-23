@@ -8,7 +8,7 @@ import logging
 
 import pytest
 
-from neurons.validators.src.services.task.checks import rented_machine
+from neurons.validators.src.services.task.checks import rental_owner
 from neurons.validators.src.services.task.checks.rented_machine import TenantEnforcementCheck
 from neurons.validators.src.services.task.messages import TenantEnforcementMessages as Msg
 from protocol.vc_protocol.compute_requests import RentedExecutor, RentedExecutorsResponse, RentedPod
@@ -65,7 +65,7 @@ def _mismatch_logs(caplog) -> list[logging.LogRecord]:
 async def test_own_rental_logs_no_mismatch(context_factory, caplog):
     ctx = _ctx(context_factory, rental_miner_hotkey="miner-hotkey")
 
-    with caplog.at_level(logging.WARNING, logger=rented_machine.logger.name):
+    with caplog.at_level(logging.WARNING, logger=rental_owner.logger.name):
         result = await TenantEnforcementCheck().run(ctx)
 
     assert result.event.reason_code != Msg.NOT_RENTED.reason
@@ -76,7 +76,7 @@ async def test_own_rental_logs_no_mismatch(context_factory, caplog):
 async def test_another_miners_rental_is_logged_and_validated_as_not_rented(context_factory, caplog):
     ctx = _ctx(context_factory, rental_miner_hotkey="other-miner-hotkey", rental_port="2222")
 
-    with caplog.at_level(logging.WARNING, logger=rented_machine.logger.name):
+    with caplog.at_level(logging.WARNING, logger=rental_owner.logger.name):
         result = await TenantEnforcementCheck().run(ctx)
 
     assert result.event.reason_code == Msg.NOT_RENTED.reason
@@ -89,7 +89,7 @@ async def test_another_miners_rental_on_same_endpoint_stays_rented(context_facto
     """Same IP and port: the renter's pod is on this box, so the probes must not run beside it."""
     ctx = _ctx(context_factory, rental_miner_hotkey="other-miner-hotkey")
 
-    with caplog.at_level(logging.WARNING, logger=rented_machine.logger.name):
+    with caplog.at_level(logging.WARNING, logger=rental_owner.logger.name):
         result = await TenantEnforcementCheck().run(ctx)
 
     assert result.event.reason_code != Msg.NOT_RENTED.reason

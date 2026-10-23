@@ -10,6 +10,7 @@ from services.executor_connectivity.models import PortVerificationResult
 from ..messages import PortConnectivityMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
+from .rental_owner import validated_rental
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ class PortConnectivityCheck:
 
         # Extract rented ports and pod names from context
         rented_data = ctx.state.rented_data
-        rented_executor = rented_data.executors.get(ctx.executor.uuid) if rented_data else None
+        rented_executor = validated_rental(ctx)
         rented_ports = rented_executor.get_rented_ports() if rented_executor else []
         rented_pod_names = [p.container_name for p in rented_executor.pods] if rented_executor else []
         # DAH-2527: an idle filler holds ports without creating a pod, so an executor running only

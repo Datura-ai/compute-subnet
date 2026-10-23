@@ -78,3 +78,24 @@ async def test_insufficient_ports_names_the_orphaned_container_holding_them(cont
     assert result.event.reason_code == Msg.INSUFFICIENT_PORTS.reason
     assert result.event.what_we_saw["held_by_orphaned_containers"] == [name]
     assert name in result.event.remediation
+
+
+@pytest.mark.asyncio
+async def test_another_miners_rental_on_a_different_endpoint_does_not_skip_the_port_floor(context_factory):
+    # DAH-4263: another miner's rental on a different endpoint is not this node's rental.
+    rented_data = RentedExecutorsResponse(
+        executors={
+            "executor-123": RentedExecutor(
+                miner_hotkey="other-miner-hotkey",
+                executor_ip_address="127.0.0.1",
+                executor_ip_port="2222",
+                pods=[RentedPod(pod_id="pod-1", container_name="container_test", rented_ports=[8080, 8081])],
+            )
+        },
+    )
+    ctx = context_factory(state=build_state(verified_port_count=MIN_PORT_COUNT - 1, rented_data=rented_data))
+
+    result = await PortCountCheck().run(ctx)
+
+    assert result.passed is False
+    assert result.event.reason_code == Msg.INSUFFICIENT_PORTS.reason

@@ -9,6 +9,7 @@ from services.port_utils import DEFAULT_PORT_RANGE_TEXT
 
 from ..messages import PortCountMessages as Msg, render_message
 from ..pipeline import CheckResult, Context, ContextState
+from .rental_owner import validated_rental
 
 
 def port_count_below_listing_floor(state: ContextState) -> int | None:
@@ -81,9 +82,8 @@ class PortCountCheck:
     async def run(self, ctx: Context) -> CheckResult:
         port_count = ctx.state.verified_port_count
 
-        # Check if executor is rented (same pattern as rented_machine.py)
-        rented_data = ctx.state.rented_data
-        rented_executor = rented_data.executors.get(ctx.executor.uuid) if rented_data else None
+        # Check if executor is rented, the same way as rented_machine.py
+        rented_executor = validated_rental(ctx)
         is_rented = rented_executor is not None and len(rented_executor.pods) > 0
 
         updated_state = replace(

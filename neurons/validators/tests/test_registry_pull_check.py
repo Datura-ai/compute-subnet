@@ -161,13 +161,13 @@ class Clock:
         return self.now
 
 
-def rented() -> RentedExecutorsResponse:
+def rented(miner_hotkey: str = "miner-hotkey", port: int = EXECUTOR.port) -> RentedExecutorsResponse:
     return RentedExecutorsResponse(
         executors={
             EXECUTOR.uuid: RentedExecutor(
-                miner_hotkey="miner-hotkey",
+                miner_hotkey=miner_hotkey,
                 executor_ip_address=EXECUTOR.address,
-                executor_ip_port=str(EXECUTOR.port),
+                executor_ip_port=str(port),
                 pods=[RentedPod(pod_id="p1", container_name="pod_p1")],
             )
         }
@@ -1094,3 +1094,9 @@ async def test_a_node_first_seen_waits_for_its_phase_then_pulls_every_interval()
         after = await check.run(ctx)
     assert pulled.event.reason_code == Msg.REGISTRY_PULL_OK.reason and len(runner.commands) == 1
     assert after.event.what_we_saw["last"]["next_pull_at"] == slot + 6 * 3600
+
+
+def test_another_miners_rental_on_a_different_endpoint_does_not_count_as_rented():
+    # DAH-4263: another miner's rental on a different endpoint is not this node's rental.
+    ctx, _, _ = make_ctx(rented_data=rented(miner_hotkey="other-miner-hotkey", port=EXECUTOR.port + 1))
+    assert module._is_rented(ctx) is False
