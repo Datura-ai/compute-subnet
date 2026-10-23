@@ -314,6 +314,7 @@ async def test_overlaid_kernel_view_on_a_live_rental_is_not_fatal(context_factor
     assert result.passed is False
     assert result.event.reason_code == BannedProviderMessages.KERNEL_GPU_VIEW_OVERLAID.reason
     assert result.fatal is False
+    assert result.updates["kernel_gpu_view_passed"] is False  # zeroes the score instead
 
 
 @pytest.mark.asyncio
