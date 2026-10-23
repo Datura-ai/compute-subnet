@@ -10931,7 +10931,12 @@ class DockerService:
                 logger.warning(
                     _m("Reset pod GPUs: recent reset mark not written", extra=get_extra_info({**default_extra, "error": str(exc)}))
                 )
-            await self.redis_service.remove_pending_pod(payload.miner_hotkey, payload.executor_id, payload.pod_id)
+            try:
+                await self.redis_service.remove_pending_pod(payload.miner_hotkey, payload.executor_id, payload.pod_id)
+            except Exception as exc:
+                logger.warning(
+                    _m("Reset pod GPUs: pending reset mark not removed", extra=get_extra_info({**default_extra, "error": str(exc)}))
+                )
 
         logger.info(
             _m(

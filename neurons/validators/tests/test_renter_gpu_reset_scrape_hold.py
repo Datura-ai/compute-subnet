@@ -6,6 +6,7 @@ pipeline before the checks that skip on it. The mark was also gone by the time a
 reset was judged.
 """
 
+import json
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,10 +26,12 @@ from services.redis_service import (
     RESET_VERIFIED_JOB_CHANNEL,
     last_scored_result_key,
 )
+from protocol.vc_protocol.compute_requests import RentedExecutor, RentedExecutorsResponse
 from protocol.vc_protocol.validator_requests import ContainerState, PodContainerState
 from services.ssh_service import SSHService
 from services.task.models import build_msg
 from test_executor_rollout_grace import _failed, _scored, _validator_process
+from neurons.validators.src.services.task.messages import GpuFingerprintMessages as FingerprintMsg
 from test_rented_host_gpu_fault_reset import (
     ENCRYPT_KEY,
     EXECUTOR,
@@ -50,7 +53,9 @@ from test_rented_host_gpu_fault_reset import (
 
 from helpers import FakeRedis, build_context_config, build_services, build_state
 from neurons.validators.src.services.task.checks import machine_spec_scrape
+from neurons.validators.src.services.task.checks import gpu_fingerprint
 from neurons.validators.src.services.task.checks.gpu_fingerprint import GpuFingerprintCheck
+from neurons.validators.src.services.task.checks.gpu_loss_hold import GpuLossHoldCheck
 from neurons.validators.src.services.task.checks.machine_spec_scrape import MachineSpecScrapeCheck
 from neurons.validators.src.services.task.checks.rented_machine import TenantEnforcementCheck
 from neurons.validators.src.services.task.messages import MachineSpecMessages as Msg
@@ -91,7 +96,7 @@ async def _cycle(context_factory, service, *, scrape):
     )
     with patch.object(machine_spec_scrape.settings, "RENTED_HOST_GPU_FAULT_RESET_ENABLED", True):
         ok, events, ctx = await Pipeline(
-            [MachineSpecScrapeCheck(), GpuFingerprintCheck(), TenantEnforcementCheck()], _Sink()
+            [MachineSpecScrapeCheck(), GpuLossHoldCheck(), GpuFingerprintCheck(), TenantEnforcementCheck()], _Sink()
         ).run(ctx)
     await ResultHandler(redis_service=service, dry_run=False)._persist_verification_data(
         miner_hotkey=RENTAL_OWNER, executor_id=EXECUTOR, verified_job_info=ctx.verified, context=ctx, success=ok
@@ -132,6 +137,51 @@ async def test_a_scrape_without_gpus_and_no_renter_reset_still_fails_as_before(c
 
     assert ok is False
     assert event.reason_code == Msg.SCRAPE_FAILED_NO_GPU.reason
+    assert ctx.clear_verified_job_info is True
+    assert len(_resets(service)) == 1
+
+
+H200_UUIDS = [f"GPU-h200-{i}" for i in range(8)]
+
+
+def _gpus_listed(uuids: list[str]):
+    specs = {"gpu": {"count": len(uuids), "details": [{"name": "NVIDIA H200", "uuid": u} for u in uuids]}, "gpu_processes": []}
+    return _scrape_result(stdout=SSHService()._encrypt(ENCRYPT_KEY, json.dumps(specs)), exit_code=0)
+
+
+async def _reset_of_the_first_four(service) -> None:
+    await service.add_pending_pod(RENTAL_OWNER, EXECUTOR, POD_ID, kind=GPU_RESET_PENDING_KIND, gpu_uuids=H200_UUIDS[:4])
+
+
+@pytest.mark.parametrize("mark", [_reset_of_the_first_four, _reset_just_ended], ids=["in-progress", "just-ended"])
+@pytest.mark.asyncio
+async def test_a_split_node_whose_renter_resets_its_four_gpus_is_held_not_zeroed(context_factory, mark):
+    """8x H200 split 4+4: the renter resets their 4; the scrape lists only the other 4, so the zero-GPU hold
+    never fires. The loss hold must hold the cycle, or GpuFingerprintCheck fails it with GPU_MISSING."""
+    service = _redis_service()
+    with patch.object(gpu_fingerprint.settings, "GPU_ANCHOR_HARD_ENABLED", True):
+        assert (await _cycle(context_factory, service, scrape=_gpus_listed(H200_UUIDS)))[0] is True
+        await mark(service)
+
+        ok, event, ctx, _ = await _cycle(context_factory, service, scrape=_gpus_listed(H200_UUIDS[4:]))
+
+    assert ok is False
+    assert event.check_id == GpuLossHoldCheck.check_id
+    assert event.reason_code == Msg.SCRAPE_GPU_RESET_IN_PROGRESS.reason
+    assert ctx.clear_verified_job_info is False
+    assert _resets(service) == []
+
+
+@pytest.mark.asyncio
+async def test_four_gpus_missing_without_a_renter_reset_still_fail_the_fingerprint(context_factory):
+    service = _redis_service()
+    with patch.object(gpu_fingerprint.settings, "GPU_ANCHOR_HARD_ENABLED", True):
+        await _cycle(context_factory, service, scrape=_gpus_listed(H200_UUIDS))
+
+        ok, event, ctx, _ = await _cycle(context_factory, service, scrape=_gpus_listed(H200_UUIDS[4:]))
+
+    assert ok is False
+    assert event.reason_code == FingerprintMsg.GPU_MISSING.reason
     assert ctx.clear_verified_job_info is True
     assert len(_resets(service)) == 1
 
@@ -188,7 +238,7 @@ def _rented_scored(uuid: str):
 async def _carry_then_withhold(service, results, rented_executor_ids=frozenset({"node-1"})):
     """The cycle's order: carry before the duplicate pass and the GPU count, withhold after."""
     job_results = {"5Miner": results}
-    await carry_renter_gpu_reset_results(job_results, service, rented_executor_ids)
+    await carry_renter_gpu_reset_results(job_results, service, rented_executor_ids, None, {})
     validator_process = _validator_process(ExecutorRolloutTracker(redis_service=MagicMock(), grace_cycles=0))
     validator_process.fetch_executor_digest_or_none = AsyncMock(return_value=None)
     validator_process.observe_executor_rollout = AsyncMock(return_value=MagicMock(covers=lambda _: False))
@@ -213,6 +263,31 @@ async def test_a_held_scrape_carries_the_previous_score_into_the_cycle():
     assert specs_to_publish(kept["5Miner"]) == []
     assert RESET_VERIFIED_JOB_CHANNEL not in [call.args[0] for call in service.publish.await_args_list]
     assert 0 < await service.redis.ttl(last_scored_result_key("5Miner", "node-1")) <= LAST_SCORED_RESULT_TTL_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_a_carried_score_takes_the_pay_flags_of_this_cycle_and_a_fresh_ban():
+    service = _redis_service()
+    previous = _rented_scored("node-1")
+    previous.spec["gpu"]["details"][0]["uuid"] = "GPU-banned"
+    previous.is_spot = previous.is_on_spot_pay_list = previous.provider_discord_connected = True
+    previous.rented_gpu_count = 8
+    await remember_rented_scored_results({"5Miner": [previous]}, service)
+    held = _failed("node-1", Msg.SCRAPE_GPU_RESET_IN_PROGRESS.reason)
+    held.is_spot = held.is_on_spot_pay_list = held.provider_discord_connected = False
+    held.is_provider_email_held = True
+    held.rented_gpu_count = 4
+    job_results = {"5Miner": [held]}
+
+    await carry_renter_gpu_reset_results(
+        job_results, service, {"node-1"}, _rented_executors(banned_provider_guids=["GPU-banned"]), {}
+    )
+
+    [carried] = job_results["5Miner"]
+    assert carried.carried_for_renter_gpu_reset is True
+    assert (carried.is_spot, carried.is_on_spot_pay_list, carried.provider_discord_connected) == (False, False, False)
+    assert (carried.is_provider_email_held, carried.rented_gpu_count) == (True, 4)
+    assert carried.is_provider_banned is True
 
 
 @pytest.mark.asyncio
@@ -292,11 +367,22 @@ async def test_a_rental_that_ended_after_the_reset_carries_nothing():
     assert [w.result.executor_info.uuid for w in withheld] == ["node-1"]
 
 
+def _rented_executors(*executor_ids: str, **fields) -> RentedExecutorsResponse:
+    rented = RentedExecutor(miner_hotkey="5Miner", executor_ip_address="203.0.113.5", executor_ip_port="22", pods=[])
+    return RentedExecutorsResponse(executors={executor_id: rented for executor_id in executor_ids}, **fields)
+
+
 @pytest.mark.parametrize(
-    ("rented_now", "carried"), [(MagicMock(executors={"NODE-1": MagicMock()}), True), (None, False)], ids=["listed", "no-answer"]
+    ("rented_now", "snapshot", "carried"),
+    [
+        (_rented_executors("NODE-1"), _rented_executors(), True),
+        (None, _rented_executors("NODE-1"), True),
+        (None, _rented_executors(), False),
+    ],
+    ids=["listed-now", "no-answer-cycle-snapshot-lists-it", "no-answer-snapshot-does-not"],
 )
 @pytest.mark.asyncio
-async def test_the_cycle_asks_the_backend_once_whether_the_node_is_still_rented(rented_now, carried):
+async def test_the_cycle_asks_the_backend_once_whether_the_node_is_still_rented(rented_now, snapshot, carried):
     service = _redis_service()
     await remember_rented_scored_results({"5Miner": [_rented_scored("node-1")]}, service)
     validator_process = _validator_process(ExecutorRolloutTracker(redis_service=MagicMock(), grace_cycles=0))
@@ -304,8 +390,8 @@ async def test_the_cycle_asks_the_backend_once_whether_the_node_is_still_rented(
     validator_process.backend_client = MagicMock(get_rented_executors_now=AsyncMock(return_value=rented_now))
     job_results = {"5Miner": [_failed("node-1", Msg.SCRAPE_GPU_RESET_IN_PROGRESS.reason), _scored("node-2")]}
 
-    await validator_process.carry_scores_over_renter_gpu_resets(job_results)
-    await validator_process.carry_scores_over_renter_gpu_resets({"5Miner": [_scored("node-3")]})
+    await validator_process.carry_scores_over_renter_gpu_resets(job_results, snapshot, {})
+    await validator_process.carry_scores_over_renter_gpu_resets({"5Miner": [_scored("node-3")]}, snapshot, {})
 
     assert job_results["5Miner"][0].carried_for_renter_gpu_reset is carried
     validator_process.backend_client.get_rented_executors_now.assert_awaited_once()
@@ -343,6 +429,20 @@ async def test_the_reset_leaves_a_recent_mark_when_its_pending_mark_goes():
     assert result.ok is True
     assert await service.gpu_reset_marks(RENTAL_OWNER, EXECUTOR) == []
     assert await renter_gpu_reset_recent(service, RENTAL_OWNER, EXECUTOR, POD_ID) is True
+
+
+@pytest.mark.asyncio
+async def test_a_redis_error_on_the_pending_mark_removal_still_answers_the_reset():
+    service = _redis_service()
+    service.remove_pending_pod = AsyncMock(side_effect=ConnectionError("redis down"))
+    connection = MagicMock(__aenter__=AsyncMock(), __aexit__=AsyncMock(return_value=False))
+    stopped = GpuResetReport(ok=True, pod_stopped=True, container_restarted=True)
+
+    with patch("services.docker_service.reset_pod_gpus", AsyncMock(return_value=stopped)):
+        result = await _run_reset(service, return_value=connection)
+
+    assert result.ok is True
+    service.remove_pending_pod.assert_awaited_once()
 
 
 @pytest.mark.asyncio

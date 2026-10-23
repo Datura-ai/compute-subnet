@@ -462,3 +462,11 @@ async def test_a_root_own_cgroup_ignores_nothing():
     report, start = await _reset(host)
     assert not report.ok and report.error_code == GpuResetErrorCode.GpuInUseOutsidePod
     _no_change(host, start)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_docker_stop_does_not_report_the_pod_stopped():
+    host = FakeHost(stop_exit=1)
+    report, _ = await _reset(host)
+    assert not report.ok and not report.pod_stopped
+    assert not any(cmd.startswith("nvidia-smi -r") for cmd in host.commands)

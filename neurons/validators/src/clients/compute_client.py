@@ -67,6 +67,7 @@ from protocol.vc_protocol.validator_requests import (
     LogStreamRequest,
     PodStatesReport,
     RentedMachineRequest,
+    ResetVerifiedJobEvidence,
     ResetVerifiedJobRequest,
     NormalizedScoreRequest,
     RevenuePerGpuTypeRequest,
@@ -451,12 +452,12 @@ class ComputeClient:
                     elif channel == RESET_VERIFIED_JOB_CHANNEL:
                         # DAH-4658: the renter is resetting the node's GPUs, or did a moment ago; what a reset can
                         # cause is the renter's doing, never the provider's fault (an unreadable mark sends it)
-                        evidence = data.get("evidence") or {}
+                        evidence = ResetVerifiedJobEvidence.model_validate(data.get("evidence") or {})
                         reset_marks = (
                             self.miner_service.redis_service,
                             data["miner_hotkey"],
                             data["executor_uuid"],
-                            evidence.get("pod_id"),
+                            evidence.pod_id,
                         )
                         if reset_caused(data.get("check_id"), data.get("reason_code"), evidence) and (
                             await renter_gpu_reset_in_progress(*reset_marks)

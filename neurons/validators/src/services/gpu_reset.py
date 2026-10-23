@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from payload_models.payloads import GpuResetErrorCode, GpuResetOutcome
+from protocol.vc_protocol.validator_requests import ResetVerifiedJobEvidence
 from services.gpu_wedge import cure_wedged_gpus
 
 if TYPE_CHECKING:
@@ -349,12 +350,12 @@ async def reset_pod_gpus(
     if plan.widened:
         notes.append("NVLink peers inside the pod were reset together")
     try:
-        report.pod_stopped = True
         stopped = await _run(
             runner, f"{DOCKER} stop -t {STOP_GRACE_SECONDS} {shlex.quote(container_name)}", timeout=60
         )
         if stopped.exit_code != 0:
             raise GpuResetRefused(GpuResetErrorCode.ResetNotSupported, f"docker stop failed: {_tail(stopped.stderr)}")
+        report.pod_stopped = True
         # docker stop killed every process of the pod: anything still on the targets is someone else's,
         # except a probe of the validator's own session (as in the precheck)
         own_cgroup = await _own_cgroup(runner)
@@ -431,14 +432,14 @@ RESET_CAUSED_REASON_CODES = {
 }
 
 
-def reset_caused(check_id: str | None, reason_code: str | None, evidence: dict | None) -> bool:
+def reset_caused(check_id: str | None, reason_code: str | None, evidence: ResetVerifiedJobEvidence) -> bool:
     """True when a verified-job reset by this check and reason is one a renter's GPU reset can cause."""
     if check_id in RESET_CAUSED_CHECK_IDS:
         return True
     if reason_code in RESET_CAUSED_REASON_CODES.get(check_id, ()):
         return True
     # warn mode reports a missing card as GPU_UUID_CHANGED, with the hard verdict in the evidence
-    return check_id == "gpu.validate.fingerprint" and (evidence or {}).get("anchor_hard_would_be") == "GPU_MISSING"
+    return check_id == "gpu.validate.fingerprint" and evidence.anchor_hard_would_be == "GPU_MISSING"
 
 
 async def renter_gpu_resets(redis, miner_hotkey: str, executor_id: str) -> list[dict]:

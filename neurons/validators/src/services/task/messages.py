@@ -541,6 +541,14 @@ class GpuLossHoldMessages:
         category="env",
         impact="Proceed",
     )
+    # DAH-4658: the reason of the zero-GPU scrape hold, so the cycle carries the last score the same way
+    MISSING_GPUS_UNDER_RESET = MessageTemplate(
+        event="GPUs missing from the scrape: the renter is resetting them",
+        reason=MachineSpecMessages.SCRAPE_GPU_RESET_IN_PROGRESS.reason,
+        severity="info",
+        category="env",
+        impact="Validation halted — no verdict this cycle, the previous result stands",
+    )
 
 
 class PostRentalGpuRecheckMessages:

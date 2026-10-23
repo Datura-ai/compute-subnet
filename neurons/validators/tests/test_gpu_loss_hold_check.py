@@ -331,7 +331,7 @@ def test_the_check_runs_after_the_scrape_and_before_the_gpu_checks_and_the_rente
 
 
 @pytest.mark.asyncio
-async def test_a_card_missing_while_the_renter_resets_it_neither_starts_nor_clears_a_hold(context_factory):
+async def test_a_card_missing_while_the_renter_resets_it_holds_the_cycle_without_a_hold(context_factory):
     """DAH-4658: the cards leave nvidia-smi for ~4-40 s during a renter's reset; that scrape is not a GPU loss."""
     from services.redis_service import RedisService
 
@@ -346,9 +346,10 @@ async def test_a_card_missing_while_the_renter_resets_it_neither_starts_nor_clea
 
     result = await GpuLossHoldCheck().run(ctx)
 
-    assert result.passed and result.event.reason_code == Msg.GPU_RESET_IN_PROGRESS.reason
+    # held as the zero-GPU scrape is, so the cycle carries the last score instead of GPU_MISSING zeroing it
+    assert not result.passed and result.event.reason_code == Msg.MISSING_GPUS_UNDER_RESET.reason == "SCRAPE_GPU_RESET_IN_PROGRESS"
     assert await redis.get(gpu_loss_hold._key(ctx)) is None
 
     # a card of the other pod missing during the reset is still a loss
     other = _ctx(context_factory, redis, listed=UUIDS[1:], count=3, pods=(2, 2))
-    assert (await GpuLossHoldCheck().run(other)).event.reason_code != Msg.GPU_RESET_IN_PROGRESS.reason
+    assert (await GpuLossHoldCheck().run(other)).event.reason_code != Msg.MISSING_GPUS_UNDER_RESET.reason

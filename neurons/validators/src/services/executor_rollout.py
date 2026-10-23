@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 
 from core.config import settings
 from core.utils import _m
+from protocol.vc_protocol.compute_requests import RentedExecutorsResponse
 from services.executor_image_policy import ImageVerdict, normalize_sha256_digest
 from services.redis_service import (
     LAST_SCORED_RESULT_TTL_SECONDS,
@@ -492,14 +493,29 @@ def _held_for_renter_gpu_reset(result: JobResult) -> bool:
     return result.failure_reason_code == MachineSpecMessages.SCRAPE_GPU_RESET_IN_PROGRESS.reason
 
 
+# rental and pay flags the held result of this cycle reads fresh from the cycle's rental snapshot
+_FRESH_PAY_FIELDS = (
+    "is_spot",
+    "is_on_spot_pay_list",
+    "is_provider_email_held",
+    "provider_discord_connected",
+    "rented_gpu_count",
+)
+
+
 async def carry_renter_gpu_reset_results(
-    job_results: dict[str, list[JobResult]], redis_service: RedisService, rented_executor_ids: set[str]
+    job_results: dict[str, list[JobResult]],
+    redis_service: RedisService,
+    rented_executor_ids: set[str],
+    rented_data: RentedExecutorsResponse | None,
+    miner_coldkeys: dict[str, str | None],
 ) -> None:
     """DAH-4658: a scrape held for the renter's own GPU reset takes the node's last scored result, in place.
 
-    The provider loses nothing: the carried result is scored as in the cycle it came from. A node the
-    backend no longer lists as rented (`rented_executor_ids`, lower-case), or without a readable last
-    result, keeps the held one, and `withhold_renter_gpu_reset_verdicts` takes it out.
+    The provider loses nothing: the carried result is scored as in the cycle it came from, with this cycle's
+    pay flags and a fresh ban lookup. A node the backend no longer lists as rented (`rented_executor_ids`,
+    lower-case), or without a readable last result, keeps the held one, and `withhold_renter_gpu_reset_verdicts`
+    takes it out.
     """
     for miner_hotkey, results in job_results.items():
         for index, held in enumerate(results):
@@ -515,6 +531,10 @@ async def carry_renter_gpu_reset_results(
                     "executor_info": held.executor_info,
                     "job_batch_id": held.job_batch_id,
                     "carried_for_renter_gpu_reset": True,
+                    **{field: getattr(held, field) for field in _FRESH_PAY_FIELDS},
+                    "is_provider_banned": _banned_now(
+                        rented_data, miner_hotkey, miner_coldkeys.get(miner_hotkey), previous, held
+                    ),
                 }
             )
             logger.info(
@@ -531,6 +551,25 @@ async def carry_renter_gpu_reset_results(
                     },
                 )
             )
+
+
+def _banned_now(
+    rented_data: RentedExecutorsResponse | None,
+    miner_hotkey: str,
+    miner_coldkey: str | None,
+    previous: JobResult,
+    held: JobResult,
+) -> bool:
+    """BannedProviderCheck never ran on the held cycle: look the ban up as it does, on the carried GPUs."""
+    if rented_data is None:
+        return held.is_provider_banned or previous.is_provider_banned
+    gpu_details = ((previous.spec or {}).get("gpu") or {}).get("details") or []
+    return held.is_provider_banned or rented_data.is_provider_banned(
+        miner_hotkey=miner_hotkey,
+        miner_coldkey=miner_coldkey,
+        gpu_uuids=[detail["uuid"] for detail in gpu_details if detail.get("uuid")],
+        executor_uuid=str(held.executor_info.uuid),
+    )
 
 
 async def _last_scored_result(
