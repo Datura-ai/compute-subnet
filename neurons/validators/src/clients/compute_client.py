@@ -1138,6 +1138,8 @@ class ComputeClient:
             response: (
                 SshPubKeyAdded | FailedContainerRequest
             ) = await self.miner_service.handle_container(job_request)
+            # the backend matches the answer to its send by this id (a delayed answer must not confirm a later send)
+            response.command_id = job_request.command_id
 
             logger.info(
                 _m(

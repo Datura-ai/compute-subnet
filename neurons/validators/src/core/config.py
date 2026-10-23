@@ -358,12 +358,6 @@ class Settings(BaseSettings):
     # filler container. Rollout: shadow first, flip enforcement after the shadow data is clean.
     FILLER_LIVENESS_CHECK_ENABLED: bool = Field(env="FILLER_LIVENESS_CHECK_ENABLED", default=True)
     FILLER_LIVENESS_ENFORCEMENT_ENABLED: bool = Field(env="FILLER_LIVENESS_ENFORCEMENT_ENABLED", default=False)
-    # GPU work inside a filler container counts as the filler's only while the container runs the
-    # image the validator started it from (recorded at create). A mismatch is always logged
-    # (FILLER_IMAGE_MISMATCH); with this on, the GPU usage check judges that work as foreign.
-    FILLER_IMAGE_IDENTITY_ENFORCEMENT_ENABLED: bool = Field(
-        env="FILLER_IMAGE_IDENTITY_ENFORCEMENT_ENABLED", default=False
-    )
     # DAH-2671 spec-truth checks. Each pair mirrors the FILLER_LIVENESS precedent above:
     # CHECK_ENABLED is the master switch — shadow mode computes the signal and emits the event/log
     # but returns passed=True and never changes score; ENFORCEMENT (only effective while
@@ -391,9 +385,6 @@ class Settings(BaseSettings):
     # present and shorter than the reported GPU count fails the validation
     # (GPU_KERNEL_COUNT_MISMATCH). A missing kernel list never fails.
     GPU_KERNEL_COUNT_CHECK_ENABLED: bool = Field(env="GPU_KERNEL_COUNT_CHECK_ENABLED", default=True)
-    # Item 2a — corroborate the advertised CPU(s) count against sources the lscpu wrapper does not
-    # author (/proc/cpuinfo, /sys present population, docker NCPU).
-    CPU_TRUTH_ENFORCEMENT_ENABLED: bool = Field(env="CPU_TRUTH_ENFORCEMENT_ENABLED", default=False)
     # The scrape mounts a size-limited vloopback volume the way a rental does and reports the verdict in
     # its SCRAPE_OK event. Kill switch: off, the scrape skips the test (baked in by FileEncryptService).
     VLOOPBACK_SCRAPE_CHECK_ENABLED: bool = Field(env="VLOOPBACK_SCRAPE_CHECK_ENABLED", default=True)
@@ -449,17 +440,10 @@ class Settings(BaseSettings):
     # verified job is cleared, so the backend marks the executor inactive and billing stops. A transport
     # error or timeout decides nothing. Off by default: the pod keeps the plain POD_NOT_RUNNING verdict.
     REBOOT_FAILED_HOST_CHECK_ENABLED: bool = Field(env="REBOOT_FAILED_HOST_CHECK_ENABLED", default=False)
-    # Report a rented node that lost a GPU to the backend from the first cycle that sees it (a possible
-    # glitch waits one more); observation only, no score change. Off by default.
-    RENTED_GPU_DROP_CHECK_ENABLED: bool = Field(env="RENTED_GPU_DROP_CHECK_ENABLED", default=False)
     # DAH-4564 — read a rented pod's cpuset, CPU quota and init oom_score_adj and flag a host that
-    # pinned or throttled the renter below 95% of its advertised cores. CHECK_ENABLED observes and
-    # reports (on); ENFORCEMENT additionally zeroes the score (off: penalty owners decide). A raised
+    # pinned or throttled the renter below 95% of its advertised cores, and zero its score. A raised
     # oom_score_adj is recorded only, never scored.
     RENTED_POD_RESOURCES_CHECK_ENABLED: bool = Field(env="RENTED_POD_RESOURCES_CHECK_ENABLED", default=True)
-    RENTED_POD_RESOURCES_ENFORCEMENT_ENABLED: bool = Field(
-        env="RENTED_POD_RESOURCES_ENFORCEMENT_ENABLED", default=False
-    )
     # The per-pod incident mark expires this long after the last cycle that saw the fault.
     RENTED_GPU_DROP_STATE_TTL_SECONDS: int = Field(env="RENTED_GPU_DROP_STATE_TTL_SECONDS", default=86400, gt=0)
     # DAH-4457: a node whose GPU dropped out stays hidden (GPU_LOST availability entry, no new rentals) until its

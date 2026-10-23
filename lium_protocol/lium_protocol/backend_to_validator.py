@@ -274,6 +274,8 @@ class RestoreContainerRequest(ContainerRequest):
     snapshot_id: str | None = None
     legacy_object_size_bytes: int | None = None
     failure_timeout_seconds: int = pydantic.Field(default=STORAGE_OPERATION_REPORTING_FAILURE_TIMEOUT_SECONDS, gt=0)
+    # a reconnect re-dispatch of a restore that may already be running; its dispatch failure is not reported
+    recovery: bool = False
 
 
 @BACKEND_MESSAGES.register
