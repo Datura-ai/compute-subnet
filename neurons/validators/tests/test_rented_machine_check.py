@@ -1239,8 +1239,14 @@ async def test_tenant_enforcement_clears_a_leftover_recovery_mark_on_a_running_p
     assert marks
 
     redis.delete.side_effect = lambda key: marks.pop(key, None)
+    lock.acquire.return_value = False  # a recovery holds the create lock between its mark and its stop
+    assert (await cycle()).passed
+    assert marks
+
+    lock.acquire.return_value = True
     assert (await cycle()).passed
     assert marks == {}
+    lock.release.assert_awaited()
 
     ssh.pod_running = False  # the provider stops the pod
     result = await cycle()
