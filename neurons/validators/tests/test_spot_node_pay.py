@@ -339,7 +339,6 @@ async def test_secure_decision_keeps_the_spot_amount_and_its_missing_average(sec
 async def test_secure_decision_refuses_a_spot_node_an_idle_pool_gate_refuses(
     secure_decision_on, monkeypatch
 ):
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_SOFT_PRICE_LIMIT", True)
     p90_config = shared_client.config.model_copy(update={"machine_prices_p90": {H100: 1.0}})
     monkeypatch.setattr(shared_client, "_config", p90_config)
     spot = _spot(filler_revenue_per_gpu_hour=2.0)
