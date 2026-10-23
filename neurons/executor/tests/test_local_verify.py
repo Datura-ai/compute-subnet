@@ -494,7 +494,6 @@ def _app(validator_keypair, monkeypatch) -> FastAPI:
     monkeypatch.setattr(
         "dependencies.auth.VALIDATOR_HOTKEYS_SS58", {"current": validator_keypair.ss58_address}
     )
-    monkeypatch.setattr(settings, "EXECUTOR_LOCAL_VERIFY_ENABLED", True)
     monkeypatch.setattr(settings, "RENTING_PORT_RANGE", "40000-40009")
     # The configured miner and the shared portal hotkey are two different keys here, so the
     # "portal hotkey binds nothing" refusal is tested against a real difference, not conftest's.
@@ -529,13 +528,10 @@ def client(validator_keypair, monkeypatch, fake_scripts, fake_docker):
     return TestClient(_from_peer(_app(validator_keypair, monkeypatch), "127.0.0.1"))
 
 
-def test_version_advertises_the_capability_and_tunnel_port_only_when_enabled(client, monkeypatch):
+def test_version_advertises_the_capability_and_tunnel_port(client, monkeypatch):
     monkeypatch.setattr(settings, "INTERNAL_PORT", 8123)
     version = client.get("/version").json()
     assert version["capabilities"] == [CAPABILITY] and version["local_verify_port"] == 8123
-    monkeypatch.setattr(settings, "EXECUTOR_LOCAL_VERIFY_ENABLED", False)
-    version = client.get("/version").json()
-    assert version["capabilities"] == [] and "local_verify_port" not in version
 
 
 def test_a_network_peer_is_403_before_the_body_is_read_and_burns_nothing(
@@ -556,11 +552,6 @@ def test_a_network_peer_is_403_before_the_body_is_read_and_burns_nothing(
     assert TestClient(_from_peer(app, "testclient")).post("/verify", json=intent).status_code == 403
     # IPv6 loopback is the tunnel too; the nonce is still unclaimed after every refusal above.
     assert TestClient(_from_peer(app, "::1")).post("/verify", json=intent).status_code == 200
-
-
-def test_flag_off_is_404(client, validator_keypair, monkeypatch):
-    monkeypatch.setattr(settings, "EXECUTOR_LOCAL_VERIFY_ENABLED", False)
-    assert client.post("/verify", json=_signed(_body(), validator_keypair)).status_code == 404
 
 
 def test_signed_intent_runs_the_suite(client, validator_keypair):
