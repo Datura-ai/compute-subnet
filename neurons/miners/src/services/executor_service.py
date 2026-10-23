@@ -97,15 +97,13 @@ _unreachable_executor_log = _UnreachableExecutorLog()
 # for the whole cycle: the validator wrote RENTED_EXECUTOR_NOT_LISTED and the backend hid the node.
 # An executor that did not answer is asked again, inside a budget counted from the validator's
 # request: the validator waits 30 s (REST_SSH_SUBMIT_TIMEOUT) for the whole answer, which on a
-# rental also includes the RENTAL_REQUEST_HOOK call, so the uploads leave the hook its time.
+# rental with a RENTAL_REQUEST_HOOK also includes the hook call, so only then the uploads leave it its time.
 VALIDATOR_SSH_SUBMIT_TIMEOUT_SECONDS = 30.0
 RENTAL_REQUEST_HOOK_TIMEOUT_SECONDS = 5.0
 UPLOAD_SSH_KEY_RESPONSE_MARGIN_SECONDS = 2.0
 UPLOAD_SSH_KEY_ATTEMPTS = 3
 UPLOAD_SSH_KEY_ATTEMPT_TIMEOUT_SECONDS = 10.0
-UPLOAD_SSH_KEY_BUDGET_SECONDS = (
-    VALIDATOR_SSH_SUBMIT_TIMEOUT_SECONDS - RENTAL_REQUEST_HOOK_TIMEOUT_SECONDS - UPLOAD_SSH_KEY_RESPONSE_MARGIN_SECONDS
-)
+UPLOAD_SSH_KEY_BUDGET_SECONDS = VALIDATOR_SSH_SUBMIT_TIMEOUT_SECONDS - UPLOAD_SSH_KEY_RESPONSE_MARGIN_SECONDS
 UPLOAD_SSH_KEY_RETRY_DELAY_SECONDS = 1.0
 # a retry with less time than this left cannot get the executor's answer (it collects attestation)
 UPLOAD_SSH_KEY_MIN_ATTEMPT_SECONDS = 3.0
@@ -498,6 +496,7 @@ class ExecutorService:
         executor_id: Optional[str] = None,
         nonce: str | None = None,
         validator_miner_signature: str | None = None,
+        is_rental_request: bool = False,
     ) -> PubkeyRegistration:
         """Register pubkeys to executors for given validator.
 
@@ -512,7 +511,10 @@ class ExecutorService:
             connection infos of the ones that accepted the pubkey.
         """
         # the budget counts the portal lookup too: the validator's wait covers the whole answer
-        deadline = time.monotonic() + UPLOAD_SSH_KEY_BUDGET_SECONDS
+        budget = UPLOAD_SSH_KEY_BUDGET_SECONDS
+        if is_rental_request and settings.RENTAL_REQUEST_HOOK:
+            budget -= RENTAL_REQUEST_HOOK_TIMEOUT_SECONDS
+        deadline = time.monotonic() + budget
         executors = await self.get_executors_for_validator(validator_hotkey, miner_hotkey, executor_id)
         tasks = [
             asyncio.create_task(

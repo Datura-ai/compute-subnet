@@ -182,8 +182,38 @@ async def test_send_pubkey_to_executor_retries_an_executor_that_did_not_answer(
         ) is None
         assert session.post.call_count == 1
 
-    # the uploads leave the rental hook and the reply its time inside the validator's wait
-    assert es.UPLOAD_SSH_KEY_BUDGET_SECONDS + es.RENTAL_REQUEST_HOOK_TIMEOUT_SECONDS < es.VALIDATOR_SSH_SUBMIT_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize(
+    "is_rental_request, hook, lookup_seconds, expected_left",
+    [
+        (False, None, 0, 28), (False, None, 15, 13),
+        (False, "http://hook", 15, 13), (True, None, 15, 13),
+        (True, "http://hook", 0, 23), (True, "http://hook", 15, 8),
+    ],
+)
+@pytest.mark.asyncio
+async def test_register_pubkey_reserves_the_hook_time_only_when_the_hook_runs(
+    executor_service, test_executor, is_rental_request, hook, lookup_seconds, expected_left
+):
+    """Ordinary checks never call the rental hook, so their uploads keep the whole wait minus the reply margin."""
+    clock = [100.0]
+
+    async def slow_lookup(*_args):
+        clock[0] += lookup_seconds
+        return [test_executor]
+
+    es.settings.RENTAL_REQUEST_HOOK = hook
+    executor_service.get_executors_for_validator = slow_lookup
+    executor_service.send_pubkey_to_executor = AsyncMock(return_value=None)
+    with patch("services.executor_service.time.monotonic", side_effect=lambda: clock[0]):
+        await executor_service.register_pubkey("v", "m", _SSH_KEY.encode(), "0xaa", is_rental_request=is_rental_request)
+
+    deadline = executor_service.send_pubkey_to_executor.call_args.kwargs["deadline"]
+    assert deadline - clock[0] == expected_left
+    # uploads plus a stalled hook still end inside the validator's 30 s wait
+    hook_time = es.RENTAL_REQUEST_HOOK_TIMEOUT_SECONDS if is_rental_request and hook else 0
+    assert lookup_seconds + expected_left + hook_time < es.VALIDATOR_SSH_SUBMIT_TIMEOUT_SECONDS
 
 
 # ---------------------------------------------------------------------------

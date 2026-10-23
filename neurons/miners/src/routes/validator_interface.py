@@ -122,6 +122,7 @@ async def submit_ssh_pubkey(
             request.executor_id,
             nonce=request.nonce,
             validator_miner_signature=request.validator_miner_signature,
+            is_rental_request=request.is_rental_request,
         )
         executors = registration.accepted
 
