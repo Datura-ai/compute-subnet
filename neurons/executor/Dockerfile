@@ -93,7 +93,13 @@ RUN if [ "$INSTALL_GPU_ATTESTATION" = "true" ]; then \
 
 COPY . .
 
-RUN mv /root/app/libdmcompverify.so /usr/lib/ \
+# arm64 takes the aarch64 builds (lib*-aarch64.so, from celium-gpu-verifier's aarch64 build) once they are
+# vendored; until then the validator refuses ARM hosts with ARM_VERIFIER_NOT_AVAILABLE.
+RUN for f in libdmcompverify libverifyx libinspector; do \
+      if [ "${TARGETARCH:-amd64}" = arm64 ] && [ -e "/root/app/$f-aarch64.so" ]; then mv -f "/root/app/$f-aarch64.so" "/root/app/$f.so"; fi; \
+    done \
+  && rm -f /root/app/lib*-aarch64.so \
+  && mv /root/app/libdmcompverify.so /usr/lib/ \
   && mv /root/app/libverifyx.so /usr/lib/ \
   && mv /root/app/libinspector.so /usr/lib/
 
