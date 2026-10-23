@@ -2,7 +2,10 @@ import asyncio
 import json
 import logging
 import time
+from contextlib import suppress
+from contextvars import ContextVar
 from typing import NoReturn
+from uuid import uuid4
 
 import aiohttp
 import bittensor
@@ -15,6 +18,7 @@ from payload_models.payloads import (
     CancelStorageOperationRequest,
     RestoreContainerRequest,
     BaseServerRequest,
+    BaseValidatorResponse,
     ContainerCreateRequest,
     ContainerDeleteRequest,
     ContainerStartRequest,
@@ -28,6 +32,8 @@ from payload_models.payloads import (
     SshPubKeyRemoved,
     ContainerDeleted,
     DuplicateExecutorsResponse,
+    FailedContainerErrorCodes,
+    FailedContainerErrorTypes,
     FailedContainerRequest,
     ExecutorRentFinishedRequest,
     ForcedValidationCycleRequest,
@@ -73,6 +79,7 @@ from services.docker_service import create_steps_after_reply, inflight_creates
 from services.miner_service import MinerService
 from incentive.rental_price import ExecutorEstimateParams, RentalPriceSnapshot, estimate_executor
 from services.redis_service import (
+    BackendCommand,
     DUPLICATED_MACHINE_SET,
     EXECUTORS_UPTIME_PREFIX,
     GPU_ESTIMATES_CHANNEL,
@@ -93,6 +100,11 @@ logger = logging.getLogger(__name__)
 # mirrors ws_ping_* in compute-app apps/server/src/core/uvicorn_worker.py, which holds the burst.
 WS_PING_INTERVAL = 20
 WS_PING_TIMEOUT = 40
+# not an executor step, so the backend never counts it against the host
+CREATE_CUT_OFF_BY_RESTART_STEP = "validator_restarted"
+
+
+command_responses: ContextVar[list[str] | None] = ContextVar("command_responses", default=None)
 
 
 class OutgoingMessages(list[DeliveryStamps]):
@@ -102,6 +114,8 @@ class OutgoingMessages(list[DeliveryStamps]):
         self.appended = asyncio.Event()
 
     def append(self, message: DeliveryStamps) -> None:
+        if (responses := command_responses.get()) is not None:
+            responses.append(message.model_dump_json())
         super().append(message)
         self.appended.set()
 
@@ -193,6 +207,19 @@ class ComputeClient:
     async def run_forever(self) -> NoReturn:
         self.subtensor_client = await SubtensorClient.initialize(chain_reads_in_thread=True)
 
+        try:
+            await self.fail_creates_cut_off_by_restart()
+        except Exception as exc:  # the sweep is best-effort; it must never keep the connector from starting
+            logger.error(
+                _m(
+                    "Failed to report creates cut off by a connector restart",
+                    extra=get_extra_info({**self.logging_extra, "error": str(exc)}),
+                )
+            )
+        try:
+            await self.miner_service.redis_service.clear_running_backend_commands()
+        except Exception:
+            logger.exception("Failed to clear running backend commands on connector start")
         asyncio.create_task(self.handle_send_messages())
         asyncio.create_task(self.subscribe_mesages_from_redis())
         asyncio.create_task(self.poll_rented_machines())
@@ -501,6 +528,9 @@ class ComputeClient:
                 if log_to_send:
                     try:
                         await self.send_model(log_to_send)
+                        if getattr(log_to_send, "failure_step", None) == CREATE_CUT_OFF_BY_RESTART_STEP:
+                            # kept until now so a second restart before the send reports it again
+                            await self._untrack_backend_create_for_restart_report(log_to_send.pod_id)
                     except Exception as exc:
                         async with self.lock:
                             self.message_queue.insert(0, log_to_send)
@@ -828,7 +858,91 @@ class ComputeClient:
         miner = await self.subtensor_client.get_miner(hotkey)
         return miner.axon_info
 
-    async def miner_driver(
+    async def miner_driver(self, job_request: BaseServerRequest):
+        if not job_request.command_id:
+            return await self._run_miner_job(job_request)
+        command_id = job_request.command_id
+        redis_service = self.miner_service.redis_service
+        claim = BackendCommand(state="running", owner=uuid4().hex).model_dump_json()
+        try:
+            existing = await redis_service.claim_backend_command(command_id, claim)
+        except Exception:
+            logger.exception(_m(
+                "Backend command dedup failed open",
+                extra=get_extra_info({**self.logging_extra, "command_id": command_id}),
+            ))
+            return await self._run_miner_job(job_request)
+        if existing is not None:
+            return await self._handle_backend_command_duplicate(job_request, existing)
+
+        responses: list[str] = []
+        token = command_responses.set(responses)
+        heartbeat = asyncio.create_task(self._refresh_backend_command(command_id, claim))
+        succeeded = False
+        try:
+            result = await self._run_miner_job(job_request)
+            succeeded = True
+            return result
+        finally:
+            command_responses.reset(token)
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
+            # A failure without any answer releases the claim so a retry can run.
+            value = (
+                BackendCommand(state="finished", responses=responses).model_dump_json()
+                if succeeded or responses
+                else ""
+            )
+            try:
+                await redis_service.update_backend_command(
+                    command_id, claim, value, settings.BACKEND_COMMAND_ANSWER_TTL_SECONDS
+                )
+            except Exception:
+                logger.exception("Failed to finish backend command: %s", command_id)
+
+    async def _handle_backend_command_duplicate(
+        self, job_request: BaseServerRequest, existing: BackendCommand
+    ) -> None:
+        command_id = job_request.command_id
+        if existing.state == "finished":
+            try:
+                replies = [BaseValidatorResponse.parse(raw) for raw in existing.responses]
+            except Exception:
+                logger.exception(_m(
+                    "Backend command reply replay failed open",
+                    extra=get_extra_info({**self.logging_extra, "command_id": command_id}),
+                ))
+                await self._run_miner_job(job_request)
+                return
+            async with self.lock:
+                for reply in replies:
+                    self.message_queue.append(reply)
+        else:
+            logger.info(
+                _m(
+                    "Ignoring running backend command duplicate",
+                    extra=get_extra_info({
+                        **self.logging_extra,
+                        "command_id": command_id,
+                        "request_type": job_request.message_type.value,
+                    }),
+                )
+            )
+
+    async def _refresh_backend_command(self, command_id: str, claim: str) -> None:
+        ttl = settings.BACKEND_COMMAND_CLAIM_TTL_SECONDS
+        interval = min(settings.BACKEND_COMMAND_HEARTBEAT_SECONDS, ttl / 3)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self.miner_service.redis_service.update_backend_command(
+                    command_id, claim, claim, ttl
+                )
+            except Exception:
+                logger.exception("Failed to refresh backend command claim: %s", command_id)
+
+    async def _run_miner_job(
         self,
         job_request: ContainerCreateRequest
         | ContainerDeleteRequest
@@ -841,7 +955,7 @@ class ComputeClient:
         | AddDebugSshKeyRequest
         | BackupContainerRequest
         | RestoreContainerRequest
-        | InstallJupyterServerRequest
+        | InstallJupyterServerRequest,
     ):
         # DAH-2728: track the create from the moment this task picks it up. The axon lookup below
         # fetches the whole miner set on a cold cache, so a delete arriving seconds later can sail
@@ -849,7 +963,63 @@ class ComputeClient:
         if not isinstance(job_request, ContainerCreateRequest):
             return await self._drive_miner_job(job_request)
         with inflight_creates.track(job_request.pod_id):
-            return await self._drive_miner_job(job_request)
+            await self._track_backend_create_for_restart_report(job_request)
+            try:
+                return await self._drive_miner_job(job_request)
+            finally:
+                await self._untrack_backend_create_for_restart_report(job_request.pod_id)
+
+    async def _track_backend_create_for_restart_report(self, job_request: ContainerCreateRequest) -> None:
+        # best-effort: a Redis error loses only the restart report, never the create itself
+        try:
+            await self.miner_service.redis_service.add_inflight_backend_create(
+                job_request.pod_id, job_request.miner_hotkey, job_request.executor_id, job_request.workload_kind
+            )
+        except Exception as exc:
+            self._log_backend_create_tracking_error(job_request.pod_id, exc)
+
+    async def _untrack_backend_create_for_restart_report(self, pod_id: str) -> None:
+        try:
+            await self.miner_service.redis_service.remove_inflight_backend_create(pod_id)
+        except Exception as exc:
+            self._log_backend_create_tracking_error(pod_id, exc)
+
+    def _log_backend_create_tracking_error(self, pod_id: str, exc: Exception) -> None:
+        logger.error(
+            _m(
+                "Failed to track a backend create for the restart report",
+                extra=get_extra_info({**self.logging_extra, "pod_id": pod_id, "error": str(exc)}),
+            )
+        )
+
+    async def fail_creates_cut_off_by_restart(self) -> None:
+        """DAH-4698: a create the previous connector was running when it died (every lium-io deploy recreates it) never
+        replied, so the backend kept the pod PENDING / the filler STARTING, and its pending-pod flag refused the
+        delete for 30 min. Each one is reported failed now, which frees the node, and its flag is cleared."""
+        redis_service = self.miner_service.redis_service
+        creates = await redis_service.inflight_backend_creates()
+        for pod_id, create in creates.items():
+            # the validator wipes these flags on its own start; this covers a connector that restarted alone
+            await redis_service.remove_pending_pod(create.miner_hotkey, create.executor_id, pod_id)
+            self.message_queue.append(
+                FailedContainerRequest(
+                    miner_hotkey=create.miner_hotkey,
+                    executor_id=create.executor_id,
+                    pod_id=pod_id,
+                    workload_kind=create.workload_kind,
+                    error_type=FailedContainerErrorTypes.ContainerCreationFailed,
+                    error_code=FailedContainerErrorCodes.UnknownError,
+                    msg="The create was interrupted by a validator restart. Please try again.",
+                    detail=f"validator connector restarted during the create (started {create.started_at_unix_seconds})",
+                    failure_step=CREATE_CUT_OFF_BY_RESTART_STEP,
+                )
+            )
+            logger.warning(
+                _m(
+                    "Create cut off by a connector restart, reported failed",
+                    extra=get_extra_info({**self.logging_extra, "pod_id": pod_id, **create.model_dump(mode="json")}),
+                )
+            )
 
     async def _drive_miner_job(
         self,
@@ -968,6 +1138,8 @@ class ComputeClient:
             response: (
                 SshPubKeyAdded | FailedContainerRequest
             ) = await self.miner_service.handle_container(job_request)
+            # the backend matches the answer to its send by this id (a delayed answer must not confirm a later send)
+            response.command_id = job_request.command_id
 
             logger.info(
                 _m(

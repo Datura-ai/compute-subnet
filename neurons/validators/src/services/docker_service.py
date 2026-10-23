@@ -66,12 +66,15 @@ from payload_models.payloads import (
     now_ms,
 )
 from services.attestation_service import AttestationError, AttestationService
+from services import build_context as build_context_service
 from services.const import (
     EDIT_PARKED_SUFFIX,
     FILLER_CACHE_VOLUME_PREFIXES,
     DPHN_CACHE_FREE_MARGIN_GB,
     DPHN_CACHE_LISTING_FLOOR_GB,
     DPHN_CACHE_SIZE_GB,
+    ENGY_CACHE_VOLUME_PREFIX,
+    FILLER_CACHE_MAX_FREE_DISK_SHARE,
     DPHN_CACHE_VOLUME_PREFIX,
     FILLER_CONTAINER_PREFIX,
     GPU_WEDGE_SWEEP_SETTLE_SECONDS,
@@ -79,6 +82,7 @@ from services.const import (
     POD_CONTAINER_PREFIX,
     PREFERRED_POD_PORTS,
 )
+from services.container_cleanup import evict_cache_volumes_oldest_first
 from services.cvm_quote_broker import ensure_quote_broker, quote_socket_pod_mount
 from services.node_host import node_owner, public_host_sock
 from services.default_docker_image_digest_service import fetch_docker_hub_digest
@@ -110,10 +114,14 @@ from services.gpu_wedge import cure_wedged_gpus, query_wedged_gpu_uuids
 from services.nvidia_devices import build_gpu_docker_config_for_executor
 from services.cluster_fabric import WIREGUARD_LISTEN_PORT, cluster_pod_networking
 from services.redis_service import (
+    FILLER_IMAGE_DIGESTS_PREFIX,
+    FILLER_IMAGE_DIGESTS_TTL_SECONDS,
+    IN_CONTAINER_SSH_BOOTSTRAP_PATH,
     RENTAL_PROBE_FAILED_PREFIX,
     RENTAL_PROBE_OK_PREFIX,
     SSHD_BOOTSTRAP_FAILED_PREFIX,
     SSHD_BOOTSTRAP_FAILED_TTL_SECONDS,
+    SSHD_VERIFY_FAILED_MARKER,
     STREAMING_LOG_CHANNEL,
     RedisService,
 )
@@ -156,6 +164,7 @@ from services.storage_operations import (
     start_storage_operation,
     supports_bootstrap_restore,
     supports_storage_operation,
+    upload_secrets_file,
     wait_for_storage_operation,
 )
 from services.task.runner import SSHCommandRunner
@@ -164,6 +173,7 @@ from tenacity import RetryError
 from core.config import settings
 from core.utils import _m, _StructuredMessage, get_extra_info, retry_ssh_command
 from services.ssh_service import SSHService
+from services.pod_ssh_host_key import derive_pod_ssh_host_key
 from services.volume_keys import VolumeKeyDeriver
 
 logger = logging.getLogger(__name__)
@@ -180,7 +190,6 @@ LOG_STREAM_INTERVAL = 0.5  # 500ms — keeps build-log p95 emit→publish under 
 # 2000ms budget (DAH-2211). Was 5s; that was fine for slow `docker pull` lines
 # but build phases emit dense progress (one line per layer) and a 5s batch
 # would violate the SSE latency requirement.
-IN_CONTAINER_SSH_BOOTSTRAP_PATH = "/tmp/lium-ssh-bootstrap.sh"
 
 # Each batch goes to the backend as one LogStreamRequest frame, and its validator socket takes at most 1 MiB per
 # frame (lium-platform F-29). A batch is budgeted by the JSON bytes of its entries, fields included, which leaves
@@ -357,7 +366,7 @@ def _port_allocated_phrase(exc: BaseException) -> str | None:
 def port_collision_error_class(exc: BaseException) -> str | None:
     """`port_collision` when the create died on a host port bind, for the failure event's counter.
 
-    Flag or no flag: a typed `RentalPortCollisionError`, or any refusal text in the exception's
+    A typed `RentalPortCollisionError`, or any refusal text in the exception's
     cause chain that names an already-bound host port.
     """
     seen: set[int] = set()
@@ -415,6 +424,19 @@ def _parse_listening_ports(output: str) -> set[int]:
             if port_text.isdigit() and 0 < int(port_text) <= 65535:
                 ports.add(int(port_text))
     return ports
+
+
+_ENGY_CACHE_SIZE_IN_NAME = re.compile(rf"^{ENGY_CACHE_VOLUME_PREFIX}hf_(\d+)gb_")
+
+
+def _cache_download_gb(volume_name: str) -> float:
+    # DAH-5014: an Engy checkpoint's size is in its name (engy_cache_hf_<N>gb_...); one without it is
+    # never afforded, rather than assumed to be DPHN's 40 GB.
+    if not volume_name.startswith(ENGY_CACHE_VOLUME_PREFIX):
+        return DPHN_CACHE_SIZE_GB
+    match: re.Match[str] | None = _ENGY_CACHE_SIZE_IN_NAME.match(volume_name)
+    return int(match.group(1)) if match else math.inf
+
 
 _VLOOPBACK_MOUNT_ERROR_PHRASES = (
     "VolumeDriver.Mount",
@@ -496,6 +518,14 @@ _PRERUN_HOST_PROBE_TIMEOUT_SECONDS = NVIDIA_SMI_TIMEOUT_SECONDS
 # DAH-3980: a forced rm of a few containers takes about a second; a hung dockerd must fail the
 # customer's create at the cleanup step instead of hanging it
 _CUSTOMER_CONTAINER_REMOVAL_TIMEOUT_SECONDS = 60
+# DAH-5012: after that rm times out on fillers only, one host command kills their processes directly and
+# reads whether each is exiting; bounded on its own, since the rm's deadline is spent by then
+_STUCK_FILLER_PROBE_TIMEOUT_SECONDS = 15
+# failure_step of a customer create whose filler (our own container) is still alive after the kill:
+# not `container_cleanup`, which the backend counts against the provider's node
+FILLER_REMOVAL_STUCK_STEP = "filler_removal_stuck"
+# Linux task flag set by do_exit(): the process was killed and is tearing down (/proc/<pid>/stat field 9)
+_PF_EXITING = 0x4
 
 
 def _missing_rental_docker_host_key_log_text(
@@ -637,7 +667,7 @@ class LoopbackPluginDisabledError(Exception):
 @dataclass
 class VolumeHostProbe:
     """What one SSH round trip learns about the host before a local volume is created
-    (RENTAL_VOLUME_FAST_PATH_ENABLED). The same facts the fresh-sizing path collected over
+    (DAH-3240). The same facts the fresh-sizing path collected over
     three commands, plus the loopback plugin state that lets `create_local_volume` skip
     `docker plugin install` — a Docker Hub round trip — when the plugin is already enabled."""
 
@@ -990,10 +1020,6 @@ _HOST_FAULT_CREATE_STEPS = frozenset({"volume_creation", "gpu_flags"})
 _RENTAL_PROBE_CONTAINER_START_STEP = "container_start"
 
 
-# sshd_bootstrap.sh's verify_sshd line: sshd is installed but not running or listening
-_SSHD_VERIFY_FAILED_MARKER = "sshd verification failed"
-
-
 def is_host_fault_create_failure(current_step: str | None) -> bool:
     return current_step in _HOST_FAULT_CREATE_STEPS
 
@@ -1041,6 +1067,11 @@ class _CreateCancelledByDelete(Exception):
 
 class _FillerRefusedForCustomerCreate(ContainerCreateRefused):
     """Raised at a filler's `docker run` while a customer create runs on the same executor."""
+
+
+class _FillerRemovalStuck(Exception):
+    """DAH-5012: a customer create's `docker rm -fv` of the node's fillers timed out and a filler process is
+    still alive, not exiting, after the validator's direct SIGKILL (or the host could not show it)."""
 
 
 class _FillerBesideCustomerContainer(Exception):
@@ -1304,6 +1335,13 @@ async def _explain_add_public_keys_failure(
     )
 
 
+# after `docker kill`, park() re-reads the container state every _PARK_KILL_SETTLE_SECONDS for up to
+# _PARK_KILL_WAIT_SECONDS: a stuck DinD pod can take most of a minute to exit (prod 22 Oct: two reboots a
+# minute apart failed, the third worked)
+_PARK_KILL_SETTLE_SECONDS = 2
+_PARK_KILL_WAIT_SECONDS = 30
+
+
 class _EditSwap:
     """DAH-2740: keep the customer's container until its replacement runs, so a failed edit can be undone.
 
@@ -1342,6 +1380,16 @@ class _EditSwap:
 
     async def park(self) -> str | None:
         """Rename the running container aside and stop it. None when there is nothing to park."""
+        try:
+            return await self._park()
+        except Exception as exc:
+            # the validator logs nothing else for a failed park, so the next one is diagnosable from Loki
+            logger.warning(
+                _m("Parking the current container failed", extra=get_extra_info({**self.default_extra, "error": repr(exc)}))
+            )
+            raise
+
+    async def _park(self) -> str | None:
         parked = f"{self.container_name}{EDIT_PARKED_SUFFIX}"
         listed = await self.ssh_client.run(
             f'/usr/bin/docker ps -a --no-trunc --format "{{{{.Names}}}} {{{{.ID}}}}" '
@@ -1384,7 +1432,7 @@ class _EditSwap:
         self.parked_name = parked
         self.parked_id = container_id
         stopped = await self.ssh_client.run(f"/usr/bin/docker stop -t 10 {shlex.quote(parked)}")
-        if stopped.exit_status != 0:
+        if stopped.exit_status != 0 and not await self._killed_after_failed_stop(parked, stopped):
             # The container cannot be stopped: give it its name back and fail the edit with the
             # pod exactly as it was. This is the wedge that used to surface as RetryError[...]
             # after a destructive `docker rm -fv`. If even the rename back fails, parked_name
@@ -1400,6 +1448,32 @@ class _EditSwap:
             )
         logger.info(_m("Parked current container for edit", extra=get_extra_info({**self.default_extra, "parked": parked})))
         return parked
+
+    async def _killed_after_failed_stop(self, parked: str, stopped) -> bool:
+        """DinD (sysbox) pods often fail the first `docker stop` while a retry seconds later works (prod 15-21 Oct
+        2026: 12 park failures on 10 hosts, all on dind-lium1). Kill it once; True when Docker reports it stopped within _PARK_KILL_WAIT_SECONDS."""
+        killed = await self.ssh_client.run(f"/usr/bin/docker kill {shlex.quote(parked)}")
+        for _ in range(max(1, _PARK_KILL_WAIT_SECONDS // max(_PARK_KILL_SETTLE_SECONDS, 1))):
+            await asyncio.sleep(_PARK_KILL_SETTLE_SECONDS)
+            running = await self.ssh_client.run(f"/usr/bin/docker inspect -f '{{{{.State.Running}}}}' {shlex.quote(parked)}")
+            is_stopped = running.exit_status == 0 and (running.stdout or "").strip() == "false"
+            if is_stopped:
+                break
+        logger.warning(
+            _m(
+                "docker stop failed while parking the current container; tried docker kill",
+                extra=get_extra_info(
+                    {
+                        **self.default_extra,
+                        "parked": parked,
+                        "stop_stderr": (stopped.stderr or "").strip(),
+                        "kill_stderr": (killed.stderr or "").strip(),
+                        "stopped_after_kill": is_stopped,
+                    }
+                ),
+            )
+        )
+        return is_stopped
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
         # Nothing here may change the create's own outcome: the cleanup and the undo are best effort,
@@ -1746,6 +1820,57 @@ class _OwnSweepRegistry:
 
 
 own_sweep_removals = _OwnSweepRegistry()
+# DAH-5012: filler IDs whose rm timed out in a customer create while every process of theirs was killed and
+# exiting; dockerd finishes that removal, so the running check after `docker run` does not rm them again.
+# shortcut: a plain set, only rare stuck removals are added; prune it if that ever stops being rare
+fillers_exiting_after_kill: set[str] = set()
+
+
+def _kill_and_read_filler_processes_command(container_ids: list[str]) -> str:
+    """DAH-5012: SIGKILL every host process whose cgroup names one of ``container_ids``, wait a second,
+    then print `PROC<TAB>id<TAB>pid<TAB>state<TAB>flags<TAB>wchan` and `STACK<TAB>pid<TAB>kernel stack` per process
+    still there, then the host's Dirty/Writeback. `HOSTPID` first when dockerd is visible: without the host's
+    pid namespace no process line proves anything."""
+    ids = " ".join(shlex.quote(container_id) for container_id in container_ids)
+    return (
+        "pgrep -x dockerd >/dev/null 2>&1 && echo HOSTPID; "
+        f"pairs=$(for id in {ids}; do grep -l -- \"$id\" /proc/[0-9]*/cgroup 2>/dev/null | "
+        "while read -r f; do p=${f#/proc/}; echo \"$id ${p%/cgroup}\"; done; done); "
+        "echo \"$pairs\" | while read -r id p; do [ -n \"$p\" ] && kill -KILL \"$p\" 2>/dev/null; done; "
+        "sleep 1; "
+        "echo \"$pairs\" | while read -r id p; do [ -n \"$p\" ] || continue; "
+        "s=$(sed 's/^.*) //' /proc/$p/stat 2>/dev/null); [ -n \"$s\" ] || continue; set -- $s; "
+        "printf 'PROC\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \"$id\" \"$p\" \"$1\" \"$7\" \"$(cat /proc/$p/wchan 2>/dev/null)\"; "
+        "printf 'STACK\\t%s\\t%s\\n' \"$p\" \"$(tr '\\n' '|' < /proc/$p/stack 2>/dev/null)\"; done; "
+        # a dockerd umount waiting on writeback of a huge dirty page cache shows here (Mikhail, 21 Oct B300)
+        "grep -E '^(Dirty|Writeback):' /proc/meminfo"
+    )
+
+
+class StuckFillerProcess(NamedTuple):
+    container_id: str
+    pid: str
+    state: str
+    flags: int
+    wchan: str
+
+    @property
+    def exiting(self) -> bool:
+        return self.state in ("Z", "X", "x") or bool(self.flags & _PF_EXITING)
+
+
+def _parse_stuck_filler_processes(stdout: str) -> tuple[bool, list[StuckFillerProcess]]:
+    """(dockerd visible, the processes still there) from _kill_and_read_filler_processes_command."""
+    host_pid_view = False
+    processes = []
+    for line in stdout.splitlines():
+        if line == "HOSTPID":
+            host_pid_view = True
+            continue
+        fields = line.split("\t")
+        if len(fields) == 6 and fields[0] == "PROC" and fields[4].isdigit():
+            processes.append(StuckFillerProcess(fields[1], fields[2], fields[3], int(fields[4]), fields[5]))
+    return host_pid_view, processes
 
 
 class _MarkOwnRemovalsOnSubmit:
@@ -1920,11 +2045,7 @@ def _build_cache_volume_mounts(payload: ContainerCreateRequest, occupied_targets
 def _wants_quote_socket(payload: ContainerCreateRequest, *, in_cvm: bool) -> bool:
     # customer rentals on a dstack CVM guest; a FILLER (DPHN/PEARL) has no attestation use and a
     # bare-metal node has no guest agent to broker
-    return (
-        settings.ENABLE_CVM_POD_QUOTE_SOCKET
-        and in_cvm
-        and payload.workload_kind == WorkloadKind.CUSTOMER_RENTAL
-    )
+    return in_cvm and payload.workload_kind == WorkloadKind.CUSTOMER_RENTAL
 
 
 class PortCheckRemoval(NamedTuple):
@@ -1983,8 +2104,7 @@ def _should_encrypt_local_volume(
         bool(local_volume)
         and workload_kind != WorkloadKind.FILLER
         and bool(is_sysbox)
-        and enable_volume_encryption
-        and settings.ENABLE_VOLUME_ENCRYPTION
+        and bool(enable_volume_encryption)
     )
 
 
@@ -2007,11 +2127,7 @@ def _can_remount_encrypted_volume(local_volume_path: str | None) -> bool:
     # derives a passphrase that simply will not mount. A plaintext path at or under the ciphertext
     # mount is refused as well: mounting the plaintext view inside the ciphertext it is decrypting
     # is not something recovery should attempt on customer data.
-    if not (
-        settings.RECOVER_ENCRYPTED_VOLUMES
-        and settings.VOLUME_MASTER_SECRET
-        and local_volume_path
-    ):
+    if not (settings.VOLUME_MASTER_SECRET and local_volume_path):
         return False
     if local_volume_path == _LIUM_CIPHER_MOUNT or local_volume_path.startswith(
         f"{_LIUM_CIPHER_MOUNT}/"
@@ -2145,10 +2261,7 @@ class DockerService:
         self.attestation_service = attestation_service
         self.rental_docker_client_factory = (
             rental_docker_client_factory
-            or RentalDockerSdkClientFactory(
-                pull_timeout_seconds=_DOCKER_PULL_TIMEOUT_SECONDS,
-                transport_retry_enabled=lambda: settings.DOCKER_TRANSPORT_RETRY_ENABLED,
-            )
+            or RentalDockerSdkClientFactory(pull_timeout_seconds=_DOCKER_PULL_TIMEOUT_SECONDS)
         )
         self.lock = asyncio.Lock()
         self.logs_queue: list[dict] = []
@@ -2342,13 +2455,13 @@ class DockerService:
         Returns the container's ID, or None when the client gave none. A ContainerCreateRefused of
         the spec's `before_create` or `before_start` (checked on every attempt) is raised as is.
 
-        Port collision (PORT_COLLISION_RETRY_ENABLED): when dockerd refuses the bind of a host port
+        Port collision: when dockerd refuses the bind of a host port
         and `port_maps` / `spare_port_pairs` are given, the colliding mapping moves to the next
         free pair of the executor's advertised range (at most `_PORT_COLLISION_CANDIDATE_CAP`
         candidates, the host's listening sockets read once over `ssh_client`) and the run is
         retried ONCE with the new mapping; `port_maps` is updated in place so the create's answer
         carries the port the pod really got. No free candidate, or a second bind refusal, fails the
-        create as `RentalPortCollisionError`. Flag off: the DAH-1991 same-command wait as before.
+        create as `RentalPortCollisionError`.
 
         `remove_port_checks_listed_live` runs once, on the first bind refusal, before either retry;
         when it removed a port check, the run is retried at once on the same mapping.
@@ -2424,7 +2537,6 @@ class DockerService:
                     ) from exc
                 if (
                     port_allocation_phrase
-                    and settings.PORT_COLLISION_RETRY_ENABLED
                     and port_maps is not None
                     and spare_port_pairs
                 ):
@@ -3501,31 +3613,15 @@ class DockerService:
             await asyncio.sleep(1)
         return False
 
-    async def _remove_fillers_beside_customer_container(
+    async def _remove_live_fillers_beside_customer_container(
         self,
         ssh_client: asyncssh.SSHClientConnection,
         default_extra: dict,
         pod_name: str,
-        listing: ContainerListing | None,
+        fillers: list[str],
+        ids: dict[str, str],
+        exiting: set[str],
     ) -> None:
-        # the `filler_*` on a listing taken while the customer's container runs
-        if listing is None:
-            # read once more, the channel open unbounded as the running check's (_list_all_containers bounds it)
-            try:
-                result = await ssh_client.run(
-                    _RUNNING_CHECK_LISTING_CMD, timeout=_PRERUN_HOST_PROBE_TIMEOUT_SECONDS
-                )
-            except Exception as exc:
-                raise _FillerBesideCustomerContainer(
-                    f"the host listing failed: {exc.__class__.__name__}"
-                ) from exc
-            _, listing = _parse_running_check_with_listing(result.stdout or "")
-            if listing is None:
-                raise _FillerBesideCustomerContainer("the host could not be listed to confirm no filler runs")
-        names, ids = listing
-        fillers = [name for name in names if name.startswith(FILLER_CONTAINER_PREFIX)]
-        if not fillers:
-            return
         logger.warning(
             _m(
                 "Filler found beside a customer's running container; removing it",
@@ -3556,10 +3652,59 @@ class DockerService:
             removed_fillers=fillers,
             listing_after=listing_after,
         )
+        if survivors:
+            survivors = {name: survivors[name] for name in survivors if name not in exiting}
         if survivors is None:
             raise _FillerBesideCustomerContainer(f"the removal of {fillers} could not be confirmed")
         if survivors:
             raise _FillerBesideCustomerContainer(f"{sorted(survivors)} still on the host after docker rm -fv")
+
+    async def _remove_fillers_beside_customer_container(
+        self,
+        ssh_client: asyncssh.SSHClientConnection,
+        default_extra: dict,
+        pod_name: str,
+        listing: ContainerListing | None,
+    ) -> None:
+        # the `filler_*` on a listing taken while the customer's container runs
+        if listing is None:
+            # read once more, the channel open unbounded as the running check's (_list_all_containers bounds it)
+            try:
+                result = await ssh_client.run(
+                    _RUNNING_CHECK_LISTING_CMD, timeout=_PRERUN_HOST_PROBE_TIMEOUT_SECONDS
+                )
+            except Exception as exc:
+                raise _FillerBesideCustomerContainer(
+                    f"the host listing failed: {exc.__class__.__name__}"
+                ) from exc
+            _, listing = _parse_running_check_with_listing(result.stdout or "")
+            if listing is None:
+                raise _FillerBesideCustomerContainer("the host could not be listed to confirm no filler runs")
+        names, ids = listing
+        fillers = [name for name in names if name.startswith(FILLER_CONTAINER_PREFIX)]
+        if not fillers:
+            return
+        # DAH-5012: a filler killed and exiting before `docker run` is still being removed by dockerd; another
+        # rm would only wait on that removal, so it is logged and left to it
+        exiting = [name for name in fillers if ids.get(name) in fillers_exiting_after_kill]
+        if exiting:
+            logger.warning(
+                _m(
+                    "Killed filler still being removed beside a customer's running container",
+                    extra=get_extra_info({
+                        **default_extra,
+                        "event": FILLER_STILL_RUNNING_EVENT,
+                        "reason": "killed_removal_in_progress",
+                        "pod_name": pod_name,
+                        "container_names": exiting,
+                    }),
+                )
+            )
+        to_remove = [name for name in fillers if name not in exiting]
+        if to_remove:
+            await self._remove_live_fillers_beside_customer_container(
+                ssh_client, default_extra, pod_name, to_remove, ids, set(exiting)
+            )
         # DAH-2356: a PEARL filler caps its GPUs before its `docker run`, possibly after this create's
         # last power restore; lifted only now that it is confirmed gone
         for name in fillers:
@@ -3766,6 +3911,7 @@ class DockerService:
         active_volume_names: list[str] | None = None,
         host_probe: PrerunHostProbe | None = None,
         remove_every_filler: bool = False,
+        keep_every_filler: bool = False,
         report: ContainerCleanupReport | None = None,
         removed_at_ssh_connect: dict[str, str] | None = None,
         refuse_before_removal: Callable[[list[str]], None] | None = None,
@@ -3780,7 +3926,8 @@ class DockerService:
         DAH-3980: ``removed_at_ssh_connect`` holds the fillers `remove_fillers_at_ssh_connect` already
         removed (or tried to), each with the ID it was listed under: the listing may predate that
         removal, and such an instance is never removed twice; a same-name filler listed under another
-        ID was created since, and goes.
+        ID was created since, and goes. The host is then listed again rather than read from ``host_probe``:
+        a filler created again under that name after the probe would carry the removed ID there and be kept.
 
         DAH-3706: ``remove_every_filler`` (a customer's create) treats every `filler_*` as stale
         whatever ``active_container_names`` says -- a paying pod never shares the node with a
@@ -3789,11 +3936,14 @@ class DockerService:
         (typed fields, countable) and the create goes on: the running check after `docker run`
         removes it again or fails the create.
 
+        ``keep_every_filler`` (the rental probe beside a filler) treats no `filler_*` as stale,
+        listed or not, and so removes neither a filler nor its volume.
+
         A stale container whose full ID the listing carried is removed by that ID, so a same-name
         container created after the listing is left alone; own_sweep_removals records each such ID
         before its `rm` is sent. A name listed without an ID is removed by name and not recorded.
         """
-        if host_probe is not None and host_probe.container_names is not None:
+        if host_probe is not None and host_probe.container_names is not None and not removed_at_ssh_connect:
             all_names: list[str] = list(host_probe.container_names)
             listed_ids = dict(host_probe.container_ids)
         else:
@@ -3821,7 +3971,7 @@ class DockerService:
                 name for name in all_names
                 if name == pod_name
                 or name.startswith(POD_CONTAINER_PREFIX)
-                or name.startswith(FILLER_CONTAINER_PREFIX)
+                or (name.startswith(FILLER_CONTAINER_PREFIX) and not keep_every_filler)
             ]
             stale_containers = []
             for name in pod_containers:
@@ -4090,6 +4240,10 @@ class DockerService:
             )
         )
         if timeout_error is not None:
+            if stale_containers and all(name.startswith(FILLER_CONTAINER_PREFIX) for name in stale_containers):
+                return await self._settle_stuck_filler_removal(
+                    ssh_client, default_extra, stale_containers, targets, timeout_error
+                )
             raise Exception(
                 f"[clean_existing_containers] docker rm -fv did not finish in {_CUSTOMER_CONTAINER_REMOVAL_TIMEOUT_SECONDS} s"
             ) from timeout_error
@@ -4126,11 +4280,82 @@ class DockerService:
                 if volumes_to_remove:
                     await self._remove_volumes(ssh_client, volumes_to_remove)
         except TimeoutError as exc:
+            # DAH-5012 (22 Oct 22:32Z, 8x aad247c2): the rm of our filler can also exit 1 and then its retry hang
+            if stale_containers and all(name.startswith(FILLER_CONTAINER_PREFIX) for name in stale_containers):
+                return await self._settle_stuck_filler_removal(
+                    ssh_client, default_extra, stale_containers, targets, exc
+                )
             raise Exception(
                 "[clean_existing_containers] the steps after a failed docker rm -fv did not finish in "
                 f"{_CUSTOMER_CONTAINER_REMOVAL_TIMEOUT_SECONDS} s"
             ) from exc
         return CustomerContainerRemoval(False, listing_after)
+
+    async def _settle_stuck_filler_removal(
+        self,
+        ssh_client: asyncssh.SSHClientConnection,
+        default_extra: dict,
+        fillers: list[str],
+        targets: list[str],
+        timeout_error: TimeoutError,
+    ) -> CustomerContainerRemoval:
+        """DAH-5012: a customer create's `docker rm -fv` of our fillers did not finish in time. In prod (22 Oct,
+        ENGY_TEE fillers on 8x B300) dockerd kept removing them: one went 62 s after the rm was sent, the
+        other's removal was still "in progress" at 66 s. Waiting longer only makes the customer wait (#1809).
+
+        So the filler processes are killed directly and read once (bounded): when dockerd is visible and every
+        process left is exiting (PF_EXITING, or a zombie) the filler can run nothing more, dockerd finishes
+        the removal, and the create goes on. Otherwise the create fails at its own step,
+        FILLER_REMOVAL_STUCK_STEP, not at `container_cleanup`: the stuck container is ours."""
+        error = (
+            f"[clean_existing_containers] docker rm -fv of filler {fillers} did not finish in "
+            f"{_CUSTOMER_CONTAINER_REMOVAL_TIMEOUT_SECONDS} s"
+        )
+        try:
+            # asyncssh's timeout= bounds only the command, not its channel open
+            async with asyncio.timeout(_STUCK_FILLER_PROBE_TIMEOUT_SECONDS):
+                result = await ssh_client.run(
+                    _kill_and_read_filler_processes_command(targets),
+                    check=False,
+                    timeout=_STUCK_FILLER_PROBE_TIMEOUT_SECONDS,
+                )
+        except Exception as exc:
+            logger.warning(
+                _m(
+                    "Stuck filler removal: the filler processes could not be read",
+                    extra=get_extra_info({
+                        **default_extra,
+                        "container_names": fillers,
+                        "error_type": exc.__class__.__name__,
+                    }),
+                )
+            )
+            raise _FillerRemovalStuck(f"{error}; its processes could not be read") from timeout_error
+        lines = (result.stdout or "").splitlines()
+        host_pid_view, processes = _parse_stuck_filler_processes(result.stdout or "")
+        # a filler listed without an ID cannot be found by its cgroup
+        all_found_by_id = not set(targets) & set(fillers)
+        exiting = host_pid_view and all_found_by_id and all(process.exiting for process in processes)
+        logger.warning(
+            _m(
+                "Filler removal timed out on a customer create",
+                extra=get_extra_info({
+                    **default_extra,
+                    "event": FILLER_STILL_RUNNING_EVENT,
+                    "reason": "rm_timed_out",
+                    "container_names": fillers,
+                    "host_pid_view": host_pid_view,
+                    "processes": [process._asdict() for process in processes[:20]],
+                    "stacks": [line.split("\t", 2)[1:] for line in lines if line.startswith("STACK\t")][:20],
+                    "dirty_writeback": [line for line in lines if line.startswith(("Dirty:", "Writeback:"))],
+                    "exiting": exiting,
+                }),
+            )
+        )
+        if not exiting:
+            raise _FillerRemovalStuck(f"{error}; a filler process is not exiting after SIGKILL") from timeout_error
+        fillers_exiting_after_kill.update(targets)
+        return CustomerContainerRemoval(False, await self._list_all_containers(ssh_client))
 
     @staticmethod
     async def _rm_containers(
@@ -4286,6 +4511,38 @@ class DockerService:
             )
             return []
 
+    async def _record_filler_image_best_effort(
+        self,
+        docker_client: RentalDockerSdkClient,
+        container: str,
+        container_name: str,
+        default_extra: dict,
+    ) -> None:
+        """Remember the image digests a filler was started from, so the GPU usage check can tell it
+        from another container later run under the same name. Never fails the create."""
+        try:
+            # the container's own image, not the tag: the tag can move during the bootstrap
+            image_id = await docker_client.container_image_id(container=container)
+            repo_digests = (
+                await docker_client.local_image_repo_digests(image=image_id) if image_id else None
+            )
+            digests = sorted(
+                {d.split("@", 1)[1] for d in repo_digests or () if "@" in d}
+            )
+            if digests:
+                await self.redis_service.set(
+                    f"{FILLER_IMAGE_DIGESTS_PREFIX}{container_name}",
+                    json.dumps(digests),
+                    ex=FILLER_IMAGE_DIGESTS_TTL_SECONDS,
+                )
+        except Exception as exc:
+            logger.warning(
+                _m(
+                    "Could not record the filler's image digests; its image is not checked",
+                    extra=get_extra_info({**default_extra, "error": str(exc)}),
+                )
+            )
+
     async def _cache_rented_pod_best_effort(
         self,
         executor_info: ExecutorSSHInfo,
@@ -4344,8 +4601,9 @@ class DockerService:
             return False
         requested_gb: int | None = payload.volume_limit_gb
         try:
+            # DAH-5014: the Engy checkpoint cache gives way to the renter too.
             cache_volumes: list[str] = await self._find_cache_volumes_to_sweep(
-                ssh_client, set(), default_extra, host_probe=host_probe
+                ssh_client, set(), default_extra, FILLER_CACHE_VOLUME_PREFIXES, host_probe=host_probe
             )
             if not cache_volumes:
                 return False
@@ -4364,7 +4622,7 @@ class DockerService:
 
             logger.info(
                 _m(
-                    "Reclaiming DPHN cache volumes for the customer rental",
+                    "Reclaiming filler cache volumes for the customer rental",
                     extra=get_extra_info({
                         **default_extra,
                         "volumes": cache_volumes,
@@ -4373,9 +4631,19 @@ class DockerService:
                     }),
                 )
             )
-            await retry_ssh_command(
-                ssh_client, DockerCommand.volume_remove(*cache_volumes), "reclaim_dphn_cache_for_rental"
-            )
+            async def remove(command: str) -> object:
+                return await retry_ssh_command(ssh_client, command, "reclaim_dphn_cache_for_rental")
+
+            if not requested_gb:
+                await remove(DockerCommand.volume_remove(*cache_volumes))
+                return True
+
+            async def rental_fits() -> bool:
+                free_now_gb = await self._get_fs_available_bytes(ssh_client, docker_root_dir) / (1024**3)
+                return free_now_gb >= requested_gb + RENTAL_DISK_HEADROOM_GB
+
+            # Oldest first, only as much as the rental needs: a kept Engy checkpoint still restarts fast.
+            await evict_cache_volumes_oldest_first(ssh_client, cache_volumes, remove, rental_fits)
             return True
         except asyncio.CancelledError:
             raise
@@ -4441,13 +4709,21 @@ class DockerService:
             return present
 
         floor_gb: int = DPHN_CACHE_LISTING_FLOOR_GB + DPHN_CACHE_FREE_MARGIN_GB
-        if free_gb - DPHN_CACHE_SIZE_GB <= floor_gb:
+        # One family per launch: DPHN's whole set is DPHN_CACHE_SIZE_GB, an Engy launch asks for one volume.
+        download_gb: float = max(
+            _cache_download_gb(volume.name) for volume in payload.cache_volumes if volume.name not in existing
+        )
+        # DAH-5014: free_gb is real disk, every cache on it counted as used. The pod's own volume is
+        # created (preallocated) after this check, so the floor must hold with both on disk.
+        free_after_gb: float = free_gb - download_gb - (payload.volume_limit_gb or 0)
+        if download_gb > free_gb * FILLER_CACHE_MAX_FREE_DISK_SHARE or free_after_gb <= floor_gb:
             logger.info(
                 _m(
-                    "Node cannot afford the DPHN cache download; keeping only the volumes it already has",
+                    "Node cannot afford the filler cache download; keeping only the volumes it already has",
                     extra=get_extra_info({
                         **default_extra,
                         "free_gb": round(free_gb, 1),
+                        "download_gb": download_gb,
                         "kept_volumes": [volume.name for volume in present],
                     }),
                 )
@@ -4680,15 +4956,16 @@ class DockerService:
         with_power: bool,
         miner_hotkey: str,
         log_extra: dict,
+        with_label: bool,
     ) -> PrerunHostProbe | None:
         """DAH-3257: the pre-run host listings in one SSH command; None on any failure.
 
-        None means every consumer runs its own listing command, exactly as with the flag off; the
+        None means every consumer runs its own listing command, exactly as without the probe; the
         probe is then one extra round trip. It reads the host and writes nothing.
         """
         command = prerun_host_probe_command(
             docker_image=docker_image,
-            image_label=_ENCRYPTED_VOLUME_IMAGE_LABEL,
+            image_label=_ENCRYPTED_VOLUME_IMAGE_LABEL if with_label else None,
             with_power=with_power,
             miner_hotkey=miner_hotkey,
         )
@@ -4697,7 +4974,7 @@ class DockerService:
             # Bounded like the nvidia-smi query it carries (a hung driver must not stall the rent);
             # asyncio.TimeoutError lands in the except below → None → the per-command path.
             result = await ssh_client.run(command, check=False, timeout=_PRERUN_HOST_PROBE_TIMEOUT_SECONDS)
-            probe = parse_prerun_host_probe(result.stdout or "", with_power=with_power)
+            probe = parse_prerun_host_probe(result.stdout or "", with_power=with_power, with_label=with_label)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -4731,7 +5008,7 @@ class DockerService:
                             ("shared_nodes", probe.shared_nodes),
                             ("shared_nodes_whole_host", probe.shared_nodes_whole_host_only),
                             ("power", probe.power_state_stdout if with_power else ""),
-                            ("image_label", probe.image_label_value),
+                            ("image_label", probe.image_label_value if with_label else ""),
                             ("port_check", probe.port_check_container_names),
                         )
                         if value is None
@@ -5252,12 +5529,72 @@ class DockerService:
                 )
             )
             # only sshd installed but not serving is the node's fault; a failed apt-get exits before that line
-            if _SSHD_VERIFY_FAILED_MARKER in f"{run_result.stdout}{run_result.stderr}":
+            if SSHD_VERIFY_FAILED_MARKER in f"{run_result.stdout}{run_result.stderr}":
                 await self._record_sshd_verdict(sshd_verdict_executor_uuid, failed=True, log_extra=log_extra)
             return False
 
         await self._record_sshd_verdict(sshd_verdict_executor_uuid, failed=False, log_extra=log_extra)
         return True
+
+    def _pod_ssh_host_key_script_path(self) -> Path:
+        return Path(__file__).resolve().parent / "assets" / "pod_ssh_host_key.sh"
+
+    async def install_pod_ssh_host_key(
+        self,
+        ssh_client: asyncssh.SSHClientConnection,
+        *,
+        docker_client: RentalDockerSdkClient,
+        container_name: str,
+        pod_id: str,
+        log_extra: dict,
+    ) -> None:
+        """Give the container the host key derived for this pod, so a recreated container (reboot,
+        edit, template switch) presents the key the renter's known_hosts already holds. Best effort:
+        on any failure the pod keeps the key its image generated, as before."""
+        if not settings.VOLUME_MASTER_SECRET or not pod_id:
+            return
+        try:
+            host_key = derive_pod_ssh_host_key(settings.VOLUME_MASTER_SECRET, pod_id)
+            script = self._pod_ssh_host_key_script_path().read_text()
+            # The CLI talks to the local daemon: one channel on the create's pinned SSH
+            # session replaces the WAN Docker API readiness/exec round trips.
+            exec_spec = ContainerExecSpec(
+                container_name=container_name,
+                argv=("sh", "-c", script, "pod_ssh_host_key", host_key.public_openssh),
+                stdin=host_key.private_openssh,
+                idempotent=True,
+            )
+            command = shlex.join(("/usr/bin/docker", "exec", "-i", "-u", "0", container_name, *exec_spec.argv))
+            started_ms = now_ms()
+            async with asyncio.timeout(60):
+                try:
+                    result = await ssh_client.run(command, input=host_key.private_openssh, check=False)
+                except asyncssh.ChannelOpenError:
+                    result = None
+                logger.info(_m(
+                    "Pod SSH host key installation finished",
+                    extra=get_extra_info({**log_extra, "duration_ms": now_ms() - started_ms,
+                                          "exit_status": result.exit_status if result else None}),
+                ))
+                if result is None or result.exit_status != 0:
+                    # Keep the SDK readiness/retry path if the cheap attempt failed.
+                    # Its output may echo stdin, so log only the status here.
+                    fallback = await docker_client.exec_in_container(exec_spec)
+                    logger.info(_m(
+                        "Pod SSH host key fallback finished",
+                        extra=get_extra_info({**log_extra, "duration_ms": now_ms() - started_ms,
+                                              "exit_status": fallback.exit_status}),
+                    ))
+                    if fallback.exit_status != 0:
+                        raise RuntimeError("pod SSH host key fallback failed")
+        except Exception as exc:
+            logger.warning(
+                _m(
+                    "Failed to install pod SSH host key",
+                    extra=get_extra_info({**log_extra, "container_name": container_name, "error": str(exc),
+                                         "error_type": type(exc).__name__}),
+                ),
+            )
 
     async def _record_sshd_verdict(self, executor_uuid: str | None, *, failed: bool, log_extra: dict) -> None:
         if not executor_uuid:
@@ -5487,9 +5824,12 @@ class DockerService:
         # DAH-2496: the kernel cannot ID-shift a FUSE mount, so under sysbox the
         # pod's root would see the bucket as nobody. s3fs keeps owner in object
         # metadata, so report the objects as owned by the pod's root instead.
-        mount_options: str = "allow_other"
+        # DAH-4636: s3fs checks access against that forced owner with the stored mode,
+        # so a non-root pod user could not reopen its own 0600 file; umask=0000 makes
+        # s3fs report and check 0777 for every object.
+        mount_options: str = "allow_other,umask=0000"
         if sysbox_subuid_base is not None:
-            mount_options = f"allow_other,uid={sysbox_subuid_base},gid={sysbox_subuid_base}"
+            mount_options = f"allow_other,umask=0000,uid={sysbox_subuid_base},gid={sysbox_subuid_base}"
 
         setup_results: list[asyncssh.SSHCompletedProcess] = (
             await self._install_s3fs_plugin_instance(
@@ -5977,13 +6317,13 @@ class DockerService:
         with_df: bool,
         log_extra: dict,
     ) -> VolumeHostProbe | None:
-        """RENTAL_VOLUME_FAST_PATH_ENABLED: the volume-stage host facts in one SSH round trip.
+        """DAH-3240: the volume-stage host facts in one SSH round trip.
 
         Replaces `docker info` + the df helper container + `docker volume ls` (fresh sizing) and the
         second `docker info` + the unconditional `docker plugin install` (create) — five serial
         commands, one of them a Docker Hub round trip — with one command and, when vloopback
         volumes exist, the same `docker volume inspect` as before. Never fatal: on any failure it
-        returns None and the callers take the exact path they take with the flag off.
+        returns None and the callers take the per-command path.
         """
         started = now_ms()
         try:
@@ -6024,7 +6364,7 @@ class DockerService:
     ) -> VolumeSizingResult:
         """Resolve effective volume/storage limits for a new pod volume (DAH-2183).
 
-        With `host_probe` (RENTAL_VOLUME_FAST_PATH_ENABLED) the fresh path reads DockerRootDir,
+        With `host_probe` (DAH-3240) the fresh path reads DockerRootDir,
         df and the vloopback volume names from the probe instead of running three commands;
         only `docker volume inspect` still goes to the host, and only when volumes exist.
 
@@ -6263,6 +6603,32 @@ class DockerService:
                 f"exit={result.exit_status} stderr={stderr!r}"
             )
 
+    async def _write_build_context_into_dind(
+        self,
+        ssh_client: asyncssh.SSHClientConnection,
+        dind_name: str,
+        archive: bytes,
+        timeout: int | None = None,
+    ) -> None:
+        """Unpack the checked build-context archive into the DinD build context, streamed on stdin."""
+        ctx = self._DIND_BUILD_CONTEXT
+        inner = f"mkdir -p {ctx} && tar -xzf - -C {ctx}"
+        command = (
+            f"/usr/bin/docker exec -i {shlex.quote(dind_name)} "
+            f"sh -c {shlex.quote(inner)}"
+        )
+        result = await ssh_client.run(
+            command, input=archive, encoding=None, check=False, timeout=timeout
+        )
+        if result.exit_status != 0:
+            stderr = result.stderr or b""
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", "replace")
+            raise RuntimeError(
+                f"Failed to unpack the build context into {dind_name!r}: "
+                f"exit={result.exit_status} stderr={stderr.strip()!r}"
+            )
+
     @staticmethod
     def _parse_egress_block_cidrs(raw: str) -> list[str]:
         """Validate the configured egress-block CIDRs into shell-safe strings.
@@ -6404,6 +6770,35 @@ class DockerService:
                 )
         return "; ".join(lines)
 
+    async def _fetch_build_context(
+        self, payload: ContainerCreateRequest, log_tag: str, default_extra: dict
+    ) -> bytes | CustomBuildOutcome:
+        """The checked build-context archive of `payload`, or the failed CustomBuildOutcome."""
+        from core.config import settings
+
+        context_hosts = build_context_service.allowed_hosts(settings.CUSTOM_DOCKERFILE_BUILD_CONTEXT_HOSTS)
+        if not context_hosts:
+            return CustomBuildOutcome(False, "build_context", "this validator does not take build contexts yet")
+        try:
+            build_context = await build_context_service.fetch(
+                payload.build_context_url,
+                payload.build_context_sha256 or "",
+                hosts=context_hosts,
+                max_bytes=int(settings.CUSTOM_DOCKERFILE_BUILD_CONTEXT_MAX_BYTES),
+                max_unpacked_bytes=int(settings.CUSTOM_DOCKERFILE_BUILD_CONTEXT_MAX_UNPACKED_BYTES),
+            )
+        except build_context_service.BuildContextError as exc:
+            await self.stream_log(str(exc), "error", log_tag)
+            logger.error(
+                _m(
+                    "Custom build context refused",
+                    extra=get_extra_info({**default_extra, "error": str(exc)}),
+                )
+            )
+            return CustomBuildOutcome(False, "build_context", str(exc))
+        await self.stream_log(f"Fetched build context ({len(build_context)} bytes)", "success", log_tag)
+        return build_context
+
     async def _custom_build_image(
         self,
         ssh_client: asyncssh.SSHClientConnection,
@@ -6450,6 +6845,14 @@ class DockerService:
                 )
             )
             return CustomBuildOutcome(False, "build_input_oversize", f"Dockerfile exceeds {max_bytes} byte cap")
+
+        # The build context is fetched and checked before anything starts on the executor.
+        build_context: bytes | None = None
+        if payload.build_context_url:
+            fetched = await self._fetch_build_context(payload, log_tag, default_extra)
+            if isinstance(fetched, CustomBuildOutcome):
+                return fetched
+            build_context = fetched
 
         # 1. Preflight: sysbox-runc MUST be available. Never fall back to runc —
         #    a silent fallback would run an internet-enabled build on the host
@@ -6685,6 +7088,11 @@ class DockerService:
                 f"Preparing build context in {dind_name}", "success", log_tag
             )
             try:
+                if build_context is not None:
+                    # unpacked first, so the request's Dockerfile replaces any the archive holds
+                    await self._write_build_context_into_dind(
+                        ssh_client, dind_name, build_context, timeout=setup_timeout_s
+                    )
                 await self._write_dockerfile_into_dind(
                     ssh_client, dind_name, content, timeout=setup_timeout_s
                 )
@@ -6696,7 +7104,7 @@ class DockerService:
                     ),
                     exc_info=True,
                 )
-                return CustomBuildOutcome(False, "build_setup", "could not write the Dockerfile into the build container")
+                return CustomBuildOutcome(False, "build_setup", "could not write the build context or the Dockerfile into the build container")
 
             # 6. Build INSIDE the DinD container WITH network enabled (no
             #    --network=none). BuildKit streams progress to stderr and
@@ -7006,6 +7414,7 @@ class DockerService:
         ssh_connect: AbstractAsyncContextManager[asyncssh.SSHClientConnection],
         docker_connect: AbstractAsyncContextManager[RentalDockerSdkClient],
         on_ssh_connected: Callable[[asyncssh.SSHClientConnection], None] | None = None,
+        log_extra: dict | None = None,
     ) -> tuple[asyncssh.SSHClientConnection, RentalDockerSdkClient]:
         """DAH-3004: enter both connection contexts at once on the caller's exit stack.
 
@@ -7014,19 +7423,40 @@ class DockerService:
         the stack closes it on the way out and nothing is leaked, which a bare ``gather`` (one
         coroutine still connecting while the exception propagates) would not guarantee.
         ``on_ssh_connected`` runs as soon as the SSH session is up, while Docker still connects.
+        DAH-4677: with ``log_extra``, one line gives each leg's own connect time, since the step
+        waits for the slower one and only that one is worth making faster (DAH-4210).
         """
+        started_ms = now_ms()
+        leg_ms: dict[str, int] = {}
 
         async def enter_ssh() -> asyncssh.SSHClientConnection:
-            ssh_client = await connections.enter_async_context(ssh_connect)
+            try:
+                ssh_client = await connections.enter_async_context(ssh_connect)
+            finally:
+                leg_ms["ssh_connect_ms"] = now_ms() - started_ms
             if on_ssh_connected is not None:
                 on_ssh_connected(ssh_client)
             return ssh_client
 
-        ssh_outcome, docker_outcome = await asyncio.gather(
-            enter_ssh(),
-            connections.enter_async_context(docker_connect),
-            return_exceptions=True,
-        )
+        async def enter_docker() -> RentalDockerSdkClient:
+            try:
+                return await connections.enter_async_context(docker_connect)
+            finally:
+                leg_ms["docker_connect_ms"] = now_ms() - started_ms
+
+        ssh_outcome, docker_outcome = await asyncio.gather(enter_ssh(), enter_docker(), return_exceptions=True)
+        if log_extra is not None:
+            logger.info(
+                _m(
+                    "Create SSH legs timed",
+                    extra=get_extra_info({
+                        **log_extra,
+                        **leg_ms,
+                        "ssh_connected": not isinstance(ssh_outcome, BaseException),
+                        "docker_connected": not isinstance(docker_outcome, BaseException),
+                    }),
+                )
+            )
         if isinstance(ssh_outcome, BaseException):
             if isinstance(docker_outcome, BaseException):
                 # both sides failed: the SSH error is raised, the Docker one rides along as its cause
@@ -7123,7 +7553,16 @@ class DockerService:
         executor_info: ExecutorSSHInfo,
         keypair: bittensor.Keypair,
         private_key: str,
+        *,
+        beside_fillers: bool = False,
     ):
+        # beside_fillers: the rental probe on a node running a Lium filler. The filler keeps running
+        # (the validator cannot end its run in the backend, so removing it reads as the provider
+        # killing it), so this create removes no filler_*, lifts no GPU power cap (DAH-2356: an
+        # uncapped PEARL filler) and reclaims no filler cache.
+        # Every step that removes fillers on a customer create (the sweep before `docker run`, any
+        # check after it) is gated on this, never on workload_kind alone.
+        removes_every_filler = payload.workload_kind == WorkloadKind.CUSTOMER_RENTAL and not beside_fillers
         warnings = []
         local_volume = payload.local_volume
         external_volume_info = payload.external_volume_info
@@ -7356,13 +7795,18 @@ class DockerService:
             # probe runs again at its own step.
             early_probes_allowed = not is_custom_build and not local_volume
             measures_host = self.measures_host_for_volume_sizing(payload)
-            wants_volume_probe = settings.RENTAL_VOLUME_FAST_PATH_ENABLED and bool(
-                measures_host or payload.volume_limit_gb
-            )
+            wants_volume_probe = bool(measures_host or payload.volume_limit_gb)
             brings_own_power_cap = payload.workload_kind == WorkloadKind.FILLER and bool(
                 payload.gpu_power_limits
             )
             probe_with_power = not brings_own_power_cap
+            # the image's label is read only for an encrypted volume (the same predicate as the volume step)
+            probe_with_label = _should_encrypt_local_volume(
+                local_volume or f"volume_{payload.pod_id}",
+                payload.workload_kind,
+                payload.is_sysbox,
+                payload.enable_volume_encryption,
+            )
             early_host_probe: asyncio.Task[AnswerWithOwnDuration] | None = None
             early_volume_probe: asyncio.Task[AnswerWithOwnDuration] | None = None
             # DAH-3980: a customer's create removes every filler (DAH-3706). The kill is started after the
@@ -7373,6 +7817,7 @@ class DockerService:
                 early_probes_allowed
                 and payload.workload_kind == WorkloadKind.CUSTOMER_RENTAL
                 and not payload.bootstrap_restore
+                and not beside_fillers
             )
             filler_removal_at_ssh_connect: asyncio.Task[FillerRemovalAtSshConnect] | None = None
 
@@ -7397,20 +7842,20 @@ class DockerService:
                 nonlocal early_host_probe, early_volume_probe
                 if not early_probes_allowed:
                     return
-                if settings.RENTAL_PRERUN_HOST_PROBE_ENABLED:
-                    early_host_probe = asyncio.create_task(
-                        _with_own_duration(
-                            self.probe_prerun_host(
-                                connected_ssh_client,
-                                docker_image=payload.docker_image,
-                                with_power=probe_with_power,
-                                miner_hotkey=payload.miner_hotkey,
-                                log_extra=default_extra,
-                            ),
-                            ProfilerStepName.PRERUN_HOST_PROBE_PARALLEL,
-                        )
+                early_host_probe = asyncio.create_task(
+                    _with_own_duration(
+                        self.probe_prerun_host(
+                            connected_ssh_client,
+                            docker_image=payload.docker_image,
+                            with_power=probe_with_power,
+                            miner_hotkey=payload.miner_hotkey,
+                            log_extra=default_extra,
+                            with_label=probe_with_label,
+                        ),
+                        ProfilerStepName.PRERUN_HOST_PROBE_PARALLEL,
                     )
-                    connections.callback(early_host_probe.cancel)
+                )
+                connections.callback(early_host_probe.cancel)
                 if wants_volume_probe:
                     early_volume_probe = asyncio.create_task(
                         _with_own_duration(
@@ -7459,6 +7904,7 @@ class DockerService:
                         private_key=private_key,
                     ),
                     on_ssh_connected=start_early_probes,
+                    log_extra=default_extra,
                 )
                 # DAH-2740: undoes a failed edit while this SSH session is still open
                 edit_swap = await connections.enter_async_context(
@@ -7856,23 +8302,23 @@ class DockerService:
                 # need (containers, volumes, mounted volumes, GPU minor map, device nodes, power
                 # state, the image's encryption label). Each consumer takes the probe in place of
                 # its own listing command; every removal and write below still runs as before.
-                # None (flag off, or the probe failed) leaves every consumer on its own commands.
+                # None (the probe failed) leaves every consumer on its own commands.
                 host_probe: PrerunHostProbe | None = None
-                if settings.RENTAL_PRERUN_HOST_PROBE_ENABLED:
-                    current_step = "prerun_host_probe"
-                    if early_host_probe is not None and image_present:
-                        host_probe, early_host_probe_step = await early_host_probe
-                        profilers.append(early_host_probe_step)
-                    else:
-                        host_probe = await self.probe_prerun_host(
-                            ssh_client,
-                            docker_image=payload.docker_image,
-                            # A PEARL filler caps its GPUs with live nvidia-smi queries of its own
-                            # (apply_filler_gpu_power_limits) and never reads the probe's power state.
-                            with_power=probe_with_power,
-                            miner_hotkey=payload.miner_hotkey,
-                            log_extra=default_extra,
-                        )
+                current_step = "prerun_host_probe"
+                if early_host_probe is not None and image_present:
+                    host_probe, early_host_probe_step = await early_host_probe
+                    profilers.append(early_host_probe_step)
+                else:
+                    host_probe = await self.probe_prerun_host(
+                        ssh_client,
+                        docker_image=payload.docker_image,
+                        # A PEARL filler caps its GPUs with live nvidia-smi queries of its own
+                        # (apply_filler_gpu_power_limits) and never reads the probe's power state.
+                        with_power=probe_with_power,
+                        miner_hotkey=payload.miner_hotkey,
+                        log_extra=default_extra,
+                        with_label=probe_with_label,
+                    )
                 # The probe is a snapshot. Once a step below removes a container or a volume, the
                 # container/volume listings are stale (a removed volume would still read as present,
                 # a removed container as still mounting its volume), so the later sweeps go back to
@@ -7916,7 +8362,8 @@ class DockerService:
                     # DAH-3706: a customer's pod never shares the node with a filler, so its
                     # create removes every filler_* whatever the backend listed; a filler create
                     # keeps protecting its listed sibling bundle (DAH-2465).
-                    remove_every_filler=payload.workload_kind == WorkloadKind.CUSTOMER_RENTAL,
+                    remove_every_filler=removes_every_filler,
+                    keep_every_filler=beside_fillers,
                     report=cleanup_report,
                     removed_at_ssh_connect=fillers_removed_at_ssh_connect.listed_id_by_filler_name,
                     refuse_before_removal=lambda names: _refuse_filler_beside_unlisted_pod(payload, names),
@@ -7980,11 +8427,15 @@ class DockerService:
                     host_probe=docker_listing_probe,
                 )
 
-                reclaimed_cache_volumes = await self.reclaim_dphn_cache_for_rental(
-                    ssh_client=ssh_client,
-                    payload=payload,
-                    default_extra=default_extra,
-                    host_probe=docker_listing_probe,
+                reclaimed_cache_volumes = (
+                    []
+                    if beside_fillers
+                    else await self.reclaim_dphn_cache_for_rental(
+                        ssh_client=ssh_client,
+                        payload=payload,
+                        default_extra=default_extra,
+                        host_probe=docker_listing_probe,
+                    )
                 )
                 cleanup_changed_host = bool(
                     removal_at_ssh_connect_lost_its_channel
@@ -8012,7 +8463,7 @@ class DockerService:
                             ProfilerStepName.GPU_POWER_RESTORE_PARALLEL,
                         )
                     )
-                    if not brings_own_power_cap and not payload.bootstrap_restore
+                    if not (brings_own_power_cap or payload.bootstrap_restore or beside_fillers)
                     else None
                 )
                 if early_gpu_power_restore is not None:
@@ -8098,7 +8549,7 @@ class DockerService:
                         )
                 if not local_volume:
                     # DAH-3240: one round trip for the host facts the sizing and the create need
-                    # (flag off → None → the per-command path below, unchanged).
+                    # (a failed probe → None → the per-command path below).
                     volume_probe: VolumeHostProbe | None = None
                     # probe only when something reads it: the host-measuring sizing (df) or a limited
                     # volume's plugin install (root dir + plugin state); an unlimited volume on a
@@ -8199,6 +8650,7 @@ class DockerService:
                             # Decided only once the volume is really attached: runc
                             # keeps /mnt writable, sysbox without the base does not.
                             payload.is_sysbox = False
+                            warnings.append(ContainerWarningCode.DockerInDockerDisabled)
                             await self.stream_log(
                                 "Sysbox disabled: cannot align S3 volume owner with the executor's sysbox uid range",
                                 "warning",
@@ -8248,9 +8700,10 @@ class DockerService:
                     # Again right before docker run, where main restores power: since the early
                     # restore a filler create may have capped these GPUs (its Redis records) or the
                     # host may have lowered a limit with no record (the live floor raise).
-                    await self._restore_gpu_power_for_uncapped_pod(
-                        ssh_client, payload, host_probe, default_extra
-                    )
+                    if not beside_fillers:
+                        await self._restore_gpu_power_for_uncapped_pod(
+                            ssh_client, payload, host_probe, default_extra
+                        )
 
                 # DAH-1524: build_gpu_flags issues 2-3 serial SSH probes (proc minor
                 # map, shared nodes, and a slow nvidia-smi -q -x fallback). Profile it
@@ -8419,7 +8872,7 @@ class DockerService:
                         container_running = await self.check_container_running(
                             ssh_client,
                             container_name,
-                            remove_every_filler=payload.workload_kind == WorkloadKind.CUSTOMER_RENTAL,
+                            remove_every_filler=removes_every_filler,
                             default_extra=default_extra,
                         )
                     except _FillerRestoreStateUnavailable:
@@ -8633,6 +9086,14 @@ class DockerService:
                         ),
                     ):
                         soft_failed_step = current_step
+                    if soft_failed_step is None:
+                        await self.install_pod_ssh_host_key(
+                            ssh_client,
+                            docker_client=docker_client,
+                            container_name=container_name,
+                            pod_id=payload.pod_id,
+                            log_extra=default_extra,
+                        )
 
                     jupyter_url = None
                     if payload.enable_jupyter and jupyter_port_map:
@@ -8730,6 +9191,10 @@ class DockerService:
                         container_name=container_name,
                         default_extra=default_extra,
                     )
+                    if payload.workload_kind == WorkloadKind.FILLER:
+                        await self._record_filler_image_best_effort(
+                            docker_client, container_id or container_name, container_name, default_extra
+                        )
                     # no duration: the collector starts after the reply, its time is logged there
                     profilers.append(
                         ProfilerStep(
@@ -8894,6 +9359,8 @@ class DockerService:
                 current_step = "cancelled_by_delete"
             elif isinstance(e, _FillerRefusedForCustomerCreate):
                 current_step = "customer_create_in_flight"
+            elif isinstance(e, _FillerRemovalStuck):
+                current_step = FILLER_REMOVAL_STUCK_STEP
             # `error_class` (e.g. `port_collision`: dockerd could not bind the pod's host port)
             # rides in the event's detail next to the stage so the backend can count the class
             error_class = rental_docker_error_class(e) or port_collision_error_class(e)
@@ -9021,20 +9488,15 @@ class DockerService:
         """Stamp a host-fault create failure as the node's standing rental probe failure.
 
         The node then scores 0 every cycle until a rental probe passes on it; the probe's interval stamp
-        is dropped so that probe runs on the next idle cycle. Without the probe there is nothing to
-        clear the stamp, so nothing is stamped while RENTAL_PROBE_ENABLED is off. In shadow
-        (RENTAL_PROBE_ENFORCEMENT_ENABLED off) only the interval stamp is dropped: a standing failure
-        written then is never cleared on a node a filler keeps busy, and would zero it once
-        enforcement is turned on.
+        is dropped so that probe runs on the next idle cycle.
         """
-        if not settings.RENTAL_PROBE_ENABLED or not is_host_fault_create_failure(current_step):
+        if not is_host_fault_create_failure(current_step):
             return
         try:
-            if settings.RENTAL_PROBE_ENFORCEMENT_ENABLED:
-                await self.redis_service.set(
-                    f"{RENTAL_PROBE_FAILED_PREFIX}:{executor_uuid}",
-                    f"{_RENTAL_PROBE_CONTAINER_START_STEP}:{current_step}",
-                )
+            await self.redis_service.set(
+                f"{RENTAL_PROBE_FAILED_PREFIX}:{executor_uuid}",
+                f"{_RENTAL_PROBE_CONTAINER_START_STEP}:{current_step}",
+            )
             await self.redis_service.delete(f"{RENTAL_PROBE_OK_PREFIX}:{executor_uuid}")
         except Exception:  # noqa: BLE001 — the create's own failure reply still goes out
             logger.warning(
@@ -9157,16 +9619,12 @@ class DockerService:
             restore.restore_path or local_volume_path,
             "--backup-source-path",
             restore.legacy_object_key or "",
-            "--auth-token",
-            restore.auth_token,
+            "--secrets-file",
+            await upload_secrets_file(ssh_client, restore.auth_token, restore.backup_volume_info),
             "--restore-log-id",
             restore.restore_log_id,
             "--backup-volume-name",
             restore.backup_volume_info.name,
-            "--backup-volume-iam_user_access_key",
-            restore.backup_volume_info.iam_user_access_key,
-            "--backup-volume-iam_user_secret_key",
-            restore.backup_volume_info.iam_user_secret_key,
             "--target-volume-path",
             local_volume_path,
         ]
@@ -9409,7 +9867,11 @@ class DockerService:
             await run_logged_rental_docker_sdk_operation(
                 operation="start_container",
                 log_extra=default_extra,
-                call=lambda: docker_client.start(container_name=container_name),
+                # a pod created before rentals ran on RENTAL_NETWORK_NAME would keep docker0 across
+                # every `docker start`; start moves it onto the rental network
+                call=lambda: docker_client.start(
+                    container_name=container_name, network=RENTAL_NETWORK_NAME
+                ),
                 container_name=container_name,
             )
             async with asyncssh.connect(
@@ -9441,12 +9903,29 @@ class DockerService:
     ) -> None:
         """`docker start` plus :meth:`_restore_mount_and_sshd_after_start`, on clients the caller already
         holds — the undo of a failed edit (``_EditSwap.restore``), whose SSH session is open anyway."""
-        await run_logged_rental_docker_sdk_operation(
-            operation="start_container",
-            log_extra=default_extra,
-            call=lambda: docker_client.start(container_name=container_name),
-            container_name=container_name,
-        )
+
+        async def _start() -> None:
+            await run_logged_rental_docker_sdk_operation(
+                operation="start_container",
+                log_extra=default_extra,
+                call=lambda: docker_client.start(
+                    container_name=container_name, network=RENTAL_NETWORK_NAME
+                ),
+                container_name=container_name,
+            )
+
+        try:
+            await _start()
+        except Exception as exc:
+            # park's `docker stop` can leave the vloopback mountpoint dir behind, so the parked
+            # container's own start fails on "file exists" and the customer's pod stays down
+            # (pod 6577912c, 22 Oct). Same repair as the create retry: rmdir only an empty,
+            # unmounted mountpoint, then start once more.
+            if not _is_stale_vloopback_mountpoint_error(str(exc)) or not await self._repair_stale_mountpoint_of_container_volume(
+                ssh_client, container_name, default_extra
+            ):
+                raise
+            await _start()
         await self._restore_mount_and_sshd_after_start(
             docker_client=docker_client,
             ssh_client=ssh_client,
@@ -10322,6 +10801,9 @@ class DockerService:
                 jupyter_port = payload.jupyter_port_map[0]
                 local_volume = payload.local_volume
                 local_volume_path = payload.local_volume_path
+                # the request does not say whether the volume is encrypted; without the flag the
+                # script is copied into the ciphertext and `chmod /root/run_jupyter.sh` fails
+                encryption_state = await self._local_volume_encryption_state(ssh_client, payload.container_name)
                 await self.run_jupyter(
                     ssh_client=ssh_client,
                     container_name=payload.container_name,
@@ -10331,6 +10813,7 @@ class DockerService:
                     log_extra=default_extra,
                     local_volume=local_volume,
                     local_volume_path=local_volume_path,
+                    encrypted_local_volume=encryption_state is _VolumeEncryptionState.ENCRYPTED,
                 )
 
                 logger.info(

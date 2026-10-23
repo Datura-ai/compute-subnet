@@ -31,6 +31,8 @@ class ReachTarget(StrEnum):
     EXECUTOR_SSH = "executor_ssh"
     # The executor's HTTP API, the miner's side of the node.
     EXECUTOR_API = "executor_api"
+    # A card on the node (GpuLossHoldCheck): the validator cannot reach it through NVML.
+    GPU = "gpu"
 
 
 # The longest peer-supplied text a reading may keep: the node writes it, the portal shows it.
@@ -49,6 +51,18 @@ class AvailabilityErrorCode(StrEnum):
     EXECUTOR_SSH_UNREACHABLE = "EXECUTOR_SSH_UNREACHABLE"
     # DAH-3558: the backend lists the executor as rented, the miner answered the wave without it.
     RENTED_EXECUTOR_NOT_LISTED = "RENTED_EXECUTOR_NOT_LISTED"
+    # An unrented node the miner lists (known_executor_ids) but could not reach to install our key.
+    EXECUTOR_UNREACHABLE_BY_MINER = "EXECUTOR_UNREACHABLE_BY_MINER"
+    # DAH-4457: a GPU dropped out of NVML within the hold window (GpuLossHoldCheck).
+    GPU_LOST = "GPU_LOST"
+    # DAH-4683: NVML reports a card's memory broken (GpuMemoryHealthCheck).
+    GPU_MEMORY_HEALTH_FAILED = "GPU_MEMORY_HEALTH_FAILED"
+
+
+# Faults of the node's own cards: never a sign of our own outage, and never silenced with one.
+NODE_GPU_FAULT_CODES = frozenset(
+    {AvailabilityErrorCode.GPU_LOST, AvailabilityErrorCode.GPU_MEMORY_HEALTH_FAILED}
+)
 
 
 def build_availability_event(
@@ -144,7 +158,9 @@ def build_ssh_unreachable_event(
         if host_key_mismatch
         else (
             "Check that sshd on the node accepts the validator on its management port, "
-            "and that no firewall or rate limit rejects the connection."
+            "and that no firewall or rate limit rejects the connection. If your host NATs or "
+            "proxies inbound SSH, set EXECUTOR_SSH_SOURCE_PIN=false in the executor .env and "
+            "restart the executor."
         ),
         what_we_saw={
             "executor_uuid": executor_uuid,
@@ -189,6 +205,27 @@ def build_rented_executor_not_listed_event(
     )
 
 
+def build_executor_unreachable_by_miner_event(*, executor_uuid: str, miner_hotkey: str) -> ValidationEvent:
+    """An unrented node the miner lists for this validator and could not reach this wave.
+
+    The miner's answer carries the node's id in ``known_executor_ids`` and not in ``executors``:
+    it tried to install the validator's key and the node did not take it. Without this event the
+    wave writes nothing and the node only "stops reporting". The miner sends no address for it.
+    """
+    return build_availability_event(
+        code=AvailabilityErrorCode.EXECUTOR_UNREACHABLE_BY_MINER,
+        reach_source=ReachSource.MINER,
+        reach_target=ReachTarget.EXECUTOR_API,
+        event_text="Miner could not reach this node to install the validator's key",
+        impact="Score 0 for this cycle; the node is hidden from the market until a cycle reaches it.",
+        remediation=(
+            "Check that the executor is running and that its API port accepts the miner's "
+            "/upload_ssh_key request."
+        ),
+        what_we_saw={"executor_uuid": executor_uuid, "miner_hotkey": miner_hotkey},
+    )
+
+
 def is_our_own_outage(unreachable_count: int, checked_count: int) -> bool:
     """True when so much of one cycle failed at the connect that the validator is the suspect.
 
@@ -227,10 +264,24 @@ def silence_availability_errors_on_our_own_outage(job_results: list[JobResult]) 
     are silenced (``_is_the_validators_own_reading``).
     """
     checked_results = [result for result in job_results if _is_the_validators_own_reading(result)]
-    unreachable_results = [result for result in checked_results if result.availability_errors]
+    # a lost or broken GPU is the node's own fault, never our outage: not counted in the share
+    unreachable_results = [
+        result
+        for result in checked_results
+        if any(
+            error.get("reason_code") not in NODE_GPU_FAULT_CODES
+            for error in result.availability_errors or []
+        )
+    ]
     if not is_our_own_outage(len(unreachable_results), len(checked_results)):
         return 0
     for result in checked_results:
         # None means "this cycle did not check": the backend leaves the stored errors alone.
-        result.availability_errors = None
+        # A lost or broken GPU is the node's own fault: its entry stays, the node stays hidden.
+        node_gpu_fault_entries = [
+            error
+            for error in result.availability_errors or []
+            if error.get("reason_code") in NODE_GPU_FAULT_CODES
+        ]
+        result.availability_errors = node_gpu_fault_entries or None
     return len(checked_results)

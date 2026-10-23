@@ -2,6 +2,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from neurons.validators.src.services.nvidia_devices import (
+    MissingRentedGpuError,
     _device_flags,
     _gpus_flag,
     _parse_nvidia_smi_xml_minor_map,
@@ -102,21 +103,18 @@ async def test_partial_rental_preserves_uuid_order_in_per_gpu():
 
 
 @pytest.mark.asyncio
-async def test_partial_rental_falls_back_to_nvidia_smi_xml_when_proc_is_empty():
+async def test_partial_rental_nvidia_smi_xml_cannot_replace_empty_proc():
+    # the kernel (procfs) list is the truth; the spoofable XML may not supply a missing card
     ssh = fake_ssh(FakeRun(""), FakeRun(NVIDIA_SMI_XML_OUTPUT))
-    nodes, host_total = await _query_gpu_nodes_for_uuids(ssh, ["GPU-bbb"])
-
-    assert nodes == ("/dev/nvidia1",)
-    assert host_total == 2
+    with pytest.raises(MissingRentedGpuError):
+        await _query_gpu_nodes_for_uuids(ssh, ["GPU-bbb"])
 
 
 @pytest.mark.asyncio
-async def test_partial_rental_falls_back_to_nvidia_smi_xml_when_proc_is_incomplete():
+async def test_partial_rental_nvidia_smi_xml_cannot_fill_incomplete_proc():
     ssh = fake_ssh(FakeRun("GPU-aaa, 0\n"), FakeRun(NVIDIA_SMI_XML_OUTPUT))
-    nodes, host_total = await _query_gpu_nodes_for_uuids(ssh, ["GPU-bbb"])
-
-    assert nodes == ("/dev/nvidia1",)
-    assert host_total == 2
+    with pytest.raises(MissingRentedGpuError):
+        await _query_gpu_nodes_for_uuids(ssh, ["GPU-bbb"])
 
 
 @pytest.mark.asyncio

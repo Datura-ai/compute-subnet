@@ -23,7 +23,7 @@ from protocol.vc_protocol.compute_requests import RentedExecutorsResponse
 
 from core.config import settings
 from incentive.config import IncentiveConfig
-from incentive.rental_price import MIN_POWER_CAP_REVERTS_TO_PENALIZE, RentalPriceIncentive
+from incentive.rental_price import MIN_POWER_CAP_REVERTS_TO_PENALIZE, NCU_PROFILING_UNRESTRICTED, RentalPriceIncentive
 from incentive.miner_incentive_log import ZeroIncentiveReason
 from payload_models.payloads import GpuPowerLimit
 from services.const import DEFAULT_JOB_OWNER_LIUM
@@ -571,7 +571,8 @@ def _redis_with_reverts(count: int) -> FakeRedis:
 
 def _make_job(is_rented: bool = False) -> JobResult:
     return JobResult(
-        spec={"container_cap_eff": "000001ffffffffff", "nvidiactl_owner_uid": 0},
+        # NCU open: the always-on flagship gate (DAH-2546) would otherwise withhold this idle 8x H200 first.
+        spec={"container_cap_eff": "000001ffffffffff", "nvidiactl_owner_uid": 0, "ncu_profiling_access": NCU_PROFILING_UNRESTRICTED},
         executor_info=ExecutorSSHInfo(
             uuid=EXECUTOR_ID,
             address="10.0.0.1",

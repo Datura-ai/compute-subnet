@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import time
 from contextlib import contextmanager
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncssh
@@ -69,16 +70,12 @@ SMI_TWO_GPUS = (
 @contextmanager
 def probe_settings(
     *,
-    enabled: bool = True,
     interval_hours: float = 6.0,
     deadline: int = 1,
     egress_check: bool = False,
     egress_enforced: bool = False,
-    enforced: bool = True,
 ):
     with patch("neurons.validators.src.services.task.checks.rental_probe.settings") as s:
-        s.RENTAL_PROBE_ENABLED = enabled
-        s.RENTAL_PROBE_ENFORCEMENT_ENABLED = enforced
         s.RENTAL_PROBE_INTERVAL_HOURS = interval_hours
         s.RENTAL_PROBE_SSH_DEADLINE_SECONDS = deadline
         s.NO_OUTBOUND_INTERNET_CHECK_ENABLED = egress_check
@@ -123,10 +120,12 @@ class FakeDocker:
             else ContainerDeleted(miner_hotkey=MINER, executor_id=EXECUTOR.uuid, pod_id="pod")
         )
         self.create_calls: list[tuple] = []
+        self.create_options: list[dict] = []
         self.delete_calls: list[tuple] = []
 
-    async def create_container(self, payload, executor_info, keypair, private_key):
+    async def create_container(self, payload, executor_info, keypair, private_key, **options):
         self.create_calls.append((payload, executor_info, keypair, private_key))
+        self.create_options.append(options)
         if isinstance(self.create_result, Exception):
             raise self.create_result
         return self.create_result
@@ -278,6 +277,7 @@ def make_probe_context(
         specs={
             "verified_ports": [ext for _, ext in port_pairs],
             "gpu": {"driver": "580.65.06", "details": GPU_DETAILS},
+            "ram": {"total": 64 * 1024 * 1024},
         },
         gpu_model="RTX 5090",
         gpu_count=2,
@@ -407,43 +407,14 @@ def renter_path(
 
 
 @pytest.mark.asyncio
-async def test_off_rents_nothing():
-    """Regression: a validator that turned the probe off still rents a container on every idle node each
-    cycle because the check ignores the flag. DAH-4258: on by default, in shadow."""
-    assert type(module.settings).model_fields["RENTAL_PROBE_ENABLED"].default is True
-    ctx, docker, _ = make_probe_context()
-    with probe_settings(enabled=False):
-        result = await RentalProbeCheck().run(ctx)
-    assert result.passed and result.event.reason_code == Msg.DISABLED.reason
-    assert docker.create_calls == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "rented,expected_reason",
-    [
-        (rented_data(pods=1), "rented"),
-        (rented_data(fillers=1), "filler running"),
-    ],
-)
-async def test_never_rents_beside_a_renter_or_a_filler(rented, expected_reason):
-    """Regression: create_container sweeps every pod_/filler_ container it was not told about and lifts GPU
-    power caps, so a probe beside a renter or a PEARL filler destroys their container or uncaps their card."""
-    ctx, docker, _ = make_probe_context(rented=rented)
+async def test_never_rents_beside_a_renter():
+    """Regression: create_container sweeps every pod_ container it was not told about, so a probe beside
+    a renter destroys their container. A filler node is probed beside its filler (see below)."""
+    ctx, docker, _ = make_probe_context(rented=rented_data(pods=1))
     with probe_settings():
         result = await RentalProbeCheck().run(ctx)
     assert result.passed and result.event.reason_code == Msg.SKIPPED.reason
-    assert result.event.what_we_saw["reason"] == expected_reason
-    assert docker.create_calls == []
-
-
-@pytest.mark.asyncio
-async def test_first_pass_in_shadow_creates_nothing():
-    ctx, docker, _ = make_probe_context(first_pass=True)
-    with probe_settings(enforced=False):
-        result = await RentalProbeCheck().run(ctx)
-    assert result.passed and result.event.reason_code == Msg.SKIPPED.reason
-    assert result.event.what_we_saw["reason"] == "first pass"
+    assert result.event.what_we_saw["reason"] == "rented"
     assert docker.create_calls == []
 
 
@@ -460,7 +431,7 @@ async def test_late_in_the_cycle_creates_nothing():
 @pytest.mark.asyncio
 async def test_first_pass_under_enforcement_probes():
     ctx, docker, _ = make_probe_context(first_pass=True)
-    with probe_settings(enforced=True), renter_path():
+    with probe_settings(), renter_path():
         result = await RentalProbeCheck().run(ctx)
     assert result.event.reason_code == Msg.PROBE_OK.reason
 
@@ -510,10 +481,6 @@ async def test_a_failed_probe_clears_an_earlier_pass_stamp_and_records_the_faile
 @pytest.mark.parametrize(
     "make_ctx, no_verdict",
     [
-        (
-            lambda redis: make_probe_context(redis=redis, rented=rented_data(fillers=1)),
-            "skipped: filler running",
-        ),
         (
             lambda redis: make_probe_context(redis=redis, image_present=False),
             "skipped: default renter image is not pulled on the node",
@@ -642,7 +609,7 @@ async def test_the_probe_holds_the_create_lock_from_the_idleness_re_read_until_i
     events: list[str] = []
 
     class RecordingDocker(FakeDocker):
-        async def create_container(self, payload, executor_info, keypair, private_key):
+        async def create_container(self, payload, executor_info, keypair, private_key, **_):
             events.append("create")
             return await super().create_container(payload, executor_info, keypair, private_key)
 
@@ -712,7 +679,7 @@ async def test_the_create_lock_is_released_when_the_create_is_cut_short():
     its TTL, and a renter's create waits that long."""
 
     class RaisingDocker(FakeDocker):
-        async def create_container(self, payload, executor_info, keypair, private_key):
+        async def create_container(self, payload, executor_info, keypair, private_key, **_):
             raise RuntimeError("redis down")
 
     ctx, _, redis = make_probe_context(docker=RaisingDocker())
@@ -722,7 +689,7 @@ async def test_the_create_lock_is_released_when_the_create_is_cut_short():
     assert redis.create_lock_events == ["acquired", "released"]
 
     class HangingDocker(FakeDocker):
-        async def create_container(self, payload, executor_info, keypair, private_key):
+        async def create_container(self, payload, executor_info, keypair, private_key, **_):
             await asyncio.sleep(30)
 
     ctx, _, redis = make_probe_context(docker=HangingDocker())
@@ -784,6 +751,9 @@ async def test_create_payload_is_what_a_renter_gets():
     assert private_key == ctx.executor_ssh_private_key_encrypted
     assert payload.docker_image == IMAGE.image_ref
     assert payload.gpu_uuids == ["GPU-aaaa", "GPU-bbbb"]
+    # the backend's whole-node limit (64 GiB less the 4 GiB reserve), so create_container never takes
+    # the no-memory-limit path that reads the host's /dev/nvidia* count
+    assert payload.memory_gb == 60
     assert (
         payload.ships_sshd is True and payload.is_sysbox is True and payload.enable_jupyter is False
     )
@@ -798,6 +768,12 @@ async def test_create_payload_is_what_a_renter_gets():
         login_key.export_public_key().decode().split()[:2]
         == payload.user_public_keys[0].split()[:2]
     )
+
+
+def test_no_ram_total_in_the_specs_sends_no_memory_limit():
+    ctx, _, _ = make_probe_context()
+    no_ram = ctx.model_copy(update={"state": replace(ctx.state, specs={})})
+    assert module._probe_memory_gb(no_ram) is None
 
 
 @pytest.mark.asyncio
@@ -878,6 +854,19 @@ async def test_a_create_that_raises_still_removes_the_container_by_name():
     assert any(f"volume_{probe_pod_id}" in cmd for cmd in shell_commands)
     assert redis.removed_rented == [f"pod_{probe_pod_id}"]
     assert redis.removed_pending == [(MINER, EXECUTOR.uuid, probe_pod_id)]
+
+
+@pytest.mark.asyncio
+async def test_a_create_that_cannot_open_its_ssh_session_is_inconclusive():
+    # Regression: a failed `ssh_connect` zeroed nodes that took renters' pods the same day
+    ctx, docker, redis = make_probe_context(
+        docker=FakeDocker(create_result=create_failed("ssh_connect"))
+    )
+    with probe_settings(), renter_path():
+        result = await RentalProbeCheck().run(ctx)
+    assert result.passed is True
+    assert result.event.reason_code == Msg.INCONCLUSIVE.reason
+    assert not redis.stamped() and redis.standing_failure() is None
 
 
 @pytest.mark.asyncio
@@ -1067,7 +1056,7 @@ async def test_a_node_rented_during_the_probe_is_not_penalised():
 
     # self-review: a filler's create goes through the same create_container and sweeps pod_<probe> too;
     # its pending mark is gone by the time the probe looks, and a false failure would then stand for the
-    # filler's whole run ("skipped: filler running")
+    # filler's whole run
     ctx, docker, redis = make_probe_context(rented_now=[rented_data(), rented_data(fillers=1)])
     with probe_settings(deadline=1), renter_path(sshd_listens=False):
         result = await RentalProbeCheck().run(ctx)
@@ -1123,7 +1112,7 @@ async def test_the_cycles_cancellation_mid_create_still_removes_the_container_by
     mark, and the container binds the verified ports into the next cycle."""
 
     class HangingDocker(FakeDocker):
-        async def create_container(self, payload, executor_info, keypair, private_key):
+        async def create_container(self, payload, executor_info, keypair, private_key, **_):
             self.create_calls.append((payload, executor_info, keypair, private_key))
             await asyncio.sleep(30)
             return created()
@@ -1234,7 +1223,6 @@ def test_a_volume_rm_that_fails_is_a_leftover_not_a_clean_teardown():
     "rented_now,redis,expected_reason",
     [
         ([rented_data(pods=1)], FakeRedis(), "rented since the cycle started"),
-        ([rented_data(fillers=1)], FakeRedis(), "filler started since the cycle started"),
         ([rented_data()], FakeRedis(renting=True), "a rent is being created on the node"),
     ],
 )
@@ -1275,7 +1263,7 @@ async def test_a_create_that_hangs_is_cut_off_and_its_container_removed_by_name(
     the node."""
 
     class HangingDocker(FakeDocker):
-        async def create_container(self, payload, executor_info, keypair, private_key):
+        async def create_container(self, payload, executor_info, keypair, private_key, **_):
             self.create_calls.append((payload, executor_info, keypair, private_key))
             await asyncio.sleep(30)
             return created()
@@ -1471,83 +1459,12 @@ async def test_pipeline_carries_the_failed_step_to_the_reset_evidence():
     ]
 
 
-def test_enforcement_is_off_by_default():
-    """DAH-4258: the probe is on by default, so its default verdict must be shadow: a failure logs
-    RENTAL_PROBE_FAILED_OBSERVED and zeroes nothing until the owner turns enforcement on."""
-    assert type(module.settings).model_fields["RENTAL_PROBE_ENFORCEMENT_ENABLED"].default is False
-
-
 @pytest.mark.asyncio
-async def test_a_failure_in_shadow_mode_is_logged_and_changes_nothing():
-    """Regression: with RENTAL_PROBE_ENFORCEMENT_ENABLED off a failed probe still zeroes the score, clears the
-    verified job, emits RENTAL_PROBE_FAILED or keeps a standing failure to apply once enforcement is on."""
-    redis = FakeRedis()
-    ctx, docker, _ = make_probe_context(redis=redis)
-    with probe_settings(deadline=1, enforced=False), renter_path(sshd_listens=False):
-        result = await RentalProbeCheck().run(ctx)
-    assert result.passed is True and result.updates == {}
-    assert result.event.reason_code == Msg.PROBE_FAILED_OBSERVED.reason
-    assert result.event.severity == "warning"
-    assert result.event.what_we_saw["failed_step"] == STEP_SSHD_LISTEN
-    assert len(docker.create_calls) == 1 and len(docker.delete_calls) == 1
-    assert redis.standing_failure() is None
-
-
-@pytest.mark.asyncio
-async def test_a_failure_in_shadow_mode_waits_for_the_interval_before_the_next_probe():
-    """Regression: a node failing in shadow mode is rented by the probe every cycle instead of once per
-    interval."""
-    redis = FakeRedis()
-    ctx, _, _ = make_probe_context(redis=redis)
-    with probe_settings(deadline=1, enforced=False), renter_path(sshd_listens=False):
-        await RentalProbeCheck().run(ctx)
-    assert redis.stamped()
-
-    ctx, docker, _ = make_probe_context(redis=redis)
-    with probe_settings(deadline=1, enforced=False), renter_path(sshd_listens=False):
-        result = await RentalProbeCheck().run(ctx)
-    assert result.event.reason_code == Msg.SKIPPED.reason
-    assert result.event.what_we_saw["reason"] == "within interval"
-    assert docker.create_calls == []
-
-
-@pytest.mark.asyncio
-async def test_a_standing_failure_is_not_applied_in_shadow_mode():
-    """Regression: a failure stamped while enforcement was on keeps failing the node after enforcement is
-    switched off."""
-    redis = FakeRedis(failed_step=STEP_GPU_COUNT)
-    ctx, _, _ = make_probe_context(redis=redis, image_present=False)
-    with probe_settings(enforced=False):
-        result = await RentalProbeCheck().run(ctx)
-    assert result.passed is True and result.updates == {}
-    assert result.event.reason_code == Msg.SKIPPED.reason
-
-
-@pytest.mark.asyncio
-async def test_a_shadow_failure_is_not_the_runs_failure_reason():
-    """Regression: the shadow verdict ends the run, so the backend reads RENTAL_PROBE_FAILED as the cycle's
-    reason and counts provider-fault time on a node that was never penalised."""
-    ctx, _, _ = make_probe_context()
-
-    class Sink:
-        async def emit(self, event):  # pragma: no cover
-            pass
-
-    with probe_settings(deadline=1, enforced=False), renter_path(sshd_listens=False):
-        ok, events, last_ctx = await Pipeline([RentalProbeCheck()], sink=Sink()).run(ctx)
-    assert ok is True
-    assert last_ctx.clear_verified_job_info is False
-    assert all(event.reason_code != Msg.PROBE_FAILED.reason for event in events)
-
-
-@pytest.mark.asyncio
-async def test_the_real_redis_service_accepts_the_stamps_lifetime(monkeypatch):
+async def test_the_real_redis_service_accepts_the_stamps_lifetime():
     """Regression (self-review): FakeRedis.set took an `ex` the real `RedisService.set` did not, so both
     stamps raised TypeError in production, swallowed by their `except Exception`: no interval stamp (a
     container per idle node per cycle) and no standing failure."""
     from services.redis_service import RedisService
-
-    from core.config import settings as validator_settings
 
     class RecordingRedis:
         calls: list[tuple] = []
@@ -1555,7 +1472,6 @@ async def test_the_real_redis_service_accepts_the_stamps_lifetime(monkeypatch):
         async def set(self, key, value, ex=None):
             self.calls.append((key, value, ex))
 
-    monkeypatch.setattr(validator_settings, "REDIS_COMMAND_LOCK_ENABLED", False)
     service = RedisService()  # builds pools from settings; nothing connects until a command runs
     service.redis = RecordingRedis()
     await service.set("rental_probe_ok:x", "1.0", ex=module._REDIS_STAMP_TTL_SECONDS)
@@ -1666,9 +1582,7 @@ async def test_egress_step_without_a_reading_records_nothing():
 async def test_a_standing_egress_failure_is_dropped_once_enforcement_is_off():
     """Regression: switching NO_OUTBOUND_INTERNET_ENFORCEMENT_ENABLED off leaves nodes failing on the
     egress step they failed while it was on, until a probe passes."""
-    ctx, _, _ = make_probe_context(
-        redis=FakeRedis(failed_step=STEP_EGRESS), rented=rented_data(fillers=1)
-    )
+    ctx, _, _ = make_probe_context(redis=FakeRedis(failed_step=STEP_EGRESS), image_present=False)
     with probe_settings(egress_check=True):
         result = await RentalProbeCheck().run(ctx)
     assert result.passed and result.event.reason_code == Msg.SKIPPED.reason
@@ -1703,3 +1617,55 @@ async def test_wait_for_sshd_uses_the_rented_probes_identification_rule(greeting
         await server.wait_closed()
 
     assert (error is None) is sshd_up, error
+
+
+@pytest.mark.asyncio
+async def test_a_filler_node_is_probed_beside_its_filler():
+    """Regression: an idle node running a Lium filler is never probed, so a node whose renter
+    container cannot start is only found by the renter who preempts the filler."""
+    fillers = rented_data(fillers=1)
+    ctx, docker, redis = make_probe_context(rented=fillers, rented_now=fillers)
+    with probe_settings(), renter_path():
+        result = await RentalProbeCheck().run(ctx)
+
+    assert result.passed and result.event.reason_code == Msg.PROBE_OK.reason
+    assert docker.create_options == [{"beside_fillers": True}]
+    assert redis.stamped()
+
+
+@pytest.mark.asyncio
+async def test_a_probe_on_a_node_without_a_filler_creates_with_beside_fillers_off():
+    ctx, docker, _ = make_probe_context()
+    with probe_settings(), renter_path():
+        await RentalProbeCheck().run(ctx)
+
+    assert docker.create_options == [{"beside_fillers": False}]
+
+
+@pytest.mark.asyncio
+async def test_a_failure_beside_the_filler_it_started_with_fails_the_node():
+    """Regression: the filler the probe ran beside is still listed afterwards and is read as one
+    given during the probe, so a broken filler node is never failed."""
+    fillers = rented_data(fillers=1)
+    ctx, docker, redis = make_probe_context(rented=fillers, rented_now=[fillers, fillers])
+    with probe_settings(deadline=1), renter_path(sshd_listens=False):
+        result = await RentalProbeCheck().run(ctx)
+
+    assert result.passed is False and result.event.reason_code == Msg.PROBE_FAILED.reason
+    assert redis.standing_failure() == STEP_SSHD_LISTEN
+
+
+@pytest.mark.asyncio
+async def test_a_filler_given_during_a_probe_beside_another_is_no_verdict():
+    """Regression: a filler create sent during the probe can refuse beside or sweep pod_<probe>,
+    and the probe then fails the node for it."""
+    ctx, docker, redis = make_probe_context(
+        rented=rented_data(fillers=1),
+        rented_now=[rented_data(fillers=1), rented_data(fillers=2)],
+    )
+    with probe_settings(deadline=1), renter_path(sshd_listens=False):
+        result = await RentalProbeCheck().run(ctx)
+
+    assert result.passed is True and result.event.reason_code == Msg.INCONCLUSIVE.reason
+    assert result.event.what_we_saw["reason"] == "node was given a filler during the probe"
+    assert redis.standing_failure() is None

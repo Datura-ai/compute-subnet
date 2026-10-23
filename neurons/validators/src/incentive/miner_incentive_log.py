@@ -267,12 +267,12 @@ class MinerLogLine(BaseModel):
             result,
             reason=ZeroIncentiveReason.PROVIDER_EMAIL_NOT_CONFIRMED,
             message=(
-                "No subnet incentive: this executor is not listed until the provider account "
-                "confirms an e-mail address. Confirm your e-mail under Profile Settings in the "
-                "provider portal to remove this hold. Other listing and incentive requirements "
-                "still apply."
+                "No idle pay or rented extra: the provider account has not confirmed an e-mail "
+                "address. Confirm your e-mail under Profile Settings in the provider portal to "
+                "remove this hold. A listed node stays listed and rented. Other listing and "
+                "incentive requirements still apply."
             ),
-            internal_message="Executor excluded from both pools - provider e-mail not confirmed, node not listed",
+            internal_message="Executor excluded from both pools - provider e-mail not confirmed",
         )
 
     @staticmethod
