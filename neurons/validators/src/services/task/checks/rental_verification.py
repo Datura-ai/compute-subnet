@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 import asyncssh
 
 from core.config import settings
-from core.utils import _m, get_extra_info
 from core.docker_utils import (
     ContainerDeathDiagnostics,
     DockerCommand,
@@ -25,8 +23,6 @@ from ..messages import MessageTemplate, render_message
 from ..messages import RentalVerificationMessages as Msg
 from ..pipeline import CheckResult, Context
 from .cpu_truth import advertised_cpu_count
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -131,39 +127,20 @@ class RentalVerificationCheck:
             rented_data and ctx.executor.uuid in rented_data.filler_create_kill_executor_ids
         )
         if create_killed and not has_customer_rental:
-            if settings.FILLER_LIVENESS_ENFORCEMENT_ENABLED:
-                event = render_message(
-                    Msg.FILLER_KILLED_AT_CREATE,
-                    ctx=ctx,
-                    check_id=self.check_id,
-                    what={"verified": False, "executor_uuid": ctx.executor.uuid, "enforced": True},
-                )
-                return CheckResult(passed=False, event=event, updates={})
-            # Shadow: observe and fall through to the normal verification. Returning a pass here
-            # would hand the node a free pass — it skips the backend health check the node would
-            # otherwise have to survive, so shadow mode would be an upgrade, not an observation.
-            # A check owns one event and the fall-through path writes it, so the shadow verdict
-            # rides a log line carrying the same reason code the enforced event uses.
-            logger.warning(
-                _m(
-                    "Lium default job is destroyed during create (shadow)",
-                    extra=get_extra_info({
-                        "reason_code": Msg.FILLER_KILLED_AT_CREATE.reason,
-                        "executor_uuid": ctx.executor.uuid,
-                        "enforced": False,
-                    }),
-                )
+            event = render_message(
+                Msg.FILLER_KILLED_AT_CREATE,
+                ctx=ctx,
+                check_id=self.check_id,
+                what={"verified": False, "executor_uuid": ctx.executor.uuid, "enforced": True},
             )
+            return CheckResult(passed=False, event=event, updates={})
 
         if filler_containers and not has_customer_rental:
             # ISSUE-050: the backend's word alone is not proof the filler is alive — some hosts
             # remove Lium filler containers while the run stays RUNNING and keep earning
             # unrented incentive. Verify the container on the host, mirroring the customer-pod
             # flow in RentedMachineCheck (SSH liveness probe + live backend re-check on miss).
-            # Without ENFORCEMENT (shadow) the verdict is observed and logged only.
-            return await self._verify_every_filler_alive(
-                ctx, filler_containers, enforce=settings.FILLER_LIVENESS_ENFORCEMENT_ENABLED
-            )
+            return await self._verify_every_filler_alive(ctx, filler_containers)
 
         # Get required info from context
         backend_client = ctx.services.backend
@@ -375,7 +352,7 @@ class RentalVerificationCheck:
         return CheckResult(passed=not enforce, event=event, updates=updates)
 
     async def _verify_every_filler_alive(
-        self, ctx: Context, filler_containers: list[str], *, enforce: bool
+        self, ctx: Context, filler_containers: list[str]
     ) -> CheckResult:
         """Verify each of the node's filler containers, one per GPU bundle (DAH-2465).
 
@@ -383,13 +360,12 @@ class RentalVerificationCheck:
         (container_missing=true, feeding the DAH-2471 reconciliation) even while its siblings run
         fine. A check may return only one result, so the node's verdict is its WORST container by
         _FILLER_VERDICT_SEVERITY. Picking positionally would let a healthy or unreachable sibling
-        hide a kill: in shadow every verdict passes, so a killed non-last bundle would emit no
-        FILLER_KILLED at all, and under enforcement an early SSH failure would decide the node
-        while a real kill behind it went unlogged. Each container's reason code is also listed on
-        the returned event, so one log line still covers the whole node.
+        hide a kill: a healthy last bundle would emit no FILLER_KILLED at all, and an early SSH
+        failure would decide the node while a real kill behind it went unlogged. Each container's
+        reason code is also listed on the returned event, so one log line still covers the whole node.
         """
         verdicts: list[tuple[str, CheckResult]] = [
-            (filler_container, await self._verify_filler_alive(ctx, filler_container, enforce=enforce))
+            (filler_container, await self._verify_filler_alive(ctx, filler_container))
             for filler_container in filler_containers
         ]
         decisive: CheckResult = max(
@@ -402,13 +378,12 @@ class RentalVerificationCheck:
         return decisive
 
     async def _verify_filler_alive(
-        self, ctx: Context, filler_container: str, *, enforce: bool
+        self, ctx: Context, filler_container: str
     ) -> CheckResult:
         """Verify the Lium filler container actually runs on the host.
 
-        In shadow mode (enforce=False) every outcome keeps passed=True so scoring is
-        unchanged; the emitted events are the observable artifact. Only a confirmed
-        kill (container gone, run still RUNNING past grace) fails in enforcement mode.
+        A confirmed kill (container gone, run still RUNNING past grace) or a dead SSH transport
+        fails the check; every unprovable state passes.
         """
         try:
             ps_result: asyncssh.SSHCompletedProcess = await ctx.ssh.run(
@@ -424,10 +399,10 @@ class RentalVerificationCheck:
                     "filler_container": filler_container,
                     "executor_uuid": ctx.executor.uuid,
                     "transport_error": repr(exc),
-                    "enforced": enforce,
+                    "enforced": True,
                 },
             )
-            return CheckResult(passed=not enforce, event=event, updates={})
+            return CheckResult(passed=False, event=event, updates={})
 
         if ps_result.exit_status != 0:
             # docker daemon error (e.g. restarting) — indistinguishable from a kill, so fail open.
@@ -496,7 +471,6 @@ class RentalVerificationCheck:
             filler_container,
             filler_run_status=filler_run.status,
             run_age=run_age,
-            enforce=enforce,
         )
 
     async def _filler_killed_result(
@@ -506,7 +480,6 @@ class RentalVerificationCheck:
         *,
         filler_run_status: str | None,
         run_age: timedelta,
-        enforce: bool,
     ) -> CheckResult:
         """Judge why the container is not running, and emit FILLER_KILLED only for a removal.
 
@@ -551,11 +524,9 @@ class RentalVerificationCheck:
                     Msg.FILLER_STOPPED_BY_HOST,
                     ctx=ctx,
                     check_id=self.check_id,
-                    severity=None if enforce else "warning",
-                    impact=None if enforce else "Shadow observation only: incentive was NOT withheld",
-                    what={**what_we_saw, "enforced": enforce},
+                    what={**what_we_saw, "enforced": True},
                 )
-                return CheckResult(passed=not enforce, event=event, updates={})
+                return CheckResult(passed=False, event=event, updates={})
             event = render_message(
                 Msg.FILLER_CONTAINER_EXITED,
                 ctx=ctx,
@@ -568,11 +539,9 @@ class RentalVerificationCheck:
             Msg.FILLER_KILLED,
             ctx=ctx,
             check_id=self.check_id,
-            severity=None if enforce else "warning",
-            impact=None if enforce else "Shadow observation only: incentive was NOT withheld",
-            what={**what_we_saw, "enforced": enforce},
+            what={**what_we_saw, "enforced": True},
         )
-        return CheckResult(passed=not enforce, event=event, updates={})
+        return CheckResult(passed=False, event=event, updates={})
 
     def _filler_state_unknown_result(
         self,

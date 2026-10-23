@@ -351,11 +351,7 @@ class Settings(BaseSettings):
     # reaped ids; on a node with more than 224 rented pods the last rented pods' states are cut
     # until the queue drains.
     POD_STATES_REPORT_ENABLED: bool = Field(env="POD_STATES_REPORT_ENABLED", default=False)
-    # ISSUE-050 filler liveness. The SSH probe + backend re-check always run; without ENFORCEMENT
-    # (shadow) the verdict is logged but never withholds incentive. ENFORCEMENT additionally fails
-    # the fatal check — no unrented incentive — when a host killed the Lium filler container.
-    FILLER_LIVENESS_ENFORCEMENT_ENABLED: bool = Field(env="FILLER_LIVENESS_ENFORCEMENT_ENABLED", default=False)
-    # DAH-2671 spec-truth checks. Each pair mirrors the FILLER_LIVENESS precedent above:
+    # DAH-2671 spec-truth checks. Each pair follows the shadow-first pattern:
     # CHECK_ENABLED is the master switch — shadow mode computes the signal and emits the event/log
     # but returns passed=True and never changes score; ENFORCEMENT (only effective while
     # CHECK_ENABLED is on) additionally lets the signal fail closed / fail the check. No enforcement
@@ -628,15 +624,6 @@ class Settings(BaseSettings):
     # When False, the breach is only logged
     # (shadow mode) so prod impact can be observed before enforcing.
     ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT: bool = Field(env="ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT", default=False)
-
-    # DAH-2715 — GPU power cap capability gate. When True, an unrented executor whose
-    # container provably cannot apply a GPU power cap (no CAP_SYS_ADMIN, or /dev/nvidiactl
-    # not owned by root - see DAH-2705) loses the unrented rental incentive while staying
-    # active. A node whose probe is missing or unreadable is never penalized.
-    # Unlike the gates above this one ships ENFORCED: the fix is one compose flag on the
-    # provider's side, and the shadow window would only delay it. Set to False to fall back
-    # to logging the breach without withholding anything.
-    ENABLE_UNRENTED_POWER_CAP_LIMIT: bool = Field(env="ENABLE_UNRENTED_POWER_CAP_LIMIT", default=True)
 
     # DAH-3698 — True withholds the unrented incentive from a split remainder below the
     # marketplace port floor (the rented GPUs keep earning); False only logs it (shadow mode).

@@ -141,7 +141,7 @@ GATE_LOG_CASES = [
         None,
         "insufficient_disk_unmeasured",
     ),
-    ("ENABLE_UNRENTED_POWER_CAP_LIMIT", {"gpu_count": 4}, None, "power_cap_capability_unmeasured"),
+    (None, {"gpu_count": 4}, None, "power_cap_capability_unmeasured"),  # power cap gate: no flag
 ]
 
 

@@ -496,20 +496,18 @@ class RentalPriceIncentive(DefaultIncentive):
         )
 
     def _log_power_cap_limit(self, result: JobResult, incapable: PowerCapIncapable) -> None:
-        enforced: bool = settings.ENABLE_UNRENTED_POWER_CAP_LIMIT
         logger.info(
             _m(
-                "Unrented executor cannot apply a GPU power cap"
-                + ("" if enforced else " (shadow only - flag off)"),
+                "Unrented executor cannot apply a GPU power cap",
                 extra={
                     "executor_id": str(result.executor_info.uuid),
                     "gpu_model": result.gpu_model,
                     "gpu_count": result.gpu_count,
                     "container_cap_eff": incapable.container_cap_eff,
                     "nvidiactl_owner_uid": incapable.nvidiactl_owner_uid,
-                    "enforced": enforced,
+                    "enforced": True,
                     "reason": ZeroIncentiveReason.CANNOT_APPLY_GPU_POWER_CAP,
-                    "pool": "rental_excluded" if enforced else "rental_kept_shadow",
+                    "pool": "rental_excluded",
                 },
             )
         )
@@ -1327,24 +1325,21 @@ class RentalPriceIncentive(DefaultIncentive):
 
         # DAH-2715 power cap gate: an idle machine whose container cannot apply a GPU power
         # cap is not fully usable for Lium's own jobs, so it forfeits the unrented incentive
-        # (node stays active). While the flag is off we only log the would-be exclusion.
-        # Last in the chain, so a node already excluded by an ENFORCED gate above is not
-        # logged here - read the shadow numbers against the flags that were on that cycle.
-        power_cap_enforced: bool = settings.ENABLE_UNRENTED_POWER_CAP_LIMIT
+        # (node stays active). Last in the chain, so a node already excluded by a gate above
+        # is not logged here, only its reason is recorded.
         power_cap_incapable: PowerCapIncapable | None = (
             self._power_cap_incapable(job_result, log_if_cannot_measure=eligible_for_rental_share)
-            if self._should_run_idle_pool_gate(idle_pool_candidate, eligible_for_rental_share, power_cap_enforced)
+            if self._should_run_idle_pool_gate(idle_pool_candidate, eligible_for_rental_share, enforced=True)
             else None
         )
         if power_cap_incapable is not None:
             if eligible_for_rental_share:
                 self._log_power_cap_limit(job_result, power_cap_incapable)
-            if power_cap_enforced:
-                eligible_for_rental_share = False
-                reason: MinerLogLine = MinerLogLine.no_payout_because_cannot_apply_gpu_power_cap(
-                    job_result, power_cap_incapable
-                )
-                job_result.record_incentive_log(reason)
+            eligible_for_rental_share = False
+            reason: MinerLogLine = MinerLogLine.no_payout_because_cannot_apply_gpu_power_cap(
+                job_result, power_cap_incapable
+            )
+            job_result.record_incentive_log(reason)
 
         # an eligible node has these two factors checked after pricing (_explain_zero_effective_rate)
         if idle_pool_candidate and not eligible_for_rental_share:
