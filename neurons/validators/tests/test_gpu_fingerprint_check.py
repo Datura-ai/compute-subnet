@@ -89,7 +89,10 @@ async def test_legacy_mode_records_the_hard_decision_without_taking_it(
     assert result.event.what_we_saw["anchor_hard_would_be"] == would_be
     assert result.event.what_we_saw["missing"] == missing
     assert result.event.what_we_saw["unexpected"] == unexpected
-    assert result.updates == {"clear_verified_job_info": True}
+    assert result.updates == {
+        "clear_verified_job_info": True,
+        "clear_verified_job_evidence": {"anchor_hard_would_be": would_be},
+    }
 
 
 @pytest.mark.asyncio
