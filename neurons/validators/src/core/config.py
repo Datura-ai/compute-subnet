@@ -618,12 +618,6 @@ class Settings(BaseSettings):
     # and the per-executor job-result dump after scoring; asyncssh and sqlalchemy keep their own levels.
     LOG_LEVEL: str = Field(env="LOG_LEVEL", default="INFO", description="Root log level (DEBUG, INFO, WARNING, ...)")
 
-    # DAH-2520 — unrented VRAM/disk sanity gate. When True, an unrented executor whose
-    # total GPU VRAM exceeds the machine's total disk loses the unrented rental incentive
-    # while staying active. When False, the breach is only logged (shadow mode) so prod
-    # impact can be observed before enforcing.
-    ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT: bool = Field(env="ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT", default=False)
-
     # DAH-2546 — flagship capability gate. When True, an unrented 8x H200/B200/B300 executor
     # with no NCU profiling counters open, no real GPU splitting enabled and no verified TDX
     # quote (DAH-2594) loses the unrented rental incentive while staying active.

@@ -366,11 +366,9 @@ class RentalPriceIncentive(DefaultIncentive):
 
     def _log_insufficient_disk(self, result: JobResult, measured: InsufficientDisk) -> None:
         # structured log for every rental-eligible unrented executor short on disk for its VRAM
-        enforced = settings.ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT
         logger.info(
             _m(
-                "Unrented executor has less total disk than its GPU VRAM requires"
-                + ("" if enforced else " (shadow only - flag off)"),
+                "Unrented executor has less total disk than its GPU VRAM requires",
                 extra={
                     "executor_id": str(result.executor_info.uuid),
                     "gpu_model": result.gpu_model,
@@ -378,9 +376,9 @@ class RentalPriceIncentive(DefaultIncentive):
                     "total_vram_gb": measured.vram_gb,
                     "total_disk_gb": measured.disk_gb,
                     "min_disk_to_vram_rate": measured.rate,
-                    "enforced": enforced,
+                    "enforced": True,
                     "reason": ZeroIncentiveReason.INSUFFICIENT_DISK_FOR_VRAM,
-                    "pool": "rental_excluded" if enforced else "rental_kept_shadow",
+                    "pool": "rental_excluded",
                 },
             )
         )
@@ -1293,22 +1291,20 @@ class RentalPriceIncentive(DefaultIncentive):
 
         # DAH-2520 disk/VRAM gate: an idle machine without the required disk margin over its
         # GPU VRAM is not realistically rentable, so it forfeits the unrented incentive (node
-        # stays active). While the flag is off we only log the would-be exclusion (shadow).
-        disk_enforced: bool = settings.ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT
+        # stays active).
         insufficient_disk = (
             self._insufficient_disk(job_result, log_if_cannot_measure=eligible_for_rental_share)
-            if self._should_run_idle_pool_gate(idle_pool_candidate, eligible_for_rental_share, disk_enforced)
+            if self._should_run_idle_pool_gate(idle_pool_candidate, eligible_for_rental_share, enforced=True)
             else None
         )
         if insufficient_disk is not None:
             if eligible_for_rental_share:
                 self._log_insufficient_disk(job_result, insufficient_disk)
-            if disk_enforced:
-                eligible_for_rental_share = False
-                reason: MinerLogLine = MinerLogLine.no_payout_because_insufficient_disk_for_vram(
-                    job_result, insufficient_disk
-                )
-                job_result.record_incentive_log(reason)
+            eligible_for_rental_share = False
+            reason: MinerLogLine = MinerLogLine.no_payout_because_insufficient_disk_for_vram(
+                job_result, insufficient_disk
+            )
+            job_result.record_incentive_log(reason)
 
         # DAH-2546 flagship capability gate; shadow-only while the flag is off
         flagship_enforced: bool = settings.ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT
