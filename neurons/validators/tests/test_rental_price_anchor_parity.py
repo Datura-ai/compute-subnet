@@ -6,12 +6,14 @@ pins the two editions to parity so an idle Server node earns the same subsidy as
 node until the 1.0 table in this PR is released and picked up by the pin.
 """
 
+from lium_core.shared_config.defaults import DEFAULT_SHARED_CONFIG
+
 from incentive.config import BASE_GPU_MAP, RENTAL_PRICES_PER_HOUR, IncentiveConfig
 from incentive.utils import get_hourly_rate
-from lium_core.shared_config.defaults import DEFAULT_SHARED_CONFIG
 
 SERVER = "NVIDIA RTX PRO 6000 Blackwell Server Edition"
 WORKSTATION = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition"
+MAX_Q = "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"
 
 
 def test_hourly_rate_is_the_same_for_both_editions_through_the_price_resolver():
@@ -36,20 +38,16 @@ def test_overrides_change_only_the_server_edition_and_b300_entries():
     B300 is pinned at 6.40 by DAH-3542. `NVIDIA B300 SXM6 PC` is the one key the pin may ADD: the
     AC card's alias (derived from the AC entry, never its own price), in the lium-core source table
     but not yet in the release the lock installs — the union is a no-op once the lock carries it.
-    `NVIDIA GB300` is the other: priced at the B300 AC rate for now, its own base model."""
+    `NVIDIA GB300` is the other: priced at the B300 AC rate for now, its own base model. The Max-Q
+    Workstation Edition is a third (DAH-3453): derived from the Workstation entry, same base model."""
     upstream = DEFAULT_SHARED_CONFIG.machine_prices
 
-    assert RENTAL_PRICES_PER_HOUR.keys() == upstream.keys() | {
-        "NVIDIA B300 SXM6 PC",
-        "NVIDIA GB300",
-    }
-    assert (
-        RENTAL_PRICES_PER_HOUR["NVIDIA B300 SXM6 PC"]
-        == RENTAL_PRICES_PER_HOUR["NVIDIA B300 SXM6 AC"]
-    )
-    assert RENTAL_PRICES_PER_HOUR["NVIDIA B300 SXM6 AC"] == 6.40
+    assert RENTAL_PRICES_PER_HOUR.keys() == upstream.keys() | {"NVIDIA B300 SXM6 PC", "NVIDIA GB300", MAX_Q}
+    assert RENTAL_PRICES_PER_HOUR["NVIDIA B300 SXM6 PC"] == RENTAL_PRICES_PER_HOUR["NVIDIA B300 SXM6 AC"]
     assert BASE_GPU_MAP["NVIDIA B300 SXM6 PC"] == BASE_GPU_MAP["NVIDIA B300 SXM6 AC"] == "B300"
     assert RENTAL_PRICES_PER_HOUR["NVIDIA GB300"] == RENTAL_PRICES_PER_HOUR["NVIDIA B300 SXM6 AC"]
     assert BASE_GPU_MAP["NVIDIA GB300"] == "GB300"
+    assert RENTAL_PRICES_PER_HOUR[MAX_Q] == RENTAL_PRICES_PER_HOUR[WORKSTATION]
+    assert BASE_GPU_MAP[MAX_Q] == BASE_GPU_MAP[WORKSTATION] == "RTX PRO 6000"
     differing = {gpu for gpu in upstream if RENTAL_PRICES_PER_HOUR[gpu] != upstream[gpu]}
     assert differing <= {SERVER, "NVIDIA B300 SXM6 AC", "NVIDIA B300 SXM6 PC"}

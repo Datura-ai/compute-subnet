@@ -3,9 +3,7 @@
 An unrented 8x H200/B200/B300 executor that has none of NCU profiling counters
 open on the host (ncu_profiling_access == "unrestricted"), real GPU splitting
 enabled (min_gpu_count below the full node size), or a verified TDX quote
-forfeits the unrented rental incentive while staying active. Enforcement is gated by
-ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT; while the flag is off the breach is
-only logged (shadow mode) and the payout is unchanged.
+forfeits the unrented rental incentive while staying active. Always enforced (the flag was removed).
 """
 
 from unittest.mock import AsyncMock
@@ -15,7 +13,6 @@ from datura.requests.miner_requests import ExecutorSSHInfo
 from incentive.config import IncentiveConfig
 from incentive.rental_price import RentalPriceIncentive
 
-from core.config import settings
 from services.task_service import JobResult
 
 H200 = "NVIDIA H200"
@@ -25,6 +22,8 @@ H100 = "NVIDIA H100 80GB HBM3"
 
 # a scrape carrying no NCU observation at all: a machine not re-scraped since DAH-2182 shipped
 SCRAPE_WITHOUT_NCU: dict[str, str] = {}
+
+# what prepare_host_policy returns for a verified TDX quote: os_image_hash + compose_hash
 
 
 def _build_incentive() -> RentalPriceIncentive:
@@ -77,7 +76,6 @@ def _make_job(
 @pytest.mark.asyncio
 async def test_enforced_drops_rental_eligibility(monkeypatch):
     # Arrange — neither capability and flag on
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT", True)
     incentive = _build_incentive()
 
     # Act
@@ -92,7 +90,6 @@ async def test_enforced_drops_rental_eligibility(monkeypatch):
 async def test_rented_flagship_without_capabilities_untouched(monkeypatch):
     # The gate governs only the unrented pool: a rented machine keeps normal scoring
     # and is never told about the missing capabilities.
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_FLAGSHIP_CAPABILITY_LIMIT", True)
     incentive = _build_incentive()
 
     result = await incentive.calculate_executor_score(_make_job(is_rented=True))

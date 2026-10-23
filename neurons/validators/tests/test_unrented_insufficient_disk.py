@@ -2,24 +2,30 @@
 
 An unrented executor whose total disk is below its total GPU VRAM times
 MIN_DISK_TO_VRAM_RATE forfeits the unrented rental incentive while staying active.
-Enforcement is gated by ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT; while the flag is
-off the breach is only logged (shadow mode) and the payout is unchanged.
+Always enforced (the flag was removed).
 """
 
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 from datura.requests.miner_requests import ExecutorSSHInfo
 
-from core.config import settings
 from incentive.config import IncentiveConfig
 from incentive.rental_price import RentalPriceIncentive
+from neurons.validators.tests.helpers import build_scrape_namespace
 from services.task_service import JobResult
 
 H200 = "NVIDIA H200"  # base model H200 is rental-eligible by default
 
 MB_PER_GB = 1024
 KB_PER_GB = 1024 ** 2
+
+
+@pytest.fixture(autouse=True)
+def _no_flagship_gate(monkeypatch):
+    # the 8x H200 jobs here are flagships; the always-on flagship gate has its own tests
+    monkeypatch.setattr(RentalPriceIncentive, "_missing_flagship_capability", lambda *_args: None)
 
 
 def _build_incentive() -> RentalPriceIncentive:
@@ -81,25 +87,6 @@ def test_insufficient_disk_detects_machine_short_on_disk():
     assert measured.disk_gb == 500.0
 
 
-def _logged_reasons(caplog) -> list[str]:
-    # the reason codes of the structured lines captured so far; _m keeps them off the message
-    return [r.msg.extra.get("reason") for r in caplog.records if hasattr(r.msg, "extra")]
-
-
-@pytest.mark.asyncio
-async def test_enforced_drops_rental_eligibility(monkeypatch):
-    # Arrange — VRAM over disk and flag on
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT", True)
-    incentive = _build_incentive()
-
-    # Act
-    result = await incentive.calculate_executor_score(_make_job())
-
-    # Assert — excluded from the rental pool, no mining either (active but no incentive)
-    assert result.eligible_for_rental_share is False
-    assert result.mining_score == 0
-
-
 MALFORMED_SPECS: list[dict] = [
     {"gpu": {"details": [{"capacity": "141 GB"}]}, "hard_disk": {"total": 1}},  # unparsable number
     {"gpu": {"details": [{"capacity": {"total": 1}}]}, "hard_disk": {"total": 1}},  # nested object
@@ -114,9 +101,50 @@ MALFORMED_SPECS: list[dict] = [
 @pytest.mark.parametrize("spec", MALFORMED_SPECS)
 async def test_malformed_scrape_never_breaks_scoring(monkeypatch, spec):
     # Raising out of calculate_executor_score would cost EVERY miner this cycle's weights.
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT", True)
     incentive = _build_incentive()
 
     result = await incentive.calculate_executor_score(_make_job(spec=spec))
 
     assert result.eligible_for_rental_share is True
+
+
+@pytest.mark.asyncio
+async def test_enforced_drops_rental_eligibility(monkeypatch):
+    # Arrange — VRAM over disk and flag on
+    incentive = _build_incentive()
+
+    # Act
+    result = await incentive.calculate_executor_score(_make_job())
+
+    # Assert — excluded from the rental pool, no mining either (active but no incentive)
+    assert result.eligible_for_rental_share is False
+    assert result.mining_score == 0
+
+
+def test_a_node_whose_filler_cache_reads_as_free_disk_still_clears_the_gate():
+    # DAH-5014: the scrape reports the Engy checkpoint cache as free disk. The gate reads TOTAL disk,
+    # which that move leaves alone, so a cached node stays on the side of the gate it was on.
+    # Arrange — 8 x 141 GB = 1128 GB VRAM needs 1692 GB; 2000 GB disk with a 1561 GB checkpoint cached
+    scrape_source = Path(__file__).resolve().parents[1] / "src" / "miner_jobs" / "machine_scrape.py"
+    release_filler_cache = build_scrape_namespace(scrape_source, {"release_filler_cache"}, {})[
+        "release_filler_cache"
+    ]
+    hard_disk = {
+        "hard_disk_total": 2000 * KB_PER_GB,
+        "hard_disk_used": 1800 * KB_PER_GB,
+        "hard_disk_free": 200 * KB_PER_GB,
+        "hard_disk_utilization": 90.0,
+        "filler_cache_kb": 1561 * KB_PER_GB,
+    }
+
+    # Act
+    release_filler_cache(hard_disk)
+    spec = {
+        "gpu": {"details": [{"capacity": 141.0 * MB_PER_GB} for _ in range(8)]},
+        "hard_disk": {"total": hard_disk["hard_disk_total"], "free": hard_disk["hard_disk_free"]},
+    }
+
+    # Assert
+    assert hard_disk["hard_disk_free"] == 1761 * KB_PER_GB
+    assert hard_disk["hard_disk_total"] == 2000 * KB_PER_GB
+    assert _build_incentive()._insufficient_disk(_make_job(spec=spec)) is None

@@ -2,17 +2,15 @@
 
 An unrented executor whose container provably cannot apply a GPU power cap
 (no CAP_SYS_ADMIN, or /dev/nvidiactl not owned by root — see DAH-2705) forfeits
-the unrented rental incentive while staying active. Enforcement is ON by default
-and can be switched off with ENABLE_UNRENTED_POWER_CAP_LIMIT; with the flag off
-the breach is only logged (shadow mode) and the payout is unchanged.
+the unrented rental incentive while staying active. Enforcement is always on.
 """
 
+import logging
 from unittest.mock import AsyncMock
 
 import pytest
 from datura.requests.miner_requests import ExecutorSSHInfo
 
-from core.config import settings
 from incentive.config import IncentiveConfig
 from incentive.rental_price import RentalPriceIncentive
 from services.task_service import JobResult
@@ -20,6 +18,12 @@ from services.task_service import JobResult
 H200 = "NVIDIA H200"  # base model H200 is rental-eligible by default
 
 CAPS_WITHOUT_SYS_ADMIN = "00000000a80425fb"  # prod 128.140.36.181: default docker caps
+
+
+@pytest.fixture(autouse=True)
+def _no_flagship_gate(monkeypatch):
+    # the 8x H200 jobs here are flagships; the always-on flagship gate has its own tests
+    monkeypatch.setattr(RentalPriceIncentive, "_missing_flagship_capability", lambda *_args: None)
 
 
 def _build_incentive() -> RentalPriceIncentive:
@@ -86,15 +90,27 @@ def test_unproven_probe_is_never_flagged(spec):
     assert incentive._power_cap_incapable(_make_job(spec=spec)) is None
 
 
-def _logged_reasons(caplog) -> list[str]:
-    # the reason codes of the structured lines captured so far; _m keeps them off the message
-    return [r.msg.extra.get("reason") for r in caplog.records if hasattr(r.msg, "extra")]
+@pytest.mark.asyncio
+async def test_breach_emits_the_measurement_log(caplog):
+    # these fields are a dashboard contract
+    incentive = _build_incentive()
+
+    with caplog.at_level(logging.INFO):
+        await incentive.calculate_executor_score(_make_job())
+
+    breach = next(
+        r.msg for r in caplog.records
+        if hasattr(r.msg, "extra") and r.msg.extra.get("reason") == "cannot_apply_gpu_power_cap"
+    )
+    assert breach.extra["container_cap_eff"] == CAPS_WITHOUT_SYS_ADMIN
+    assert breach.extra["nvidiactl_owner_uid"] == 0
+    assert breach.extra["enforced"] is True
+    assert breach.extra["pool"] == "rental_excluded"
 
 
 @pytest.mark.asyncio
-async def test_enforced_drops_rental_eligibility(monkeypatch):
-    # Arrange — incapable container and flag on
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_POWER_CAP_LIMIT", True)
+async def test_enforced_drops_rental_eligibility():
+    # Arrange — incapable container
     incentive = _build_incentive()
 
     # Act
