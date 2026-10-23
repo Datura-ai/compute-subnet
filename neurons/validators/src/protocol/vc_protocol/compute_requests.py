@@ -149,6 +149,13 @@ class FillerRevenueByGpuConfig(BaseModel):
     gpu_hours: float  # the filler GPU-hours the average was taken over
 
 
+class MaintenanceWindow(BaseModel):
+    """A provider maintenance window, UTC, half-open: [starting_at, expiring_at)."""
+
+    starting_at: datetime
+    expiring_at: datetime
+
+
 class RentedExecutorsResponse(BaseModel):
     """Response with executors dict and banned GUIDs."""
     executors: dict[str, RentedExecutor]  # key = executor_id
@@ -192,6 +199,9 @@ class RentedExecutorsResponse(BaseModel):
     # executor_ids inside a running provider maintenance window (DAH-4709): no incentive from either pool,
     # rented or not. Additive with an empty default: an older backend names nobody.
     maintenance_executor_ids: list[str] = []
+    # executor_id → its maintenance window (DAH-4709): a node whose cycle started inside it fails
+    # PROVIDER_MAINTENANCE. Additive with an empty default: an older backend names no window.
+    maintenance_windows_by_executor: dict[str, MaintenanceWindow] = {}
     # executor_id → "miner" | "lium"; absent = no default job. Parsed leniently as str for
     # forward-compatibility (a future owner value must not break parsing of the whole response).
     default_job_owner_by_executor: dict[str, str] = {}
