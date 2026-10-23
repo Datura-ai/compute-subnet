@@ -1322,7 +1322,8 @@ async def test_customer_create_keeps_the_listings_but_not_the_volume_facts_after
     assert type(result).__name__ == "ContainerCreated", getattr(result, "msg", "")
     # the fail-closed pid_max read every rental makes first, then the listing that finds the filler and the
     # rm with its confirming listing in one command — the removal starts only once the host reads succeed
-    assert _cmds(ssh_client) == [
+    assert "pod_ssh_host_key" in _cmds(ssh_client)[-1]
+    assert _cmds(ssh_client)[:-1] == [
         "cat /proc/sys/kernel/pid_max",
         *([] if removal_lost_its_channel else [DOCKER_PS_ALL_NAMES_IDS_CMD, _FILLER_X_REMOVAL, DOCKER_PS_ALL_NAMES_IDS_CMD]),
     ]
@@ -1381,10 +1382,11 @@ async def test_customer_create_relists_after_any_other_removal(
 
 
 @pytest.mark.asyncio
-async def test_customer_create_whose_filler_removal_times_out_fails_at_the_cleanup_step(
+async def test_customer_create_whose_filler_removal_times_out_fails_at_its_own_step(
     svc_fixture, monkeypatch
 ):
-    """A hung dockerd fails the create where a failed cleanup does, never hangs it."""
+    """A filler rm that times out, its processes not shown exiting, fails the create, never hangs it; at
+    filler_removal_stuck (DAH-5012), not container_cleanup, which the backend counts against the node."""
     svc = svc_fixture
     ssh_client = _wire_customer_create_over_the_host(
         svc,
@@ -1396,7 +1398,7 @@ async def test_customer_create_whose_filler_removal_times_out_fails_at_the_clean
     result = await _run_create_container(svc, _deploy_payload(active_volume_names=["volume_x"]))
 
     assert type(result).__name__ == "FailedContainerRequest"
-    assert result.failure_step == "container_cleanup"
+    assert result.failure_step == "filler_removal_stuck"
     [removal] = [call for call in ssh_client.run.await_args_list if call.args[0].startswith("/usr/bin/docker rm -fv")]
     assert removal.kwargs["timeout"] == ds_module._CUSTOMER_CONTAINER_REMOVAL_TIMEOUT_SECONDS
 
@@ -1562,7 +1564,8 @@ async def test_only_a_customer_create_removes_fillers_at_ssh_connect(
     assert type(result).__name__ == "ContainerCreated", getattr(result, "msg", "")
     # the fail-closed pid_max read every rental makes comes first; only then does the removal run (at SSH
     # connect for a customer create, at the cleanup step for a bootstrap restore), so it is always after
-    assert _cmds(ssh_client) == ["cat /proc/sys/kernel/pid_max", *commands]
+    assert "pod_ssh_host_key" in _cmds(ssh_client)[-1]
+    assert _cmds(ssh_client)[:-1] == ["cat /proc/sys/kernel/pid_max", *commands]
     svc.probe_prerun_host.assert_awaited_once()
     # the restore's removal at the cleanup step changed the host: its volume facts are probed again
     assert svc.probe_volume_host.await_count == (2 if bootstrap_restore else 1)

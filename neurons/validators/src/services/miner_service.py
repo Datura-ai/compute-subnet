@@ -77,7 +77,13 @@ from services.task.availability import (
 )
 from incentive.config import BASE_GPU_MAP
 from services.task_service import TaskService, JobResult
-from services.storage_operations import cancel_storage_operation, start_storage_operation, supports_workspace_field
+from services.storage_operations import (
+    cancel_storage_operation,
+    report_launch_failure,
+    start_storage_operation,
+    supports_workspace_field,
+)
+from services.storage_operations import upload_secrets_file
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +98,15 @@ def _miner_job_script_path(script_name: str) -> str:
 
 def _nohup_command(argv: list[str], log_path: str) -> str:
     return f"{shlex.join(argv)} > {shlex.quote(log_path)} 2>&1 &"
+
+
+async def _storage_known_hosts(docker_service: DockerService, executor_info: ExecutorSSHInfo, payload):
+    """The same pinned host-key policy the rental paths use, for backup/restore/cancel SSH."""
+    return await docker_service._prepare_known_hosts_policy(
+        executor_info,
+        payload.miner_hotkey,
+        {"miner_hotkey": payload.miner_hotkey, "executor_id": payload.executor_id, "pod_id": payload.pod_id},
+    )
 
 
 def _get_error_details(error: Exception) -> str:
@@ -1301,9 +1316,25 @@ class MinerService:
         # DAH-2728: register the create BEFORE the miner handshake — a delete whose handshake is
         # quicker would otherwise reach the executor first and see a pod that does not exist yet.
         if not isinstance(payload, ContainerCreateRequest):
-            return await self._route_container(payload)
+            result = await self._route_container(payload)
+            await self._report_storage_dispatch_failure(payload, result)
+            return result
         with inflight_creates.track(payload.pod_id), customer_creates.track(payload):
             return await self._route_container(payload)
+
+    async def _report_storage_dispatch_failure(self, payload: ContainerBaseRequest, result: object) -> None:
+        """A Restic backup/restore that fails before its runner starts (executor unreachable, old image)
+        reports nothing itself, so the backend waited 20 min and logged "stopped reporting progress".
+        Report the failure now. The backend ignores a second report on a log that is already terminal."""
+        if not isinstance(result, FailedContainerRequest) or getattr(payload, "backup_engine", None) != "restic":
+            return
+        if isinstance(payload, BackupContainerRequest):
+            operation_id, spec = payload.backup_log_id, self._restic_backup_operation_spec(payload)
+        elif isinstance(payload, RestoreContainerRequest) and not payload.recovery:
+            operation_id, spec = payload.restore_log_id, self._restic_restore_operation_spec(payload)
+        else:
+            return
+        await report_launch_failure(UUID(operation_id), spec, RuntimeError(result.msg))
 
     async def _route_container(self, payload: ContainerBaseRequest):
         """Route a container request over the miner's REST API."""
@@ -1347,7 +1378,7 @@ class MinerService:
         )
         return await self._add_debug_ssh_key(payload)
 
-    async def handle_backup_container_req(self, executor_info: ExecutorSSHInfo, payload: BackupContainerRequest, pkey: SSHKey):
+    async def handle_backup_container_req(self, executor_info: ExecutorSSHInfo, payload: BackupContainerRequest, pkey: SSHKey, docker_service: DockerService):
         """Handle backup container request."""
         async with asyncssh.connect(
             host=executor_info.address,
@@ -1355,7 +1386,7 @@ class MinerService:
             **await public_host_sock(executor_info.address, executor_info.ssh_port),
             username=executor_info.ssh_username,
             client_keys=[pkey],
-            known_hosts=None,
+            known_hosts=await _storage_known_hosts(docker_service, executor_info, payload),
         ) as ssh_client:
 
             if payload.backup_engine == "restic":
@@ -1363,10 +1394,13 @@ class MinerService:
                 if payload.exclude_patterns and not await supports_workspace_field(
                     ssh_client, executor_info.python_path, "exclude_patterns"
                 ):
-                    raise RuntimeError(
+                    error = RuntimeError(
                         "executor image cannot skip caches and keys (no workspace.exclude_patterns); "
                         "the provider must update the executor image"
                     )
+                    # report the real reason first; the generic dispatch-failure report then finds the log terminal
+                    await report_launch_failure(operation_id, self._restic_backup_operation_spec(payload), error)
+                    raise error
                 await start_storage_operation(
                     ssh_client,
                     executor_info.python_path,
@@ -1398,11 +1432,9 @@ class MinerService:
                 "--api-url", settings.COMPUTE_REST_API_URL_EXTERNAL,
                 "--source-volume", payload.source_volume,
                 "--backup-path", payload.backup_path,
-                "--auth-token", payload.auth_token,
+                "--secrets-file", await upload_secrets_file(ssh_client, payload.auth_token, payload.backup_volume_info),
                 "--backup-log-id", payload.backup_log_id,
                 "--backup-volume-name", payload.backup_volume_info.name,
-                "--backup-volume-iam_user_access_key", payload.backup_volume_info.iam_user_access_key,
-                "--backup-volume-iam_user_secret_key", payload.backup_volume_info.iam_user_secret_key,
                 "--source-volume-path", payload.source_volume_path,
                 "--backup-target-path", payload.backup_target_path,
             ]
@@ -1412,7 +1444,7 @@ class MinerService:
                 check=True,
             )
 
-    async def handle_restore_container_req(self, executor_info: ExecutorSSHInfo, payload: RestoreContainerRequest, pkey: SSHKey):
+    async def handle_restore_container_req(self, executor_info: ExecutorSSHInfo, payload: RestoreContainerRequest, pkey: SSHKey, docker_service: DockerService):
         """Handle restore container request."""
         async with asyncssh.connect(
             host=executor_info.address,
@@ -1420,7 +1452,7 @@ class MinerService:
             **await public_host_sock(executor_info.address, executor_info.ssh_port),
             username=executor_info.ssh_username,
             client_keys=[pkey],
-            known_hosts=None,
+            known_hosts=await _storage_known_hosts(docker_service, executor_info, payload),
         ) as ssh_client:
 
             if payload.backup_engine == "restic":
@@ -1457,11 +1489,9 @@ class MinerService:
                 "--target-volume", payload.target_volume,
                 "--restore-path", payload.restore_path,
                 "--backup-source-path", payload.backup_source_path,
-                "--auth-token", payload.auth_token,
+                "--secrets-file", await upload_secrets_file(ssh_client, payload.auth_token, payload.backup_volume_info),
                 "--restore-log-id", payload.restore_log_id,
                 "--backup-volume-name", payload.backup_volume_info.name,
-                "--backup-volume-iam_user_access_key", payload.backup_volume_info.iam_user_access_key,
-                "--backup-volume-iam_user_secret_key", payload.backup_volume_info.iam_user_secret_key,
                 "--target-volume-path", payload.target_volume_path,
             ]
             await ssh_client.run(
@@ -1475,6 +1505,7 @@ class MinerService:
         executor_info: ExecutorSSHInfo,
         payload: CancelStorageOperationRequest,
         pkey: SSHKey,
+        docker_service: DockerService,
     ) -> None:
         async with asyncssh.connect(
             host=executor_info.address,
@@ -1482,7 +1513,7 @@ class MinerService:
             **await public_host_sock(executor_info.address, executor_info.ssh_port),
             username=executor_info.ssh_username,
             client_keys=[pkey],
-            known_hosts=None,
+            known_hosts=await _storage_known_hosts(docker_service, executor_info, payload),
         ) as ssh_client:
             await cancel_storage_operation(ssh_client, UUID(payload.operation_id))
 
@@ -2238,11 +2269,11 @@ class MinerService:
                 elif isinstance(payload, ResetPodGpuRequest):
                     result = await docker_service.reset_pod_gpus(payload, executor, my_key, private_key.decode("utf-8"))
                 elif isinstance(payload, BackupContainerRequest):
-                    result = await self.handle_backup_container_req(executor, payload, ssh_pkey)
+                    result = await self.handle_backup_container_req(executor, payload, ssh_pkey, docker_service)
                 elif isinstance(payload, RestoreContainerRequest):
-                    result = await self.handle_restore_container_req(executor, payload, ssh_pkey)
+                    result = await self.handle_restore_container_req(executor, payload, ssh_pkey, docker_service)
                 elif isinstance(payload, CancelStorageOperationRequest):
-                    result = await self.handle_cancel_storage_operation_req(executor, payload, ssh_pkey)
+                    result = await self.handle_cancel_storage_operation_req(executor, payload, ssh_pkey, docker_service)
                 else:
                     log_text = _m(
                         "Unexpected request",

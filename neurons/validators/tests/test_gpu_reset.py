@@ -309,15 +309,14 @@ async def test_the_rented_gpu_checks_skip_a_node_whose_renter_is_resetting(conte
     from services.task.checks.rented_gpu_drop import RentedGpuDropCheck
     from services.task.messages import GpuUsageMessages, RentedGpuDropMessages
 
-    from tests.test_rented_gpu_drop_check import _ctx, rented_gpu_drop
+    from tests.test_rented_gpu_drop_check import _ctx
 
     redis = PendingRedis()
     services = build_services(redis=redis)
     ctx = _ctx(context_factory, services, listed=[], count=0, scrape_error="NVMLError(999)")
     await redis.add_pending_pod(ctx.miner_hotkey, ctx.executor.uuid, "pod1", kind="gpu_reset")
 
-    with patch.object(rented_gpu_drop.settings, "RENTED_GPU_DROP_CHECK_ENABLED", True):
-        drop = await RentedGpuDropCheck().run(ctx)
+    drop = await RentedGpuDropCheck().run(ctx)
     usage = await GpuUsageCheck().run(ctx)
 
     assert drop.passed and drop.event.reason_code == RentedGpuDropMessages.GPU_RESET_IN_PROGRESS.reason
@@ -330,15 +329,14 @@ async def test_the_drop_check_skips_only_when_every_missing_gpu_is_under_reset(c
     from services.task.checks.rented_gpu_drop import RentedGpuDropCheck
     from services.task.messages import RentedGpuDropMessages
 
-    from tests.test_rented_gpu_drop_check import UUIDS, _ctx, rented_gpu_drop
+    from tests.test_rented_gpu_drop_check import UUIDS, _ctx
 
     redis = PendingRedis()
     ctx = _ctx(context_factory, build_services(redis=redis), listed=UUIDS[1:], count=7)
     await redis.add_pending_pod(ctx.miner_hotkey, ctx.executor.uuid, "pod1", kind="gpu_reset", gpu_uuids=UUIDS[1:2])
-    with patch.object(rented_gpu_drop.settings, "RENTED_GPU_DROP_CHECK_ENABLED", True):
-        other_tenant = await RentedGpuDropCheck().run(ctx)  # UUIDS[0] is missing and not under reset
-        await redis.add_pending_pod(ctx.miner_hotkey, ctx.executor.uuid, "pod2", kind="gpu_reset", gpu_uuids=UUIDS[:1])
-        skipped = await RentedGpuDropCheck().run(ctx)
+    other_tenant = await RentedGpuDropCheck().run(ctx)  # UUIDS[0] is missing and not under reset
+    await redis.add_pending_pod(ctx.miner_hotkey, ctx.executor.uuid, "pod2", kind="gpu_reset", gpu_uuids=UUIDS[:1])
+    skipped = await RentedGpuDropCheck().run(ctx)
 
     assert other_tenant.event.reason_code != RentedGpuDropMessages.GPU_RESET_IN_PROGRESS.reason
     assert skipped.passed and skipped.event.reason_code == RentedGpuDropMessages.GPU_RESET_IN_PROGRESS.reason
