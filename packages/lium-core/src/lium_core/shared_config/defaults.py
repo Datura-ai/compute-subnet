@@ -27,11 +27,14 @@ DEFAULT_SHARED_CONFIG = SharedConfig(
         "NVIDIA GeForce RTX 5090": 0.65,
         "NVIDIA GeForce RTX 4090": 0.30,
         "NVIDIA GeForce RTX 4090 D": 0.11,
+        # DAH-3289: own class like the 4090 D; the backend's 5090 anchor (0.40) x the 4090 D / 4090 ratio (0.11 / 0.30)
+        "NVIDIA GeForce RTX 5090 D": 0.15,
         "NVIDIA RTX 4000 Ada Generation": 0.16,
         "NVIDIA RTX 6000 Ada Generation": 0.69,
         # same card for a renter; anchored at parity (DAH-3230, owner 2026-09-08)
         "NVIDIA RTX PRO 6000 Blackwell Server Edition": 1.0,
         "NVIDIA RTX PRO 6000 Blackwell Workstation Edition": 1.0,
+        "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition": 1.0,
         "NVIDIA L4": 0.11,
         "NVIDIA L40S": 0.35,
         "NVIDIA L40": 0.36,
@@ -60,8 +63,10 @@ DEFAULT_SHARED_CONFIG = SharedConfig(
         "NVIDIA GeForce RTX 5090": 0.014,
         "NVIDIA GeForce RTX 4090": 0.010,
         "NVIDIA GeForce RTX 4090 D": 0.008,
+        "NVIDIA GeForce RTX 5090 D": 0.011,  # 5090 x the 4090 D / 4090 ratio (0.008 / 0.010)
         "NVIDIA RTX PRO 6000 Blackwell Server Edition": 0.0425,
         "NVIDIA RTX PRO 6000 Blackwell Workstation Edition": 0.0459,
+        "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition": 0.0459,
         "NVIDIA RTX 6000 Ada Generation": 0.017,
         "NVIDIA L4": 0.008,
         "NVIDIA L40S": 0.027,
@@ -78,6 +83,7 @@ DEFAULT_SHARED_CONFIG = SharedConfig(
         # Blackwell (sm_100/120)
         "NVIDIA B200": {"arch": "blackwell", "min_cuda": 12.8, "compute_cap": "sm_100"},
         "NVIDIA GeForce RTX 5090": {"arch": "blackwell", "min_cuda": 12.8, "compute_cap": "sm_120"},
+        "NVIDIA GeForce RTX 5090 D": {"arch": "blackwell", "min_cuda": 12.8, "compute_cap": "sm_120"},
         # Hopper (sm_90)
         "NVIDIA H100 80GB HBM3": {"arch": "hopper", "min_cuda": 11.8, "optimal_cuda": 12.2, "compute_cap": "sm_90"},
         "NVIDIA H100 NVL": {"arch": "hopper", "min_cuda": 11.8, "optimal_cuda": 12.2, "compute_cap": "sm_90"},

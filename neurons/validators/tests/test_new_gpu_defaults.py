@@ -63,6 +63,7 @@ NEW_GPU_MODELS = {
     "NVIDIA RTX 4500 Ada Generation": "RTX 4500 Ada Generation",
     "NVIDIA A800 80GB PCIe": "A800",
     "NVIDIA CMP 170HX": "CMP 170HX",
+    "NVIDIA GeForce RTX 5090 D": "RTX 5090 D",
 }
 
 

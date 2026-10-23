@@ -8,6 +8,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 from neurons.validators.src.services.task import pipeline_factory
+from neurons.validators.src.services.task.availability import (
+    AvailabilityErrorCode,
+    availability_errors,
+    silence_availability_errors_on_our_own_outage,
+)
 from neurons.validators.src.services.task.checks.gpu_fault_probe import (
     PROBE_JSON_MARKER,
     PROBE_SOURCE,
@@ -18,6 +23,7 @@ from neurons.validators.src.services.task.pipeline import Pipeline
 from protocol.vc_protocol.compute_requests import RentedExecutor, RentedExecutorsResponse, RentedPod
 
 from core.config import settings
+from services.task.models import JobResult
 from tests.helpers import default_executor
 from tests.test_gpu_fault_probe_check import FakeRunner, _probe_namespace, make_ctx
 
@@ -192,6 +198,19 @@ async def test_a_broken_card_under_a_live_rental_fails_without_stopping_verifica
 
     assert (result.passed, result.fatal) == (False, False)
     assert result.updates == {"clear_verified_job_info": True}
+    # DAH-4683: the backend hides the node and refuses new rentals; the live pod is untouched
+    [entry] = availability_errors([result.event])
+    assert entry.reason_code == AvailabilityErrorCode.GPU_MEMORY_HEALTH_FAILED
+    assert (entry.reach_source, entry.reach_target) == ("validator", "gpu")
+    assert entry.what_we_saw["flags"] == FLAGS
+
+
+def test_broken_gpu_memory_entries_do_not_count_toward_our_own_outage():
+    broken = [{"reason_code": "GPU_MEMORY_HEALTH_FAILED", "reach_source": "validator"}]
+    results = [JobResult.model_construct(availability_errors=list(broken)) for _ in range(6)]
+
+    assert silence_availability_errors_on_our_own_outage(results) == 0
+    assert all(result.availability_errors == broken for result in results)
 
 
 @pytest.mark.asyncio
@@ -202,6 +221,7 @@ async def test_with_enforcement_off_a_broken_card_is_only_flagged(context_factor
     result = await GpuMemoryHealthCheck().run(make_ctx(context_factory, runner))
 
     assert (result.passed, result.event.reason_code) == (True, Msg.FLAGGED.reason)
+    assert availability_errors([result.event]) == []
 
 
 @pytest.mark.asyncio
@@ -209,7 +229,10 @@ async def test_with_enforcement_off_a_broken_card_is_only_flagged(context_factor
     "stdout, reason",
     [
         (_report("ok", flags=[]), Msg.OK.reason),
-        (_report("ok", flags=[], warnings=["gpu 1 (GPU-1): row remap pending"]), Msg.OK.reason),
+        (
+            _report("ok", flags=[], warnings=["gpu 1 (GPU-1): row remap pending"]),
+            Msg.RESET_ADVISED.reason,
+        ),
         (_report("error", flags=[], nvml={"available": False}), Msg.UNKNOWN.reason),
         ("no marker", Msg.UNKNOWN.reason),
     ],

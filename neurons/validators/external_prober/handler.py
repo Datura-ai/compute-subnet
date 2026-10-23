@@ -16,11 +16,18 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 MAX_TARGETS = 64
+# Fetched with every request: if the prober cannot reach this known-open URL, its own egress is down and an empty
+# answer would read as "every node blocks the outside", so it answers 503 (no verdict) instead.
+CANARY_URL = os.environ.get("CANARY_URL", "http://checkip.amazonaws.com/")
 
 
 def _fetch(host: str, port: int, timeout: float) -> str | None:
+    return _get(f"http://{host}:{port}/", timeout)
+
+
+def _get(url: str, timeout: float) -> str | None:
     try:
-        with urllib.request.urlopen(f"http://{host}:{port}/", timeout=timeout) as resp:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
             return resp.read(256).decode(errors="replace")
     except urllib.error.HTTPError as e:
         return e.read(256).decode(errors="replace")
@@ -51,6 +58,9 @@ def handler(event, context):
     if not targets or len(targets) > MAX_TARGETS or not all(_public(h) and 0 < p < 65536 for h, p in targets):
         return {"statusCode": 400, "body": "bad targets"}
     with ThreadPoolExecutor(max_workers=16) as pool:
+        canary = pool.submit(_get, CANARY_URL, timeout)
         bodies = list(pool.map(lambda t: _fetch(t[0], t[1], timeout), targets))
+        if canary.result() is None:
+            return {"statusCode": 503, "body": "prober egress failed"}
     results = [{"host": h, "port": p, "body": b} for (h, p), b in zip(targets, bodies)]
     return {"statusCode": 200, "headers": {"content-type": "application/json"}, "body": json.dumps({"results": results})}

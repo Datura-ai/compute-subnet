@@ -46,7 +46,7 @@ from services.redis_service import (
 from protocol.vc_protocol.compute_requests import RentedExecutorsResponse
 from services.pod_ssh_probe import attach_pod_ssh, pod_ssh_only_results, probe_rented_pods
 from services.task.availability import silence_availability_errors_on_our_own_outage
-from services.task.checks.duplicate_executor import keep_one_miner_per_executor
+from services.task.checks.duplicate_executor import keep_one_executor_per_gpu, keep_one_miner_per_executor
 from services.task.checks.verifyx import MIN_VERIFYX_EMA_DOWNLOAD_SPEED_MBPS
 from services.task_service import JobResult, TaskService
 from services.verifyx_validation_service import NETWORK_GATE_TALLY, VerifyXValidationService
@@ -99,6 +99,7 @@ def settle_cycle_results(
             for executor_id, rented in (rented_executors.executors if rented_executors else {}).items()
         }
         keep_one_miner_per_executor(all_job_results, default_extra, rental_hotkeys)
+        keep_one_executor_per_gpu(all_job_results, default_extra)
     except Exception as exc:
         logger.error(
             _m("[sync] Duplicate-executor pass failed; results left as they are", extra=get_extra_info({**default_extra, "error": str(exc)})),
@@ -258,12 +259,11 @@ class Validator:
         )
 
     def express_lane_cycle_inputs(self) -> CycleInputs | None:
-        """DAH-2958: the express lane runs only once a full cycle has completed since start.
-        That cycle marks validated every executor of every miner that answered it; an executor
-        registered before it began whose miner failed or was offline is not in that set, so the
-        lane also skips everything registered before `fleet_known_since` (the inputs carry it)."""
-        if self.completed_cycles_since_start < 1:
-            return None
+        """DAH-2958: the express lane runs once the first cycle since start has begun (None before).
+        The lane skips everything registered before `fleet_known_since` (that cycle's start, the inputs
+        carry it), so it only ever takes executors no cycle since start could have known; one the running
+        cycle does pick up is in `in_flight` under the cycle lane, which the lane skips. Waiting for that
+        first cycle to finish instead kept new nodes out of the lane 8-14 minutes after every restart."""
         return self.cycle_inputs
 
     async def an_operator_asked_for_a_cycle_now(self) -> bool:
@@ -468,9 +468,7 @@ class Validator:
                 # A fresh job-files directory for this cycle; the ones an express verification
                 # still reads are kept (DAH-2958). The express lane uses the new one from here on.
                 encrypted_files = self.file_encrypt_service.ecrypt_miner_job_files(
-                    keep_directories=(
-                        self.express_lane.directories_in_use() if settings.EXPRESS_LANE_ENABLED else ()
-                    )
+                    keep_directories=self.express_lane.directories_in_use()
                 )
                 self.cycle_inputs = CycleInputs(
                     encrypted_files=encrypted_files,
@@ -791,21 +789,20 @@ class Validator:
                         withheld.result.executor_info.uuid for withheld in withheld_results
                     )
 
-                    if settings.EXPRESS_LANE_ENABLED:
-                        # DAH-2958: everything published by a cycle is "validated" for the
-                        # express lane; only what the portal lists beyond this set is new.
-                        # Never lets a Redis blip end the cycle: the next cycle seeds again, and
-                        # the wave's CYCLE_DONE claims keep the lane off those executors until then.
-                        try:
-                            await self.redis_service.mark_executors_validated(published_executor_ids)
-                            self.miner_service.forget_cycle_done()
-                        except Exception as exc:
-                            logger.error(
-                                _m(
-                                    "[sync] Failed to record validated executors for the express lane",
-                                    extra=get_extra_info({**self.default_extra, "error": str(exc)}),
-                                ),
-                            )
+                    # DAH-2958: everything published by a cycle is "validated" for the
+                    # express lane; only what the portal lists beyond this set is new.
+                    # Never lets a Redis blip end the cycle: the next cycle seeds again, and
+                    # the wave's CYCLE_DONE claims keep the lane off those executors until then.
+                    try:
+                        await self.redis_service.mark_executors_validated(published_executor_ids)
+                        self.miner_service.forget_cycle_done()
+                    except Exception as exc:
+                        logger.error(
+                            _m(
+                                "[sync] Failed to record validated executors for the express lane",
+                                extra=get_extra_info({**self.default_extra, "error": str(exc)}),
+                            ),
+                        )
 
                     # A cycle with no miners validated nobody, so it keeps the post-restart
                     # warm-up closed: set_weights and the express lane wait for a scored cycle.
@@ -1544,9 +1541,9 @@ class Validator:
             await self.initiate_services()
             self.should_exit = False
 
-            if settings.EXPRESS_LANE_ENABLED and not settings.DRY_RUN:
+            if not settings.DRY_RUN:
                 # DAH-2958: ticks beside the cycle on this loop; coordination through
-                # MinerService.in_flight. Flag off: the task is never created.
+                # MinerService.in_flight.
                 self.express_lane_task = asyncio.create_task(
                     self.express_lane.run(lambda: self.should_exit)
                 )

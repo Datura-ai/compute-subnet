@@ -46,7 +46,7 @@ class CapabilityCheck:
             )
             return CheckResult(passed=False, event=event)
 
-        filler_container = _get_filler_only_container(ctx)
+        filler_container = get_filler_only_container(ctx)
         if filler_container:
             what_filler: dict = {"filler_container": filler_container}
             if _filler_matmul_sample_due(ctx):
@@ -125,7 +125,7 @@ class CapabilityCheck:
             failure_details = {"error": failure_reason}
 
         if _probe_gave_no_answer(result):
-            lium_workload = await _lium_workload_live_now(ctx)
+            lium_workload = await lium_workload_live_now(ctx)
             if lium_workload is not None:
                 event = render_message(
                     Msg.RENTED_SKIPPED,
@@ -186,7 +186,7 @@ class _LiumWorkload:
     snapshot: RentedExecutorsResponse
 
 
-async def _lium_workload_live_now(ctx: Context) -> _LiumWorkload | None:
+async def lium_workload_live_now(ctx: Context) -> _LiumWorkload | None:
     """Ask the backend whether a workload it started holds this node's cards right now.
 
     `rented_data` is read once, at cycle start. A filler the backend starts right after a rental
@@ -367,7 +367,7 @@ def _sample_error_kind(result: ValidationResult) -> str:
     return "no_answer"  # no CUDA device / CUDA not ready
 
 
-def _get_filler_only_container(ctx: Context) -> str | None:
+def get_filler_only_container(ctx: Context) -> str | None:
     rented_data = ctx.state.rented_data
     if not rented_data:
         return None

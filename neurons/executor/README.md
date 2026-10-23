@@ -33,7 +33,7 @@ The script installs the [`lium`](https://github.com/Datura-ai/lium) CLI and runs
 2. runs `scripts/install_executor_on_ubuntu.sh` (Docker Engine and the compose plugin), then checks prerequisites — `nvidia-smi`, `nvidia-container-cli`, `docker info`,
 3. renders `neurons/executor/.env` from `.env.template` with the hotkey and the ports — you are prompted for the service port (`8080`), the node SSH port (`2200`), an optional public SSH port and an optional renting port range; pass `--auto` to accept the defaults without prompts,
 4. starts the executor with `docker compose up -d` and waits for the container to report `healthy`,
-5. runs the validator's own check against the node (`daturaai/lium-validator:latest`).
+5. runs the validator's own check against the node (`daturaai/compute-subnet-validator:preflight`).
 
 At the end it prints the node's endpoint, GPU type and count, and a `provider.lium.io/nodes?action=add&…` link that pre-fills the **Add Node** form in the [Provider Portal](https://provider.lium.io) with those values. Other options: `-d/--dir` (checkout directory, default `compute-subnet`) and `-b/--branch` (default `main`); `lium mine --help` lists them.
 
@@ -95,6 +95,7 @@ defaults are `8001` / `8001` / `2200` (`lium mine` proposes `8080` for the servi
 - **EXTERNAL_PORT**: external expose port of your executor docker container
 - **SSH_PORT**: ssh port map into 22 of your executor docker container
 - **SSH_PUBLIC_PORT**: [Optional] ssh public access port of your executor docker container. If `SSH_PUBLIC_PORT` is equal to `SSH_PORT` then you don't have to specify this port.
+- **EXECUTOR_SSH_SOURCE_PIN**: [Optional] Off by default. Set to `true` to let the validator's keys log in only from the validator's addresses. Leave it off if inbound SSH to your executor passes through a relay or tunnel, or through Docker's userland-proxy (sshd then sees the Docker gateway address), because the validator's own address never reaches the executor.
 - **MINER_HOTKEY_SS58_ADDRESS**: your provider hotkey (SS58 address). It must be the hotkey this node is listed under: the validator signs each SSH key it sends for the miner hotkey it is validating, and the executor logs (and, once enforcement is on, refuses) a key issued for a different hotkey
 - **RENTING_PORT_RANGE**: The port range that are publicly accessible. This can be empty if all ports are open. Available formats are: 
   - Range Specification(`from-to`): a range of ports, such as 2000-2005. This means ports from 2000 to 2005 will be open for the validator to select.
@@ -205,7 +206,7 @@ sudo systemctl restart docker
 
 ### Volume plugin (vloopback)
 
-A rental with a disk limit gets its volume from the `vloopback` Docker volume plugin ([`ashald/docker-volume-loopback`](https://github.com/ashald/docker-volume-loopback)), mounted into the pod's Sysbox container. Once Sysbox runs a GPU container, `nvidia_docker_sysbox_setup.sh` does this itself, and re-running it on a working host changes nothing. On a node whose Docker does not accept `--storage-opt`, rentals run without a disk limit and never use the plugin, so the installer and `--check` skip all three steps:
+A rental with a disk limit gets its volume from the `vloopback` Docker volume plugin ([`ashald/docker-volume-loopback`](https://github.com/ashald/docker-volume-loopback)), mounted into the pod's Sysbox container. Once Sysbox runs a GPU container, `nvidia_docker_sysbox_setup.sh` does this itself, and re-running it on a working host changes nothing. On a node whose Docker does not accept `--storage-opt`, rentals run without a disk limit and never use the plugin, so the installer and `--check` skip all three steps and tell you to set up the disk limit (`sudo lium gpu-splitting setup --device <spare disk>`, see [Docker Storage Setup](https://docs.lium.io/providers/nodes/docker-storage)): one renter could otherwise fill the disk and take the node down, and validators will reject such nodes (not released yet). `--check` counts it as a `FIX`:
 
 1. installs the plugin when it is missing, with `DATA_DIR=<Docker data-root>/loopback` (the data-root is `docker info --format '{{.DockerRootDir}}'`). It installs by digest `ashald/docker-volume-loopback@sha256:caafc80c60c3630812433c6e5ebb4df5ca514333cbec4af6a3a5164c150fd170`, the plugin the validators' rental path installs today;
 2. on a plugin whose `DATA_DIR` is not an absolute path, stops if a rental is running, then sets `DATA_DIR=<Docker data-root>/loopback` and enables the plugin;

@@ -35,6 +35,11 @@ RENTAL_PRICES_PER_HOUR: dict[str, float] = {
     ],
     "NVIDIA B300 SXM6 AC": 6.4,
 }
+# Max-Q (300 W) Workstation Edition: priced at parity with the Workstation (DAH-3453). Derived from the
+# Workstation entry; the pinned lium-core release lacks the key, so this pin adds it until the lock catches up.
+RENTAL_PRICES_PER_HOUR["NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"] = RENTAL_PRICES_PER_HOUR[
+    "NVIDIA RTX PRO 6000 Blackwell Workstation Edition"
+]
 # `NVIDIA B300 SXM6 PC`: provider-observed on real hardware, 21 Sep 2026 (nvidia-smi: name NVIDIA B300
 # SXM6 PC, memory.total 275040 MiB, all 8 GPUs of the host); not in NVIDIA's public chip list, which has
 # only the AC spelling. Listed as the AC card's alias and never a row of its own: every table derives it
@@ -109,6 +114,7 @@ MAX_UNRENTED_GPUS_BY_TYPE: dict[str, dict[int, int]] = {
     "A800": {},
     "CMP 170HX": {1: 10, 8: 64},
     "RTX 5090": {1: 10, 8: 64},
+    "RTX 5090 D": {},
     "RTX 4000 Ada Generation": {},
     "RTX 6000 Ada Generation": {1: 10, 8: 64},
     "RTX PRO 6000": {1: 10, 8: 64},
@@ -216,6 +222,7 @@ BASE_GPU_MAP = {
     "NVIDIA H800 NVL": "H800",
     "NVIDIA H800 PCIe": "H800",
     "NVIDIA GeForce RTX 5090": "RTX 5090",
+    "NVIDIA GeForce RTX 5090 D": "RTX 5090 D",
     "NVIDIA GeForce RTX 5080": "RTX 5080",
     "NVIDIA GeForce RTX 5070 Ti": "RTX 5070 Ti",
     "NVIDIA GeForce RTX 5070": "RTX 5070",
@@ -243,6 +250,7 @@ BASE_GPU_MAP = {
     "NVIDIA RTX 6000 Ada Generation": "RTX 6000 Ada Generation",
     "NVIDIA RTX PRO 6000 Blackwell Server Edition": "RTX PRO 6000",
     "NVIDIA RTX PRO 6000 Blackwell Workstation Edition": "RTX PRO 6000",
+    "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition": "RTX PRO 6000",
     "NVIDIA RTX PRO 6000D Blackwell Workstation Edition": "RTX PRO 6000D",
     "NVIDIA RTX 6000D": "RTX PRO 6000D",
     "NVIDIA L4": "L4",

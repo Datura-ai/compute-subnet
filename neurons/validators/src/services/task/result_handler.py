@@ -263,7 +263,7 @@ class ResultHandler:
         specs: dict[str, Any],
         validation_event: ValidationEvent | None,
     ) -> dict[str, Any]:
-        """``specs`` with the VerifyX EMA held when this cycle must not move it and the flag is on."""
+        """``specs`` with the VerifyX EMA held when this cycle must not move it."""
         # The pipeline names the fatal check that ended the run in the last event's summary.
         failed_check_id = (
             validation_event.what_we_saw.get("steps_failed") if validation_event else None
@@ -272,13 +272,10 @@ class ResultHandler:
         if not ema_hold_reason:
             return specs
         held_specs = hold_verifyx_ema(context, specs)
-        hold_enabled = settings.VERIFYX_EMA_HOLD_ENABLED
         if held_specs.get("network") != specs.get("network"):
             logger.info(
                 _m(
-                    "VerifyX EMA held: this cycle's sample does not move it"
-                    if hold_enabled
-                    else "VerifyX EMA hold is off: this cycle's sample would not have moved it",
+                    "VerifyX EMA held: this cycle's sample does not move it",
                     extra=get_extra_info(
                         {
                             "executor_id": context.executor.uuid,
@@ -289,7 +286,7 @@ class ResultHandler:
                     ),
                 )
             )
-        return held_specs if hold_enabled else specs
+        return held_specs
 
     @staticmethod
     def _get_rented_gpu_count(context: Context) -> int | None:
@@ -367,12 +364,19 @@ class ResultHandler:
             # On failure, either clear or mark as failed
             if context.clear_verified_job_info:
                 reason = self._resolve_clear_reason(context.clear_verified_job_reason)
+                # DAH-2865: the address this cycle checked, so the backend can drop a reset that arrives after the
+                # provider moved the node to another address under the same id
+                evidence = {
+                    **(context.clear_verified_job_evidence or {}),
+                    "executor_ip": context.executor.address,
+                    "executor_port": context.executor.port,
+                }
                 await self.redis_service.clear_verified_job_info(
                     miner_hotkey=miner_hotkey,
                     executor_id=executor_id,
                     prev_info=verified_job_info,
                     reason=reason,
-                    evidence=context.clear_verified_job_evidence,
+                    evidence=evidence,
                     anchor_broken=context.gpu_anchor_broken,
                 )
             else:

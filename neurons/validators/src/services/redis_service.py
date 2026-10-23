@@ -3,7 +3,10 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
-from typing import NamedTuple
+from typing import Literal, NamedTuple
+
+from pydantic import BaseModel, ValidationError
+from payload_models.payloads import WorkloadKind
 from protocol.vc_protocol.validator_requests import ResetVerifiedJobReason
 import redis.asyncio as aioredis
 import redis.exceptions
@@ -23,11 +26,18 @@ RESET_VERIFIED_JOB_CHANNEL = "RESET_VERIFIED_JOB_CHANNEL"
 POD_STATES_CHANNEL = "POD_STATES_CHANNEL"
 RENTED_MACHINE_PREFIX = "rented_machines_prefix"
 PENDING_PODS_PREFIX = "pending_pods_prefix"
+# DAH-4698: creates the backend sent that are running in this connector right now, by pod id; what is left when a
+# connector starts was cut off by the restart (a redeploy recreates the connector mid-create)
+INFLIGHT_BACKEND_CREATES_KEY = "inflight_backend_creates"
+BACKEND_COMMAND_PREFIX = "backend_command:"
 DUPLICATED_MACHINE_SET = "duplicated_machines"
 RENTAL_SUCCEED_MACHINE_SET = "rental_succeed_machines"
 AVAILABLE_PORT_MAPS_PREFIX = "available_port_maps"
 RENTAL_PROBE_OK_PREFIX = "rental_probe_ok"
 RENTAL_PROBE_FAILED_PREFIX = "rental_probe_failed"
+# filler container name -> JSON list of the image digests (bare sha256) the validator started it from
+FILLER_IMAGE_DIGESTS_PREFIX = "filler_image_digests:"
+FILLER_IMAGE_DIGESTS_TTL_SECONDS = 30 * 24 * 3600
 # set by a filler create whose sshd never came up in the container, cleared by one where it did
 SSHD_BOOTSTRAP_FAILED_PREFIX = "sshd_bootstrap_failed"
 # prod, 24 h: failed filler creates on a broken node came 5 min to 2.7 h apart, so 6 h outlives the
@@ -65,6 +75,8 @@ SYSBOX_VERIFIED_PREFIX = "sysbox_verified"
 # One key per executor: when this validator first found it without its recommended default image
 # (epoch seconds). Opens CachedTemplateVerificationCheck's fresh-node grace.
 CACHED_TEMPLATE_FIRST_UNCACHED_PREFIX = "cached_template_first_uncached"
+# One key per (miner hotkey, executor): what the rented GPU health read flagged and when (DAH-4482).
+POST_RENTAL_GPU_RECHECK_PREFIX = "post_rental_gpu_recheck"
 # One scheduled window is 75 blocks, about 15 minutes. A request older than a couple of sync
 # ticks is stale: the operator has moved on, or the scheduled cycle covered them anyway.
 FORCED_VALIDATION_CYCLE_TTL_SECONDS = 60
@@ -118,19 +130,17 @@ REDIS_HEALTH_CHECK_INTERVAL_SECONDS = 30
 logger = logging.getLogger(__name__)
 
 
-class _PassThroughLock:
-    """`RedisService.lock` with REDIS_COMMAND_LOCK_ENABLED off (DAH-3006): every `async with
-    self.lock:` site stays as it is, but nothing waits — each call is one atomic Redis command
-    and the pool bounds the concurrency."""
+class BackendCommand(BaseModel):
+    state: Literal["running", "finished"]
+    owner: str = ""
+    responses: list[str] = []
 
-    async def __aenter__(self):
-        return self
 
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
-
-    def locked(self) -> bool:
-        return False
+class InflightBackendCreate(BaseModel):
+    miner_hotkey: str
+    executor_id: str
+    workload_kind: WorkloadKind
+    started_at_unix_seconds: int
 
 
 class RedisWrite(NamedTuple):
@@ -204,7 +214,7 @@ class RedisService:
                 retry_on_error=[redis.exceptions.ConnectionError, redis.exceptions.TimeoutError],
             )
         )
-        self.lock = asyncio.Lock() if settings.REDIS_COMMAND_LOCK_ENABLED else _PassThroughLock()
+        self.lock = asyncio.Lock()
 
     @asynccontextmanager
     async def acquire_executor_lock(
@@ -386,6 +396,13 @@ class RedisService:
         async with self.lock:
             return await self.redis.get(key)
 
+    async def mget(self, keys: list[str]) -> list:
+        """Several GETs in one round trip and one lock hold; None for a missing key."""
+        if not keys:
+            return []
+        async with self.lock:
+            return await self.redis.mget(keys)
+
     async def delete(self, key: str):
         """Remove a key from Redis."""
         async with self.lock:
@@ -561,7 +578,74 @@ class RedisService:
             await self.hset(PENDING_PODS_PREFIX, f"{miner_hotkey}:{executor_id}", json.dumps(pending_pods))
         else:
             await self.hdel(PENDING_PODS_PREFIX, f"{miner_hotkey}:{executor_id}")
-    
+
+    async def claim_backend_command(self, command_id: str, claim: str) -> BackendCommand | None:
+        key = f"{BACKEND_COMMAND_PREFIX}{command_id}"
+        while True:
+            if await self.redis.set(
+                key, claim, nx=True, ex=settings.BACKEND_COMMAND_CLAIM_TTL_SECONDS
+            ):
+                return None
+            existing = await self.redis.get(key)
+            if existing is not None:
+                existing = BackendCommand.model_validate_json(existing)
+                # Redis may retry SET NX after storing our claim but losing the reply.
+                return None if existing == BackendCommand.model_validate_json(claim) else existing
+
+    async def update_backend_command(
+        self, command_id: str, claim: str, value: str, ttl: int
+    ) -> None:
+        # Compare ownership atomically: a stale job must not touch a retry's claim.
+        await self.redis.eval(
+            """
+            if redis.call('GET', KEYS[1]) == ARGV[1] then
+                if ARGV[2] == '' then
+                    return redis.call('DEL', KEYS[1])
+                end
+                return redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+            end
+            """,
+            1,
+            f"{BACKEND_COMMAND_PREFIX}{command_id}",
+            claim,
+            value,
+            ttl,
+        )
+
+    async def clear_running_backend_commands(self) -> None:
+        async for key in self.redis.scan_iter(match=f"{BACKEND_COMMAND_PREFIX}*", count=100):
+            value = await self.redis.get(key)
+            if value is not None and BackendCommand.model_validate_json(value).state == "running":
+                await self.redis.delete(key)
+
+    async def add_inflight_backend_create(
+        self, pod_id: str, miner_hotkey: str, executor_id: str, workload_kind: WorkloadKind
+    ) -> None:
+        create = InflightBackendCreate(
+            miner_hotkey=miner_hotkey,
+            executor_id=executor_id,
+            workload_kind=workload_kind,
+            started_at_unix_seconds=int(time.time()),
+        )
+        await self.hset(INFLIGHT_BACKEND_CREATES_KEY, pod_id, create.model_dump_json())
+
+    async def remove_inflight_backend_create(self, pod_id: str) -> None:
+        await self.hdel(INFLIGHT_BACKEND_CREATES_KEY, pod_id)
+
+    async def inflight_backend_creates(self) -> dict[str, InflightBackendCreate]:
+        """pod id -> the create the backend sent for it"""
+        raw = await self.hgetall(INFLIGHT_BACKEND_CREATES_KEY)
+        creates: dict[str, InflightBackendCreate] = {}
+        for raw_pod_id, entry in raw.items():
+            pod_id = raw_pod_id.decode() if isinstance(raw_pod_id, bytes) else raw_pod_id
+            try:
+                creates[pod_id] = InflightBackendCreate.model_validate_json(entry)
+            except ValidationError:
+                # one bad entry must not block the sweep of the others on every start
+                logger.error(_m("Dropping an unreadable inflight backend create", extra={"pod_id": pod_id}))
+                await self.hdel(INFLIGHT_BACKEND_CREATES_KEY, pod_id)
+        return creates
+
     async def get_pending_pods(self, miner_hotkey: str, executor_id: str) -> list[dict]:
         data = await self.hget(PENDING_PODS_PREFIX, f"{miner_hotkey}:{executor_id}")
         if not data:
