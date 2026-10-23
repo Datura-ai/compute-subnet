@@ -22,7 +22,9 @@ from services.task_service import JobResult
 
 H200 = "NVIDIA H200"
 # a scrape without the NCU observation: the flagship gate reads it as "not unrestricted"
-FLAGSHIP_SPEC: dict = {"hard_disk": {"total": 200 * 1024**2}, "gpu": {"details": [{"capacity": 141 * 1024}] * 8}}
+FLAGSHIP_SPEC: dict = {"hard_disk": {"total": 2000 * 1024**2}, "gpu": {"details": [{"capacity": 141 * 1024}] * 8}}
+# the always-enforced disk/VRAM gate fires only on this one
+SHORT_DISK_SPEC: dict = {**FLAGSHIP_SPEC, "hard_disk": {"total": 200 * 1024**2}}
 
 
 def _incentive() -> RentalPriceIncentive:
@@ -86,16 +88,13 @@ async def test_flagship_gate_is_recorded_even_when_discord_blocks(monkeypatch, d
 async def test_every_hard_exclusion_and_every_enforced_gate_is_recorded_in_order(
     monkeypatch, discord_cutoff_passed
 ):
-    for flag in (
-        "ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT",
-        "ENABLE_UNRENTED_SOFT_PRICE_LIMIT",
-    ):
-        monkeypatch.setattr(settings, flag, True)
     new_cfg = shared_client.config.model_copy(update={"machine_prices_p90": {H200: 0.5}})
     monkeypatch.setattr(shared_client, "_config", new_cfg)
 
     result = await _incentive().calculate_executor_score(
-        _idle_flagship(provider_discord_connected=False, is_new_rentals_paused=True, is_spot=True)
+        _idle_flagship(
+            provider_discord_connected=False, is_new_rentals_paused=True, is_spot=True, spec=dict(SHORT_DISK_SPEC)
+        )
     )
 
     assert _codes(result) == [
@@ -112,12 +111,10 @@ async def test_every_hard_exclusion_and_every_enforced_gate_is_recorded_in_order
 @pytest.mark.asyncio
 async def test_two_idle_pool_gates_are_both_recorded(monkeypatch):
     # price used to stop the chain: a node over the price limit never heard about its disk
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_SOFT_PRICE_LIMIT", True)
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT", True)
     new_cfg = shared_client.config.model_copy(update={"machine_prices_p90": {H200: 0.5}})
     monkeypatch.setattr(shared_client, "_config", new_cfg)
 
-    result = await _incentive().calculate_executor_score(_idle_flagship(gpu_count=4))
+    result = await _incentive().calculate_executor_score(_idle_flagship(gpu_count=4, spec=dict(SHORT_DISK_SPEC)))
 
     assert _codes(result) == ["price_above_market_p90_soft_limit", "insufficient_disk_for_vram"]
     assert result.eligible_for_rental_share is False
@@ -132,14 +129,14 @@ def _logged(caplog, reason: str) -> int:
 # the sentence is false for a node that is already excluded.
 GATE_LOG_CASES = [
     (None, {}, "flagship_without_ncu_or_split", "flagship_without_ncu_or_split"),
-    ("ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT", {"gpu_count": 4}, "insufficient_disk_for_vram", "insufficient_disk_for_vram"),
+    (None, {"gpu_count": 4, "spec": SHORT_DISK_SPEC}, "insufficient_disk_for_vram", "insufficient_disk_for_vram"),
     (
-        "ENABLE_UNRENTED_VRAM_OVER_DISK_LIMIT",
+        None,
         {"gpu_count": 4, "spec": {"gpu": {"details": []}}},
         None,
         "insufficient_disk_unmeasured",
     ),
-    ("ENABLE_UNRENTED_POWER_CAP_LIMIT", {"gpu_count": 4}, None, "power_cap_capability_unmeasured"),
+    (None, {"gpu_count": 4}, None, "power_cap_capability_unmeasured"),  # power cap gate: no flag
 ]
 
 
