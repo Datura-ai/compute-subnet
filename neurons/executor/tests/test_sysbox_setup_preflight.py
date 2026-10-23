@@ -1083,7 +1083,7 @@ def test_check_mode_without_a_gpu_reports_the_nvidia_fixes_and_exits_one(tmp_pat
     [
         ({"STUB_KERNEL": "5.15.0-91-generic"}, "FIX  Kernel 5.15.0-91-generic is below 5.19"),
         ({"STUB_NO_DOCKER_DAEMON": "1"}, "FIX  Docker daemon is not running"),
-        ({"STUB_ARCH": "aarch64"}, "FIX  Architecture aarch64"),
+        ({"STUB_ARCH": "ppc64le"}, "FIX  Architecture ppc64le"),
     ],
 )
 def test_install_mode_stops_before_installing_on_a_blocking_fix(tmp_path, env, fix_line):
@@ -1284,3 +1284,9 @@ def test_diagnostics_say_not_found_without_sysbox_runc(tmp_path):
     rc, out, _ = run_check(tmp_path, "failure_diagnostics", without=("sysbox-runc",))
     assert rc == 0
     assert "sysbox-runc:         not found" in out
+
+
+def test_aarch64_host_passes_the_arch_check(tmp_path):
+    # GB300 / Grace: nestybox ships an arm64 .deb, so aarch64 is no longer a blocking FIX
+    proc = run_script(tmp_path, "--check", env={"STUB_ARCH": "aarch64"})
+    assert "PASS Architecture aarch64." in proc.stdout

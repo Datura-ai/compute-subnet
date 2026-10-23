@@ -134,10 +134,22 @@ log_kv "Dockerfile:"    "Dockerfile"
 log_kv "Build context:" "${SCRIPT_DIR}"
 echo ""
 
-docker build \
-  --build-context datura=../../datura \
-  --tag "${IMAGE_NAME}" \
-  "${SCRIPT_DIR}"
+# PLATFORMS (e.g. linux/amd64,linux/arm64; executor_cd_*.yml) builds one multi-arch image with buildx.
+# buildx cannot load a multi-platform image into the local store, so it goes to an OCI archive that
+# docker_publish.sh pushes; unset, a plain single-arch build as before.
+if [[ -n "${PLATFORMS:-}" ]]; then
+  docker buildx build \
+    --platform "${PLATFORMS}" \
+    --provenance=false \
+    --build-context datura=../../datura \
+    --output "type=oci,dest=${OCI_ARCHIVE:-/tmp/executor.oci.tar}" \
+    "${SCRIPT_DIR}"
+else
+  docker build \
+    --build-context datura=../../datura \
+    --tag "${IMAGE_NAME}" \
+    "${SCRIPT_DIR}"
+fi
 
 # ── Success summary ────────────────────────────────────────────────────────────
 log_header "${SYM_DONE}  Build Complete"
