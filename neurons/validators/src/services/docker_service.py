@@ -1304,6 +1304,13 @@ async def _explain_add_public_keys_failure(
     )
 
 
+# after `docker kill`, park() re-reads the container state every _PARK_KILL_SETTLE_SECONDS for up to
+# _PARK_KILL_WAIT_SECONDS: a stuck DinD pod can take most of a minute to exit (prod 22 Oct: two reboots a
+# minute apart failed, the third worked)
+_PARK_KILL_SETTLE_SECONDS = 2
+_PARK_KILL_WAIT_SECONDS = 30
+
+
 class _EditSwap:
     """DAH-2740: keep the customer's container until its replacement runs, so a failed edit can be undone.
 
@@ -1342,6 +1349,16 @@ class _EditSwap:
 
     async def park(self) -> str | None:
         """Rename the running container aside and stop it. None when there is nothing to park."""
+        try:
+            return await self._park()
+        except Exception as exc:
+            # the validator logs nothing else for a failed park, so the next one is diagnosable from Loki
+            logger.warning(
+                _m("Parking the current container failed", extra=get_extra_info({**self.default_extra, "error": repr(exc)}))
+            )
+            raise
+
+    async def _park(self) -> str | None:
         parked = f"{self.container_name}{EDIT_PARKED_SUFFIX}"
         listed = await self.ssh_client.run(
             f'/usr/bin/docker ps -a --no-trunc --format "{{{{.Names}}}} {{{{.ID}}}}" '
@@ -1384,7 +1401,7 @@ class _EditSwap:
         self.parked_name = parked
         self.parked_id = container_id
         stopped = await self.ssh_client.run(f"/usr/bin/docker stop -t 10 {shlex.quote(parked)}")
-        if stopped.exit_status != 0:
+        if stopped.exit_status != 0 and not await self._killed_after_failed_stop(parked, stopped):
             # The container cannot be stopped: give it its name back and fail the edit with the
             # pod exactly as it was. This is the wedge that used to surface as RetryError[...]
             # after a destructive `docker rm -fv`. If even the rename back fails, parked_name
@@ -1400,6 +1417,32 @@ class _EditSwap:
             )
         logger.info(_m("Parked current container for edit", extra=get_extra_info({**self.default_extra, "parked": parked})))
         return parked
+
+    async def _killed_after_failed_stop(self, parked: str, stopped) -> bool:
+        """DinD (sysbox) pods often fail the first `docker stop` while a retry seconds later works (prod 15-21 Oct
+        2026: 12 park failures on 10 hosts, all on dind-lium1). Kill it once; True when Docker reports it stopped within _PARK_KILL_WAIT_SECONDS."""
+        killed = await self.ssh_client.run(f"/usr/bin/docker kill {shlex.quote(parked)}")
+        for _ in range(max(1, _PARK_KILL_WAIT_SECONDS // max(_PARK_KILL_SETTLE_SECONDS, 1))):
+            await asyncio.sleep(_PARK_KILL_SETTLE_SECONDS)
+            running = await self.ssh_client.run(f"/usr/bin/docker inspect -f '{{{{.State.Running}}}}' {shlex.quote(parked)}")
+            is_stopped = running.exit_status == 0 and (running.stdout or "").strip() == "false"
+            if is_stopped:
+                break
+        logger.warning(
+            _m(
+                "docker stop failed while parking the current container; tried docker kill",
+                extra=get_extra_info(
+                    {
+                        **self.default_extra,
+                        "parked": parked,
+                        "stop_stderr": (stopped.stderr or "").strip(),
+                        "kill_stderr": (killed.stderr or "").strip(),
+                        "stopped_after_kill": is_stopped,
+                    }
+                ),
+            )
+        )
+        return is_stopped
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
         # Nothing here may change the create's own outcome: the cleanup and the undo are best effort,
