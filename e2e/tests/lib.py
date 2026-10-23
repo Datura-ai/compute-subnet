@@ -6,7 +6,7 @@ import time
 
 import requests
 from bittensor_wallet import Keypair
-from datura.requests.validator_requests import AuthenticationPayload, ssh_pubkey_signing_blob
+from datura.requests.validator_requests import AuthenticationPayload, fresh_upload_nonce, ssh_pubkey_signing_blob
 
 ENV = os.environ
 MINER_URL = f"http://{ENV['E2E_MINER_IP']}:{ENV['E2E_MINER_PORT']}"
@@ -69,17 +69,27 @@ def validator_rest_headers(kp: Keypair, miner_hotkey: str = MINER_HOTKEY, timest
     }
 
 
-def upload_ssh_key_payload(miner_kp: Keypair, validator_kp: Keypair, public_key: str, nonce: str | None = None) -> dict:
-    """What the miner posts to the executor's /upload_ssh_key (ExecutorService.send_pubkey_to_executor)."""
-    body = {
-        "public_key": public_key,
-        "validator_signature": sign(validator_kp, ssh_pubkey_signing_blob(public_key, nonce)),
+def upload_ssh_key_payload(miner_kp: Keypair, validator_kp: Keypair, public_key: str) -> dict:
+    """What the miner posts to the executor's /upload_ssh_key (ExecutorService.send_pubkey_to_executor), signed as the
+    validator does: a dated nonce and the miner-bound signature, both of which executors require on upload."""
+    return {
+        **validator_signed_upload_fields(validator_kp, public_key),
         "data_to_sign": public_key,
         "signature": sign(miner_kp, public_key),
     }
-    if nonce is not None:
-        body["nonce"] = nonce
-    return body
+
+
+def validator_signed_upload_fields(validator_kp: Keypair, public_key: str) -> dict:
+    """The validator-signed fields of an SSH-key upload (MinerService): validator_signature over the key and a fresh
+    dated nonce, and validator_miner_signature binding the key to this miner's hotkey."""
+    nonce = fresh_upload_nonce()
+    return {
+        "public_key": public_key,
+        "validator_signature": sign(validator_kp, ssh_pubkey_signing_blob(public_key, nonce)),
+        "nonce": nonce,
+        "miner_hotkey": MINER_HOTKEY,
+        "validator_miner_signature": sign(validator_kp, ssh_pubkey_signing_blob(public_key, nonce, MINER_HOTKEY)),
+    }
 
 
 def ssh_keypair() -> tuple[str, str]:
