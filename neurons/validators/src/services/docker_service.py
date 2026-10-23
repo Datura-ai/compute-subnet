@@ -1884,6 +1884,11 @@ async def _cleanup_to_completion(cleanup: Awaitable[Any]) -> Any:
 
 # the recovery mark's write; past it, the stopped pod is parked instead
 _STOPPED_BY_RECOVERY_MARK_TIMEOUT_SEC = 5
+# a mark whose delete failed is retried this often, then this long apart: left set, it would later restart a pod the
+# provider stopped on purpose
+_STOPPED_BY_RECOVERY_CLEAR_ATTEMPTS = 6
+_STOPPED_BY_RECOVERY_CLEAR_RETRY_SEC = 30
+_RECOVERY_MARK_CLEANUPS: set[asyncio.Task] = set()
 
 
 def _is_safe_docker_volume_name(volume_name: str) -> bool:
@@ -9993,9 +9998,33 @@ class DockerService:
                 )
             )
             return False
-        with contextlib.suppress(Exception):  # left set, it only lets a later cycle start this pod again
-            await self.redis_service.delete(f"{STOPPED_BY_RECOVERY_PREFIX}{pod_id}")
+        await self._clear_stopped_by_recovery(pod_id)
         return True
+
+    async def _clear_stopped_by_recovery(self, pod_id: str) -> None:
+        """Delete the mark, bounded like its write; a failed delete is retried in the background."""
+        key = f"{STOPPED_BY_RECOVERY_PREFIX}{pod_id}"
+
+        async def delete() -> bool:
+            try:
+                await asyncio.wait_for(self.redis_service.delete(key), timeout=_STOPPED_BY_RECOVERY_MARK_TIMEOUT_SEC)
+                return True
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return False
+
+        async def retry() -> None:
+            for _ in range(_STOPPED_BY_RECOVERY_CLEAR_ATTEMPTS):
+                await asyncio.sleep(_STOPPED_BY_RECOVERY_CLEAR_RETRY_SEC)
+                if await delete():
+                    return
+            logger.error(_m("POD_RECOVERY_MARK_CLEAR_FAILED", extra=get_extra_info({"pod_id": pod_id})))
+
+        if not await delete():
+            task = asyncio.create_task(retry())
+            _RECOVERY_MARK_CLEANUPS.add(task)
+            task.add_done_callback(_RECOVERY_MARK_CLEANUPS.discard)
 
     async def _mark_stopped_by_recovery(self, pod_id: str) -> None:
         # bounded: RedisService.set waits on a process-wide lock, and the recovery must end inside
@@ -10108,11 +10137,7 @@ class DockerService:
                 raise
             return False
         # a mark left by an earlier stop that did not take would later restart a pod the provider stopped
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(
-                self.redis_service.delete(f"{STOPPED_BY_RECOVERY_PREFIX}{pod_id}"),
-                timeout=_STOPPED_BY_RECOVERY_MARK_TIMEOUT_SEC,
-            )
+        await self._clear_stopped_by_recovery(pod_id)
         logger.warning(
             _m(
                 "POD_VOLUME_MOUNT_RESTORED",
@@ -10133,10 +10158,13 @@ class DockerService:
             marked = True
         except Exception:
             marked = False
-        stopped = await self._stop_half_recovered_container(ssh_client, container_name)
-        if not marked:
+        outcome = await self._stop_outcome(ssh_client, container_name)
+        if outcome == "failed" and marked:
+            # docker said it did not stop: the pod still runs, and the mark must not restart a later provider stop
+            await self._clear_stopped_by_recovery(pod_id)
+        elif not marked:
             await self._park_by_id(ssh_client, container_name, f"{container_name}{EDIT_PARKED_SUFFIX}")
-        return stopped
+        return outcome == "stopped"
 
     async def _local_volume_encryption_state(
         self,
@@ -10202,16 +10230,20 @@ class DockerService:
         # cycle revisits it because recovery only fires on a stopped container. Put it back down so
         # the POD_NOT_RUNNING verdict keeps matching what the customer sees. A no-op when the start
         # itself was what failed.
+        return await self._stop_outcome(ssh_client, container_name) == "stopped"
+
+    async def _stop_outcome(self, ssh_client: asyncssh.SSHClientConnection, container_name: str) -> str:
+        """"stopped", "failed" (docker answered non-zero) or "unknown" (no answer: the stop may have applied)."""
         try:
             stop_result = await ssh_client.run(
                 f"/usr/bin/docker stop {shlex.quote(container_name)}",
                 timeout=_VLOOPBACK_REPAIR_COMMAND_TIMEOUT_SEC,
             )
-            return getattr(stop_result, "exit_status", 1) == 0
         except asyncio.CancelledError:
             raise
         except Exception:
-            return False
+            return "unknown"
+        return "stopped" if getattr(stop_result, "exit_status", 1) == 0 else "failed"
 
     def _container_deleted(self, payload: ContainerDeleteRequest) -> ContainerDeleted:
         return ContainerDeleted(

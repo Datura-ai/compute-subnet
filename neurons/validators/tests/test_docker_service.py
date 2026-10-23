@@ -8057,8 +8057,8 @@ async def test_restore_volume_mount_of_running_container_remounts_or_stops_the_p
     remount = AsyncMock(side_effect=remount_error)
     monkeypatch.setattr(docker_service, "_restore_mount_and_sshd_after_start", remount)
     monkeypatch.setattr(docker_service, "rental_docker_client_factory", Mock(connect=_docker_client))
-    stop = AsyncMock(return_value=True)
-    monkeypatch.setattr(docker_service, "_stop_half_recovered_container", stop)
+    stop = AsyncMock(return_value="stopped")
+    monkeypatch.setattr(docker_service, "_stop_outcome", stop)
     docker_service.redis_service.set = AsyncMock()
     docker_service.redis_service.delete = AsyncMock()
     restore = docker_service.restore_volume_mount_of_running_container(
@@ -8093,6 +8093,7 @@ async def test_restore_volume_mount_of_running_container_remounts_or_stops_the_p
         pytest.param("hang", None, "pod_pod-1__prev", id="stalled_mark_parks_it"),
         pytest.param(None, ConnectionError("SSH lost after the stop"), "pod_pod-1", id="stop_applied_reply_lost"),
         pytest.param(None, TimeoutError(), "pod_pod-1", id="stop_applied_reply_timed_out"),
+        pytest.param(None, "nonzero", "pod_pod-1", id="docker_refused_the_stop"),
     ],
 )
 @pytest.mark.asyncio
@@ -8106,6 +8107,8 @@ async def test_mark_and_stop_unmounted_pod_leaves_a_retry_anchor(
 
     async def run(command, *_args, **_kwargs):
         if command == "/usr/bin/docker stop pod_pod-1" and host["name"] == "pod_pod-1":
+            if stop_reply_error == "nonzero":
+                return _make_ssh_command_result(exit_status=1)
             host["running"] = False
             if stop_reply_error:
                 raise stop_reply_error
@@ -8125,15 +8128,38 @@ async def test_mark_and_stop_unmounted_pod_leaves_a_retry_anchor(
         marks[key] = value
 
     docker_service.redis_service.set = AsyncMock(side_effect=set_mark)
+    docker_service.redis_service.delete = AsyncMock(side_effect=lambda key: marks.pop(key, None))
     monkeypatch.setattr(docker_service_module, "_STOPPED_BY_RECOVERY_MARK_TIMEOUT_SEC", 0.01)
 
     assert await docker_service._mark_and_stop_unmounted_pod(ssh_client, "pod_pod-1", "pod-1") is (
         stop_reply_error is None
     )
 
-    assert host["running"] is False
+    refused = stop_reply_error == "nonzero"
+    assert host["running"] is refused
     assert host["name"] == expected_name
-    assert marks == ({} if mark_error else {"stopped_by_recovery:pod-1": "1"})
+    # a refused stop leaves the pod running, so its mark goes: a later provider stop is never ours to undo
+    assert marks == ({} if mark_error or refused else {"stopped_by_recovery:pod-1": "1"})
+
+
+@pytest.mark.asyncio
+async def test_a_failed_mark_delete_is_retried_in_the_background(docker_service, monkeypatch):
+    marks = {"stopped_by_recovery:pod-1": "1"}
+    attempts = []
+
+    async def delete(key):
+        attempts.append(key)
+        if len(attempts) < 3:
+            raise ConnectionError("temporary Redis failure")
+        marks.pop(key, None)
+
+    docker_service.redis_service.delete = AsyncMock(side_effect=delete)
+    monkeypatch.setattr(docker_service_module, "_STOPPED_BY_RECOVERY_CLEAR_RETRY_SEC", 0)
+
+    await docker_service._clear_stopped_by_recovery("pod-1")
+    assert marks  # the first delete failed; the caller is not held up
+    await asyncio.gather(*docker_service_module._RECOVERY_MARK_CLEANUPS)
+    assert marks == {} and len(attempts) == 3
 
 
 _GOCRYPTFS_MOUNT = "/lium-cipher /workspace fuse.gocryptfs rw,nosuid,nodev 0 0\n"
