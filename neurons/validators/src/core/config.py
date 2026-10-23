@@ -305,9 +305,9 @@ class Settings(BaseSettings):
     # A filler-only node skips the matmul while the filler runs. With N > 0, every Nth such cycle
     # runs the challenge on a small VRAM budget beside the filler and records the answer
     # (FILLER_MATMUL_SAMPLE); the check result never depends on it. Each sample is pinned to the
-    # next claimed card in rotation. 0 = never, the default.
+    # next claimed card in rotation. 0 = never. Default 96 = about once a day per node (Mikhail, DAH-4278).
     FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES: int = Field(
-        env="FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES", default=0, ge=0
+        env="FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES", default=96, ge=0
     )
     # Above the 2048 MB the matmul keeps in reserve, or no matrix fits.
     FILLER_MATMUL_SAMPLE_VRAM_MB: int = Field(env="FILLER_MATMUL_SAMPLE_VRAM_MB", default=4096, ge=4096)
