@@ -280,7 +280,42 @@ async def test_a_slow_backend_ends_the_pass_on_budget_and_later_passes_resume(cl
     ssh_client.commands.clear()
     seen.clear()
     assert await cleanup.remove_orphan_rental_volumes(ssh_client, _snapshot([LIVE]), "exec-1", is_orphan) == 2
-    assert seen == [ids[2], ids[1]] and _removed(ssh_client) == names[1:]
+    assert seen == [ids[1], ids[2]] and _removed(ssh_client) == names[1:]
+
+
+@pytest.mark.asyncio
+async def test_a_budget_cut_resumes_at_the_cut_volume_so_it_is_not_skipped_forever(cleanup, monkeypatch):
+    # kept A then eligible B, each lookup over half the budget: every pass used to finish A and cut B
+    monkeypatch.setattr("services.container_cleanup.ORPHAN_VOLUME_LOOKUP_BUDGET_SECONDS", 0.3)
+    ids = [str(UUID(int=i)) for i in range(1, 3)]
+    names = [f"volume_{uid}" for uid in ids]
+    ssh_client = VolumeHostSsh(dangling=names, created={name: "2026-09-10T08:00:00Z" for name in names}, volumes=names)
+
+    async def is_orphan(volume_id, age):
+        await asyncio.sleep(0.2)
+        return volume_id == ids[1]
+
+    passes = [await cleanup.remove_orphan_rental_volumes(ssh_client, _snapshot([LIVE]), "exec-1", is_orphan) for _ in range(2)]
+    assert passes == [0, 1] and _removed(ssh_client) == [names[1]]
+
+
+@pytest.mark.asyncio
+async def test_a_first_volume_that_eats_the_whole_budget_does_not_pin_the_pass(cleanup, monkeypatch):
+    monkeypatch.setattr("services.container_cleanup.ORPHAN_VOLUME_LOOKUP_BUDGET_SECONDS", 0.05)
+    ids = [str(UUID(int=i)) for i in range(1, 3)]
+    names = [f"volume_{uid}" for uid in ids]
+    ssh_client = VolumeHostSsh(dangling=names, created={name: "2026-09-10T08:00:00Z" for name in names}, volumes=names)
+    seen = []
+
+    async def is_orphan(volume_id, age):
+        seen.append(volume_id)
+        if volume_id == ids[0]:
+            await asyncio.sleep(1)
+        return True
+
+    for _ in range(2):
+        await cleanup.remove_orphan_rental_volumes(ssh_client, _snapshot([LIVE]), "exec-1", is_orphan)
+    assert seen[:2] == ids and _removed(ssh_client) == [names[1]]
 
 
 class EvictingSshClient(FakeSshClient):

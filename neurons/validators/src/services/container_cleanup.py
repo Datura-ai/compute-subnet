@@ -432,13 +432,15 @@ class ContainerCleanup:
 
             ages: dict[str, timedelta] = await self._volume_ages(ssh_client, candidates)
             orphans: list[str] = []
+            # a pass cut off by the budget resumes AT the in-flight candidate, so a slow one is not
+            # skipped behind faster ones; only a first candidate that eats the whole budget is passed
+            self._orphan_volume_cursor[executor_uuid] = candidates[0]
             try:
                 async with asyncio.timeout(ORPHAN_VOLUME_LOOKUP_BUDGET_SECONDS):
                     for name in candidates:
-                        # the cursor counts the in-flight candidate too, so one slow lookup cannot pin it
-                        self._orphan_volume_cursor[executor_uuid] = name
                         if name in ages and await is_orphan(name.removeprefix("volume_"), ages[name]):
                             orphans.append(name)
+                        self._orphan_volume_cursor[executor_uuid] = name
             except TimeoutError:
                 logger.info(
                     _m("Orphan volume lookups hit the pass budget; resuming next pass", extra=extra)
