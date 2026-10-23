@@ -476,6 +476,7 @@ class RestoreContainerRequest(ContainerBaseRequest):
     snapshot_id: str | None = None
     legacy_object_size_bytes: int | None = None
     failure_timeout_seconds: int = Field(default=600, gt=0)
+    recovery: bool = False  # reconnect re-dispatch: the restore may already be running, so never report it failed
 
 
 class CancelStorageOperationRequest(ContainerBaseRequest):

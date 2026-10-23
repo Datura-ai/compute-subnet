@@ -5261,6 +5261,11 @@
           "title": "Pod Id",
           "type": "string"
         },
+        "recovery": {
+          "default": false,
+          "title": "Recovery",
+          "type": "boolean"
+        },
         "repository_password": {
           "anyOf": [
             {
@@ -5865,7 +5870,7 @@
       "$ref": "#/$defs/RentedExecutorsResponse"
     }
   },
-  "protocol_version": "1.14.0",
+  "protocol_version": "1.15.0",
   "socket_replies": {
     "RentedMachineResponse": {
       "$ref": "#/$defs/RentedMachineResponse"
