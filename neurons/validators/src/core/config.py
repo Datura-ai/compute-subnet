@@ -580,7 +580,6 @@ class Settings(BaseSettings):
     # nodes' idle shares moved to the verified burner); with none to serve, submit this tempo's vector with its
     # idle moved to the burner, never an older vector.
     SETTLEMENT_MODE: Literal["off", "shadow", "enforce"] = Field(env="SETTLEMENT_MODE", default="off")
-    DUPLICATE_EXECUTOR_DRY_RUN: bool = Field(env="DUPLICATE_EXECUTOR_DRY_RUN", default=True, description="Observe mode: detect duplicate executors but don't penalize")
     # Two executors of ONE miner hotkey that report the same GPU UUID in one cycle are one set of
     # cards listed twice. Always logged (GPU_ALIAS_SAME_MINER); with this on, every copy but one
     # scores 0 for the cycle. Only the miner's own executors are compared, so another miner
