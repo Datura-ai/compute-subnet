@@ -395,14 +395,13 @@ class Settings(BaseSettings):
     # Item 2b — send the advertised CPU-core count in the rental-verification health check so the
     # host's Docker daemon creates the probe with `--cpus=<advertised>` and rejects a count that
     # exceeds the machine's physical cores (a signal the lscpu wrapper cannot forge, since dockerd
-    # reads the kernel directly). CHECK_ENABLED sends the count and observes the verdict; ENFORCEMENT
-    # additionally zeroes the score on CPU_QUOTA_EXCEEDS_HOST.
+    # reads the kernel directly). CHECK_ENABLED sends the count; a CPU_QUOTA_EXCEEDS_HOST verdict
+    # zeroes the score.
     # Defaults to False, unlike the other CHECK_ENABLED flags: this one is the only item that
     # changes what the backend does (the probe is created with `--cpus`), so a rejection the backend
     # does not yet tag CPU_QUOTA_EXCEEDS_HOST lands in the fatal branch of the check. Flip it on once
     # the daemon-to-classification chain is confirmed on staging against the backend side (#918).
     RENTAL_CPU_LIMIT_CHECK_ENABLED: bool = Field(env="RENTAL_CPU_LIMIT_CHECK_ENABLED", default=False)
-    RENTAL_CPU_LIMIT_ENFORCEMENT_ENABLED: bool = Field(env="RENTAL_CPU_LIMIT_ENFORCEMENT_ENABLED", default=False)
     # Rented pod SSH, observe only: at the start of each cycle the validator
     # reads the SSH identification line of every rented pod listed with an ssh_port, from outside the
     # container (services/pod_ssh_probe.py), and reports each result with the node's result. The
