@@ -339,7 +339,6 @@ async def test_secure_decision_keeps_the_spot_amount_and_its_missing_average(sec
 async def test_secure_decision_refuses_a_spot_node_an_idle_pool_gate_refuses(
     secure_decision_on, monkeypatch
 ):
-    monkeypatch.setattr(settings, "ENABLE_UNRENTED_SOFT_PRICE_LIMIT", True)
     p90_config = shared_client.config.model_copy(update={"machine_prices_p90": {H100: 1.0}})
     monkeypatch.setattr(shared_client, "_config", p90_config)
     spot = _spot(filler_revenue_per_gpu_hour=2.0)
@@ -469,7 +468,6 @@ async def test_spot_rental_flag_does_not_pay_an_idle_spot_node(spot_rental_on):
 
 @pytest.mark.asyncio
 async def test_the_free_remainder_of_a_partially_rented_spot_node_keeps_spot_tier(monkeypatch):
-    monkeypatch.setattr(settings, "ENABLE_SPLIT_PARTIAL_RENTAL_SCORING", True)
     config = IncentiveConfig(
         rental_incentive_gpu_types=["H100"],
         max_unrented_gpus={"H100": {8: BUCKET_CAP, 1: BUCKET_CAP}},
@@ -675,7 +673,6 @@ async def test_a_floored_node_below_the_minimum_driver_adds_no_floor_cost(floor_
 async def test_floor_skips_the_free_remainder_of_a_partially_rented_split_node(
     floor_on, monkeypatch
 ):
-    monkeypatch.setattr(settings, "ENABLE_SPLIT_PARTIAL_RENTAL_SCORING", True)
     config = IncentiveConfig(
         rental_incentive_gpu_types=["H100"],
         max_unrented_gpus={"H100": {8: BUCKET_CAP, 1: 1}},
