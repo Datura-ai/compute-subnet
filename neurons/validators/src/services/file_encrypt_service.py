@@ -119,6 +119,8 @@ ORIGINAL_KEYS = {
     'hard_disk_docker_scrape_error': "hard_disk_docker_scrape_error",
     # DAH-3674: nvme | ssd | hdd | unknown for the disk under docker's data root
     'hard_disk_disk_type': "disk_type",
+    # DAH-5045: used size of the engy_cache_* volumes, in GB
+    'hard_disk_engy_cache_used_gb': "engy_cache_used_gb",
     'data_os': "os",
     'data_kernel': "kernel",
     'kernel_scrape_error': "kernel_scrape_error",
@@ -175,6 +177,7 @@ ORIGINAL_KEYS = {
     'ib_pkey': "pkey",
     'ib_gids': "gids",
     'data_boot_id': "boot_id",
+    'data_egress_ip': "egress_ip",
     'data_container_cap_eff': "container_cap_eff",
     'data_nvidiactl_owner_uid': "nvidiactl_owner_uid",
     'data_power_cap_probe_error': "power_cap_probe_error",
@@ -325,6 +328,7 @@ class FileEncryptService:
             'hard_disk_scrape_error': "",
             'hard_disk_docker_scrape_error': "",
             'hard_disk_disk_type': "",
+            'hard_disk_engy_cache_used_gb': "",
             'data_os': "",
             'data_kernel': "",
             'kernel_scrape_error': "",
@@ -384,6 +388,7 @@ class FileEncryptService:
             'ib_pkey': "",
             'ib_gids': "",
             'data_boot_id': "",
+            'data_egress_ip': "",
             'data_container_cap_eff': "",
             'data_nvidiactl_owner_uid': "",
             'data_power_cap_probe_error': "",
