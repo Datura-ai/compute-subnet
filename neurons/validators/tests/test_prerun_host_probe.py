@@ -54,6 +54,7 @@ from services.gpu_power_limit import (
 )
 from services.nvidia_devices import (
     GPU_DEVICE_NODES_CMD,
+    MissingRentedGpuError,
     PROC_GPU_INFO_CMD,
     build_gpu_docker_config_for_executor,
     shared_device_nodes_command,
@@ -826,10 +827,10 @@ async def test_gpu_config_with_probe_whole_host_gets_the_whole_host_nodes():
 async def test_gpu_config_with_probe_missing_uuid_still_consults_xml_live():
     probe = _probe(gpu_minor_map_stdout="GPU-1, 0\n", shared_nodes=("/dev/nvidiactl",))
     ssh = _ssh(_ssh_result(exit_status=1, stderr="no nvidia-smi"))
-    config = await build_gpu_docker_config_for_executor(ssh, ["GPU-9"], host_probe=probe)
-    # the kernel map lacks GPU-9 → nvidia-smi XML is asked live → fails → legacy --gpus-only fallback
+    # the kernel map lacks GPU-9 → nvidia-smi XML is asked live → fails → fail closed
+    with pytest.raises(MissingRentedGpuError):
+        await build_gpu_docker_config_for_executor(ssh, ["GPU-9"], host_probe=probe)
     assert _cmds(ssh) == ["nvidia-smi -q -x"]
-    assert config.device_mounts == ()
 
 
 @pytest.mark.asyncio
