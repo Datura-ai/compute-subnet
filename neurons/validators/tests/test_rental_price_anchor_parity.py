@@ -38,8 +38,9 @@ def test_overrides_change_only_the_server_edition_and_b300_entries():
     B300 is pinned at 6.40 by DAH-3542. `NVIDIA B300 SXM6 PC` is the one key the pin may ADD: the
     AC card's alias (derived from the AC entry, never its own price), in the lium-core source table
     but not yet in the release the lock installs — the union is a no-op once the lock carries it.
-    `NVIDIA GB300` is the other: priced at the B300 AC rate for now, its own base model. The Max-Q
-    Workstation Edition is a third (DAH-3453): derived from the Workstation entry, same base model."""
+    `NVIDIA GB300` is the other: priced at the B300 AC rate for now, its own base model.
+    `NVIDIA Rubin` likewise (DAH-4506). The Max-Q Workstation Edition is a fourth (DAH-3453): derived
+    from the Workstation entry, same base model."""
     upstream = DEFAULT_SHARED_CONFIG.machine_prices
 
     # The GPU types added to the unrented program after the lock's lium-core release carry no upstream row yet.
@@ -64,8 +65,16 @@ def test_overrides_change_only_the_server_edition_and_b300_entries():
         "NVIDIA Quadro RTX 8000",
         "NVIDIA CMP 170HX",
     }
-    assert RENTAL_PRICES_PER_HOUR.keys() == upstream.keys() | {"NVIDIA B300 SXM6 PC", "NVIDIA GB300", MAX_Q} | added_types
-    assert RENTAL_PRICES_PER_HOUR["NVIDIA B300 SXM6 PC"] == RENTAL_PRICES_PER_HOUR["NVIDIA B300 SXM6 AC"]
+    assert (
+        RENTAL_PRICES_PER_HOUR.keys()
+        == upstream.keys()
+        | {"NVIDIA B300 SXM6 PC", "NVIDIA GB300", "NVIDIA Rubin", MAX_Q}
+        | added_types
+    )
+    assert (
+        RENTAL_PRICES_PER_HOUR["NVIDIA B300 SXM6 PC"]
+        == RENTAL_PRICES_PER_HOUR["NVIDIA B300 SXM6 AC"]
+    )
     assert BASE_GPU_MAP["NVIDIA B300 SXM6 PC"] == BASE_GPU_MAP["NVIDIA B300 SXM6 AC"] == "B300"
     assert RENTAL_PRICES_PER_HOUR["NVIDIA GB300"] == RENTAL_PRICES_PER_HOUR["NVIDIA B300 SXM6 AC"]
     assert BASE_GPU_MAP["NVIDIA GB300"] == "GB300"
