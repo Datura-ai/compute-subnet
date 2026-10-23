@@ -25,6 +25,7 @@ from services.executor_rollout import (
     RolloutWindow,
     WithheldVerdict,
     carry_renter_gpu_reset_results,
+    has_renter_gpu_reset_holds,
     remember_rented_scored_results,
     withhold_renter_gpu_reset_verdicts,
     withhold_rollout_verdicts,
@@ -609,7 +610,7 @@ class Validator:
                             task.cancel()
 
                     # DAH-4658: before the duplicate pass and the GPU count, so a carried result counts in both
-                    await carry_renter_gpu_reset_results(all_job_results, self.redis_service)
+                    await self.carry_scores_over_renter_gpu_resets(all_job_results)
                     total_gpu_model_count_map = settle_cycle_results(
                         all_job_results,
                         {**self.default_extra, "job_batch_id": job_batch_id},
@@ -1484,6 +1485,14 @@ class Validator:
                 cycles_seen=0,
                 grace_cycles=0,
             )
+
+    async def carry_scores_over_renter_gpu_resets(self, all_job_results: dict[str, list[JobResult]]) -> None:
+        """DAH-4658: only a node the backend still lists as rented right now carries its score; no answer carries none."""
+        if not has_renter_gpu_reset_holds(all_job_results):
+            return
+        rented_now = await self.backend_client.get_rented_executors_now()
+        rented_executor_ids = {str(executor_id).lower() for executor_id in rented_now.executors} if rented_now else set()
+        await carry_renter_gpu_reset_results(all_job_results, self.redis_service, rented_executor_ids)
 
     async def withhold_verdicts_for_rollout(
         self,

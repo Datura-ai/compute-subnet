@@ -467,7 +467,7 @@ def withhold_renter_gpu_reset_verdicts(
     for miner_hotkey, results in job_results.items():
         standing_by_miner[miner_hotkey] = []
         for result in results:
-            if result.failure_reason_code != MachineSpecMessages.SCRAPE_GPU_RESET_IN_PROGRESS.reason:
+            if not _held_for_renter_gpu_reset(result):
                 standing_by_miner[miner_hotkey].append(result)
                 continue
             withheld.append(WithheldVerdict(miner_hotkey=miner_hotkey, result=result))
@@ -484,17 +484,28 @@ def withhold_renter_gpu_reset_verdicts(
     return standing_by_miner, withheld
 
 
+def has_renter_gpu_reset_holds(job_results: dict[str, list[JobResult]]) -> bool:
+    return any(_held_for_renter_gpu_reset(result) for results in job_results.values() for result in results)
+
+
+def _held_for_renter_gpu_reset(result: JobResult) -> bool:
+    return result.failure_reason_code == MachineSpecMessages.SCRAPE_GPU_RESET_IN_PROGRESS.reason
+
+
 async def carry_renter_gpu_reset_results(
-    job_results: dict[str, list[JobResult]], redis_service: RedisService
+    job_results: dict[str, list[JobResult]], redis_service: RedisService, rented_executor_ids: set[str]
 ) -> None:
     """DAH-4658: a scrape held for the renter's own GPU reset takes the node's last scored result, in place.
 
-    The provider loses nothing: the carried result is scored as in the cycle it came from. A node without
-    a readable last result keeps the held one, and `withhold_renter_gpu_reset_verdicts` takes it out.
+    The provider loses nothing: the carried result is scored as in the cycle it came from. A node the
+    backend no longer lists as rented (`rented_executor_ids`, lower-case), or without a readable last
+    result, keeps the held one, and `withhold_renter_gpu_reset_verdicts` takes it out.
     """
     for miner_hotkey, results in job_results.items():
         for index, held in enumerate(results):
-            if held.failure_reason_code != MachineSpecMessages.SCRAPE_GPU_RESET_IN_PROGRESS.reason:
+            if not _held_for_renter_gpu_reset(held):
+                continue
+            if str(held.executor_info.uuid).lower() not in rented_executor_ids:
                 continue
             previous = await _last_scored_result(redis_service, miner_hotkey, held)
             if previous is None:
@@ -544,18 +555,20 @@ async def remember_rented_scored_results(
 ) -> None:
     """DAH-4658: keep each rented node's scored result of this cycle for `carry_renter_gpu_reset_results`.
 
+    Any other standing result drops the kept one, so only the cycle right before a reset is carried.
     A carried result is not kept again, so the TTL bounds how long one result can stand in. A Redis
     error only logs: the next cycle writes again.
     """
     writes = RedisWrites()
     for miner_hotkey, results in job_results.items():
         for result in results:
-            if result.is_rented and result.is_successful and not result.carried_for_renter_gpu_reset:
-                writes.set(
-                    last_scored_result_key(miner_hotkey, result.executor_info.uuid),
-                    result.model_dump_json(),
-                    ex=LAST_SCORED_RESULT_TTL_SECONDS,
-                )
+            if result.carried_for_renter_gpu_reset:
+                continue
+            key = last_scored_result_key(miner_hotkey, result.executor_info.uuid)
+            if result.is_rented and result.is_successful:
+                writes.set(key, result.model_dump_json(), ex=LAST_SCORED_RESULT_TTL_SECONDS)
+            else:
+                writes.delete(key)
     try:
         await redis_service.write_atomically(writes)
     except Exception as exc:
