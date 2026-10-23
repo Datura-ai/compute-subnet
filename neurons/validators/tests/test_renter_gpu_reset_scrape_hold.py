@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from payload_models.payloads import ResetPodGpuRequest
+from incentive.config import IncentiveConfig
+from incentive.rental_price import RentalPriceIncentive
 from services.docker_service import DockerService
 from core.validator import specs_to_publish
 from services.executor_rollout import (
@@ -66,10 +68,12 @@ ZERO_GPUS = _scrape_result(stdout=NO_GPU_REPORT, exit_code=1)
 RESET_REQUIRED = _scrape_result(stdout=_driver_report("NVMLError(16)"), exit_code=1)
 
 
-async def _cycle(context_factory, service, *, scrape):
+async def _cycle(context_factory, service, *, scrape, pod_gpu_count: int | None = None):
     """One rented cycle through the real Pipeline and ResultHandler, with the node's Redis marks in `service`."""
     backend = DummyBackendClient(active=True)
     backend.report_rented_gpu_drop = AsyncMock()
+    rented_data = build_rented_data(EXECUTOR, {"containers": [{"name": "tenant-123", "pod_id": POD_ID}], "owner_flag": False})
+    rented_data.executors[EXECUTOR].pods[0].gpu_count = pod_gpu_count
     ctx = context_factory(
         miner_hotkey=RENTAL_OWNER,
         services=build_services(
@@ -82,9 +86,7 @@ async def _cycle(context_factory, service, *, scrape):
         config=build_context_config(machine_scrape_filename="scrape.sh", obfuscation_keys={}),
         state=build_state(
             remote_dir="/remote",
-            rented_data=build_rented_data(
-                EXECUTOR, {"containers": [{"name": "tenant-123", "pod_id": POD_ID}], "owner_flag": False}
-            ),
+            rented_data=rented_data,
         ),
         runner=_Runner(scrape),
         ssh=DummySSHClient(pod_running=True),
@@ -227,6 +229,44 @@ async def test_an_old_recent_mark_without_gpus_still_names_its_pod():
     assert await renter_gpu_reset_recent(service, RENTAL_OWNER, EXECUTOR, "pod-other") is False
 
 
+async def _job_result(ctx, ok: bool, event):
+    """The cycle's JobResult as TaskService builds it (persistence already done by `_cycle`)."""
+    miner_info = MagicMock(miner_hotkey=RENTAL_OWNER, job_batch_id="batch")
+    result = await ResultHandler(redis_service=MagicMock(), dry_run=True).handle_result(
+        context=ctx, miner_info=miner_info, executor_info=ctx.executor, verified_job_info=ctx.verified or {},
+        log_text="", success=ok, validation_event=event,
+    )
+    if not ok:
+        result.failure_reason_code = event.reason_code  # as TaskService sets it
+    return result
+
+
+@pytest.mark.asyncio
+async def test_a_carried_split_node_keeps_only_its_rented_gpus_in_the_mining_pool(context_factory):
+    """8x H200 split 4+4, the renter's pod holds 4: the carried result must still say 4 rented, or the
+    split pricing reads the whole node as rented for up to the carry TTL."""
+    service = _redis_service()
+    with patch.object(gpu_fingerprint.settings, "GPU_ANCHOR_HARD_ENABLED", True):
+        ok, event, ctx, _ = await _cycle(context_factory, service, scrape=_gpus_listed(H200_UUIDS), pod_gpu_count=4)
+        previous = await _job_result(ctx, ok, event)
+        previous.supports_gpu_splitting, previous.gpu_splitting_min_count = True, 4  # the provider's split opt-in
+        await remember_rented_scored_results({RENTAL_OWNER: [previous]}, service)
+        await _reset_in_progress(service, H200_UUIDS[:4])
+
+        ok, event, ctx, _ = await _cycle(context_factory, service, scrape=_gpus_listed(H200_UUIDS[4:]), pod_gpu_count=4)
+        held = await _job_result(ctx, ok, event)
+    job_results = {RENTAL_OWNER: [held]}
+
+    await carry_renter_gpu_reset_results(job_results, service, {EXECUTOR}, ctx.state.rented_data, {})
+
+    [carried] = job_results[RENTAL_OWNER]
+    assert carried.carried_for_renter_gpu_reset is True
+    assert (carried.is_rented, carried.gpu_count, carried.rented_gpu_count) == (True, 8, 4)
+    incentive = RentalPriceIncentive(IncentiveConfig(), AsyncMock(), job_results, {"NVIDIA H200": 8})
+    incentive._expand_partially_rented_split_results()
+    assert [(result.is_rented, result.gpu_count) for result in job_results[RENTAL_OWNER]] == [(True, 4), (False, 4)]
+
+
 @pytest.mark.asyncio
 async def test_four_gpus_missing_without_a_renter_reset_still_fail_the_fingerprint(context_factory):
     service = _redis_service()
@@ -326,14 +366,12 @@ async def test_a_carried_score_takes_the_pay_flags_of_this_cycle_and_a_fresh_ban
     previous = _rented_scored("node-1")
     previous.spec["gpu"]["details"][0]["uuid"] = "GPU-banned"
     previous.is_spot = previous.is_on_spot_pay_list = previous.provider_discord_connected = True
-    previous.rented_gpu_count = 8
     previous.gpu_model = "NVIDIA H100 80GB HBM3"
     previous.default_job_owner, previous.has_lium_filler, previous.filler_revenue_per_gpu_hour = "miner", False, 9.0
     await remember_rented_scored_results({"5Miner": [previous]}, service)
     held = _failed("node-1", Msg.SCRAPE_GPU_RESET_IN_PROGRESS.reason)
     held.is_spot = held.is_on_spot_pay_list = held.provider_discord_connected = False
     held.is_provider_email_held = held.is_new_rentals_paused = True
-    held.rented_gpu_count = 4
     held.default_job_owner, held.has_lium_filler = "lium", True
     job_results = {"5Miner": [held]}
     rented_data = _rented_executors(
@@ -348,7 +386,7 @@ async def test_a_carried_score_takes_the_pay_flags_of_this_cycle_and_a_fresh_ban
     [carried] = job_results["5Miner"]
     assert carried.carried_for_renter_gpu_reset is True
     assert (carried.is_spot, carried.is_on_spot_pay_list, carried.provider_discord_connected) == (False, False, False)
-    assert (carried.is_provider_email_held, carried.rented_gpu_count) == (True, 4)
+    assert carried.is_provider_email_held is True
     assert carried.is_provider_banned is True
     assert (carried.is_new_rentals_paused, carried.default_job_owner, carried.has_lium_filler) == (True, "lium", True)
     # this cycle's filler average for the carried configuration (8x H100), not the held scrape's

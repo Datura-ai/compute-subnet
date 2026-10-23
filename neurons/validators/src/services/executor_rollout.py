@@ -50,6 +50,7 @@ from services.task.messages import (
     UploadFilesMessages,
 )
 from services.task.models import JobResult
+from services.task.result_handler import pods_rented_gpu_count
 
 logger = logging.getLogger(__name__)
 
@@ -500,7 +501,6 @@ _FRESH_PAY_FIELDS = (
     "is_on_spot_pay_list",
     "is_provider_email_held",
     "provider_discord_connected",
-    "rented_gpu_count",
     "is_new_rentals_paused",
     "default_job_owner",
     "has_lium_filler",
@@ -540,6 +540,9 @@ async def carry_renter_gpu_reset_results(
                         rented_data, miner_hotkey, miner_coldkeys.get(miner_hotkey), previous, held
                     ),
                     "filler_revenue_per_gpu_hour": _filler_revenue_now(rented_data, previous),
+                    # the hold ends the run before the rented check, so the held result counts no rented GPU
+                    "rented_gpu_count": pods_rented_gpu_count(rented_data, str(held.executor_info.uuid))
+                    or previous.rented_gpu_count,
                 }
             )
             logger.info(
