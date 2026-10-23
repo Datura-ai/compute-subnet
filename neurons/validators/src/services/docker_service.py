@@ -159,6 +159,7 @@ from services.storage_operations import (
     start_storage_operation,
     supports_bootstrap_restore,
     supports_storage_operation,
+    upload_secrets_file,
     wait_for_storage_operation,
 )
 from services.task.runner import SSHCommandRunner
@@ -360,7 +361,7 @@ def _port_allocated_phrase(exc: BaseException) -> str | None:
 def port_collision_error_class(exc: BaseException) -> str | None:
     """`port_collision` when the create died on a host port bind, for the failure event's counter.
 
-    Flag or no flag: a typed `RentalPortCollisionError`, or any refusal text in the exception's
+    A typed `RentalPortCollisionError`, or any refusal text in the exception's
     cause chain that names an already-bound host port.
     """
     seen: set[int] = set()
@@ -640,7 +641,7 @@ class LoopbackPluginDisabledError(Exception):
 @dataclass
 class VolumeHostProbe:
     """What one SSH round trip learns about the host before a local volume is created
-    (RENTAL_VOLUME_FAST_PATH_ENABLED). The same facts the fresh-sizing path collected over
+    (DAH-3240). The same facts the fresh-sizing path collected over
     three commands, plus the loopback plugin state that lets `create_local_volume` skip
     `docker plugin install` — a Docker Hub round trip — when the plugin is already enabled."""
 
@@ -1919,11 +1920,7 @@ def _build_cache_volume_mounts(payload: ContainerCreateRequest, occupied_targets
 def _wants_quote_socket(payload: ContainerCreateRequest, *, in_cvm: bool) -> bool:
     # customer rentals on a dstack CVM guest; a FILLER (DPHN/PEARL) has no attestation use and a
     # bare-metal node has no guest agent to broker
-    return (
-        settings.ENABLE_CVM_POD_QUOTE_SOCKET
-        and in_cvm
-        and payload.workload_kind == WorkloadKind.CUSTOMER_RENTAL
-    )
+    return in_cvm and payload.workload_kind == WorkloadKind.CUSTOMER_RENTAL
 
 
 class PortCheckRemoval(NamedTuple):
@@ -1982,8 +1979,7 @@ def _should_encrypt_local_volume(
         bool(local_volume)
         and workload_kind != WorkloadKind.FILLER
         and bool(is_sysbox)
-        and enable_volume_encryption
-        and settings.ENABLE_VOLUME_ENCRYPTION
+        and bool(enable_volume_encryption)
     )
 
 
@@ -2006,11 +2002,7 @@ def _can_remount_encrypted_volume(local_volume_path: str | None) -> bool:
     # derives a passphrase that simply will not mount. A plaintext path at or under the ciphertext
     # mount is refused as well: mounting the plaintext view inside the ciphertext it is decrypting
     # is not something recovery should attempt on customer data.
-    if not (
-        settings.RECOVER_ENCRYPTED_VOLUMES
-        and settings.VOLUME_MASTER_SECRET
-        and local_volume_path
-    ):
+    if not (settings.VOLUME_MASTER_SECRET and local_volume_path):
         return False
     if local_volume_path == _LIUM_CIPHER_MOUNT or local_volume_path.startswith(
         f"{_LIUM_CIPHER_MOUNT}/"
@@ -2144,10 +2136,7 @@ class DockerService:
         self.attestation_service = attestation_service
         self.rental_docker_client_factory = (
             rental_docker_client_factory
-            or RentalDockerSdkClientFactory(
-                pull_timeout_seconds=_DOCKER_PULL_TIMEOUT_SECONDS,
-                transport_retry_enabled=lambda: settings.DOCKER_TRANSPORT_RETRY_ENABLED,
-            )
+            or RentalDockerSdkClientFactory(pull_timeout_seconds=_DOCKER_PULL_TIMEOUT_SECONDS)
         )
         self.lock = asyncio.Lock()
         self.logs_queue: list[dict] = []
@@ -2341,13 +2330,13 @@ class DockerService:
         Returns the container's ID, or None when the client gave none. A ContainerCreateRefused of
         the spec's `before_create` or `before_start` (checked on every attempt) is raised as is.
 
-        Port collision (PORT_COLLISION_RETRY_ENABLED): when dockerd refuses the bind of a host port
+        Port collision: when dockerd refuses the bind of a host port
         and `port_maps` / `spare_port_pairs` are given, the colliding mapping moves to the next
         free pair of the executor's advertised range (at most `_PORT_COLLISION_CANDIDATE_CAP`
         candidates, the host's listening sockets read once over `ssh_client`) and the run is
         retried ONCE with the new mapping; `port_maps` is updated in place so the create's answer
         carries the port the pod really got. No free candidate, or a second bind refusal, fails the
-        create as `RentalPortCollisionError`. Flag off: the DAH-1991 same-command wait as before.
+        create as `RentalPortCollisionError`.
 
         `remove_port_checks_listed_live` runs once, on the first bind refusal, before either retry;
         when it removed a port check, the run is retried at once on the same mapping.
@@ -2423,7 +2412,6 @@ class DockerService:
                     ) from exc
                 if (
                     port_allocation_phrase
-                    and settings.PORT_COLLISION_RETRY_ENABLED
                     and port_maps is not None
                     and spare_port_pairs
                 ):
@@ -4716,15 +4704,16 @@ class DockerService:
         with_power: bool,
         miner_hotkey: str,
         log_extra: dict,
+        with_label: bool,
     ) -> PrerunHostProbe | None:
         """DAH-3257: the pre-run host listings in one SSH command; None on any failure.
 
-        None means every consumer runs its own listing command, exactly as with the flag off; the
+        None means every consumer runs its own listing command, exactly as without the probe; the
         probe is then one extra round trip. It reads the host and writes nothing.
         """
         command = prerun_host_probe_command(
             docker_image=docker_image,
-            image_label=_ENCRYPTED_VOLUME_IMAGE_LABEL,
+            image_label=_ENCRYPTED_VOLUME_IMAGE_LABEL if with_label else None,
             with_power=with_power,
             miner_hotkey=miner_hotkey,
         )
@@ -4733,7 +4722,7 @@ class DockerService:
             # Bounded like the nvidia-smi query it carries (a hung driver must not stall the rent);
             # asyncio.TimeoutError lands in the except below → None → the per-command path.
             result = await ssh_client.run(command, check=False, timeout=_PRERUN_HOST_PROBE_TIMEOUT_SECONDS)
-            probe = parse_prerun_host_probe(result.stdout or "", with_power=with_power)
+            probe = parse_prerun_host_probe(result.stdout or "", with_power=with_power, with_label=with_label)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -4767,7 +4756,7 @@ class DockerService:
                             ("shared_nodes", probe.shared_nodes),
                             ("shared_nodes_whole_host", probe.shared_nodes_whole_host_only),
                             ("power", probe.power_state_stdout if with_power else ""),
-                            ("image_label", probe.image_label_value),
+                            ("image_label", probe.image_label_value if with_label else ""),
                             ("port_check", probe.port_check_container_names),
                         )
                         if value is None
@@ -5300,8 +5289,9 @@ class DockerService:
 
     async def install_pod_ssh_host_key(
         self,
-        docker_client: RentalDockerSdkClient,
+        ssh_client: asyncssh.SSHClientConnection,
         *,
+        docker_client: RentalDockerSdkClient,
         container_name: str,
         pod_id: str,
         log_extra: dict,
@@ -5314,22 +5304,43 @@ class DockerService:
         try:
             host_key = derive_pod_ssh_host_key(settings.VOLUME_MASTER_SECRET, pod_id)
             script = self._pod_ssh_host_key_script_path().read_text()
-            await exec_logged_rental_docker_sdk_operation(
-                docker_client=docker_client,
-                operation="exec_install_pod_ssh_host_key",
-                exec_spec=ContainerExecSpec(
-                    container_name=container_name,
-                    argv=("sh", "-c", script, "pod_ssh_host_key", host_key.public_openssh),
-                    stdin=host_key.private_openssh,
-                    idempotent=True,
-                ),
-                log_extra=log_extra,
+            # The CLI talks to the local daemon: one channel on the create's pinned SSH
+            # session replaces the WAN Docker API readiness/exec round trips.
+            exec_spec = ContainerExecSpec(
+                container_name=container_name,
+                argv=("sh", "-c", script, "pod_ssh_host_key", host_key.public_openssh),
+                stdin=host_key.private_openssh,
+                idempotent=True,
             )
+            command = shlex.join(("/usr/bin/docker", "exec", "-i", "-u", "0", container_name, *exec_spec.argv))
+            started_ms = now_ms()
+            async with asyncio.timeout(60):
+                try:
+                    result = await ssh_client.run(command, input=host_key.private_openssh, check=False)
+                except asyncssh.ChannelOpenError:
+                    result = None
+                logger.info(_m(
+                    "Pod SSH host key installation finished",
+                    extra=get_extra_info({**log_extra, "duration_ms": now_ms() - started_ms,
+                                          "exit_status": result.exit_status if result else None}),
+                ))
+                if result is None or result.exit_status != 0:
+                    # Keep the SDK readiness/retry path if the cheap attempt failed.
+                    # Its output may echo stdin, so log only the status here.
+                    fallback = await docker_client.exec_in_container(exec_spec)
+                    logger.info(_m(
+                        "Pod SSH host key fallback finished",
+                        extra=get_extra_info({**log_extra, "duration_ms": now_ms() - started_ms,
+                                              "exit_status": fallback.exit_status}),
+                    ))
+                    if fallback.exit_status != 0:
+                        raise RuntimeError("pod SSH host key fallback failed")
         except Exception as exc:
             logger.warning(
                 _m(
                     "Failed to install pod SSH host key",
-                    extra=get_extra_info({**log_extra, "container_name": container_name, "error": str(exc)}),
+                    extra=get_extra_info({**log_extra, "container_name": container_name, "error": str(exc),
+                                         "error_type": type(exc).__name__}),
                 ),
             )
 
@@ -6054,13 +6065,13 @@ class DockerService:
         with_df: bool,
         log_extra: dict,
     ) -> VolumeHostProbe | None:
-        """RENTAL_VOLUME_FAST_PATH_ENABLED: the volume-stage host facts in one SSH round trip.
+        """DAH-3240: the volume-stage host facts in one SSH round trip.
 
         Replaces `docker info` + the df helper container + `docker volume ls` (fresh sizing) and the
         second `docker info` + the unconditional `docker plugin install` (create) — five serial
         commands, one of them a Docker Hub round trip — with one command and, when vloopback
         volumes exist, the same `docker volume inspect` as before. Never fatal: on any failure it
-        returns None and the callers take the exact path they take with the flag off.
+        returns None and the callers take the per-command path.
         """
         started = now_ms()
         try:
@@ -6101,7 +6112,7 @@ class DockerService:
     ) -> VolumeSizingResult:
         """Resolve effective volume/storage limits for a new pod volume (DAH-2183).
 
-        With `host_probe` (RENTAL_VOLUME_FAST_PATH_ENABLED) the fresh path reads DockerRootDir,
+        With `host_probe` (DAH-3240) the fresh path reads DockerRootDir,
         df and the vloopback volume names from the probe instead of running three commands;
         only `docker volume inspect` still goes to the host, and only when volumes exist.
 
@@ -7532,13 +7543,18 @@ class DockerService:
             # probe runs again at its own step.
             early_probes_allowed = not is_custom_build and not local_volume
             measures_host = self.measures_host_for_volume_sizing(payload)
-            wants_volume_probe = settings.RENTAL_VOLUME_FAST_PATH_ENABLED and bool(
-                measures_host or payload.volume_limit_gb
-            )
+            wants_volume_probe = bool(measures_host or payload.volume_limit_gb)
             brings_own_power_cap = payload.workload_kind == WorkloadKind.FILLER and bool(
                 payload.gpu_power_limits
             )
             probe_with_power = not brings_own_power_cap
+            # the image's label is read only for an encrypted volume (the same predicate as the volume step)
+            probe_with_label = _should_encrypt_local_volume(
+                local_volume or f"volume_{payload.pod_id}",
+                payload.workload_kind,
+                payload.is_sysbox,
+                payload.enable_volume_encryption,
+            )
             early_host_probe: asyncio.Task[AnswerWithOwnDuration] | None = None
             early_volume_probe: asyncio.Task[AnswerWithOwnDuration] | None = None
             # DAH-3980: a customer's create removes every filler (DAH-3706). The kill is started after the
@@ -7574,20 +7590,20 @@ class DockerService:
                 nonlocal early_host_probe, early_volume_probe
                 if not early_probes_allowed:
                     return
-                if settings.RENTAL_PRERUN_HOST_PROBE_ENABLED:
-                    early_host_probe = asyncio.create_task(
-                        _with_own_duration(
-                            self.probe_prerun_host(
-                                connected_ssh_client,
-                                docker_image=payload.docker_image,
-                                with_power=probe_with_power,
-                                miner_hotkey=payload.miner_hotkey,
-                                log_extra=default_extra,
-                            ),
-                            ProfilerStepName.PRERUN_HOST_PROBE_PARALLEL,
-                        )
+                early_host_probe = asyncio.create_task(
+                    _with_own_duration(
+                        self.probe_prerun_host(
+                            connected_ssh_client,
+                            docker_image=payload.docker_image,
+                            with_power=probe_with_power,
+                            miner_hotkey=payload.miner_hotkey,
+                            log_extra=default_extra,
+                            with_label=probe_with_label,
+                        ),
+                        ProfilerStepName.PRERUN_HOST_PROBE_PARALLEL,
                     )
-                    connections.callback(early_host_probe.cancel)
+                )
+                connections.callback(early_host_probe.cancel)
                 if wants_volume_probe:
                     early_volume_probe = asyncio.create_task(
                         _with_own_duration(
@@ -8034,23 +8050,23 @@ class DockerService:
                 # need (containers, volumes, mounted volumes, GPU minor map, device nodes, power
                 # state, the image's encryption label). Each consumer takes the probe in place of
                 # its own listing command; every removal and write below still runs as before.
-                # None (flag off, or the probe failed) leaves every consumer on its own commands.
+                # None (the probe failed) leaves every consumer on its own commands.
                 host_probe: PrerunHostProbe | None = None
-                if settings.RENTAL_PRERUN_HOST_PROBE_ENABLED:
-                    current_step = "prerun_host_probe"
-                    if early_host_probe is not None and image_present:
-                        host_probe, early_host_probe_step = await early_host_probe
-                        profilers.append(early_host_probe_step)
-                    else:
-                        host_probe = await self.probe_prerun_host(
-                            ssh_client,
-                            docker_image=payload.docker_image,
-                            # A PEARL filler caps its GPUs with live nvidia-smi queries of its own
-                            # (apply_filler_gpu_power_limits) and never reads the probe's power state.
-                            with_power=probe_with_power,
-                            miner_hotkey=payload.miner_hotkey,
-                            log_extra=default_extra,
-                        )
+                current_step = "prerun_host_probe"
+                if early_host_probe is not None and image_present:
+                    host_probe, early_host_probe_step = await early_host_probe
+                    profilers.append(early_host_probe_step)
+                else:
+                    host_probe = await self.probe_prerun_host(
+                        ssh_client,
+                        docker_image=payload.docker_image,
+                        # A PEARL filler caps its GPUs with live nvidia-smi queries of its own
+                        # (apply_filler_gpu_power_limits) and never reads the probe's power state.
+                        with_power=probe_with_power,
+                        miner_hotkey=payload.miner_hotkey,
+                        log_extra=default_extra,
+                        with_label=probe_with_label,
+                    )
                 # The probe is a snapshot. Once a step below removes a container or a volume, the
                 # container/volume listings are stale (a removed volume would still read as present,
                 # a removed container as still mounting its volume), so the later sweeps go back to
@@ -8281,7 +8297,7 @@ class DockerService:
                         )
                 if not local_volume:
                     # DAH-3240: one round trip for the host facts the sizing and the create need
-                    # (flag off → None → the per-command path below, unchanged).
+                    # (a failed probe → None → the per-command path below).
                     volume_probe: VolumeHostProbe | None = None
                     # probe only when something reads it: the host-measuring sizing (df) or a limited
                     # volume's plugin install (root dir + plugin state); an unlimited volume on a
@@ -8820,7 +8836,8 @@ class DockerService:
                         soft_failed_step = current_step
                     if soft_failed_step is None:
                         await self.install_pod_ssh_host_key(
-                            docker_client,
+                            ssh_client,
+                            docker_client=docker_client,
                             container_name=container_name,
                             pod_id=payload.pod_id,
                             log_extra=default_extra,
@@ -9217,20 +9234,15 @@ class DockerService:
         """Stamp a host-fault create failure as the node's standing rental probe failure.
 
         The node then scores 0 every cycle until a rental probe passes on it; the probe's interval stamp
-        is dropped so that probe runs on the next idle cycle. Without the probe there is nothing to
-        clear the stamp, so nothing is stamped while RENTAL_PROBE_ENABLED is off. In shadow
-        (RENTAL_PROBE_ENFORCEMENT_ENABLED off) only the interval stamp is dropped: a standing failure
-        written then is never cleared on a node a filler keeps busy, and would zero it once
-        enforcement is turned on.
+        is dropped so that probe runs on the next idle cycle.
         """
-        if not settings.RENTAL_PROBE_ENABLED or not is_host_fault_create_failure(current_step):
+        if not is_host_fault_create_failure(current_step):
             return
         try:
-            if settings.RENTAL_PROBE_ENFORCEMENT_ENABLED:
-                await self.redis_service.set(
-                    f"{RENTAL_PROBE_FAILED_PREFIX}:{executor_uuid}",
-                    f"{_RENTAL_PROBE_CONTAINER_START_STEP}:{current_step}",
-                )
+            await self.redis_service.set(
+                f"{RENTAL_PROBE_FAILED_PREFIX}:{executor_uuid}",
+                f"{_RENTAL_PROBE_CONTAINER_START_STEP}:{current_step}",
+            )
             await self.redis_service.delete(f"{RENTAL_PROBE_OK_PREFIX}:{executor_uuid}")
         except Exception:  # noqa: BLE001 — the create's own failure reply still goes out
             logger.warning(
@@ -9353,16 +9365,12 @@ class DockerService:
             restore.restore_path or local_volume_path,
             "--backup-source-path",
             restore.legacy_object_key or "",
-            "--auth-token",
-            restore.auth_token,
+            "--secrets-file",
+            await upload_secrets_file(ssh_client, restore.auth_token, restore.backup_volume_info),
             "--restore-log-id",
             restore.restore_log_id,
             "--backup-volume-name",
             restore.backup_volume_info.name,
-            "--backup-volume-iam_user_access_key",
-            restore.backup_volume_info.iam_user_access_key,
-            "--backup-volume-iam_user_secret_key",
-            restore.backup_volume_info.iam_user_secret_key,
             "--target-volume-path",
             local_volume_path,
         ]
@@ -9641,14 +9649,29 @@ class DockerService:
     ) -> None:
         """`docker start` plus :meth:`_restore_mount_and_sshd_after_start`, on clients the caller already
         holds — the undo of a failed edit (``_EditSwap.restore``), whose SSH session is open anyway."""
-        await run_logged_rental_docker_sdk_operation(
-            operation="start_container",
-            log_extra=default_extra,
-            call=lambda: docker_client.start(
-                container_name=container_name, network=RENTAL_NETWORK_NAME
-            ),
-            container_name=container_name,
-        )
+
+        async def _start() -> None:
+            await run_logged_rental_docker_sdk_operation(
+                operation="start_container",
+                log_extra=default_extra,
+                call=lambda: docker_client.start(
+                    container_name=container_name, network=RENTAL_NETWORK_NAME
+                ),
+                container_name=container_name,
+            )
+
+        try:
+            await _start()
+        except Exception as exc:
+            # park's `docker stop` can leave the vloopback mountpoint dir behind, so the parked
+            # container's own start fails on "file exists" and the customer's pod stays down
+            # (pod 6577912c, 22 Oct). Same repair as the create retry: rmdir only an empty,
+            # unmounted mountpoint, then start once more.
+            if not _is_stale_vloopback_mountpoint_error(str(exc)) or not await self._repair_stale_mountpoint_of_container_volume(
+                ssh_client, container_name, default_extra
+            ):
+                raise
+            await _start()
         await self._restore_mount_and_sshd_after_start(
             docker_client=docker_client,
             ssh_client=ssh_client,
