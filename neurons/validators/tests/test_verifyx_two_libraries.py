@@ -156,7 +156,7 @@ async def test_hash_mismatch_does_not_refresh_when_opt_in_is_off(libraries):
     assert refresh.await_count == 0
     assert result.error == OUTDATED_LIBRARY_ERROR
     assert (result.diagnostics or {}).get("event") == "VERIFYX_LIBRARY_MISMATCH_NO_REFRESH"
-    assert commands(shell) == []
+    assert commands(shell) == ["uname -m"]  # a mismatch reads the CPU, nothing else
 
 
 @pytest.mark.asyncio
@@ -183,7 +183,7 @@ async def test_hash_mismatch_does_not_refresh_when_usr_lib_is_not_writable(libra
 async def test_hash_mismatch_fetches_then_retries(libraries):
     digests = {LIB_PATH: STALE_SHA256}
 
-    async def after_refresh(_shell, expected, _extra):
+    async def after_refresh(_shell, expected, _extra, **_kw):
         digests[LIB_PATH] = expected
         return True
 
@@ -218,7 +218,7 @@ async def test_hash_mismatch_and_failed_fetch_stays_outdated(libraries):
         result = await gated_run(shell)
     assert refresh.await_count == 1
     assert result.error == OUTDATED_LIBRARY_ERROR
-    assert commands(shell) == []
+    assert commands(shell) == ["uname -m"]
 
 
 @pytest.mark.asyncio
@@ -266,3 +266,70 @@ async def test_curl_error_is_logged_and_validator_file_is_installed():
         )
     assert ok is True
     put.assert_awaited_once()
+
+
+ARM_SHA256 = "e" * 64
+
+
+def arm_shell(digests: dict[str, str]) -> MagicMock:
+    shell = executor_shell(digests)
+    shell.ssh_client.run = AsyncMock(
+        side_effect=lambda cmd, **_kw: SimpleNamespace(
+            stdout="aarch64\n" if cmd == "uname -m" else "ab" * MIN_CIPHER_LEN, stderr="", exit_status=0
+        )
+    )
+    return shell
+
+
+@pytest.mark.asyncio
+async def test_arm_executor_without_an_aarch64_build_fails_clearly_and_uploads_nothing(libraries):
+    shell = arm_shell({LIB_PATH: ARM_SHA256})
+    put = AsyncMock(return_value=None)
+    with _refresh_on(), patch.object(VerifyXValidationService, "_put_validator_library", put):
+        result = await gated_run(shell)
+    assert result.error.startswith("ARM_VERIFIER_NOT_AVAILABLE")
+    assert result.diagnostics == {"event": "ARM_VERIFIER_NOT_AVAILABLE", "executor_arch": "aarch64"}
+    put.assert_not_awaited()
+    assert commands(shell) == ["uname -m"]
+
+
+@pytest.mark.asyncio
+async def test_arm_executor_is_checked_against_and_sent_the_aarch64_build(libraries, tmp_path):
+    arm_lib = tmp_path / "libverifyx-aarch64.so"
+    arm_lib.write_bytes(b"arm")
+    digests = {LIB_PATH: STALE_SHA256}
+    sources = []
+
+    async def after_refresh(_shell, expected, _extra, source):
+        sources.append((source, expected))
+        digests[LIB_PATH] = expected
+        return True
+
+    shell = arm_shell(digests)
+    with (
+        _refresh_on(),
+        patch(f"{SERVICE}.aarch64_lib_path", return_value=str(arm_lib)),
+        patch(f"{SERVICE}.sha256_from_path", side_effect=lambda p: ARM_SHA256 if p == str(arm_lib) else LIBRARY_SHA256),
+        patch.object(VerifyXValidationService, "_executor_can_write_lib", AsyncMock(return_value=True)),
+        patch.object(VerifyXValidationService, "_refresh_executor_library", side_effect=after_refresh),
+    ):
+        result = await gated_run(shell)
+    assert sources == [(str(arm_lib), ARM_SHA256)]
+    assert result.error is None
+    assert [record.lib_name for record in libraries.built] == [LIB_PATH]  # the validator still runs its own build
+
+
+@pytest.mark.asyncio
+async def test_refresh_of_the_aarch64_build_fetches_and_puts_that_file():
+    shell = executor_shell({LIB_PATH: STALE_SHA256})
+    shell.ssh_client.run = AsyncMock(
+        return_value=SimpleNamespace(stdout="CURL_RC:22\n", stderr="404", exit_status=0)
+    )
+    put = AsyncMock(return_value=None)
+    with patch.object(VerifyXValidationService, "_put_validator_library", put):
+        ok = await VerifyXValidationService()._refresh_executor_library(
+            shell, ARM_SHA256, {"executor_uuid": "exec-1"}, source="/usr/lib/libverifyx-aarch64.so"
+        )
+    assert ok is True
+    assert "/neurons/executor/libverifyx-aarch64.so" in commands(shell)[0]
+    put.assert_awaited_once_with(shell, "/usr/lib/libverifyx-aarch64.so")
