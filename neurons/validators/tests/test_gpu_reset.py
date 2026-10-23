@@ -134,7 +134,7 @@ def _no_change(host: FakeHost, start) -> None:
 async def test_resets_the_pods_gpus_and_starts_the_container_again():
     host = FakeHost(apps=[(4242, U[1])])
     report, start = await _reset(host)
-    assert report.ok and report.container_restarted and report.error_code is None
+    assert report.ok and report.container_restarted and report.error_code is None and report.pod_stopped
     # pod index by host bus id: U[1] (0A) is pod GPU 0, U[0] (1B) pod GPU 1
     assert [(g.index, g.uuid, g.result) for g in report.gpus] == [(0, U[1], "reset"), (1, U[0], "reset")]
     assert f"nvidia-smi -r -i {U[1]},{U[0]}" in host.commands
@@ -182,7 +182,7 @@ async def test_a_whole_host_rental_resolves_gpus_all_on_the_host():
 @pytest.mark.asyncio
 async def test_every_precheck_refusal_changes_nothing(host, kwargs, code):
     report, start = await _reset(host, **kwargs)
-    assert not report.ok and report.error_code == code and report.gpus == []
+    assert not report.ok and report.error_code == code and report.gpus == [] and not report.pod_stopped
     _no_change(host, start)
 
 

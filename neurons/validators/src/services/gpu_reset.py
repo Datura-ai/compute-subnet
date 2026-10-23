@@ -62,6 +62,8 @@ class GpuResetReport:
     container_restarted: bool = False
     gpus: list[GpuResetOutcome] = field(default_factory=list)
     detail: str | None = None
+    # docker stop ran: the pod's GPUs may drop out until the driver brings them back
+    pod_stopped: bool = False
 
 
 @dataclass(frozen=True)
@@ -347,6 +349,7 @@ async def reset_pod_gpus(
     if plan.widened:
         notes.append("NVLink peers inside the pod were reset together")
     try:
+        report.pod_stopped = True
         stopped = await _run(
             runner, f"{DOCKER} stop -t {STOP_GRACE_SECONDS} {shlex.quote(container_name)}", timeout=60
         )

@@ -10896,6 +10896,7 @@ class DockerService:
             kind=GPU_RESET_PENDING_KIND,
             gpu_uuids=payload.gpu_uuids,
         )
+        report: GpuResetReport | None = None
         try:
             async with asyncssh.connect(
                 host=executor_info.address,
@@ -10919,11 +10920,13 @@ class DockerService:
             logger.error(_m("Reset pod GPUs failed", extra=get_extra_info({**default_extra, "error": str(exc)})), exc_info=True)
             report = GpuResetReport(ok=False, error_code=GpuResetErrorCode.ExecutorUnreachable, detail=str(exc))
         finally:
-            # a scrape that ends just after the reset can still miss cards: keep a short mark past the pending one
+            # a scrape that ends just after the reset can still miss cards: keep a short mark past the pending one;
+            # a reset refused before the pod stopped never took the cards out (None: cancelled mid-reset)
             try:
-                await self.redis_service.mark_gpu_reset_recent(
-                    payload.miner_hotkey, payload.executor_id, payload.pod_id, RECENT_RENTER_GPU_RESET_SECONDS
-                )
+                if report is None or report.pod_stopped:
+                    await self.redis_service.mark_gpu_reset_recent(
+                        payload.miner_hotkey, payload.executor_id, payload.pod_id, RECENT_RENTER_GPU_RESET_SECONDS
+                    )
             except Exception as exc:
                 logger.warning(
                     _m("Reset pod GPUs: recent reset mark not written", extra=get_extra_info({**default_extra, "error": str(exc)}))

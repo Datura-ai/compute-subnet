@@ -12,7 +12,7 @@ import pytest
 from payload_models.payloads import ResetPodGpuRequest
 from services.docker_service import DockerService
 from services.executor_rollout import ExecutorRolloutTracker
-from services.gpu_reset import RECENT_RENTER_GPU_RESET_SECONDS, renter_gpu_reset_recent
+from services.gpu_reset import RECENT_RENTER_GPU_RESET_SECONDS, GpuResetReport, renter_gpu_reset_recent
 from services.redis_service import GPU_RESET_PENDING_KIND
 from services.ssh_service import SSHService
 from test_executor_rollout_grace import _failed, _scored, _validator_process
@@ -160,27 +160,48 @@ async def test_the_held_result_gets_no_verdict_this_cycle():
     assert [(w.miner_hotkey, w.result.executor_info.uuid) for w in withheld] == [("5Miner", "node-1")]
 
 
-@pytest.mark.asyncio
-async def test_the_reset_leaves_a_recent_mark_when_its_pending_mark_goes():
-    service = _redis_service()
+def _reset_service(service) -> DockerService:
     docker_service = DockerService.__new__(DockerService)
     docker_service.redis_service = service
     docker_service.ssh_service = MagicMock(decrypt_payload=MagicMock(return_value="key"))
     docker_service._prepare_known_hosts_policy = AsyncMock(return_value=None)
+    return docker_service
+
+
+async def _run_reset(service, **connect):
     payload = ResetPodGpuRequest(
         miner_hotkey=RENTAL_OWNER, executor_id=EXECUTOR, pod_id=POD_ID, container_name="c", gpu_uuids=["GPU-1"], request_id="r1"
     )
     executor_info = MagicMock(address="203.0.113.5", ssh_port=22, tdx_quote=None)
-
     with patch("services.docker_service.asyncssh.import_private_key"), \
             patch("services.docker_service.require_rental_docker_ssh_host_key"), \
             patch("services.docker_service.public_host_sock", AsyncMock(return_value={})), \
-            patch("services.docker_service.asyncssh.connect", side_effect=OSError("down")):
-        result = await docker_service.reset_pod_gpus(payload, executor_info, MagicMock(), "encrypted")
+            patch("services.docker_service.asyncssh.connect", **connect):
+        return await _reset_service(service).reset_pod_gpus(payload, executor_info, MagicMock(), "encrypted")
 
-    assert result.ok is False
+
+@pytest.mark.asyncio
+async def test_the_reset_leaves_a_recent_mark_when_its_pending_mark_goes():
+    service = _redis_service()
+    connection = MagicMock(__aenter__=AsyncMock(), __aexit__=AsyncMock(return_value=False))
+    stopped = GpuResetReport(ok=True, pod_stopped=True, container_restarted=True)
+
+    with patch("services.docker_service.reset_pod_gpus", AsyncMock(return_value=stopped)):
+        result = await _run_reset(service, return_value=connection)
+
+    assert result.ok is True
     assert await service.gpu_reset_marks(RENTAL_OWNER, EXECUTOR) == []
     assert await renter_gpu_reset_recent(service, RENTAL_OWNER, EXECUTOR, POD_ID) is True
+
+
+@pytest.mark.asyncio
+async def test_a_reset_that_never_stopped_the_pod_leaves_no_recent_mark():
+    service = _redis_service()
+
+    result = await _run_reset(service, side_effect=OSError("down"))
+
+    assert result.ok is False
+    assert await renter_gpu_reset_recent(service, RENTAL_OWNER, EXECUTOR, POD_ID) is False
 
 
 @pytest.mark.asyncio
