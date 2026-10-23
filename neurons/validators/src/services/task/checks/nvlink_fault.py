@@ -10,6 +10,7 @@ from core.config import settings
 from ..messages import NvlinkFaultMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
+from .capability import get_filler_only_container
 
 # Stdlib-only, shipped over stdin like the pinned-memory probe: nothing to upload or update.
 PROBE_SOURCE_PATH = Path(__file__).resolve().parents[3] / "miner_jobs" / "nvlink_multicast_probe.py"
@@ -40,6 +41,18 @@ class NvlinkFaultCheck:
         if not (isinstance(interconnect, dict) and interconnect.get("nvlink") is True):
             return CheckResult(
                 passed=True, event=render_message(Msg.SKIPPED, ctx=ctx, check_id=self.check_id)
+            )
+        # the probe opens a context on every GPU beside the filler's own NCCL, like the fault probe it skips
+        filler_container = get_filler_only_container(ctx)
+        if filler_container:
+            return CheckResult(
+                passed=True,
+                event=render_message(
+                    Msg.FILLER_SKIPPED,
+                    ctx=ctx,
+                    check_id=self.check_id,
+                    what={"filler_container": filler_container},
+                ),
             )
 
         run = await ctx.runner.run(

@@ -3,6 +3,8 @@ from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
+from neurons.validators.src.protocol.vc_protocol.compute_requests import RentedExecutorsResponse
+from neurons.validators.src.services.const import FILLER_CONTAINER_PREFIX
 from neurons.validators.src.services.task import pipeline_factory
 from neurons.validators.src.services.task.checks import nvlink_fault
 from neurons.validators.src.services.task.checks.nvlink_fault import (
@@ -13,7 +15,7 @@ from neurons.validators.src.services.task.checks.nvlink_fault import (
 from neurons.validators.src.services.task.messages import NvlinkFaultMessages as Msg
 from neurons.validators.src.services.task.runner import SSHCommandResult
 
-from tests.helpers import build_context_config, build_services, build_state
+from tests.helpers import build_context_config, build_services, build_state, default_executor
 
 NVLINK_BOARD = {"interconnect": {"nvlink": True, "nvlink_links": 18, "nvlink_active_links": 18}}
 PCIE_BOARD = {"interconnect": {"nvlink": False, "pcie_class": "SYS"}}
@@ -46,12 +48,12 @@ def report(**fields) -> str:
     return "noise\n" + PROBE_JSON_MARKER + " " + json.dumps(fields) + "\n"
 
 
-async def run_check(context_factory, specs, stdout=""):
+async def run_check(context_factory, specs, stdout="", rented_data=None):
     runner = FakeRunner(stdout)
     ctx = context_factory(
         services=build_services(),
         config=build_context_config(),
-        state=build_state(specs=specs),
+        state=build_state(specs=specs, rented_data=rented_data),
         runner=runner,
     )
     return await NvlinkFaultCheck().run(ctx), runner
@@ -206,3 +208,18 @@ def test_probe_reports_any_other_error_as_could_not_measure():
     probe = load_probe()
     with pytest.raises(probe["ProbeError"]):
         probe["probe"](FakeCuda(codes={"cuMulticastCreate": 1}))
+
+
+@pytest.mark.asyncio
+async def test_active_filler_skips_the_probe(context_factory):
+    rented_data = RentedExecutorsResponse(
+        executors={},
+        banned_guids=[],
+        filler_containers_by_executor={default_executor().uuid: f"{FILLER_CONTAINER_PREFIX}active"},
+    )
+
+    result, runner = await run_check(context_factory, NVLINK_BOARD, FAULT, rented_data=rented_data)
+
+    assert result.passed is True
+    assert result.event.reason_code == Msg.FILLER_SKIPPED.reason
+    assert runner.calls == []

@@ -1871,6 +1871,13 @@ class NvlinkFaultMessages:
         category="env",
         impact="Proceed",
     )
+    FILLER_SKIPPED = MessageTemplate(
+        event="NVLink multicast probe skipped for active filler",
+        reason="NVLINK_SKIPPED_ACTIVE_FILLER",
+        severity="info",
+        category="policy",
+        impact="Active filler runtime preserved; the probe would compete with it on every GPU.",
+    )
     PROBE_FAILED = MessageTemplate(
         event="NVLink is faulted: multicast memory cannot be bound across the GPUs",
         reason="NVLINK_FAULT",
