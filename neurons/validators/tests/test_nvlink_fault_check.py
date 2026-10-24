@@ -15,7 +15,13 @@ from neurons.validators.src.services.task.checks.nvlink_fault import (
 from neurons.validators.src.services.task.messages import NvlinkFaultMessages as Msg
 from neurons.validators.src.services.task.runner import SSHCommandResult
 
-from tests.helpers import build_context_config, build_services, build_state, default_executor
+from tests.helpers import (
+    FakeRedis,
+    build_context_config,
+    build_services,
+    build_state,
+    default_executor,
+)
 
 NVLINK_BOARD = {"interconnect": {"nvlink": True, "nvlink_links": 18, "nvlink_active_links": 18}}
 PCIE_BOARD = {"interconnect": {"nvlink": False, "pcie_class": "SYS"}}
@@ -48,10 +54,10 @@ def report(**fields) -> str:
     return "noise\n" + PROBE_JSON_MARKER + " " + json.dumps(fields) + "\n"
 
 
-async def run_check(context_factory, specs, stdout="", rented_data=None):
+async def run_check(context_factory, specs, stdout="", rented_data=None, services=None):
     runner = FakeRunner(stdout)
     ctx = context_factory(
-        services=build_services(),
+        services=services or build_services(),
         config=build_context_config(),
         state=build_state(specs=specs, rented_data=rented_data),
         runner=runner,
@@ -223,3 +229,52 @@ async def test_active_filler_skips_the_probe(context_factory):
     assert result.passed is True
     assert result.event.reason_code == Msg.FILLER_SKIPPED.reason
     assert runner.calls == []
+
+
+def filler_rented_data():
+    return RentedExecutorsResponse(
+        executors={},
+        banned_guids=[],
+        filler_containers_by_executor={default_executor().uuid: f"{FILLER_CONTAINER_PREFIX}active"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_fault_seen_before_a_filler_started_still_fails_while_it_runs(context_factory):
+    # 24 Oct: an 8x board faulted at 18:52Z, a filler started, and the skipped probe passed it after
+    services = build_services()
+    with patch.object(nvlink_fault.settings, "NVLINK_FAULT_ENFORCEMENT_ENABLED", True):
+        await run_check(context_factory, NVLINK_BOARD, FAULT, services=services)
+        result, runner = await run_check(
+            context_factory, NVLINK_BOARD, rented_data=filler_rented_data(), services=services
+        )
+
+    assert runner.calls == []
+    assert result.passed is False
+    assert result.event.reason_code == "NVLINK_FAULT"
+    assert "401" in result.event.what_we_saw["last_probe"]["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_passing_probe_clears_the_fault_record(context_factory):
+    services = build_services()
+    with patch.object(nvlink_fault.settings, "NVLINK_FAULT_ENFORCEMENT_ENABLED", True):
+        await run_check(context_factory, NVLINK_BOARD, FAULT, services=services)
+        await run_check(context_factory, NVLINK_BOARD, report(status="ok", gpus=8), services=services)
+        result, _ = await run_check(
+            context_factory, NVLINK_BOARD, rented_data=filler_rented_data(), services=services
+        )
+
+    assert result.passed is True
+    assert result.event.reason_code == Msg.FILLER_SKIPPED.reason
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_fault_record_keeps_the_filler_skip(context_factory):
+    services = build_services(redis=FakeRedis(failing=True))
+    result, _ = await run_check(
+        context_factory, NVLINK_BOARD, rented_data=filler_rented_data(), services=services
+    )
+
+    assert result.passed is True
+    assert result.event.reason_code == Msg.FILLER_SKIPPED.reason

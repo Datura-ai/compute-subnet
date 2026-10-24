@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import shlex
 from pathlib import Path
 from typing import Any
 
 from core.config import settings
+from core.utils import _m, get_extra_info
 
 from ..messages import NvlinkFaultMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
 from .capability import get_filler_only_container
+
+logger = logging.getLogger(__name__)
 
 # Stdlib-only, shipped over stdin like the pinned-memory probe: nothing to upload or update.
 PROBE_SOURCE_PATH = Path(__file__).resolve().parents[3] / "miner_jobs" / "nvlink_multicast_probe.py"
@@ -19,6 +23,9 @@ PROBE_JSON_MARKER = "NVLINK_MULTICAST_PROBE_JSON:"
 # above the probe's own 45 s budget; only catches a stalled SSH channel (scored UNKNOWN)
 PROBE_TIMEOUT_SECONDS = 75
 MAX_CHARS = 300
+# a fault stays on record while a filler blocks the probe; the next probe that runs replaces it
+FAULT_KEY_PREFIX = "nvlink_fault"
+FAULT_KEY_TTL_SECONDS = 7 * 24 * 3600
 
 
 class NvlinkFaultCheck:
@@ -31,6 +38,10 @@ class NvlinkFaultCheck:
     multicast support, a driver without the API, or any error other than the NVLink-fault codes passes
     with NVLINK_UNKNOWN. Runs after the rented halt, so a rented node is never probed or failed here.
     A fault fails the node only with NVLINK_FAULT_ENFORCEMENT_ENABLED; off, it is logged and the node passes.
+
+    A filler holds every GPU, so the probe is skipped while one runs. A fault seen before the filler started
+    is kept in Redis and still reported on those cycles: on 24 Oct an 8x board faulted at 18:52Z, a filler
+    started, and every later cycle skipped the probe and passed the faulted node.
     """
 
     check_id = "gpu.validate.nvlink_fault"
@@ -45,6 +56,11 @@ class NvlinkFaultCheck:
         # the probe opens a context on every GPU beside the filler's own NCCL, like the fault probe it skips
         filler_container = get_filler_only_container(ctx)
         if filler_container:
+            last_fault = await self._last_fault(ctx)
+            if last_fault is not None:
+                return self._fault(
+                    ctx, {"filler_container": filler_container, "last_probe": last_fault}
+                )
             return CheckResult(
                 passed=True,
                 event=render_message(
@@ -79,20 +95,45 @@ class NvlinkFaultCheck:
         }
         status = report.get("status")
         if status == "fault":
-            enforce = settings.NVLINK_FAULT_ENFORCEMENT_ENABLED
-            event = render_message(
-                Msg.PROBE_FAILED,
-                ctx=ctx,
-                check_id=self.check_id,
-                severity=None if enforce else "warning",
-                impact=None if enforce else "Shadow observation only: score was NOT changed",
-                what=what,
-            )
-            return CheckResult(passed=not enforce, event=event)
+            await self._remember(ctx, what["probe"])
+            return self._fault(ctx, what)
+        if status == "ok":
+            await self._remember(ctx, None)
         template = Msg.PROBE_OK if status == "ok" else Msg.UNKNOWN
         return CheckResult(
             passed=True, event=render_message(template, ctx=ctx, check_id=self.check_id, what=what)
         )
+
+    def _fault(self, ctx: Context, what: dict[str, Any]) -> CheckResult:
+        enforce = settings.NVLINK_FAULT_ENFORCEMENT_ENABLED
+        event = render_message(
+            Msg.PROBE_FAILED,
+            ctx=ctx,
+            check_id=self.check_id,
+            severity=None if enforce else "warning",
+            impact=None if enforce else "Shadow observation only: score was NOT changed",
+            what=what,
+        )
+        return CheckResult(passed=not enforce, event=event)
+
+    async def _last_fault(self, ctx: Context) -> dict[str, Any] | None:
+        try:
+            raw = await ctx.services.redis.get(f"{FAULT_KEY_PREFIX}:{ctx.executor.uuid}")
+            return json.loads(raw) if raw is not None else None
+        except Exception:
+            # an unreadable record keeps the plain filler skip, as before the record existed
+            logger.warning(_m("NVLink fault record unreadable", extra=get_extra_info(ctx.default_extra)))
+            return None
+
+    async def _remember(self, ctx: Context, probe: dict[str, Any] | None) -> None:
+        key = f"{FAULT_KEY_PREFIX}:{ctx.executor.uuid}"
+        try:
+            if probe is None:
+                await ctx.services.redis.delete(key)
+            else:
+                await ctx.services.redis.set(key, json.dumps(probe), ex=FAULT_KEY_TTL_SECONDS)
+        except Exception:
+            logger.warning(_m("NVLink fault record not written", extra=get_extra_info(ctx.default_extra)))
 
 
 def _parse_report(stdout: str) -> dict[str, Any] | None:
