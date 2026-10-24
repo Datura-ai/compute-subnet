@@ -79,10 +79,15 @@ class PortCountCheck:
     fatal = True
 
     async def run(self, ctx: Context) -> CheckResult:
-        port_count = ctx.state.verified_port_count
+        rented_data = ctx.state.rented_data
+        # The probe skips our idle filler's ports, but a rental frees them, so they count toward
+        # the floor, so a small declared range is not hidden and failed by our own filler.
+        filler_ports = (
+            set(rented_data.get_filler_ports(ctx.executor.uuid)) if rented_data else set()
+        )
+        port_count = ctx.state.verified_port_count + len(filler_ports)
 
         # Check if executor is rented (same pattern as rented_machine.py)
-        rented_data = ctx.state.rented_data
         rented_executor = rented_data.executors.get(ctx.executor.uuid) if rented_data else None
         is_rented = rented_executor is not None and len(rented_executor.pods) > 0
 
