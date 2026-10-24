@@ -24,8 +24,12 @@ from core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# OCI types too: a multi-arch tag pushed by buildx is an OCI index, which Docker Hub does not
+# serve when the Accept header lists only the Docker types
 _MANIFEST_ACCEPT = (
-    "application/vnd.docker.distribution.manifest.list.v2+json,"
+    "application/vnd.oci.image.index.v1+json,"
+    " application/vnd.docker.distribution.manifest.list.v2+json,"
+    " application/vnd.oci.image.manifest.v1+json,"
     " application/vnd.docker.distribution.manifest.v2+json"
 )
 _REGISTRY_AUTH_URL = "https://auth.docker.io/token"
