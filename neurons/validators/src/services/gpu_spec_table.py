@@ -235,18 +235,19 @@ REFERENCE_VRAM_BAND = (0.90, 1.10)
 
 
 def _anchor_prices() -> dict[str, float] | None:
+    # the backend's served MACHINE_PRICES, so the backend (core.constants.reference_gpu_model) picks the same model
     try:
-        from incentive.config import RENTAL_PRICES_PER_HOUR
-    except ImportError:  # preflight image: services/ without incentive/; it only asks if one exists
+        from core.config import shared_client
+    except ImportError:  # preflight image: services/ without core/; it only asks if one exists
         return None
-    return RENTAL_PRICES_PER_HOUR
+    return shared_client.config.machine_prices
 
 
 def reference_gpu_model(name: str | None, vram_mb: int | None) -> str | None:
     """The known model whose tables (rate, base, caps, price anchor) a card is scored by.
 
     A known name is its own reference. An unknown NVIDIA name gets the cheapest known model (by the
-    unrented anchor price, then name) with a nominal VRAM size within REFERENCE_VRAM_BAND of the reported
+    backend's served machine price, then name) with a nominal VRAM size within REFERENCE_VRAM_BAND of the reported
     VRAM; failing that, the cheapest one with the largest size below it. None otherwise: not NVIDIA, VRAM
     unknown, or smaller than every known model.
     """

@@ -4,11 +4,12 @@ The reference is the cheapest known model whose nominal VRAM is within 0.90-1.10
 reported VRAM, else the cheapest with the largest size below it, else none (still unsupported).
 """
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from incentive.config import RENTAL_PRICES_PER_HOUR
 from neurons.validators.src.services.task.checks.gpu_model_valid import GpuModelValidCheck
 from neurons.validators.src.services.task.messages import GpuModelMessages as Msg
 from neurons.validators.src.services.task.result_handler import ResultHandler
@@ -28,7 +29,18 @@ from tests.test_idle_slot_caps_by_tier import _run_with_production_config
 from tests.test_rental_price_incentive_flow import _make_pcc_job
 
 UNKNOWN = "NVIDIA RTX Future 9000"
-CANDIDATES = [m for m in GPU_VRAM_SIZES_MB if m in GPU_MODEL_RATES and m in RENTAL_PRICES_PER_HOUR]
+# the backend's served MACHINE_PRICES (lium.io/api/v1/shared-config, 24 Oct 2026): the validator ranks by it in
+# prod, and the pinned lium-core defaults lack many older models
+PRICES = json.loads((Path(__file__).parent / "fixtures" / "served_machine_prices_20261024.json").read_text())
+
+
+@pytest.fixture(autouse=True)
+def _served_prices(monkeypatch):
+    monkeypatch.setattr(
+        shared_client, "_config", shared_client.config.model_copy(update={"machine_prices": PRICES})
+    )
+
+CANDIDATES = [m for m in GPU_VRAM_SIZES_MB if m in GPU_MODEL_RATES and m in PRICES]
 
 
 def _in_band(model: str, vram_mb: int) -> bool:
@@ -40,9 +52,25 @@ def test_an_unknown_card_gets_the_cheapest_known_model_of_its_memory(vram_mb):
     reference = reference_gpu_model(UNKNOWN, vram_mb)
     in_band = [m for m in CANDIDATES if _in_band(m, vram_mb)]
     assert reference in in_band
-    cheapest = min(RENTAL_PRICES_PER_HOUR[m] for m in in_band)
-    assert RENTAL_PRICES_PER_HOUR[reference] == cheapest
-    assert reference == min(m for m in in_band if RENTAL_PRICES_PER_HOUR[m] == cheapest)
+    cheapest = min(PRICES[m] for m in in_band)
+    assert PRICES[reference] == cheapest
+    assert reference == min(m for m in in_band if PRICES[m] == cheapest)
+
+
+# the same cases as lium-platform's src/test/test_unknown_gpu_reference_model.py: the backend lists and the
+# validator pays an unknown card as one model
+@pytest.mark.parametrize(
+    ("vram_mb", "reference"),
+    [
+        (16303, "NVIDIA Quadro RTX 5000"),
+        (24564, "NVIDIA Tesla P40"),
+        (49140, "NVIDIA Quadro RTX 8000"),
+        (81559, "NVIDIA A800 80GB PCIe"),
+        (409600, "NVIDIA B300 SXM6 AC"),
+    ],
+)
+def test_the_reference_matches_the_backends(vram_mb, reference):
+    assert reference_gpu_model(UNKNOWN, vram_mb) == reference
 
 
 def test_with_none_that_close_it_falls_back_to_the_largest_size_below():
@@ -52,14 +80,14 @@ def test_with_none_that_close_it_falls_back_to_the_largest_size_below():
     reference = reference_gpu_model(UNKNOWN, vram_mb)
     assert largest in GPU_VRAM_SIZES_MB[reference]
     at_largest = [m for m in CANDIDATES if largest in GPU_VRAM_SIZES_MB[m]]
-    assert RENTAL_PRICES_PER_HOUR[reference] == min(RENTAL_PRICES_PER_HOUR[m] for m in at_largest)
+    assert PRICES[reference] == min(PRICES[m] for m in at_largest)
 
 
 @pytest.mark.parametrize(
     "name,vram_mb",
     [
         ("AMD Instinct MI300X", 196_608),
-        (UNKNOWN, 3000),
+        (UNKNOWN, 1000),
         (UNKNOWN, None),
         (UNKNOWN, 0),
         (None, 24_576),
@@ -102,7 +130,7 @@ def _model_ctx(context_factory, details: list[dict]):
     [
         ([{"name": UNKNOWN, "capacity": 23028}] * 2, Msg.MODEL_OK.reason),
         ([{"name": "AMD Instinct MI300X", "capacity": 196_608}], Msg.MODEL_UNSUPPORTED.reason),
-        ([{"name": UNKNOWN, "capacity": 3000}], Msg.MODEL_UNSUPPORTED.reason),
+        ([{"name": UNKNOWN, "capacity": 1000}], Msg.MODEL_UNSUPPORTED.reason),
         (
             [
                 {"name": UNKNOWN, "capacity": 23028},
