@@ -135,7 +135,7 @@ log_kv "Build context:" "${SCRIPT_DIR}"
 echo ""
 
 # PLATFORMS (e.g. linux/amd64,linux/arm64) builds one multi-arch image with buildx. CD does not set it yet: the arm64
-# half needs aarch64 wheels (bittensor-wallet, bittensor-commit-reveal, pywry) and the digest readers must accept OCI indexes first.
+# half needs the digest readers to accept OCI indexes first (the python deps all have aarch64 wheels since bittensor-wallet 3.1.0).
 # buildx cannot load a multi-platform image into the local store, so it goes to an OCI archive that
 # docker_publish.sh pushes; unset, a plain single-arch build as before.
 if [[ -n "${PLATFORMS:-}" ]]; then
