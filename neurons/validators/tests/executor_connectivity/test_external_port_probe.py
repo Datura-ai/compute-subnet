@@ -148,6 +148,34 @@ async def test_external_probe_counts_only_answers_carrying_the_token():
 
 
 @pytest.mark.asyncio
+async def test_external_probe_sends_a_dns_named_node_as_its_address():
+    sent = []
+
+    async def prober(request):
+        targets = (await request.json())["targets"]
+        sent.extend(t["host"] for t in targets)
+        return web.json_response({"results": [{**t, "body": "tok:9000"} for t in targets]})
+
+    app = web.Application()
+    app.router.add_post("/", prober)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    try:
+        probe = ExternalPortProbe(f"http://127.0.0.1:{port}/", "secret")
+        reached = await probe.reached("localhost", PORTS[:1], "tok")
+        unresolved = await probe.reached("no-such-host.invalid", PORTS[:1], "tok")
+    finally:
+        await runner.cleanup()
+
+    assert sent == ["127.0.0.1"]
+    assert reached == [PORTS[0]]
+    assert unresolved is None
+
+
+@pytest.mark.asyncio
 async def test_external_probe_returns_none_when_the_prober_is_down():
     assert await ExternalPortProbe("http://127.0.0.1:9", "secret").reached("1.2.3.4", PORTS[:1], "tok") is None
 
