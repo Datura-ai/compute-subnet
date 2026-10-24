@@ -252,8 +252,8 @@ async def test_register_pubkey_first_upload_keeps_mains_full_timeout(
 
 
 @pytest.mark.asyncio
-async def test_send_pubkey_retry_after_an_overrun_delay_keeps_a_positive_timeout(executor_service, test_executor):
-    """A retry whose delay ran past the deadline still gets a bounded timeout, never aiohttp's 'no timeout'."""
+async def test_send_pubkey_does_not_retry_when_the_delay_overran_the_deadline(executor_service, test_executor):
+    """A retry delay that ended past the deadline gives up instead of starting an attempt the validator cannot wait for."""
     clock = [100.0]
 
     async def late_sleep(_seconds):
@@ -270,10 +270,10 @@ async def test_send_pubkey_retry_after_an_overrun_delay_keeps_a_positive_timeout
     with patch("services.executor_service.aiohttp.ClientSession", return_value=session), \
             patch("services.executor_service.asyncio.sleep", late_sleep), \
             patch("services.executor_service.time.monotonic", side_effect=lambda: clock[0]):
-        await executor_service.send_pubkey_to_executor(test_executor, _SSH_KEY, "0xaa", deadline=clock[0] + 20)
+        info = await executor_service.send_pubkey_to_executor(test_executor, _SSH_KEY, "0xaa", deadline=clock[0] + 20)
 
-    totals = [c.kwargs["timeout"].total for c in session.post.call_args_list]
-    assert totals == [es.UPLOAD_SSH_KEY_ATTEMPT_TIMEOUT_SECONDS, es.UPLOAD_SSH_KEY_MIN_ATTEMPT_SECONDS]
+    assert info is None
+    assert session.post.call_count == 1
 
 
 # ---------------------------------------------------------------------------

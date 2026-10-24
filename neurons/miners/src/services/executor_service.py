@@ -420,7 +420,9 @@ class ExecutorService:
                     time_left = deadline - time.monotonic() - UPLOAD_SSH_KEY_RETRY_DELAY_SECONDS
                     if attempt < UPLOAD_SSH_KEY_ATTEMPTS and time_left >= UPLOAD_SSH_KEY_MIN_ATTEMPT_SECONDS:
                         await asyncio.sleep(UPLOAD_SSH_KEY_RETRY_DELAY_SECONDS)
-                        continue
+                        # a delay that overran (busy event loop) must not start a retry past the deadline
+                        if deadline - time.monotonic() >= UPLOAD_SSH_KEY_MIN_ATTEMPT_SECONDS:
+                            continue
                     _unreachable_executor_log.warn(
                         str(executor.uuid),
                         "API request failed to register SSH key - executor did not answer",
