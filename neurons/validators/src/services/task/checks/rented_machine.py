@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from core.docker_utils import DockerCommand, collect_container_death_diagnostics
 from core.utils import _m, get_extra_info
-from protocol.vc_protocol.compute_requests import RentedExecutor, RentedPod
+from protocol.vc_protocol.compute_requests import RentedPod
 from protocol.vc_protocol.validator_requests import (
     ContainerState,
     PodContainerState,
@@ -29,6 +29,7 @@ from services.gpu_reset import renter_gpu_reset_in_progress
 from ..messages import PortCountMessages, TenantEnforcementMessages as Msg
 from ..messages import render_message
 from ..pipeline import CheckResult, Context
+from .rental_owner import validated_rental
 from .port_count import hidden_from_renters_text, port_count_below_listing_floor, port_floor_what
 
 logger = logging.getLogger(__name__)
@@ -98,33 +99,6 @@ def _gpu_usage_violation_details(
     }
 
 
-def _rental_of_validated_miner(
-    ctx: Context, rented_executor: RentedExecutor | None
-) -> RentedExecutor | None:
-    """The rental listed under this executor's UUID, or None when it belongs to another miner on a
-    different endpoint (logged as RENTED_OWNER_MISMATCH). On the same IP and port the renter's pod
-    is on this box, so it stays rented and the VerifyX/matmul probes never run beside it."""
-    if not rented_executor or rented_executor.miner_hotkey == ctx.miner_hotkey:
-        return rented_executor
-    logger.warning(
-        _m(
-            "RENTED_OWNER_MISMATCH",
-            extra=get_extra_info(
-                {
-                    **ctx.default_extra,
-                    "executor_uuid": ctx.executor.uuid,
-                    "rental_miner_hotkey": rented_executor.miner_hotkey,
-                }
-            ),
-        )
-    )
-    same_endpoint = (rented_executor.executor_ip_address, str(rented_executor.executor_ip_port)) == (
-        ctx.executor.address,
-        str(ctx.executor.port),
-    )
-    return rented_executor if same_endpoint else None
-
-
 def _within_container_name_grace(pod: RentedPod) -> bool:
     """An unnamed pod is waited for only this long after it was created; a pod with no
     created_at (backend predates the field) is waited for as before."""
@@ -173,9 +147,7 @@ class TenantEnforcementCheck:
 
         # Get rented executor from context instead of Redis
         rented_data = ctx.state.rented_data
-        rented_executor = _rental_of_validated_miner(
-            ctx, rented_data.executors.get(ctx.executor.uuid) if rented_data else None
-        )
+        rented_executor = validated_rental(ctx)
         # EVERY filler on the node: a partially rented split node keeps one filler per free VRAM
         # bundle running beside the renter (DAH-2465/DAH-2467), and allowlisting only the first
         # makes its siblings' GPU processes read as usage outside the tenant.
