@@ -285,6 +285,9 @@ class Settings(BaseSettings):
     # validator reaches them, the node gets no verified ports. Unset URL: no outside probe.
     EXTERNAL_PORT_PROBE_URL: str = Field(env="EXTERNAL_PORT_PROBE_URL", default="")
     EXTERNAL_PORT_PROBE_TOKEN: str = Field(env="EXTERNAL_PORT_PROBE_TOKEN", default="")
+    # Off: a node whose ports answer only the validator is logged ("log-only"), not failed, so prod can count
+    # those nodes before enforcing.
+    EXTERNAL_PORT_PROBE_ENFORCE: bool = Field(env="EXTERNAL_PORT_PROBE_ENFORCE", default=False)
     # DAH-3011: a never-validated executor's FIRST verification (the express lane's, DAH-2958 —
     # published spec-only, never scored) proves "this GPU exists, is the model claimed, the host is
     # reachable and rentable"; the VRAM-filling matmul and the 128 GB RAM proof exist to make a
@@ -302,9 +305,9 @@ class Settings(BaseSettings):
     # A filler-only node skips the matmul while the filler runs. With N > 0, every Nth such cycle
     # runs the challenge on a small VRAM budget beside the filler and records the answer
     # (FILLER_MATMUL_SAMPLE); the check result never depends on it. Each sample is pinned to the
-    # next claimed card in rotation. 0 = never, the default.
+    # next claimed card in rotation. 0 = never. Default 96 = about once a day per node (Mikhail, DAH-4278).
     FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES: int = Field(
-        env="FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES", default=0, ge=0
+        env="FILLER_MATMUL_SAMPLE_EVERY_N_CYCLES", default=96, ge=0
     )
     # Above the 2048 MB the matmul keeps in reserve, or no matrix fits.
     FILLER_MATMUL_SAMPLE_VRAM_MB: int = Field(env="FILLER_MATMUL_SAMPLE_VRAM_MB", default=4096, ge=4096)
@@ -482,6 +485,9 @@ class Settings(BaseSettings):
     # sequential matmul. It always runs and logs the verdict (DAH-4257 shadow, flag removed);
     # ENFORCEMENT lets a fault zero the score and stays off until the owner decides.
     GPU_FAULT_PROBE_ENFORCEMENT_ENABLED: bool = Field(env="GPU_FAULT_PROBE_ENFORCEMENT_ENABLED", default=False)
+    # DAH-5048 — the NVLink multicast probe always runs on all-NVLink boards and logs NVLINK_FAULT; ENFORCEMENT
+    # lets a fault fail the node. Shadow first: the false-fail count on healthy boards is unknown yet.
+    NVLINK_FAULT_ENFORCEMENT_ENABLED: bool = Field(env="NVLINK_FAULT_ENFORCEMENT_ENABLED", default=False)
     # DAH-3110 — a card NVML reports broken (uncorrected ECC since the driver loaded, a pending or failed
     # row remap, a required recovery action) fails the node like a GPU ban until the host resets or
     # replaces it. On: a broken card faults renters' jobs. Off is the kill switch back to flag-only.

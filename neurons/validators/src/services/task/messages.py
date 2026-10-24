@@ -191,6 +191,14 @@ class MachineSpecMessages:
             " reboot or reinstall the driver."
         ),
     )
+    # DAH-4658: the renter's own reset takes the cards out of NVML; the cycle withholds the verdict
+    SCRAPE_GPU_RESET_IN_PROGRESS = MessageTemplate(
+        event="Machine specs scrape found no GPU: the renter is resetting the pod's GPUs",
+        reason="SCRAPE_GPU_RESET_IN_PROGRESS",
+        severity="info",
+        category="env",
+        impact="Validation halted — no verdict this cycle, the previous result stands",
+    )
     SCRAPE_FAILED_ON_HOST = MessageTemplate(
         event="Machine specs scrape failed on the executor",
         reason="SCRAPE_FAILED_ON_HOST",
@@ -489,6 +497,13 @@ class RentedGpuDropMessages:
         category="env",
         impact="Proceed",
     )
+    GPU_RESET_IN_PROGRESS = MessageTemplate(
+        event="Rented GPU drop check skipped: the renter is resetting the pod's GPUs",
+        reason="RENTED_GPU_DROP_GPU_RESET_IN_PROGRESS",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
 
 
 class GpuLossHoldMessages:
@@ -518,6 +533,21 @@ class GpuLossHoldMessages:
         severity="info",
         category="env",
         impact="Proceed",
+    )
+    GPU_RESET_IN_PROGRESS = MessageTemplate(
+        event="GPU loss hold skipped: the renter is resetting the pod's GPUs",
+        reason="GPU_LOST_GPU_RESET_IN_PROGRESS",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+    # DAH-4658: the reason of the zero-GPU scrape hold, so the cycle carries the last score the same way
+    MISSING_GPUS_UNDER_RESET = MessageTemplate(
+        event="GPUs missing from the scrape: the renter is resetting them",
+        reason=MachineSpecMessages.SCRAPE_GPU_RESET_IN_PROGRESS.reason,
+        severity="info",
+        category="env",
+        impact="Validation halted — no verdict this cycle, the previous result stands",
     )
 
 
@@ -1207,6 +1237,13 @@ class GpuUsageMessages:
         category="runtime",
         impact="Proceed",
     )
+    GPU_RESET_IN_PROGRESS = MessageTemplate(
+        event="GPU usage check skipped: the renter is resetting the pod's GPUs",
+        reason="GPU_USAGE_GPU_RESET_IN_PROGRESS",
+        severity="info",
+        category="runtime",
+        impact="Proceed",
+    )
     USAGE_HIGH = MessageTemplate(
         event="GPU busy outside validator",
         reason="GPU_USAGE_HIGH",
@@ -1850,6 +1887,53 @@ class PinnedMemoryProbeMessages:
             "Score unchanged; a copy hung beside a Lium pod or default job that started after this "
             "cycle's rental snapshot. The next cycle probes again."
         ),
+    )
+
+
+class NvlinkFaultMessages:
+    """A sticky NVLink fault: NVLink multicast (NVLS) cannot bind on an all-NVLink board. PROBE_FAILED is the
+    enforced form; with NVLINK_FAULT_ENFORCEMENT_ENABLED off it renders as a warning that changes no score."""
+
+    PROBE_OK = MessageTemplate(
+        event="NVLink multicast probe passed",
+        reason="NVLINK_OK",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+    SKIPPED = MessageTemplate(
+        event="NVLink multicast probe not run: not an all-NVLink board",
+        reason="NVLINK_SKIPPED",
+        severity="info",
+        category="env",
+        impact="Proceed",
+    )
+    FILLER_SKIPPED = MessageTemplate(
+        event="NVLink multicast probe skipped for active filler",
+        reason="NVLINK_SKIPPED_ACTIVE_FILLER",
+        severity="info",
+        category="policy",
+        impact="Active filler runtime preserved; the probe would compete with it on every GPU.",
+    )
+    PROBE_FAILED = MessageTemplate(
+        event="NVLink is faulted: multicast memory cannot be bound across the GPUs",
+        reason="NVLINK_FAULT",
+        severity="error",
+        category="env",
+        impact="Score set to 0 until NVLink works again",
+        remediation=(
+            "The GPUs report an uncorrectable NVLink error state: NCCL NVLink SHARP (NVLS) and other "
+            "multi-GPU jobs fail. Check the host `dmesg` for NVRM Xid lines and `nvidia-smi nvlink -e`. "
+            "Stop the workloads, reset the GPUs (`nvidia-smi -r`) and restart nvidia-fabricmanager, or "
+            "reboot. If the errors come back, service the board."
+        ),
+    )
+    UNKNOWN = MessageTemplate(
+        event="NVLink multicast probe could not run",
+        reason="NVLINK_UNKNOWN",
+        severity="info",
+        category="env",
+        impact="Proceed without penalty",
     )
 
 
