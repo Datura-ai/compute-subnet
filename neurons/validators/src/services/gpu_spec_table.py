@@ -48,6 +48,8 @@ Pre-check policy:
 """
 from __future__ import annotations
 
+from services.const import GPU_MODEL_RATES
+
 # Per-window bounds are nominal × [VRAM_FLOOR_RATIO, VRAM_CEIL_RATIO].
 # See the module docstring for why 0.90 / 1.05 (NVML under-reporting + vendor drift).
 # These ratios encode the libdmcompverify.so contract and must stay in sync with it.
@@ -227,7 +229,48 @@ def vram_window_for_size(nominal_mb: int) -> tuple[int, int]:
     return (round(nominal_mb * VRAM_FLOOR_RATIO), round(nominal_mb * VRAM_CEIL_RATIO))
 
 
-def matmul_probe_vram_mb(model: str | None) -> int | None:
+# DAH-5088: an unknown model is scored as a known one of the same memory. The name is self-reported,
+# so an unknown name never earns more than an honest card of that VRAM: the cheapest one.
+REFERENCE_VRAM_BAND = (0.90, 1.10)
+
+
+def _anchor_prices() -> dict[str, float] | None:
+    try:
+        from incentive.config import RENTAL_PRICES_PER_HOUR
+    except ImportError:  # preflight image: services/ without incentive/; it only asks if one exists
+        return None
+    return RENTAL_PRICES_PER_HOUR
+
+
+def reference_gpu_model(name: str | None, vram_mb: int | None) -> str | None:
+    """The known model whose tables (rate, base, caps, price anchor) a card is scored by.
+
+    A known name is its own reference. An unknown NVIDIA name gets the cheapest known model (by the
+    unrented anchor price, then name) with a nominal VRAM size within REFERENCE_VRAM_BAND of the reported
+    VRAM; failing that, the cheapest one with the largest size below it. None otherwise: not NVIDIA, VRAM
+    unknown, or smaller than every known model.
+    """
+    canonical = normalize_gpu_model(name)
+    if canonical in GPU_MODEL_RATES:
+        return canonical
+    if not canonical.startswith("NVIDIA ") or not vram_mb or vram_mb <= 0:
+        return None
+    prices = _anchor_prices()
+    sizes = [
+        (size, (prices or {}).get(model, 0.0), model)
+        for model, model_sizes in GPU_VRAM_SIZES_MB.items()
+        if model in GPU_MODEL_RATES and (prices is None or model in prices)
+        for size in model_sizes
+    ]
+    low, high = REFERENCE_VRAM_BAND
+    in_band = [(price, model) for size, price, model in sizes if low <= size / vram_mb <= high]
+    if in_band:
+        return min(in_band)[1]
+    below = [(-size, price, model) for size, price, model in sizes if size < vram_mb]
+    return min(below)[2] if below else None
+
+
+def matmul_probe_vram_mb(model: str | None, reported_vram_mb: int | None = None) -> int | None:
     """VRAM (MB) to size the all-cards work-proof from — registry-derived and floored to usable.
 
     Normalizes the CUDA-reported name, takes the SMALLEST nominal size for a multi-variant model
@@ -236,12 +279,15 @@ def matmul_probe_vram_mb(model: str | None) -> int | None:
     observed up to ~6.7% below the marketing nominal (e.g. B200 reports 183359 on a 192 GB card,
     L40S 46068 on 48 GB); sizing the matmul from the raw nominal would ask an honest B200/B300/L40S
     to allocate past its usable VRAM and OOM (DAH-2671). The floor is registry-derived, NOT host
-    self-report, so a spoofing host still cannot shrink its own challenge. Returns None for unknown
-    models — the caller then skips rather than guessing. Keeps registry sizing in this one module.
+    self-report, so a spoofing host still cannot shrink its own challenge. An unknown model scored as a
+    reference model (DAH-5088) has no registry size, so it is sized from `reported_vram_mb`, floored the
+    same way. Returns None for other unknown models — the caller then skips rather than guessing.
     """
     canonical = normalize_gpu_model(model)
     sizes = GPU_VRAM_SIZES_MB.get(canonical)
     if not sizes:
+        if reported_vram_mb and reference_gpu_model(canonical, reported_vram_mb):
+            return round(reported_vram_mb * VRAM_FLOOR_RATIO)
         return None
     return round(min(sizes) * VRAM_FLOOR_RATIO)
 
