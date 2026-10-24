@@ -680,6 +680,11 @@ DOCKER_SOCKET_PATH = "/var/run/docker.sock"
 # let a scrape round hang on it.
 DOCKER_API_TIMEOUT_SECONDS = 20
 VLOOPBACK_DRIVER_PREFIX = "vloopback"
+# DAH-5014: the persistent filler model caches (services/const.py FILLER_CACHE_VOLUME_PREFIXES). The
+# validator evicts them before a rental or the listing floor needs the room, so they read as free disk.
+ENGY_CACHE_VOLUME_PREFIX = "engy_cache_"
+# literal: the obfuscator does not rename names inside this tuple
+FILLER_CACHE_VOLUME_PREFIXES = ("dphn_cache_", "engy_cache_")
 
 
 class UnixSocketHTTPConnection(http.client.HTTPConnection):
@@ -778,6 +783,15 @@ def get_host_disk_usage():
     return shutil.disk_usage("/")
 
 
+def cache_volume_bytes(df, prefixes):
+    # local-driver volumes: /system/df walks each one's _data, so this is what the files really hold
+    return sum(
+        max(int((volume.get("UsageData") or {}).get("Size") or 0), 0)
+        for volume in df.get("Volumes") or []
+        if str(volume.get("Name") or "").startswith(prefixes)
+    )
+
+
 def get_docker_disk_usage():
     # what actually filled the disk, split by kind, in kB to match the other hard_disk fields
     df = docker_api_get("/system/df")
@@ -788,6 +802,8 @@ def get_docker_disk_usage():
         max(int((volume.get("UsageData") or {}).get("Size") or 0), 0)
         for volume in df.get("Volumes") or []
     )
+    filler_cache = cache_volume_bytes(df, FILLER_CACHE_VOLUME_PREFIXES)
+    volumes -= filler_cache
     docker_root_dir = (docker_api_get("/info") or {}).get("DockerRootDir") or "/var/lib/docker"
     volumes += get_vloopback_volume_bytes(docker_root_dir)
     containers += get_container_log_bytes(docker_root_dir)
@@ -802,7 +818,23 @@ def get_docker_disk_usage():
         "hard_disk_images": (int(df.get("LayersSize") or 0) + build_cache) // 1024,
         "hard_disk_containers": containers // 1024,
         "hard_disk_volumes": volumes // 1024,
+        "filler_cache_kb": filler_cache // 1024,
+        # DAH-5045: how far the Engy checkpoint download has got, in GB (10**9 bytes)
+        "hard_disk_engy_cache_used_gb": cache_volume_bytes(df, ENGY_CACHE_VOLUME_PREFIX) // 10**9,
     }
+
+
+def release_filler_cache(hard_disk):
+    # DAH-5014: report the filler model cache as free disk, so the listing floor, the disk a renter is
+    # offered and the filler fit checks all see it as the reclaimable space it is. The key is dropped:
+    # it is not part of the reported hard_disk block.
+    cache_kb = hard_disk.pop("filler_cache_kb", 0)
+    if not cache_kb or not hard_disk.get("hard_disk_total"):
+        return
+    used_kb = max(hard_disk["hard_disk_used"] - cache_kb, 0)
+    hard_disk["hard_disk_free"] += hard_disk["hard_disk_used"] - used_kb
+    hard_disk["hard_disk_used"] = used_kb
+    hard_disk["hard_disk_utilization"] = used_kb / hard_disk["hard_disk_total"] * 100
 
 
 def get_container_cpu_percents(docker_path: str) -> tuple[float, dict[str, float]]:
@@ -2220,6 +2252,7 @@ def get_machine_specs():
 
     try:
         data["data_hard_disk"].update(get_docker_disk_usage())
+        release_filler_cache(data["data_hard_disk"])
     except Exception as exc:
         # kept apart from hard_disk_scrape_error: the docker socket is the fragile half, and a
         # node that loses only the breakdown must keep reporting total/used/free.

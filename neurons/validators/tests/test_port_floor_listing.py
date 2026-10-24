@@ -558,3 +558,19 @@ async def test_a_range_next_to_empty_mappings_is_named_while_the_event_says_no_p
     what = count_result.event.what_we_saw
     assert what["port_range"] == DECLARED_RANGE
     assert (what["probed_port_count"], what["declared_port_count"]) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_ports_held_by_our_filler_count_toward_the_floor(context_factory):
+    """A 6-port node whose idle filler holds 2 ports and answers 2 of the other 4 passes with 4:
+    a rental removes the filler and frees its ports (prod 22 Oct, declared ranges of 6-11)."""
+    rented_data = RentedExecutorsResponse(
+        executors={}, filler_ports_by_executor={"executor-123": [2004, 2001]}
+    )
+    ctx = context_factory(state=build_state(verified_port_count=2, rented_data=rented_data))
+
+    result = await PortCountCheck().run(ctx)
+
+    assert result.passed is True
+    assert result.updates["port_count"] == 4
+    assert result.updates["state"].specs["available_port_count"] == 4
