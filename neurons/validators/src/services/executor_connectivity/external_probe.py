@@ -1,4 +1,7 @@
+import asyncio
+import ipaddress
 import logging
+import socket
 
 import aiohttp
 from services.executor_connectivity.models import PortPair
@@ -25,7 +28,11 @@ class ExternalPortProbe:
     async def reached(self, host: str, ports: list[PortPair], token: str) -> list[PortPair] | None:
         """The ports whose listener answered the outside fetch; None when the prober itself failed,
         which is never a verdict on the node."""
-        body = {"targets": [{"host": host, "port": p.external} for p in ports], "timeout": 3}
+        address = await _address(host)
+        if address is None:
+            logger.warning("external port prober skipped: could not resolve %s", host)
+            return None
+        body = {"targets": [{"host": address, "port": p.external} for p in ports], "timeout": 3}
         try:
             async with aiohttp.ClientSession(timeout=PROBER_TIMEOUT) as session:
                 async with session.post(
@@ -39,6 +46,21 @@ class ExternalPortProbe:
             logger.warning("external port prober failed: %s", e)
             return None
         return [p for p, r in zip(ports, results) if (r.get("body") or "").strip() == f"{token}:{p.internal}"]
+
+
+async def _address(host: str) -> str | None:
+    """The prober takes IP literals only (it refuses names, so a name cannot resolve to a private address there);
+    a node registered by DNS name is probed at the IPv4 address that name has now."""
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, None, family=socket.AF_INET)
+    except OSError:
+        return None
+    return infos[0][4][0] if infos else None
 
 
 def external_port_probe() -> ExternalPortProbe | None:
